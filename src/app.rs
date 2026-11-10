@@ -5,6 +5,7 @@ use crate::fs_ops::TransferKind;
 use crate::icons::{self, Icon};
 use crate::operations::{Progress, ProgressView};
 use crate::preview::Preview;
+use crate::shortcuts::{self, Command, ShortcutEditor, Shortcuts};
 use crate::tab_drag::{DragTab, TabDrop, TabDropTargets};
 use crate::theme::{appearance_menu, Palette, Theme};
 use crate::vfs::{self as fs_ops, Endpoint, FileEntry, Location};
@@ -33,6 +34,7 @@ struct Settings {
     theme: Theme,
     language: crate::i18n::Language,
     sftp_profiles: Vec<Location>,
+    shortcuts: Shortcuts,
 }
 impl Settings {
     fn grid_for(&self, index: usize) -> bool {
@@ -55,6 +57,7 @@ impl Default for Settings {
             theme: Theme::Frappe,
             language: crate::i18n::Language::default(),
             sftp_profiles: vec![],
+            shortcuts: Shortcuts::default(),
         }
     }
 }
@@ -647,6 +650,9 @@ fn move_tab(panes: &mut [Pane], drop: TabDrop, ctx: &egui::Context) -> bool {
 
 #[derive(Clone)]
 enum Action {
+    Shortcut(Command),
+    MoveSelection { delta: isize, extend: bool },
+    ClearSelection,
     Focus(usize),
     SetGrid(usize, bool),
     Navigate(usize, Location),
@@ -794,6 +800,10 @@ pub struct PawCommander {
     transfer: Option<TransferInteraction>,
     notice: Option<(String, bool)>,
     show_help: bool,
+    shortcut_editor: Option<ShortcutEditor>,
+    keyboard_had_focus: bool,
+    tab_held: bool,
+    pane_tab_presses: Vec<(usize, egui::Event)>,
     sftp_form: Option<SftpForm>,
     connection: Option<ConnectionJob>,
     native_drag: crate::native_drag::NativeDrag,
@@ -807,6 +817,7 @@ impl PawCommander {
             .storage
             .and_then(|s| eframe::get_value(s, "pawcommander.settings"))
             .unwrap_or_default();
+        settings.shortcuts.validate();
         crate::i18n::set_language(settings.language);
         settings.theme.apply(&cc.egui_ctx);
         egui_extras::install_image_loaders(&cc.egui_ctx);
@@ -852,6 +863,10 @@ impl PawCommander {
             transfer: None,
             notice: None,
             show_help: false,
+            shortcut_editor: None,
+            keyboard_had_focus: false,
+            tab_held: false,
+            pane_tab_presses: Vec::new(),
             sftp_form: None,
             connection: None,
             native_drag: Default::default(),
@@ -932,6 +947,7 @@ impl PawCommander {
             && self.properties.is_none()
             && self.sftp_form.is_none()
             && !self.show_help
+            && self.shortcut_editor.is_none()
             && !self.search.visible
     }
 
@@ -1283,6 +1299,18 @@ impl PawCommander {
 
     fn action(&mut self, action: Action, ctx: &egui::Context) {
         match action {
+            Action::Shortcut(command) => self.run_shortcut(command, ctx),
+            Action::MoveSelection { delta, extend } => {
+                let hidden = self.settings.hidden;
+                self.tab_mut().move_selection(delta, hidden, extend);
+            }
+            Action::ClearSelection => {
+                let tab = self.tab_mut();
+                tab.selected.clear();
+                tab.cursor = None;
+                tab.anchor = None;
+                tab.filter.clear();
+            }
             Action::SetGrid(index, grid) => {
                 self.settings.set_grid(index, grid);
                 self.active = index;
@@ -1490,146 +1518,190 @@ impl PawCommander {
         tab.reveal_after_load = Some(path.into());
     }
 
-    fn keyboard(&mut self, ctx: &egui::Context) {
-        if egui::DragAndDrop::has_payload_of_type::<DragTab>(ctx)
+    fn toggle_split(&mut self) {
+        self.settings.split = !self.settings.split;
+        if !self.settings.split {
+            self.active = 0;
+        }
+    }
+
+    fn run_shortcut(&mut self, command: Command, ctx: &egui::Context) {
+        let action = match command {
+            Command::EditPath => return self.tab_mut().begin_address(),
+            Command::Filter => {
+                self.tab_mut().focus_filter = true;
+                return;
+            }
+            Command::Search => return self.open_search(),
+            Command::NewTab => Action::NewTab(self.active),
+            Command::CloseTab => Action::CloseTab(self.active, self.panes[self.active].current),
+            Command::Back => Action::Back,
+            Command::Forward => Action::Forward,
+            Command::Parent => Action::Up,
+            Command::Open => {
+                let Some(path) = self.selected().into_iter().next() else {
+                    return;
+                };
+                Action::Open(self.active, path)
+            }
+            Command::SelectAll => {
+                let hidden = self.settings.hidden;
+                let tab = self.tab_mut();
+                tab.selected = tab
+                    .visible(hidden)
+                    .iter()
+                    .map(|&index| tab.entries[index].path.clone())
+                    .collect();
+                return;
+            }
+            Command::Hidden => {
+                self.settings.hidden = !self.settings.hidden;
+                return;
+            }
+            Command::Split => return self.toggle_split(),
+            Command::OtherPane => {
+                if self.settings.split {
+                    self.active = 1 - self.active;
+                }
+                return;
+            }
+            Command::Preview => {
+                self.settings.preview = !self.settings.preview;
+                return;
+            }
+            Command::EditInZed => {
+                let paths = self.selected();
+                let [path] = paths.as_slice() else {
+                    return;
+                };
+                if !self
+                    .tab()
+                    .entries
+                    .iter()
+                    .any(|entry| entry.path == *path && !entry.is_dir)
+                {
+                    return;
+                }
+                if self.tools.zed.is_none() {
+                    self.notice = Some((
+                        crate::i18n::text("Zed не найден. Установите редактор и выберите Настройки → Инструменты → Проверить снова.").into(),
+                        true,
+                    ));
+                    return;
+                }
+                Action::OpenInZed(self.active, path.clone())
+            }
+            Command::Refresh => Action::Refresh,
+            Command::Properties => Action::Properties,
+            Command::Rename => Action::Rename,
+            Command::NewFolder => Action::NewFolder,
+            Command::Trash => Action::Trash,
+            Command::CopyToPane => Action::Transfer(TransferKind::Copy),
+            Command::MoveToPane => Action::Transfer(TransferKind::Move),
+        };
+        self.action(action, ctx);
+    }
+
+    fn keyboard_blocked(&self, ctx: &egui::Context) -> bool {
+        egui::DragAndDrop::has_payload_of_type::<DragTab>(ctx)
+            || egui::DragAndDrop::has_payload_of_type::<DragFiles>(ctx)
+            || ctx.memory(|memory| memory.any_popup_open())
             || self.dialog.is_some()
             || self.properties.is_some()
             || self.conflict_open()
             || self.sftp_form.is_some()
             || self.show_help
+            || self.shortcut_editor.is_some()
             || self.native_drag.active()
             || self.search.visible
-        {
+    }
+
+    fn bound_pane_command(&self, chord: egui::KeyboardShortcut) -> Option<Command> {
+        self.settings.shortcuts.command(chord).filter(|&command| {
+            chord.logical_key != egui::Key::Tab
+                || command != Command::OtherPane
+                || self.settings.split
+        })
+    }
+
+    fn keyboard(&mut self, ctx: &egui::Context) {
+        let pane_tab_presses = std::mem::take(&mut self.pane_tab_presses);
+        if self.keyboard_blocked(ctx) {
             return;
         }
-        let command = egui::Modifiers::COMMAND;
-        if ctx.input_mut(|i| {
-            i.consume_shortcut(&egui::KeyboardShortcut::new(
-                command | egui::Modifiers::SHIFT,
-                egui::Key::F,
-            ))
-        }) {
-            self.open_search();
-            return;
-        }
-        if ctx
-            .input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(command, egui::Key::L)))
-        {
-            let tab = self.tab_mut();
-            tab.begin_address();
-            return;
-        }
-        if ctx
-            .input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(command, egui::Key::F)))
-        {
-            self.tab_mut().focus_filter = true;
-            return;
-        }
-        if ctx.wants_keyboard_input() {
-            return;
-        }
-        let mut actions = vec![];
-        ctx.input_mut(|i| {
-            i.events.retain(|event| {
-                if let Some(action) = file_clipboard_action(event) {
+        // egui drops a text field's focus on Escape before this update runs.
+        let focused = ctx.wants_keyboard_input()
+            || (self.keyboard_had_focus && ctx.input(|input| input.key_pressed(egui::Key::Escape)));
+        let mut actions = Vec::new();
+        ctx.input_mut(|input| {
+            if !focused {
+                for (index, event) in pane_tab_presses {
+                    input.events.insert(index.min(input.events.len()), event);
+                }
+            }
+            input.events.retain(|event| {
+                let action = if let egui::Event::Key {
+                    key,
+                    modifiers,
+                    pressed: true,
+                    repeat,
+                    ..
+                } = *event
+                {
+                    let chord = shortcuts::chord(key, modifiers);
+                    let modifiers = chord.modifiers;
+                    if !focused
+                        && matches!(modifiers, egui::Modifiers::NONE | egui::Modifiers::SHIFT)
+                        && matches!(key, egui::Key::ArrowUp | egui::Key::ArrowDown)
+                    {
+                        Some(Action::MoveSelection {
+                            delta: if key == egui::Key::ArrowUp { -1 } else { 1 },
+                            extend: modifiers.shift,
+                        })
+                    } else if !focused
+                        && !repeat
+                        && modifiers == egui::Modifiers::NONE
+                        && key == egui::Key::Escape
+                    {
+                        Some(Action::ClearSelection)
+                    } else {
+                        let Some(command) = self
+                            .bound_pane_command(chord)
+                            .filter(|command| !focused || command.works_in_text_field(chord))
+                        else {
+                            return true;
+                        };
+                        if repeat {
+                            return false;
+                        }
+                        Some(Action::Shortcut(command))
+                    }
+                } else if !focused {
+                    file_clipboard_action(event)
+                } else {
+                    None
+                };
+                if let Some(action) = action {
                     actions.push(action);
                     false
                 } else {
                     true
                 }
             });
-            for (key, action) in [
-                (egui::Key::T, Action::NewTab(self.active)),
-                (
-                    egui::Key::W,
-                    Action::CloseTab(self.active, self.panes[self.active].current),
-                ),
-            ] {
-                if i.consume_shortcut(&egui::KeyboardShortcut::new(command, key)) {
-                    actions.push(action);
-                }
-            }
-            if i.consume_shortcut(&egui::KeyboardShortcut::new(command, egui::Key::A)) {
-                let hidden = self.settings.hidden;
-                let tab = self.tab_mut();
-                tab.selected = tab
-                    .visible(hidden)
-                    .iter()
-                    .map(|i| tab.entries[*i].path.clone())
-                    .collect();
-            }
-            if i.consume_shortcut(&egui::KeyboardShortcut::new(command, egui::Key::H)) {
-                self.settings.hidden = !self.settings.hidden;
-            }
-            if i.consume_shortcut(&egui::KeyboardShortcut::new(
-                command | egui::Modifiers::SHIFT,
-                egui::Key::N,
-            )) {
-                actions.push(Action::NewFolder);
-            }
-            for (key, action) in [
-                (egui::Key::ArrowLeft, Action::Back),
-                (egui::Key::ArrowRight, Action::Forward),
-                (egui::Key::ArrowUp, Action::Up),
-            ] {
-                if i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::ALT, key)) {
-                    actions.push(action);
-                }
-            }
-            if !i.modifiers.alt && !i.modifiers.command && !i.modifiers.ctrl {
-                let modifiers = if i.modifiers.shift {
-                    egui::Modifiers::SHIFT
-                } else {
-                    egui::Modifiers::NONE
-                };
-                for (key, delta) in [(egui::Key::ArrowUp, -1), (egui::Key::ArrowDown, 1)] {
-                    if i.consume_key(modifiers, key) {
-                        let hidden = self.settings.hidden;
-                        self.tab_mut()
-                            .move_selection(delta, hidden, modifiers.shift);
-                    }
-                }
-            }
-            if i.consume_shortcut(&egui::KeyboardShortcut::new(
-                egui::Modifiers::ALT,
-                egui::Key::Enter,
-            )) {
-                actions.push(Action::Properties);
-            }
-            if i.key_pressed(egui::Key::F2) {
-                actions.push(Action::Rename);
-            }
-            if i.key_pressed(egui::Key::F3) {
-                self.settings.split = !self.settings.split;
-                if !self.settings.split {
-                    self.active = 0;
-                }
-            }
-            if i.key_pressed(egui::Key::F5) {
-                actions.push(Action::Refresh);
-            }
-            if i.key_pressed(egui::Key::Delete)
-                || (i.modifiers.command && i.key_pressed(egui::Key::Backspace))
-            {
-                actions.push(Action::Trash);
-            }
-            if !i.modifiers.alt && i.key_pressed(egui::Key::Enter) {
-                if let Some(p) = self.selected().first() {
-                    actions.push(Action::Open(self.active, p.clone()));
-                }
-            }
-            if i.key_pressed(egui::Key::Escape) {
-                self.tab_mut().selected.clear();
-                self.tab_mut().cursor = None;
-                self.tab_mut().anchor = None;
-                self.tab_mut().filter.clear();
-            }
-            if i.key_pressed(egui::Key::Tab) && self.settings.split {
-                self.active = 1 - self.active;
-            }
         });
         for action in actions {
+            if self.keyboard_blocked(ctx) {
+                break;
+            }
+            let begins_text_entry = matches!(
+                action,
+                Action::Shortcut(Command::EditPath | Command::Filter)
+            );
             self.action(action, ctx);
+            // The text field takes focus later in this frame, when it is rendered.
+            if begins_text_entry {
+                break;
+            }
         }
     }
     fn toolbar(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
@@ -1645,11 +1717,12 @@ impl PawCommander {
                     }
                     let tab = self.tab();
                     for (icon, tip, enabled, action) in [
-                        (Icon::Back, crate::i18n::text("Назад · Alt+←"), tab.history_index > 0, Action::Back),
-                        (Icon::Forward, crate::i18n::text("Вперёд · Alt+→"), tab.history_index + 1 < tab.history.len(), Action::Forward),
-                        (Icon::Up, crate::i18n::text("Родительская папка · Alt+↑"), tab.path.parent().is_some(), Action::Up),
-                        (Icon::Refresh, crate::i18n::text("Обновить · F5"), true, Action::Refresh),
+                        (Icon::Back, Command::Back, tab.history_index > 0, Action::Back),
+                        (Icon::Forward, Command::Forward, tab.history_index + 1 < tab.history.len(), Action::Forward),
+                        (Icon::Up, Command::Parent, tab.path.parent().is_some(), Action::Up),
+                        (Icon::Refresh, Command::Refresh, true, Action::Refresh),
                     ] {
+                        let tip = self.settings.shortcuts.hint(ctx, tip, tip.label());
                         if ui.add_enabled_ui(enabled, |ui| icons::button(ui, icon, "", false)).inner.on_hover_text(tip).clicked() {
                             actions.push(action);
                         }
@@ -1663,9 +1736,9 @@ impl PawCommander {
                     } else {
                         ""
                     };
-                    let search_enabled = self.dialog.is_none() && self.sftp_form.is_none() && !self.show_help && !self.native_drag.active();
+                    let search_enabled = !self.keyboard_blocked(ctx);
                     if ui.add_enabled_ui(search_enabled, |ui| icons::button_width(ui, Icon::Search, search_label, false, search_width)).inner
-                        .on_hover_text(crate::i18n::text("Суперпоиск по индексу locate · ⌘/Ctrl+Shift+F")).clicked() {
+                        .on_hover_text(self.settings.shortcuts.hint(ctx, Command::Search, crate::i18n::text("Суперпоиск по индексу locate"))).clicked() {
                         self.open_search();
                     }
                     if ui.add_enabled_ui(self.job.is_none(), |ui| icons::button(ui, Icon::Server, "SFTP", self.tab().path.remote())).inner
@@ -1673,9 +1746,9 @@ impl PawCommander {
                         actions.push(Action::ConnectSftp);
                     }
                     for (icon, tip, enabled, action) in [
-                        (Icon::NewFolder, crate::i18n::text("Создать папку · ⌘/Ctrl+Shift+N"), self.job.is_none(), Action::NewFolder),
-                        (Icon::Copy, crate::i18n::text("Копировать · ⌘/Ctrl+C"), !self.tab().selected.is_empty(), Action::Copy(false)),
-                        (Icon::Paste, crate::i18n::text("Вставить · ⌘/Ctrl+V"), self.job.is_none(), Action::Paste(false)),
+                        (Icon::NewFolder, self.settings.shortcuts.hint(ctx, Command::NewFolder, Command::NewFolder.label()), self.job.is_none(), Action::NewFolder),
+                        (Icon::Copy, crate::i18n::text("Копировать · ⌘/Ctrl+C").into(), !self.tab().selected.is_empty(), Action::Copy(false)),
+                        (Icon::Paste, crate::i18n::text("Вставить · ⌘/Ctrl+V").into(), self.job.is_none(), Action::Paste(false)),
                     ] {
                         if ui.add_enabled_ui(enabled, |ui| icons::button(ui, icon, "", false)).inner.on_hover_text(tip).clicked() {
                             actions.push(action);
@@ -1686,7 +1759,16 @@ impl PawCommander {
                         let button = icons::button(ui, Icon::Settings, crate::i18n::text("Настройки"), false);
                         let mut menu = egui::menu::BarState::load(ctx, menu_id);
                         menu.bar_menu(&button, |ui| {
-                            if ui.button(crate::i18n::text("О PawCommander / клавиши")).clicked() { self.show_help = true; ui.close_menu(); }
+                            if ui.button(crate::i18n::text("Горячие клавиши")).clicked() {
+                                self.shortcut_editor = Some(ShortcutEditor::new(&self.settings.shortcuts));
+                                ctx.memory_mut(|memory| {
+                                    if let Some(id) = memory.focused() {
+                                        memory.surrender_focus(id);
+                                    }
+                                });
+                                ui.close_menu();
+                            }
+                            if ui.button(crate::i18n::text("О PawCommander")).clicked() { self.show_help = true; ui.close_menu(); }
                             ui.menu_button("Язык / Language", |ui| {
                                 for (language, label) in [
                                     (crate::i18n::Language::English, "English"),
@@ -1717,12 +1799,11 @@ impl PawCommander {
                             });
                         });
                         menu.store(ctx, menu_id);
-                        if icons::button(ui, Icon::Info, "", self.settings.preview).on_hover_text(crate::i18n::text("Панель сведений")).clicked() {
+                        if icons::button(ui, Icon::Info, "", self.settings.preview).on_hover_text(self.settings.shortcuts.hint(ctx, Command::Preview, Command::Preview.label())).clicked() {
                             self.settings.preview = !self.settings.preview;
                         }
-                        if icons::button(ui, Icon::Split, "", self.settings.split).on_hover_text(crate::i18n::text("Две панели · F3")).clicked() {
-                            self.settings.split = !self.settings.split;
-                            if !self.settings.split { self.active = 0; }
+                        if icons::button(ui, Icon::Split, "", self.settings.split).on_hover_text(self.settings.shortcuts.hint(ctx, Command::Split, Command::Split.label())).clicked() {
+                            self.toggle_split();
                         }
                         if cfg!(target_os = "macos") && ui.available_width() > 0.0 {
                             let (_, drag) = ui.allocate_exact_size(
@@ -1930,7 +2011,11 @@ impl PawCommander {
                         &mut self.settings.hidden,
                         crate::i18n::text("Скрытые файлы"),
                     )
-                    .on_hover_text("⌘/Ctrl+H");
+                    .on_hover_text(self.settings.shortcuts.hint(
+                        ctx,
+                        Command::Hidden,
+                        Command::Hidden.label(),
+                    ));
                 });
                 card.end(panel_ui);
             });
@@ -1982,11 +2067,9 @@ impl PawCommander {
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.label(
-                                RichText::new(crate::i18n::text(
-                                    "Двойной щелчок — открыть   ·   F2 — переименовать",
-                                ))
-                                .size(11.0)
-                                .color(colors.muted),
+                                RichText::new(crate::i18n::text("Двойной щелчок — открыть"))
+                                    .size(11.0)
+                                    .color(colors.muted),
                             );
                         });
                     });
@@ -2116,11 +2199,7 @@ impl PawCommander {
                     });
                 });
                 ui.add_space(12.0);
-                egui::Grid::new("shortcuts").min_row_height(22.0).spacing([30.0, 6.0]).show(ui, |ui| {
-                    for (key, action) in [("⌘/Ctrl+L", crate::i18n::text("Ввести путь")), ("⌘/Ctrl+F", crate::i18n::text("Фильтр текущей папки")), ("⌘/Ctrl+T / W", crate::i18n::text("Новая / закрыть вкладку")), ("⌘/Ctrl+C / X / V", crate::i18n::text("Копировать / вырезать / вставить")), ("⌘/Ctrl+A", crate::i18n::text("Выделить всё")), ("⌘/Ctrl+Shift+N", crate::i18n::text("Создать папку")), ("⌘/Ctrl+H", crate::i18n::text("Скрытые файлы")), ("Alt+← / → / ↑", crate::i18n::text("Назад / вперёд / вверх")), ("F2 / F3 / F5", crate::i18n::text("Переименовать / две панели / обновить")), ("Delete / ⌘+Backspace", crate::i18n::text("В корзину с подтверждением")), (crate::i18n::text("Shift / ⌘/Ctrl + щелчок"), crate::i18n::text("Выделение диапазона / нескольких файлов"))] {
-                        ui.monospace(key); ui.label(action); ui.end_row();
-                    }
-                });
+                ui.label(crate::i18n::text("Действующие сочетания показаны в разделе Настройки → Горячие клавиши."));
                 ui.add_space(14.0); ui.label(crate::i18n::text("Буфер файлов работает внутри PawCommander. «Копировать путь» использует системный буфер."));
                 ui.label(crate::i18n::text("При совпадении имён выберите действие в диалоге. Удаление SFTP — навсегда с подтверждением; локальные файлы отправляются в корзину."));
             });
@@ -2253,7 +2332,7 @@ impl PawCommander {
     }
 }
 impl eframe::App for PawCommander {
-    fn raw_input_hook(&mut self, _ctx: &egui::Context, input: &mut egui::RawInput) {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
         if let Some(accepted) = self.native_drag.finish_input(input) {
             if accepted {
                 self.notice = Some((
@@ -2262,6 +2341,45 @@ impl eframe::App for PawCommander {
                 ));
             }
         }
+
+        self.pane_tab_presses.clear();
+        if !input.focused {
+            self.tab_held = false;
+            return;
+        }
+        let pane_keys = !ctx.wants_keyboard_input() && !self.keyboard_blocked(ctx);
+        let mut index = 0;
+        input.events.retain_mut(|event| {
+            let event_index = index;
+            index += 1;
+            match event {
+                egui::Event::Key {
+                    key: egui::Key::Tab,
+                    modifiers,
+                    pressed,
+                    repeat,
+                    ..
+                } => {
+                    let was_held = self.tab_held;
+                    self.tab_held = *pressed;
+                    if *pressed
+                        && pane_keys
+                        && self
+                            .bound_pane_command(shortcuts::chord(egui::Key::Tab, *modifiers))
+                            .is_some()
+                    {
+                        // egui uses raw Tab presses for focus traversal before update.
+                        // Dispatch this press in order without letting it move widget focus.
+                        *repeat |= was_held;
+                        self.pane_tab_presses.push((event_index, event.clone()));
+                        return false;
+                    }
+                }
+                egui::Event::WindowFocused(false) => self.tab_held = false,
+                _ => {}
+            }
+            true
+        });
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
@@ -2274,6 +2392,11 @@ impl eframe::App for PawCommander {
                     .into(),
                 false,
             ));
+        }
+        if !self.conflict_open() {
+            if let Some(editor) = &mut self.shortcut_editor {
+                editor.capture(ctx);
+            }
         }
         self.keyboard(ctx);
         let mut actions = vec![];
@@ -2361,6 +2484,7 @@ impl eframe::App for PawCommander {
             && !self.conflict_open()
             && self.sftp_form.is_none()
             && !self.show_help
+            && self.shortcut_editor.is_none()
             && !self.search.visible
         {
             for action in actions {
@@ -2400,6 +2524,13 @@ impl eframe::App for PawCommander {
             self.properties = None;
         }
         self.sftp_dialog(ctx);
+        if self
+            .shortcut_editor
+            .as_mut()
+            .is_some_and(|editor| editor.show(ctx, &mut self.settings.shortcuts))
+        {
+            self.shortcut_editor = None;
+        }
         if let Some(path) = self.search.show(ctx, self.tools.locate.as_deref()) {
             self.reveal_search_result(path, ctx);
         }
@@ -2413,6 +2544,7 @@ impl eframe::App for PawCommander {
         {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
+        self.keyboard_had_focus = ctx.wants_keyboard_input();
     }
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         self.settings.locations = self
@@ -2686,7 +2818,7 @@ fn tab_strip(
                 colors.ink,
             );
             if response
-                .on_hover_text(crate::i18n::text("Новая вкладка · ⌘/Ctrl+T"))
+                .on_hover_text(crate::i18n::text("Новая вкладка"))
                 .clicked()
             {
                 actions.push(Action::NewTab(index));
@@ -2916,7 +3048,7 @@ fn address_bar(
                         if icons::compact_button(
                             ui,
                             Icon::ChevronDown,
-                            crate::i18n::text("Ввести путь вручную · ⌘/Ctrl+L"),
+                            crate::i18n::text("Ввести путь вручную"),
                             false,
                         )
                         .clicked()
@@ -3761,7 +3893,7 @@ fn entry_widget(
                     Action::Trash,
                     idle,
                 ),
-                (crate::i18n::text("Свойства… · Alt+Enter"), Action::Properties,
+                (crate::i18n::text("Свойства…"), Action::Properties,
                     !tab.selected.is_empty() && tab.selected.iter().all(|path| !path.remote())),
                 (crate::i18n::text("Копировать путь"), Action::CopyPath, true),
                 (crate::i18n::text("Показать в системе"), Action::Reveal, !path.remote()),
@@ -4219,6 +4351,220 @@ mod tests {
         assert!(app.properties.is_some());
         assert_eq!(app.tab().path, before);
         assert_eq!(app.selected().len(), 2);
+    }
+
+    #[test]
+    fn pane_shortcuts_leave_text_and_modal_input_alone() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        let focus = egui::Id::new("test_filter");
+        let key = |key, modifiers| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+        let run = |app: &mut PawCommander, events, focused| {
+            let _ = ctx.run(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let response =
+                            ui.add(egui::TextEdit::singleline(&mut app.tab_mut().filter).id(focus));
+                        if focused {
+                            response.request_focus();
+                        } else {
+                            response.surrender_focus();
+                        }
+                    });
+                    app.keyboard(ctx);
+                },
+            );
+        };
+        run(
+            &mut app,
+            vec![key(egui::Key::F3, egui::Modifiers::NONE)],
+            true,
+        );
+        assert!(
+            app.settings.split,
+            "a focused text field blocks pane commands"
+        );
+        run(
+            &mut app,
+            vec![key(egui::Key::L, egui::Modifiers::COMMAND)],
+            true,
+        );
+        assert!(
+            app.tab().edit_address,
+            "the original text navigation chord still works"
+        );
+
+        app.shortcut_editor = Some(ShortcutEditor::new(&app.settings.shortcuts));
+        run(
+            &mut app,
+            vec![key(egui::Key::F3, egui::Modifiers::NONE)],
+            false,
+        );
+        assert!(
+            app.settings.split,
+            "the shortcut editor blocks pane commands"
+        );
+        app.shortcut_editor = None;
+        run(
+            &mut app,
+            vec![key(egui::Key::F3, egui::Modifiers::SHIFT)],
+            false,
+        );
+        assert!(app.settings.split, "extra modifiers do not match a binding");
+        run(
+            &mut app,
+            vec![
+                egui::Event::Key {
+                    key: egui::Key::F3,
+                    physical_key: None,
+                    pressed: false,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                key(egui::Key::F3, egui::Modifiers::NONE),
+            ],
+            false,
+        );
+        assert!(!app.settings.split);
+    }
+
+    #[test]
+    fn pane_tab_keeps_event_order_without_traversing_widget_focus() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        let key = |key, modifiers, pressed| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers,
+        };
+        let tab = |pressed| key(egui::Key::Tab, egui::Modifiers::NONE, pressed);
+        let run = |app: &mut PawCommander, events| {
+            let mut input = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            eframe::App::raw_input_hook(app, &ctx, &mut input);
+            let _ = ctx.run(input, |ctx| {
+                app.keyboard(ctx);
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let _ = ui.button("Widget focus target");
+                });
+            });
+        };
+        run(
+            &mut app,
+            vec![tab(true), key(egui::Key::T, egui::Modifiers::COMMAND, true)],
+        );
+        assert_eq!(app.active, 1);
+        assert_eq!(app.panes[1].tabs.len(), 2, "Tab dispatched before New tab");
+        assert!(!ctx.wants_keyboard_input());
+        run(&mut app, vec![tab(true)]);
+        assert_eq!(app.active, 1, "held Tab does not switch panes again");
+        run(&mut app, vec![tab(false), tab(true)]);
+        assert_eq!(app.active, 0);
+
+        app.settings.shortcuts = serde_json::from_value(serde_json::json!({
+            "overrides": { "OtherPane": null }
+        }))
+        .unwrap();
+        run(&mut app, vec![tab(false), tab(true)]);
+        assert_eq!(app.active, 0);
+        assert!(ctx.wants_keyboard_input(), "unbound Tab traverses widgets");
+    }
+
+    #[test]
+    fn starting_filter_input_blocks_a_later_file_shortcut_in_the_same_frame() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("keep.txt");
+        std::fs::write(&path, b"data").unwrap();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        wait_for_directory(app.tab_mut());
+        app.tab_mut().selected.insert(path.into());
+        assert_eq!(app.selected().len(), 1);
+
+        let key = |key, modifiers| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+        let _ = ctx.run(
+            egui::RawInput {
+                events: vec![
+                    key(egui::Key::F, egui::Modifiers::COMMAND),
+                    key(egui::Key::Delete, egui::Modifiers::NONE),
+                ],
+                ..Default::default()
+            },
+            |ctx| app.keyboard(ctx),
+        );
+        assert!(app.tab().focus_filter);
+        assert!(app.dialog.is_none());
+    }
+
+    #[test]
+    fn settings_round_trip_shortcut_profile_and_overrides() {
+        let mut storage = MemoryStorage::default();
+        let settings: Settings = serde_json::from_value(serde_json::json!({
+            "shortcuts": {
+                "profile": "Commander",
+                "overrides": {
+                    "Rename": {
+                        "modifiers": {
+                            "alt": false,
+                            "ctrl": false,
+                            "shift": false,
+                            "mac_cmd": false,
+                            "command": false
+                        },
+                        "logical_key": "F9"
+                    },
+                    "Refresh": null
+                }
+            }
+        }))
+        .unwrap();
+        eframe::set_value(&mut storage, "settings", &settings);
+        let mut restored: Settings = eframe::get_value(&storage, "settings").unwrap();
+        restored.shortcuts.validate();
+        assert_eq!(restored.shortcuts, settings.shortcuts);
+        for (key, command) in [
+            (egui::Key::F2, None),
+            (egui::Key::F5, Some(Command::CopyToPane)),
+            (egui::Key::F9, Some(Command::Rename)),
+        ] {
+            assert_eq!(
+                restored
+                    .shortcuts
+                    .command(shortcuts::chord(key, egui::Modifiers::NONE)),
+                command
+            );
+        }
+        assert_eq!(
+            restored
+                .shortcuts
+                .command(shortcuts::chord(egui::Key::R, egui::Modifiers::COMMAND)),
+            None
+        );
     }
 
     #[test]
@@ -4835,6 +5181,7 @@ mod tests {
             Location::Local(PathBuf::from("/tmp/two words"))
         );
         assert_eq!(legacy.theme, Theme::Frappe);
+        assert_eq!(legacy.shortcuts, Shortcuts::default());
         let remote =
             fs_ops::resolve("sftp://alice@example.com:2222/папка", &legacy.bookmarks[0]).unwrap();
         let settings = Settings {

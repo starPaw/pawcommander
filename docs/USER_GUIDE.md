@@ -91,7 +91,15 @@ An index can omit restricted folders and contain stale paths. Search does not re
 
 Zed establishes its own SSH connection using its SSH configuration and authentication. PawCommander's stored secrets are not passed to Zed. A server must allow full SSH access and execution of Zed's helper; SFTP-only access is insufficient. Zed may install its remote server under `~/.zed_server`. Edits are saved on the server; the visible folder updates automatically, or use `F5` to refresh immediately. See [Zed Remote Development](https://zed.dev/docs/remote-development).
 
-## Keyboard reference
+## Keyboard shortcuts
+
+Open **Settings → Keyboard Shortcuts** to view and change bindings. Click a binding and press the new shortcut. If it is already assigned, PawCommander shows which action uses it. Clear that action's binding first if you want to reassign the key. Press `Esc` to stop recording. Use **Save** to apply and remember your changes, or **Cancel** to discard them.
+
+The **Commander** profile changes the function row. `F3` toggles the details panel, `F4` opens the selected file in Zed when available, `F5` copies to the other pane, `F6` moves to the other pane, `F7` creates a folder, and `F8` opens the deletion confirmation. Refresh moves to `Cmd/Ctrl+R` and the dual-pane toggle moves to `Cmd/Ctrl+Shift+D`. Copying and moving between panes require both panes to be visible.
+
+Choosing another profile replaces custom bindings in the editor. **Reset to defaults** restores the Default profile. Save to keep either change. Clipboard shortcuts, Up/Down selection and `Esc` are fixed. Use a function key, a supported navigation key, or a key with a modifier. System and native menu shortcuts may take precedence. On macOS this includes `Cmd+H`, which can hide the app.
+
+### Default profile
 
 | Action | Shortcut |
 | --- | --- |
@@ -111,5 +119,5 @@ Zed establishes its own SSH connection using its SSH configuration and authentic
 | Rename | `F2` |
 | Local properties | `Alt+Enter` |
 | Create folder | `Cmd/Ctrl+Shift+N` |
-| Delete with confirmation | `Delete` |
+| Delete with confirmation | `Delete` / `Cmd/Ctrl+Backspace` |
 | Open selected item | `Enter` |

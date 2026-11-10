@@ -16,6 +16,7 @@ mod operations;
 mod preview;
 mod properties;
 mod search;
+mod shortcuts;
 mod tab_drag;
 mod theme;
 mod tools;
