@@ -14,7 +14,7 @@ Built with Rust, with local files and SFTP side by side.
 [![Rust](https://img.shields.io/badge/built_with-Rust-e78284?labelColor=303446)](https://www.rust-lang.org/)
 [![Catppuccin](https://img.shields.io/badge/theme-Catppuccin-ca9ee6?labelColor=303446)](https://github.com/catppuccin/catppuccin)
 
-[Download for Mac](https://github.com/starPaw/pawcommander/releases/download/v0.1.0/PawCommander-0.1.0-macOS-arm64.zip) · [User guide](docs/USER_GUIDE.md) · [Report a bug](https://github.com/starPaw/pawcommander/issues/new/choose) · [Contribute](CONTRIBUTING.md)
+[Website](https://pawcommander.capture402.xyz/) · [Download for Mac](https://github.com/starPaw/pawcommander/releases/download/v0.1.0/PawCommander-0.1.0-macOS-arm64.zip) · [User guide](docs/USER_GUIDE.md) · [Report a bug](https://github.com/starPaw/pawcommander/issues/new/choose) · [Contribute](CONTRIBUTING.md)
 
 </div>
 
