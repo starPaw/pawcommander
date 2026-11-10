@@ -75,7 +75,7 @@ Remote deletion recursively removes directories without a trash. Symlinks are re
 
 The details pane previews UTF-8 text and PNG, JPEG, GIF, and WebP images. Reads are bounded: text previews show the beginning of a file (up to 32 KiB), and images are limited to 20 MiB with additional dimension limits. Remote symlinks and special files are not read for preview.
 
-Select local items and use **Properties** or `Alt+Enter` to calculate their combined logical size and counts in the background. Hidden entries are included; overlapping selected trees are counted once. Symlinks are counted separately without following targets. Hard links are counted per path. The result is logical file size, not disk usage.
+Select local items and use **Properties** or `Alt+Enter` to calculate their combined logical size and counts in the background. Hidden entries are included; overlapping selected trees are counted once. Symlinks are counted separately without following targets. Hard links are counted per path. Counts update as directory entries are read; cancellation keeps the partial result. The result is logical file size, not disk usage.
 
 Properties show available dates and permissions for selected roots. Unix permissions, UID, and GID do not represent ACLs or effective access; Windows shows read-only state. Properties are read-only and are not available for SFTP. Stop counting, close the window, or press `Esc` to request cancellation. Results can be partial when files disappear or access fails. Cancellation does not interrupt a blocked OS call.
 

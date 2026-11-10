@@ -1,6 +1,7 @@
 //! Read-only local properties. Cancellation is cooperative between filesystem calls.
 use chrono::{DateTime, Local};
 use eframe::egui;
+use std::collections::HashSet;
 use std::fs::{self, Metadata};
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -23,6 +24,19 @@ struct Summary {
     cancelled: bool,
 }
 impl Summary {
+    fn count(&mut self, metadata: &Metadata) {
+        if metadata.is_symlink() {
+            self.links += 1;
+        } else if metadata.is_file() {
+            self.files += 1;
+            self.bytes = self.bytes.saturating_add(metadata.len());
+        } else if metadata.is_dir() {
+            self.directories += 1;
+        } else {
+            self.other += 1;
+        }
+    }
+
     fn error(&mut self, path: &Path, error: impl std::fmt::Display) {
         self.errors += 1;
         if self.error_examples.len() < 5 {
@@ -170,61 +184,79 @@ fn scan(paths: &[PathBuf], cancel: &AtomicBool, mut progress: impl FnMut(&Summar
     let mut roots = paths.to_vec();
     roots.sort();
     roots.dedup();
-    let mut accepted: Vec<PathBuf> = Vec::new();
+    let mut accepted = HashSet::new();
     for path in roots {
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        if accepted.iter().any(|root| path.starts_with(root)) {
+        if path
+            .ancestors()
+            .skip(1)
+            .any(|parent| accepted.contains(parent))
+        {
             continue;
         }
-        match fs::symlink_metadata(&path) {
-            Ok(metadata) => {
-                summary.details.push((path.clone(), details(&metadata)));
-                if metadata.is_dir() {
-                    accepted.push(path.clone());
-                }
-            }
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
             Err(error) => {
                 summary.error(&path, error);
+                progress(&summary);
                 continue;
             }
+        };
+        summary.details.push((path.clone(), details(&metadata)));
+        if metadata.is_dir() {
+            accepted.insert(path.clone());
         }
+
+        let mut root_metadata = Some(metadata);
+        // Hold one directory iterator at a time. Count ordinary entries while
+        // reading them and only queue subdirectories for later descent.
         let mut pending = vec![path];
         while let Some(path) = pending.pop() {
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
-            match fs::symlink_metadata(&path) {
-                Ok(metadata) => {
-                    if metadata.file_type().is_symlink() {
-                        summary.links += 1;
-                    } else if metadata.is_file() {
-                        summary.files += 1;
-                        summary.bytes = summary.bytes.saturating_add(metadata.len());
-                    } else if metadata.is_dir() {
-                        summary.directories += 1;
-                        match fs::read_dir(&path) {
-                            Ok(entries) => {
-                                for entry in entries {
-                                    if cancel.load(Ordering::Relaxed) {
-                                        break;
-                                    }
-                                    match entry {
-                                        Ok(entry) => pending.push(entry.path()),
-                                        Err(error) => summary.error(&path, error),
-                                    }
-                                }
-                            }
-                            Err(error) => summary.error(&path, error),
-                        }
-                    } else {
-                        summary.other += 1;
-                    }
+            // Recheck queued directories before opening them in case an entry
+            // has been replaced since it was read from its parent.
+            let metadata = match root_metadata
+                .take()
+                .map_or_else(|| fs::symlink_metadata(&path), Ok)
+            {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    summary.error(&path, error);
+                    progress(&summary);
+                    continue;
                 }
-                Err(error) => summary.error(&path, error),
+            };
+            summary.count(&metadata);
+            if !metadata.is_dir() || cancel.load(Ordering::Relaxed) {
+                progress(&summary);
+                continue;
             }
+            let mut entries = match fs::read_dir(&path) {
+                Ok(entries) => entries,
+                Err(error) => {
+                    summary.error(&path, error);
+                    progress(&summary);
+                    continue;
+                }
+            };
             progress(&summary);
+            while !cancel.load(Ordering::Relaxed) {
+                match entries.next() {
+                    // DirEntry::metadata reports the link itself.
+                    Some(Ok(entry)) => match entry.metadata() {
+                        Ok(metadata) if metadata.is_dir() => pending.push(entry.path()),
+                        Ok(metadata) => summary.count(&metadata),
+                        Err(error) => summary.error(&entry.path(), error),
+                    },
+                    Some(Err(error)) => summary.error(&path, error),
+                    None => break,
+                }
+                progress(&summary);
+            }
         }
     }
     summary.cancelled = cancel.load(Ordering::Relaxed);
@@ -275,6 +307,27 @@ mod tests {
     }
 
     #[test]
+    fn flat_folder_publishes_file_counts_before_cancellation() {
+        let temp = tempfile::tempdir().unwrap();
+        for index in 0..64 {
+            fs::write(temp.path().join(index.to_string()), b"data").unwrap();
+        }
+        let cancel = AtomicBool::new(false);
+        let mut first_file_progress = None;
+        let result = scan(&[temp.path().into()], &cancel, |summary| {
+            if summary.files > 0 {
+                first_file_progress.get_or_insert((summary.files, summary.bytes));
+                cancel.store(true, Ordering::Relaxed);
+            }
+        });
+
+        assert_eq!(first_file_progress, Some((1, 4)));
+        assert_eq!((result.files, result.directories, result.bytes), (1, 1, 4));
+        assert!(result.done && result.cancelled);
+        assert_eq!(result.errors, 0);
+    }
+
+    #[test]
     fn missing_roots_report_partial_result_with_bounded_error_examples() {
         let temp = tempfile::tempdir().unwrap();
         let paths: Vec<_> = (0..12).map(|i| temp.path().join(i.to_string())).collect();
@@ -306,6 +359,35 @@ mod tests {
         let result = scan(&[root.join("file")], &AtomicBool::new(false), |_| {});
         assert!(result.details[0].1.contains("0640"));
         assert!(result.details[0].1.contains("Modified:"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn queued_directory_replaced_by_symlink_is_counted_as_link() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let child = root.join("child");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&child).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(child.join("file"), b"original").unwrap();
+        fs::write(outside.join("file"), b"outside").unwrap();
+
+        let mut updates = 0;
+        let result = scan(&[root], &AtomicBool::new(false), |_| {
+            updates += 1;
+            if updates == 2 {
+                fs::rename(&child, temp.path().join("moved")).unwrap();
+                symlink(&outside, &child).unwrap();
+            }
+        });
+        assert_eq!(
+            (result.files, result.directories, result.links, result.bytes),
+            (0, 1, 1, 0)
+        );
+        assert_eq!(result.errors, 0);
     }
 
     #[test]
