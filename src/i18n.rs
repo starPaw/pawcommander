@@ -104,6 +104,8 @@ fn translate(english: bool, russian: &'static str) -> &'static str {
         "Ссылка на файл" => "Link to file",
         "Папка" => "Folder",
         "Файл" => "File",
+        "Ссылка" => "Link",
+        "Специальный объект" => "Special item",
         "Символическая ссылка" => "Symbolic link",
         "Левая панель" => "Left pane",
         "Правая панель" => "Right pane",

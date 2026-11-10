@@ -35,6 +35,7 @@ pub struct ConflictDialog {
     conflict: Conflict,
     reply: mpsc::Sender<Answer>,
     apply_to_group: bool,
+    focus_cancel: bool,
 }
 
 impl ConflictDialog {
@@ -43,15 +44,31 @@ impl ConflictDialog {
             conflict,
             reply,
             apply_to_group: false,
+            focus_cancel: true,
         }
     }
 
     /// Returns true once the worker has been given a decision.
     pub fn show(&mut self, ctx: &egui::Context) -> bool {
+        // A key used to trigger the transfer or answer a previous prompt must
+        // not act on a newly opened prompt. Require a fresh press to activate.
+        ctx.input_mut(|input| {
+            input.events.retain(|event| {
+                !matches!(
+                    event,
+                    egui::Event::Key {
+                        key: egui::Key::Enter | egui::Key::Space,
+                        pressed: true,
+                        repeat,
+                        ..
+                    } if self.focus_cancel || *repeat
+                )
+            });
+        });
         let conflict = &self.conflict;
         let mut decision = None;
         egui::Modal::new(egui::Id::new("transfer_conflict")).show(ctx, |ui| {
-            ui.set_width(520.0);
+            ui.set_width((ctx.screen_rect().width() - 32.0).clamp(1.0, 520.0));
             ui.heading(crate::i18n::text("Совпадение имён"));
             ui.label(crate::tr_format!(
                 "Совпадение {} из {}",
@@ -80,7 +97,12 @@ impl ConflictDialog {
                 );
             }
             ui.horizontal_wrapped(|ui| {
-                if ui.button(crate::i18n::text("Отменить операцию")).clicked() {
+                let cancel = ui.button(crate::i18n::text("Отменить операцию"));
+                if self.focus_cancel && ui.is_visible() {
+                    cancel.request_focus();
+                    self.focus_cancel = false;
+                }
+                if cancel.clicked() {
                     decision = Some(Decision::Cancel);
                 }
                 if ui.button(crate::i18n::text("Пропустить")).clicked() {
@@ -109,7 +131,7 @@ impl ConflictDialog {
         if let Some(decision) = decision {
             let _ = self.reply.send(Answer {
                 decision,
-                apply_to_group: self.apply_to_group,
+                apply_to_group: self.apply_to_group && decision != Decision::Cancel,
             });
             return true;
         }
@@ -136,7 +158,7 @@ fn entry(ui: &mut egui::Ui, title: &str, entry: &EntryDetails) {
     ui.label(crate::tr_format!(
         "{} · Размер {size} · Изменён {date}",
         "{} · Size {size} · Modified {date}",
-        entry.kind
+        crate::i18n::text(entry.kind)
     ));
 }
 
@@ -146,28 +168,51 @@ mod tests {
     use std::path::PathBuf;
     use std::time::UNIX_EPOCH;
 
+    fn frame(
+        dialog: &mut ConflictDialog,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(420.0, 400.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                dialog.show(ctx);
+            },
+        )
+    }
+
+    fn dialog(can_replace: bool, index: usize) -> (ConflictDialog, mpsc::Receiver<Answer>) {
+        let entry = |path: &str, size| EntryDetails {
+            location: PathBuf::from(path).into(),
+            kind: "Файл",
+            size: Some(size),
+            modified: Some(UNIX_EPOCH),
+        };
+        let (tx, rx) = mpsc::channel();
+        (
+            ConflictDialog::new(
+                Conflict {
+                    source: entry("/source/file.txt", 17),
+                    target: entry("/target/file.txt", 32),
+                    can_replace,
+                    index,
+                    count: 3,
+                },
+                tx,
+            ),
+            rx,
+        )
+    }
+
     #[test]
     fn conflict_dialog_shows_metadata_and_returns_group_decision_or_cancel() {
-        fn frame(
-            dialog: &mut ConflictDialog,
-            ctx: &egui::Context,
-            events: Vec<egui::Event>,
-        ) -> egui::FullOutput {
-            ctx.run(
-                egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(960.0, 600.0),
-                    )),
-                    events,
-                    ..Default::default()
-                },
-                |ctx| {
-                    dialog.show(ctx);
-                },
-            )
-        }
-
         fn label(frame: &egui::FullOutput, text: &str) -> egui::Pos2 {
             frame
                 .shapes
@@ -183,39 +228,17 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing text: {text}"))
         }
 
-        let create = || {
-            let entry = |path: &str, size| EntryDetails {
-                location: PathBuf::from(path).into(),
-                kind: "Файл",
-                size: Some(size),
-                modified: Some(UNIX_EPOCH),
-            };
-            let (tx, rx) = mpsc::channel();
-            (
-                ConflictDialog::new(
-                    Conflict {
-                        source: entry("/source/file.txt", 17),
-                        target: entry("/target/file.txt", 32),
-                        can_replace: false,
-                        index: 1,
-                        count: 3,
-                    },
-                    tx,
-                ),
-                rx,
-            )
-        };
         let ctx = egui::Context::default();
-        let (mut dialog, rx) = create();
-        frame(&mut dialog, &ctx, vec![]);
-        let output = frame(&mut dialog, &ctx, vec![]);
-        label(&output, "Size 17 B · Modified");
-        label(&output, "Size 32 B · Modified");
+        let (mut first, rx) = dialog(false, 1);
+        frame(&mut first, &ctx, vec![]);
+        let output = frame(&mut first, &ctx, vec![]);
+        label(&output, "File · Size 17 B · Modified");
+        label(&output, "File · Size 32 B · Modified");
         let mut click = |text| {
             let pos = label(&output, text);
             for pressed in [true, false] {
                 frame(
-                    &mut dialog,
+                    &mut first,
                     &ctx,
                     vec![
                         egui::Event::PointerMoved(pos),
@@ -237,9 +260,9 @@ mod tests {
         assert_eq!(answer.decision, Decision::KeepBoth);
         assert!(answer.apply_to_group);
 
-        let (mut dialog, rx) = create();
+        let (mut second, rx) = dialog(false, 2);
         frame(
-            &mut dialog,
+            &mut second,
             &ctx,
             vec![egui::Event::Key {
                 key: egui::Key::Escape,
@@ -249,6 +272,33 @@ mod tests {
                 modifiers: egui::Modifiers::NONE,
             }],
         );
+        assert_eq!(rx.try_recv().unwrap().decision, Decision::Cancel);
+    }
+
+    #[test]
+    fn each_conflict_starts_on_cancel_and_ignores_held_activation_keys() {
+        let ctx = egui::Context::default();
+        let key = |key, pressed| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let (mut first, rx) = dialog(true, 1);
+        frame(&mut first, &ctx, vec![]);
+        frame(&mut first, &ctx, vec![]);
+        frame(&mut first, &ctx, vec![key(egui::Key::Tab, true)]);
+        frame(&mut first, &ctx, vec![key(egui::Key::Enter, true)]);
+        assert_eq!(rx.try_recv().unwrap().decision, Decision::Skip);
+
+        let (mut second, rx) = dialog(true, 2);
+        for _ in 0..2 {
+            frame(&mut second, &ctx, vec![key(egui::Key::Enter, true)]);
+            assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        }
+        frame(&mut second, &ctx, vec![key(egui::Key::Enter, false)]);
+        frame(&mut second, &ctx, vec![key(egui::Key::Enter, true)]);
         assert_eq!(rx.try_recv().unwrap().decision, Decision::Cancel);
     }
 }

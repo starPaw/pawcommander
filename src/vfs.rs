@@ -793,6 +793,12 @@ fn transfer_plan(
             // Resolve aliases for the destination and the source subtree.
             let actual_source = canonical(source)?;
             let actual_dest = canonical(destination)?;
+            if kind == TransferKind::Move {
+                let parent = source.parent().ok_or("Недопустимый источник")?;
+                if canonical(&parent)? == actual_dest {
+                    return Err(crate::i18n::text("Элементы уже находятся в этой папке").into());
+                }
+            }
             if actual_dest.starts_with(&actual_source) {
                 return Err(
                     "Нельзя копировать или перемещать элемент в себя или вложенную папку".into(),
@@ -843,6 +849,11 @@ pub fn transfer_with_conflicts(
         .iter()
         .map(|item| {
             progress.item(item.original.path());
+            // The local plan resolves parent aliases. A same-folder move
+            // with Keep both would only rename the existing item.
+            if kind == TransferKind::Move && item.source == item.target {
+                return Err(crate::i18n::text("Элементы уже находятся в этой папке").into());
+            }
             entry_metadata(&item.target)
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -2010,6 +2021,64 @@ mod tests {
     }
 
     #[test]
+    fn same_folder_move_stops_before_conflicts_but_copy_can_keep_both() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root: Location = fixture.path().to_path_buf().into();
+        let destination = create_directory(&root, "destination").unwrap();
+        let outside = root.join("outside.txt");
+        let existing = destination.join("existing.txt");
+        fs::write(outside.path(), b"outside").unwrap();
+        fs::write(existing.path(), b"existing").unwrap();
+        let reject_move = |destination: &Location| {
+            let error = transfer_with_conflicts(
+                &[outside.clone(), existing.clone()],
+                destination,
+                TransferKind::Move,
+                &mut Progress::default(),
+                |_| panic!("same-folder moves must fail before any conflict prompt"),
+                |_| panic!("same-folder moves must fail before transferring any item"),
+            )
+            .unwrap_err();
+            assert_eq!(
+                error,
+                crate::i18n::text("Элементы уже находятся в этой папке")
+            );
+            assert_eq!(fs::read(outside.path()).unwrap(), b"outside");
+            assert_eq!(fs::read(existing.path()).unwrap(), b"existing");
+            assert_eq!(fs::read_dir(destination.path()).unwrap().count(), 1);
+        };
+        reject_move(&destination);
+        #[cfg(unix)]
+        {
+            let alias = root.join("alias");
+            std::os::unix::fs::symlink(destination.path(), alias.path()).unwrap();
+            reject_move(&alias);
+        }
+
+        let report = transfer_with_conflicts(
+            std::slice::from_ref(&existing),
+            &destination,
+            TransferKind::Copy,
+            &mut Progress::default(),
+            |conflict| {
+                assert!(!conflict.can_replace);
+                Ok(Answer {
+                    decision: Decision::KeepBoth,
+                    apply_to_group: false,
+                })
+            },
+            |_| panic!("copy must not report a move"),
+        )
+        .unwrap();
+        assert_eq!(report.completed, 1);
+        assert_eq!(fs::read(existing.path()).unwrap(), b"existing");
+        assert_eq!(
+            fs::read(destination.join("existing (2).txt").path()).unwrap(),
+            b"existing"
+        );
+    }
+
+    #[test]
     fn conflict_replace_preserves_changed_destination_and_restores_on_publish_error() {
         let root = tempfile::tempdir().unwrap();
         let root: Location = root.path().to_path_buf().into();
@@ -2261,6 +2330,25 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].path, refresh_file);
         assert_eq!(entries[0].size, 13);
+        #[cfg(unix)]
+        {
+            let alias = remote_root.with_path(root.join("remote-alias"));
+            std::os::unix::fs::symlink(remote_root.path(), alias.path()).unwrap();
+            let error = transfer_with_conflicts(
+                std::slice::from_ref(&refresh_file),
+                &alias,
+                TransferKind::Move,
+                &mut Progress::default(),
+                |_| panic!("same-folder moves through an alias must fail before conflicts"),
+                |_| panic!("same-folder moves must preserve the original entry"),
+            )
+            .unwrap_err();
+            assert_eq!(
+                error,
+                crate::i18n::text("Элементы уже находятся в этой папке")
+            );
+            assert_eq!(fs::read(refresh_file.path()).unwrap(), b"external edit");
+        }
         fs::remove_file(refresh_file.path()).unwrap();
         assert!(read_automatic_directory(&remote_root, &|| false)
             .unwrap()

@@ -1120,6 +1120,9 @@ impl PawCommander {
 
     fn poll(&mut self, ctx: &egui::Context) {
         self.poll_transfer();
+        if self.conflict_open() && self.dialog_file_focus.is_none() {
+            self.remember_dialog_file_focus(ctx);
+        }
         if let Some(rx) = &self.editor_job {
             let result = match rx.try_recv() {
                 Ok(result) => Some(result),
@@ -2818,6 +2821,7 @@ impl eframe::App for PawCommander {
             if let Some(conflict) = &mut transfer.conflict {
                 if conflict.show(ctx) {
                     transfer.conflict = None;
+                    ctx.request_repaint();
                 }
                 return;
             }
