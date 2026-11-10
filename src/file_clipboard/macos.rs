@@ -106,7 +106,7 @@ impl SystemClipboard {
         Ok(files)
     }
 
-    pub fn consume_moved(&mut self, files: &FileList, source: &Path) {
+    pub fn consume_moved(&mut self, files: &FileList, sources: &HashSet<&Path>) {
         let revision = files
             .revision
             .as_deref()
@@ -118,7 +118,7 @@ impl SystemClipboard {
             paths, consumed, ..
         } = &mut self.selection;
         paths.retain(|(slot, path)| {
-            if path.starts_with(source) {
+            if sources.contains(path.as_path()) {
                 consumed.insert(*slot);
                 false
             } else {
@@ -152,6 +152,10 @@ fn clipboard_path(value: &NSString) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conflict::{Answer, Decision};
+    use crate::fs_ops::TransferKind;
+    use crate::operations::Progress;
+    use crate::vfs::{self, Location};
     use std::os::unix::fs::symlink;
 
     fn native_url(path: &Path) -> Retained<NSURL> {
@@ -191,7 +195,7 @@ mod tests {
 
             let moved = root.path().join("moved");
             std::fs::rename(&folder, &moved).unwrap();
-            clipboard.consume_moved(&before, &folder);
+            clipboard.consume_moved(&before, &HashSet::from([folder.as_path(), child.as_path()]));
             let renamed = root.path().join("renamed.txt");
             std::fs::rename(&pending, &renamed).unwrap();
             let retry = read(&mut clipboard, 1, &urls).unwrap();
@@ -205,8 +209,100 @@ mod tests {
             let after = read(&mut clipboard, 2, &new_urls).unwrap();
             assert_ne!(after.revision, before.revision);
             assert_eq!(after.paths, [renamed.as_path()]);
-            clipboard.consume_moved(&before, &renamed);
+            clipboard.consume_moved(&before, &HashSet::from([renamed.as_path()]));
             assert_eq!(read(&mut clipboard, 2, &new_urls), Some(after));
+        });
+    }
+
+    #[test]
+    fn plain_urls_retry_only_pending_paths_after_moving_a_directory_selected_through_aliases() {
+        autoreleasepool(|_| {
+            let root = tempfile::tempdir_in("/private/tmp").unwrap();
+            let actual = root.path().join("actual");
+            let alias = root.path().join("alias");
+            let folder = actual.join("folder");
+            let pending = alias.join("pending.txt");
+            let target = root.path().join("target");
+            let retry = root.path().join("retry");
+            std::fs::create_dir_all(folder.join("nested")).unwrap();
+            symlink(&actual, &alias).unwrap();
+            std::fs::write(folder.join("nested/child.txt"), b"child").unwrap();
+            std::fs::write(&pending, b"pending").unwrap();
+            symlink(&pending, folder.join("link")).unwrap();
+            std::fs::create_dir(&target).unwrap();
+            std::fs::create_dir(&retry).unwrap();
+            std::fs::write(target.join("pending.txt"), b"conflict").unwrap();
+
+            let urls = [
+                &alias.join("folder/nested/child.txt"),
+                &alias.join("folder/nested"),
+                &alias.join("folder/link"),
+                &folder,
+                &alias.join("folder"),
+                &pending,
+            ]
+            .map(|path| unsafe { native_url(path).absoluteString() }.unwrap());
+            let read = |clipboard: &mut SystemClipboard| {
+                clipboard
+                    .read_items(1, urls.iter(), |url| Some(url.clone()), || 1)
+                    .unwrap()
+                    .unwrap()
+            };
+            let mut clipboard = SystemClipboard::default();
+            let before = read(&mut clipboard);
+            let move_files = |clipboard: &mut SystemClipboard, files: &FileList, target: &Path| {
+                let sources: Vec<Location> = files.paths.iter().cloned().map(Into::into).collect();
+                vfs::transfer_with_conflicts(
+                    &sources,
+                    &target.to_path_buf().into(),
+                    TransferKind::Move,
+                    &mut Progress::default(),
+                    |_| {
+                        Ok(Answer {
+                            decision: Decision::Skip,
+                            apply_to_group: false,
+                        })
+                    },
+                    |source, covered| {
+                        let moved = std::iter::once(source.local().unwrap())
+                            .chain(covered.iter().map(PathBuf::as_path))
+                            .collect();
+                        clipboard.consume_moved(files, &moved);
+                    },
+                )
+                .unwrap()
+            };
+            let first = move_files(&mut clipboard, &before, &target);
+            assert_eq!((first.completed, first.skipped), (1, 1));
+            assert_eq!(
+                std::fs::read(target.join("folder/nested/child.txt")).unwrap(),
+                b"child"
+            );
+            assert_eq!(
+                std::fs::read_link(target.join("folder/link")).unwrap(),
+                pending
+            );
+            assert_eq!(
+                std::fs::read(target.join("pending.txt")).unwrap(),
+                b"conflict"
+            );
+
+            // Reusing the old pathname must not bring the completed aliases back.
+            std::fs::create_dir_all(folder.join("nested")).unwrap();
+            std::fs::write(folder.join("nested/child.txt"), b"new").unwrap();
+            let remaining = read(&mut clipboard);
+            assert_eq!(remaining.paths, [pending]);
+            let second = move_files(&mut clipboard, &remaining, &retry);
+            assert_eq!((second.completed, second.skipped), (1, 0));
+            assert_eq!(
+                std::fs::read(retry.join("pending.txt")).unwrap(),
+                b"pending"
+            );
+            assert_eq!(
+                std::fs::read(folder.join("nested/child.txt")).unwrap(),
+                b"new"
+            );
+            assert!(!retry.join("folder").exists());
         });
     }
 

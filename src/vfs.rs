@@ -738,6 +738,7 @@ struct TransferItem {
     original: Location,
     source: Location,
     target: Location,
+    covered: Vec<PathBuf>,
     replacement: Option<(EntryMetadata, EntryMetadata)>,
 }
 
@@ -747,6 +748,7 @@ impl TransferItem {
             original,
             source,
             target,
+            covered: Vec::new(),
             replacement: None,
         }
     }
@@ -770,8 +772,12 @@ fn transfer_plan(
             let paths = sources.iter().map(|p| p.path().into()).collect::<Vec<_>>();
             return fs_ops::plan_transfer(&paths, dest, progress).map(|plan| {
                 plan.into_iter()
-                    .map(|(original, source, target)| {
-                        TransferItem::new(original.into(), source.into(), target.into())
+                    .map(|item| TransferItem {
+                        original: item.original.into(),
+                        source: item.source.into(),
+                        target: item.target.into(),
+                        covered: item.covered,
+                        replacement: None,
                     })
                     .collect()
             });
@@ -843,7 +849,7 @@ pub fn transfer_with_conflicts(
     kind: TransferKind,
     progress: &mut Progress,
     mut decide: impl FnMut(Conflict) -> Result<Answer, String>,
-    mut moved: impl FnMut(&Location),
+    mut moved: impl FnMut(&Location, &[PathBuf]),
 ) -> Result<TransferSummary, String> {
     let plan = transfer_plan(sources, destination, kind, progress)?;
     let mut reserved: HashSet<_> = plan.iter().map(|item| item.target.clone()).collect();
@@ -943,7 +949,7 @@ pub fn transfer_with_conflicts(
         let result = match kind {
             TransferKind::Copy => copy_item(&item, expected, progress),
             TransferKind::Move => publish_item(&item.source, &item.target, expected, || {
-                moved(&item.original);
+                moved(&item.original, &item.covered);
             }),
         };
         if let Err(error) = result {
@@ -975,7 +981,7 @@ pub fn transfer(
                 conflict.target.location
             ))
         },
-        |_| {},
+        |_, _| {},
     )
     .map(|report| report.completed)
 }
@@ -2051,7 +2057,7 @@ mod tests {
                     })
                 }
             },
-            |_| panic!("copy must not report a move"),
+            |_, _| panic!("copy must not report a move"),
         )
         .unwrap();
         assert_eq!(prompted, vec![1, 3]);
@@ -2097,7 +2103,7 @@ mod tests {
                     apply_to_group: false,
                 })
             },
-            |_| panic!("nothing may move before conflicts are resolved"),
+            |_, _| panic!("nothing may move before conflicts are resolved"),
         )
         .unwrap();
         assert!(cancelled.cancelled);
@@ -2117,7 +2123,10 @@ mod tests {
                     apply_to_group: true,
                 })
             },
-            |location| moved.push(location.clone()),
+            |location, covered| {
+                assert!(covered.is_empty());
+                moved.push(location.clone());
+            },
         )
         .unwrap();
         assert_eq!((report.completed, report.skipped), (1, 2));
@@ -2145,7 +2154,7 @@ mod tests {
                 TransferKind::Move,
                 &mut Progress::default(),
                 |_| panic!("same-folder moves must fail before any conflict prompt"),
-                |_| panic!("same-folder moves must fail before transferring any item"),
+                |_, _| panic!("same-folder moves must fail before transferring any item"),
             )
             .unwrap_err();
             assert_eq!(
@@ -2176,7 +2185,7 @@ mod tests {
                     apply_to_group: false,
                 })
             },
-            |_| panic!("copy must not report a move"),
+            |_, _| panic!("copy must not report a move"),
         )
         .unwrap();
         assert_eq!(report.completed, 1);
@@ -2211,7 +2220,7 @@ mod tests {
                     apply_to_group: false,
                 })
             },
-            |_| panic!("copy must not report a move"),
+            |_, _| panic!("copy must not report a move"),
         )
         .unwrap();
         assert_eq!(report.completed, 1);
@@ -2242,7 +2251,7 @@ mod tests {
                     apply_to_group: false,
                 })
             },
-            |_| {},
+            |_, _| {},
         )
         .unwrap_err();
         assert!(failure.contains("изменилось после показа диалога"));
@@ -2353,7 +2362,7 @@ mod tests {
                 TransferKind::Copy,
                 &mut progress,
                 |_| panic!("unexpected conflict"),
-                |_| {},
+                |_, _| {},
             )
             .unwrap()
             .completed,
@@ -2390,7 +2399,7 @@ mod tests {
             TransferKind::Move,
             &mut progress,
             |_| panic!("unexpected conflict"),
-            |_| panic!("preflight must finish before moving files"),
+            |_, _| panic!("preflight must finish before moving files"),
         );
 
         assert!(result.is_err());
@@ -2483,7 +2492,7 @@ mod tests {
                 TransferKind::Move,
                 &mut Progress::default(),
                 |_| panic!("same-folder moves through an alias must fail before conflicts"),
-                |_| panic!("same-folder moves must preserve the original entry"),
+                |_, _| panic!("same-folder moves must preserve the original entry"),
             )
             .unwrap_err();
             assert_eq!(
@@ -2548,7 +2557,7 @@ mod tests {
                 TransferKind::Copy,
                 &mut progress,
                 |_| panic!("unexpected conflict"),
-                |_| {},
+                |_, _| {},
             )
             .unwrap()
             .completed,
@@ -2612,7 +2621,7 @@ mod tests {
             TransferKind::Copy,
             &mut Progress::default(),
             replace,
-            |_| {},
+            |_, _| {},
         )
         .unwrap();
         assert_eq!(
@@ -2635,7 +2644,7 @@ mod tests {
             TransferKind::Copy,
             &mut Progress::default(),
             replace,
-            |_| {},
+            |_, _| {},
         )
         .unwrap();
         assert_eq!(
@@ -2653,7 +2662,7 @@ mod tests {
                     apply_to_group: false,
                 })
             },
-            |_| {},
+            |_, _| {},
         )
         .unwrap();
         let remote_source = uploaded.join("hello world (2).txt");
@@ -2666,7 +2675,7 @@ mod tests {
             TransferKind::Move,
             &mut Progress::default(),
             replace,
-            |_| {},
+            |_, _| {},
         )
         .unwrap();
         assert!(!remote_source.path().exists());
@@ -2683,7 +2692,7 @@ mod tests {
                     apply_to_group: false,
                 })
             },
-            |_| {},
+            |_, _| {},
         )
         .is_err());
         let disposable = create_directory(&remote_root, "delete-me").unwrap();

@@ -12,7 +12,7 @@ use crate::vfs::{self as fs_ops, Endpoint, FileEntry, Location};
 use eframe::egui::{self, Color32, FontId, RichText, Sense, Stroke, Vec2};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -769,7 +769,7 @@ enum Dialog {
 }
 enum TransferEvent {
     Conflict(Box<ConflictDialog>),
-    Moved(Location),
+    Moved(Location, Vec<PathBuf>),
 }
 struct TransferInteraction {
     events: Receiver<TransferEvent>,
@@ -1033,9 +1033,10 @@ impl PawCommander {
                         apply_to_group: false,
                     }))
                 },
-                |location| {
+                |location, covered| {
                     if cut_generation.is_some() {
-                        let _ = events.send(TransferEvent::Moved(location.clone()));
+                        let _ =
+                            events.send(TransferEvent::Moved(location.clone(), covered.to_vec()));
                         worker_ctx.request_repaint();
                     }
                 },
@@ -1063,9 +1064,9 @@ impl PawCommander {
         while let Some(transfer) = &mut self.transfer {
             match transfer.events.try_recv() {
                 Ok(TransferEvent::Conflict(dialog)) => transfer.conflict = Some(dialog),
-                Ok(TransferEvent::Moved(location)) => {
+                Ok(TransferEvent::Moved(location, covered)) => {
                     if let Some(generation) = transfer.cut_generation {
-                        self.consume_cut_source(&location, generation);
+                        self.consume_cut_source(&location, &covered, generation);
                     }
                 }
                 Err(mpsc::TryRecvError::Disconnected) => self.transfer = None,
@@ -1331,21 +1332,28 @@ impl PawCommander {
         );
     }
 
-    fn consume_cut_source(&mut self, source: &Location, generation: u64) {
+    fn consume_cut_source(&mut self, source: &Location, covered: &[PathBuf], generation: u64) {
         if let Some(clipboard) = self
             .clipboard
             .as_mut()
             .filter(|clipboard| clipboard.generation == generation)
         {
-            #[cfg(target_os = "macos")]
-            if let (ClipboardOrigin::System(files), Some(source)) =
-                (&clipboard.origin, source.local())
-            {
-                self.system_clipboard.consume_moved(files, source);
+            if let Some(source) = source.local() {
+                let moved: HashSet<_> = std::iter::once(source)
+                    .chain(covered.iter().map(PathBuf::as_path))
+                    .collect();
+                #[cfg(target_os = "macos")]
+                if let ClipboardOrigin::System(files) = &clipboard.origin {
+                    self.system_clipboard.consume_moved(files, &moved);
+                }
+                clipboard
+                    .paths
+                    .retain(|path| path.local().is_none_or(|path| !moved.contains(path)));
+            } else {
+                clipboard.paths.retain(|path| {
+                    !path.same_backend(source) || !path.path().starts_with(source.path())
+                });
             }
-            clipboard.paths.retain(|path| {
-                !path.same_backend(source) || !path.path().starts_with(source.path())
-            });
         }
     }
 

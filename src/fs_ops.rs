@@ -2,7 +2,7 @@
 //! volume before publication. This does not snapshot a changing filesystem.
 
 use crate::operations::Progress;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io;
@@ -139,17 +139,29 @@ pub fn rename_entry(source: &Path, name: &str) -> Result<PathBuf, String> {
     Ok(destination)
 }
 
+pub(crate) struct LocalTransfer {
+    pub original: PathBuf,
+    pub source: PathBuf,
+    pub target: PathBuf,
+    pub covered: Vec<PathBuf>,
+}
+
 pub(crate) fn plan_transfer(
     sources: &[PathBuf],
     destination: &Path,
     progress: &mut Progress,
-) -> Result<Vec<(PathBuf, PathBuf, PathBuf)>, String> {
+) -> Result<Vec<LocalTransfer>, String> {
     progress.item(destination);
     let destination = directory_path(destination)?;
     let sources = normalize_selection(sources, progress)?;
     let mut names = HashSet::new();
     let mut plan = Vec::new();
-    for (original, source) in sources {
+    for LocalSelection {
+        original,
+        source,
+        covered,
+    } in sources
+    {
         progress.item(&original);
         let metadata = fs::symlink_metadata(&source).map_err(|e| {
             at(
@@ -176,7 +188,12 @@ pub(crate) fn plan_transfer(
             ));
         }
         let target = destination.join(name);
-        plan.push((original, source, target));
+        plan.push(LocalTransfer {
+            original,
+            source,
+            target,
+            covered,
+        });
     }
     Ok(plan)
 }
@@ -189,7 +206,8 @@ fn transfer(sources: &[PathBuf], destination: &Path, kind: TransferKind) -> Resu
 
 pub fn trash_entries(paths: &[PathBuf], progress: &mut Progress) -> Result<usize, String> {
     let paths = normalize_selection(paths, progress)?;
-    for (completed, (_, path)) in paths.iter().enumerate() {
+    for (completed, entry) in paths.iter().enumerate() {
+        let path = &entry.source;
         progress.item(path);
         // Use the operating system's trash. There is deliberately no permanent
         // deletion fallback when trash is unavailable for a volume.
@@ -253,29 +271,55 @@ fn entry_path(path: &Path) -> Result<PathBuf, String> {
     }
 }
 
+struct LocalSelection {
+    original: PathBuf,
+    source: PathBuf,
+    covered: Vec<PathBuf>,
+}
+
 fn normalize_selection(
     paths: &[PathBuf],
     progress: &mut Progress,
-) -> Result<Vec<(PathBuf, PathBuf)>, String> {
-    let mut unique = HashSet::new();
-    let mut entries = Vec::new();
+) -> Result<Vec<LocalSelection>, String> {
+    let mut entries = Vec::with_capacity(paths.len());
     for original in paths {
         progress.item(original);
         let path = entry_path(original)?;
         let metadata = fs::symlink_metadata(&path)
             .map_err(|e| at("Не удалось получить сведения об элементе", &path, e))?;
-        if unique.insert(path.clone()) {
-            entries.push((original, path, metadata.is_dir()));
+        entries.push((path, metadata.is_dir()));
+    }
+    let mut first = HashMap::with_capacity(entries.len());
+    for (index, (path, _)) in entries.iter().enumerate() {
+        first.entry(path.as_path()).or_insert(index);
+    }
+    let mut retained = vec![false; entries.len()];
+    let mut covered = vec![Vec::new(); entries.len()];
+    for (index, (path, _)) in entries.iter().enumerate() {
+        // The outermost selected directory covers all selected entries in
+        // its tree, including paths spelled through other parent aliases.
+        let representative = path
+            .ancestors()
+            .skip(1)
+            .filter_map(|ancestor| first.get(ancestor).copied())
+            .filter(|&ancestor| entries[ancestor].1)
+            .last()
+            .unwrap_or(first[path.as_path()]);
+        if index == representative {
+            retained[index] = true;
+        } else {
+            covered[representative].push(paths[index].clone());
         }
     }
     Ok(entries
-        .iter()
-        .filter(|(_, path, _)| {
-            !entries
-                .iter()
-                .any(|(_, parent, is_dir)| *is_dir && parent != path && path.starts_with(parent))
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| retained[*index])
+        .map(|(index, (source, _))| LocalSelection {
+            original: paths[index].clone(),
+            source,
+            covered: std::mem::take(&mut covered[index]),
         })
-        .map(|(original, path, _)| ((*original).clone(), path.clone()))
         .collect())
 }
 
