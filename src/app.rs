@@ -10,8 +10,11 @@ use crate::theme::{appearance_menu, Palette, Theme};
 use crate::vfs::{self as fs_ops, Endpoint, FileEntry, Location};
 use eframe::egui::{self, Color32, FontId, RichText, Sense, Stroke, Vec2};
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::collections::BTreeSet;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::Arc;
@@ -127,6 +130,119 @@ fn send_progressive_listing(
     }
 }
 
+#[derive(Default)]
+struct DirectoryEntries {
+    files: Vec<FileEntry>,
+    view: RefCell<DirectoryView>,
+}
+
+impl Deref for DirectoryEntries {
+    type Target = [FileEntry];
+
+    fn deref(&self) -> &Self::Target {
+        &self.files
+    }
+}
+
+#[derive(Default)]
+struct DirectoryView {
+    folded_names: Vec<Option<Box<str>>>,
+    query: Option<ViewQuery>,
+    scanned: usize,
+    rows: Rc<Vec<usize>>,
+}
+
+struct ViewQuery {
+    hidden: bool,
+    filter: String,
+    sort: Sort,
+    descending: bool,
+}
+
+impl DirectoryEntries {
+    fn replace(&mut self, files: Vec<FileEntry>) {
+        self.files = files;
+        *self.view.get_mut() = DirectoryView::default();
+    }
+
+    fn extend(&mut self, files: Vec<FileEntry>) {
+        self.files.extend(files);
+    }
+
+    fn visible(&self, hidden: bool, filter: &str, sort: Sort, descending: bool) -> Rc<Vec<usize>> {
+        let mut view = self.view.borrow_mut();
+        let DirectoryView {
+            folded_names,
+            query,
+            scanned,
+            rows,
+        } = &mut *view;
+        if query.as_ref().is_none_or(|previous| {
+            previous.hidden != hidden
+                || previous.filter != filter
+                || previous.sort != sort
+                || previous.descending != descending
+        }) {
+            *query = Some(ViewQuery {
+                hidden,
+                filter: filter.into(),
+                sort,
+                descending,
+            });
+            *scanned = 0;
+            if let Some(rows) = Rc::get_mut(rows) {
+                rows.clear();
+            } else {
+                *rows = Rc::default();
+            }
+        }
+        if *scanned == self.len() {
+            return rows.clone();
+        }
+
+        let filter = filter.to_lowercase();
+        if sort == Sort::Name || !filter.is_empty() {
+            folded_names.extend(self[folded_names.len()..].iter().map(|entry| {
+                let name = &entry.name;
+                if name.is_ascii() && !name.bytes().any(|byte| byte.is_ascii_uppercase()) {
+                    return None;
+                }
+                let folded = name.to_lowercase();
+                (folded != *name).then(|| folded.into_boxed_str())
+            }));
+        }
+        let folded_name =
+            |index: usize| folded_names[index].as_deref().unwrap_or(&self[index].name);
+        let indices = Rc::make_mut(rows);
+        let previous_len = indices.len();
+        indices.extend((*scanned..self.len()).filter(|&index| {
+            (hidden || !self[index].name.starts_with('.'))
+                && (filter.is_empty() || folded_name(index).contains(&filter))
+        }));
+        if indices.len() != previous_len {
+            // Prior rows are already sorted after an append. Stable sorting also
+            // keeps enumeration order for entries with identical sort keys.
+            indices.sort_by(|&a, &b| {
+                self[b].is_dir.cmp(&self[a].is_dir).then_with(|| {
+                    let order = match sort {
+                        Sort::Name => folded_name(a).cmp(folded_name(b)),
+                        Sort::Size => self[a].size.cmp(&self[b].size),
+                        Sort::Modified => self[a].modified.cmp(&self[b].modified),
+                    }
+                    .then_with(|| self[a].name.cmp(&self[b].name));
+                    if descending {
+                        order.reverse()
+                    } else {
+                        order
+                    }
+                })
+            });
+        }
+        *scanned = self.len();
+        rows.clone()
+    }
+}
+
 struct Tab {
     id: u64,
     path: Location,
@@ -137,7 +253,7 @@ struct Tab {
     address_completion: crate::address::Completion,
     focus_filter: bool,
     filter: String,
-    entries: Vec<FileEntry>,
+    entries: DirectoryEntries,
     selected: BTreeSet<Location>,
     anchor: Option<Location>,
     cursor: Option<Location>,
@@ -165,7 +281,7 @@ impl Tab {
             address_completion: Default::default(),
             focus_filter: false,
             filter: String::new(),
-            entries: vec![],
+            entries: DirectoryEntries::default(),
             selected: BTreeSet::new(),
             anchor: None,
             cursor: None,
@@ -209,7 +325,7 @@ impl Tab {
             self.error = None;
         }
         if mode == DirectoryLoadMode::Progressive {
-            self.entries.clear();
+            self.entries.replace(Vec::new());
         }
         self.loading = Some(load);
         if let Err(error) = std::thread::Builder::new()
@@ -269,24 +385,35 @@ impl Tab {
             Ok(None) if mode != DirectoryLoadMode::Progressive => {}
             Ok(entries) => {
                 if let Some(entries) = entries {
-                    self.entries = entries;
+                    self.entries.replace(entries);
                 }
                 self.has_complete_listing = true;
-                let paths: BTreeSet<_> = self.entries.iter().map(|entry| &entry.path).collect();
-                self.selected.retain(|path| paths.contains(path));
-                if self
-                    .anchor
-                    .as_ref()
-                    .is_some_and(|path| !paths.contains(path))
-                {
-                    self.anchor = None;
-                }
-                if self
-                    .cursor
-                    .as_ref()
-                    .is_some_and(|path| !paths.contains(path))
-                {
-                    self.cursor = None;
+                if !self.selected.is_empty() || self.anchor.is_some() || self.cursor.is_some() {
+                    let paths: BTreeSet<_> = self
+                        .entries
+                        .iter()
+                        .map(|entry| &entry.path)
+                        .filter(|path| {
+                            self.selected.contains(*path)
+                                || self.anchor.as_ref() == Some(*path)
+                                || self.cursor.as_ref() == Some(*path)
+                        })
+                        .collect();
+                    self.selected.retain(|path| paths.contains(path));
+                    if self
+                        .anchor
+                        .as_ref()
+                        .is_some_and(|path| !paths.contains(path))
+                    {
+                        self.anchor = None;
+                    }
+                    if self
+                        .cursor
+                        .as_ref()
+                        .is_some_and(|path| !paths.contains(path))
+                    {
+                        self.cursor = None;
+                    }
                 }
                 self.error = None;
                 if let Some(path) = self.reveal_after_load.take() {
@@ -319,7 +446,7 @@ impl Tab {
                 } else {
                     self.error = Some(error);
                     self.has_complete_listing = false;
-                    self.entries.clear();
+                    self.entries.replace(Vec::new());
                     self.selected.clear();
                     self.anchor = None;
                     self.cursor = None;
@@ -388,35 +515,9 @@ impl Tab {
         }
         false
     }
-    fn visible(&self, hidden: bool) -> Vec<usize> {
-        let filter = self.filter.to_lowercase();
-        let mut indices: Vec<_> = self
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| {
-                (hidden || !e.name.starts_with('.')) && e.name.to_lowercase().contains(&filter)
-            })
-            .map(|(i, _)| i)
-            .collect();
-        indices.sort_by(|a, b| {
-            let a = &self.entries[*a];
-            let b = &self.entries[*b];
-            b.is_dir.cmp(&a.is_dir).then_with(|| {
-                let order = match self.sort {
-                    Sort::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-                    Sort::Size => a.size.cmp(&b.size),
-                    Sort::Modified => a.modified.cmp(&b.modified),
-                }
-                .then_with(|| a.name.cmp(&b.name));
-                if self.descending {
-                    order.reverse()
-                } else {
-                    order
-                }
-            })
-        });
-        indices
+    fn visible(&self, hidden: bool) -> Rc<Vec<usize>> {
+        self.entries
+            .visible(hidden, &self.filter, self.sort, self.descending)
     }
     fn choose(&mut self, index: usize, visible: &[usize], modifiers: egui::Modifiers) {
         let path = self.entries[index].path.clone();
@@ -450,8 +551,8 @@ impl Tab {
 
     fn selected_visible(&self, hidden: bool) -> Vec<Location> {
         self.visible(hidden)
-            .into_iter()
-            .map(|i| &self.entries[i].path)
+            .iter()
+            .map(|&i| &self.entries[i].path)
             .filter(|path| self.selected.contains(*path))
             .cloned()
             .collect()
@@ -3159,11 +3260,12 @@ fn render_pane(
             if response.has_focus() {
                 actions.push(Action::Focus(pane_index));
             }
-            if response.changed() {
+            if response.changed() && !tab.selected.is_empty() {
                 let visible_paths: BTreeSet<_> = tab
                     .visible(settings.hidden)
                     .iter()
-                    .map(|i| tab.entries[*i].path.clone())
+                    .map(|i| &tab.entries[*i].path)
+                    .filter(|path| tab.selected.contains(*path))
                     .collect();
                 tab.selected.retain(|p| visible_paths.contains(p));
             }
@@ -3322,11 +3424,12 @@ fn render_pane(
                         if grid {
                             ui.horizontal(|ui| {
                                 for col in 0..columns {
-                                    if let Some(index) = visible.get(row * columns + col) {
+                                    let position = row * columns + col;
+                                    if position < visible.len() {
                                         entry_widget(
                                             ui,
                                             tab,
-                                            *index,
+                                            position,
                                             &visible,
                                             EntryOptions {
                                                 pane: pane_index,
@@ -3341,11 +3444,11 @@ fn render_pane(
                                     }
                                 }
                             });
-                        } else if let Some(index) = visible.get(row) {
+                        } else if row < visible.len() {
                             entry_widget(
                                 ui,
                                 tab,
-                                *index,
+                                row,
                                 &visible,
                                 EntryOptions {
                                     pane: pane_index,
@@ -3416,12 +3519,13 @@ struct EntryOptions {
 fn entry_widget(
     ui: &mut egui::Ui,
     tab: &mut Tab,
-    index: usize,
+    position: usize,
     visible: &[usize],
     options: EntryOptions,
     actions: &mut Vec<Action>,
     drop_targets: &mut DropTargets,
 ) {
+    let index = visible[position];
     let colors = Palette::from_ctx(ui.ctx());
     let EntryOptions {
         pane,
@@ -3457,12 +3561,7 @@ fn entry_widget(
             &entry.name,
         )
     });
-    if !grid
-        && visible
-            .iter()
-            .position(|i| *i == index)
-            .is_some_and(|i| i % 2 == 0)
-    {
+    if !grid && position.is_multiple_of(2) {
         ui.painter()
             .rect_filled(rect, 6, colors.bg.lerp_to_gamma(colors.raised, 0.22));
     }
@@ -4068,14 +4167,14 @@ mod tests {
             path: "/".into(),
         };
         let keep = tab.path.join("keep.txt");
-        tab.entries = vec![FileEntry {
+        tab.entries.replace(vec![FileEntry {
             path: keep.clone(),
             name: "keep.txt".into(),
             is_dir: false,
             is_symlink: false,
             size: 42,
             modified: None,
-        }];
+        }]);
         tab.selected.insert(keep.clone());
         tab.next_auto_refresh = Instant::now();
         app.poll(&ctx);
@@ -4853,14 +4952,14 @@ mod tests {
                 },
                 path: "/project/.env".into(),
             };
-            tab.entries = vec![FileEntry {
+            tab.entries.replace(vec![FileEntry {
                 path: path.clone(),
                 name: ".env".into(),
                 is_dir: false,
                 is_symlink: false,
                 size: 12,
                 modified: None,
-            }];
+            }]);
             let mut time = 0.0;
             let mut render = |events| {
                 let mut actions = vec![];
@@ -4963,7 +5062,8 @@ mod tests {
             }
             let mut tab = Tab::new(source.into(), &ctx);
             tab.loading = None;
-            tab.entries = fs_ops::read_directory(&tab.path, &|| false).unwrap();
+            tab.entries
+                .replace(fs_ops::read_directory(&tab.path, &|| false).unwrap());
             tab.selected = tab.entries.iter().map(|e| e.path.clone()).collect();
             let mut source_pos = egui::Pos2::ZERO;
             let mut target_pos = egui::Pos2::ZERO;
@@ -4997,7 +5097,7 @@ mod tests {
                             entry_widget(
                                 &mut cols[1],
                                 &mut tab,
-                                visible[0],
+                                0,
                                 &visible,
                                 EntryOptions {
                                     pane: 1,
@@ -5062,31 +5162,99 @@ mod tests {
         let ctx = egui::Context::default();
         let root = tempfile::tempdir().unwrap();
         let mut tab = Tab::new(root.path().to_path_buf().into(), &ctx);
-        tab.entries = [
-            ("z.txt", false),
-            ("B", true),
-            ("a.txt", false),
-            (".hidden", false),
-        ]
-        .into_iter()
-        .map(|(name, is_dir)| FileEntry {
-            path: root.path().join(name).into(),
-            name: name.into(),
-            is_dir,
-            is_symlink: false,
-            size: 1,
-            modified: None,
-        })
-        .collect();
+        tab.entries.replace(
+            [
+                ("z.txt", false),
+                ("B", true),
+                ("a.txt", false),
+                (".hidden", false),
+            ]
+            .into_iter()
+            .map(|(name, is_dir)| FileEntry {
+                path: root.path().join(name).into(),
+                name: name.into(),
+                is_dir,
+                is_symlink: false,
+                size: 1,
+                modified: None,
+            })
+            .collect(),
+        );
         let visible = tab.visible(false);
-        assert_eq!(visible, vec![1, 2, 0]);
+        assert_eq!(visible.as_slice(), &[1, 2, 0]);
         tab.choose(1, &visible, egui::Modifiers::NONE);
         tab.choose(0, &visible, egui::Modifiers::SHIFT);
         assert_eq!(tab.selected.len(), 3);
         tab.filter = "TXT".into();
-        assert_eq!(tab.visible(false), vec![2, 0]);
+        assert_eq!(tab.visible(false).as_slice(), &[2, 0]);
         tab.descending = true;
         tab.filter.clear();
-        assert_eq!(tab.visible(false), vec![1, 0, 2]);
+        assert_eq!(tab.visible(false).as_slice(), &[1, 0, 2]);
+    }
+
+    #[test]
+    fn visible_rows_follow_batches_query_changes_and_replacements() {
+        let ctx = egui::Context::default();
+        let root = tempfile::tempdir().unwrap();
+        let mut tab = Tab::new(root.path().to_path_buf().into(), &ctx);
+        let entry = |name: &str, size: u64, is_dir: bool| FileEntry {
+            path: root.path().join(name).into(),
+            name: name.into(),
+            is_dir,
+            is_symlink: false,
+            size,
+            modified: Some(std::time::UNIX_EPOCH + Duration::from_secs(size)),
+        };
+        let (tx, load) = DirectoryLoad::channel(DirectoryLoadMode::Progressive);
+        tab.loading = Some(load);
+        tx.send(DirectoryRead::Batch(vec![
+            entry("z.txt", 20, false),
+            entry("Ä.txt", 4, false),
+            entry(".hidden", 8, false),
+        ]))
+        .unwrap();
+        assert!(tab.poll());
+        let initial = tab.visible(false);
+        assert_eq!(initial.as_slice(), &[0, 1]);
+        assert!(Rc::ptr_eq(&initial, &tab.visible(false)));
+        tab.descending = true;
+        assert_eq!(tab.visible(false).as_slice(), &[1, 0]);
+
+        tx.send(DirectoryRead::Batch(vec![
+            entry("D", 2, true),
+            entry("ä.txt", 4, false),
+        ]))
+        .unwrap();
+        assert!(tab.poll());
+        assert_eq!(tab.visible(false).as_slice(), &[3, 4, 1, 0]);
+        assert_eq!(initial.as_slice(), &[0, 1]);
+        tab.filter = "Ä.TXT".into();
+        assert_eq!(tab.visible(false).as_slice(), &[4, 1]);
+        tab.filter.clear();
+        assert_eq!(tab.visible(true).as_slice(), &[3, 4, 1, 0, 2]);
+        tab.sort = Sort::Modified;
+        assert_eq!(tab.visible(true).as_slice(), &[3, 0, 2, 4, 1]);
+
+        tx.send(DirectoryRead::Finished(Ok(None))).unwrap();
+        assert!(!tab.poll());
+        let (tx, load) = DirectoryLoad::channel(DirectoryLoadMode::Reload);
+        tab.loading = Some(load);
+        let mut replacement = tab.entries.to_vec();
+        replacement[0] = entry("B.txt", 1, false);
+        tx.send(DirectoryRead::Finished(Ok(Some(replacement))))
+            .unwrap();
+        assert!(!tab.poll());
+        assert_eq!(tab.visible(true).as_slice(), &[3, 2, 4, 1, 0]);
+        tab.sort = Sort::Name;
+        tab.filter = "B.TXT".into();
+        assert_eq!(tab.visible(false).as_slice(), &[0]);
+
+        let next = tempfile::tempdir().unwrap();
+        std::fs::write(next.path().join("next"), "").unwrap();
+        tab.navigate(next.path().to_path_buf().into(), &ctx);
+        assert!(tab.visible(false).is_empty());
+        wait_for_directory(&mut tab);
+        assert_eq!(tab.visible(false).as_slice(), &[0]);
+        assert_eq!(tab.entries[0].name, "next");
     }
 }
