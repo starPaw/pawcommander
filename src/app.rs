@@ -61,9 +61,12 @@ enum Sort {
     Size,
     Modified,
 }
-// Poll only displayed local directories. Waiting from completion also bounds
-// work on slow volumes; no timer thread, native watcher or SFTP session is held.
+// Poll only displayed directories. Wait from completion to bound work on slow
+// filesystems, and poll SFTP less frequently to limit network traffic.
 const AUTO_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+const SFTP_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
+
+type DirectoryRead = Result<Option<Vec<FileEntry>>, String>;
 
 struct Tab {
     id: u64,
@@ -83,7 +86,7 @@ struct Tab {
     reveal_after_load: Option<Location>,
     history: Vec<Location>,
     history_index: usize,
-    loading: Option<Receiver<Result<Vec<FileEntry>, String>>>,
+    loading: Option<Receiver<DirectoryRead>>,
     automatic_loading: bool,
     next_auto_refresh: Instant,
     error: Option<String>,
@@ -145,7 +148,12 @@ impl Tab {
         if let Err(error) = std::thread::Builder::new()
             .name("pawcommander-directory-read".into())
             .spawn(move || {
-                let _ = tx.send(fs_ops::read_directory(&path));
+                let result = if automatic {
+                    fs_ops::read_automatic_directory(&path)
+                } else {
+                    fs_ops::read_directory(&path).map(Some)
+                };
+                let _ = tx.send(result);
                 ctx.request_repaint();
             })
         {
@@ -156,9 +164,6 @@ impl Tab {
         }
     }
     fn auto_refresh(&mut self, ctx: &egui::Context, now: Instant) {
-        if self.path.remote() {
-            return;
-        }
         if self.loading.is_none() && now >= self.next_auto_refresh {
             self.start_load(ctx, true);
         }
@@ -169,9 +174,9 @@ impl Tab {
     fn blocking_load(&self) -> bool {
         self.loading.is_some() && !self.automatic_loading
     }
-    fn finish_load(&mut self, result: Result<Vec<FileEntry>, String>) {
+    fn finish_load(&mut self, result: DirectoryRead) {
         match result {
-            Ok(entries) => {
+            Ok(Some(entries)) => {
                 let paths: BTreeSet<_> = entries.iter().map(|entry| &entry.path).collect();
                 self.selected.retain(|path| paths.contains(path));
                 if self
@@ -204,6 +209,7 @@ impl Tab {
                     }
                 }
             }
+            Ok(None) => {}
             Err(error) => {
                 if self.automatic_loading {
                     self.error = Some(crate::tr_format!("Автообновление: {error}. Показан последний прочитанный список; повторим попытку автоматически.", "Auto refresh: {error}. Showing the last successful listing; will retry automatically."));
@@ -216,7 +222,12 @@ impl Tab {
         }
         self.loading = None;
         self.automatic_loading = false;
-        self.next_auto_refresh = Instant::now() + AUTO_REFRESH_INTERVAL;
+        let interval = if self.path.remote() {
+            SFTP_REFRESH_INTERVAL
+        } else {
+            AUTO_REFRESH_INTERVAL
+        };
+        self.next_auto_refresh = Instant::now() + interval;
     }
     fn navigate(&mut self, path: Location, ctx: &egui::Context) {
         if path == self.path {
@@ -906,7 +917,7 @@ impl PawCommander {
                 if !tab.automatic_loading || automatic_allowed {
                     tab.poll();
                 }
-                if displayed && tab_index == pane.current && !tab.path.remote() {
+                if displayed && tab_index == pane.current {
                     if automatic_allowed {
                         tab.auto_refresh(ctx, now);
                     } else {
@@ -3813,7 +3824,7 @@ mod tests {
     }
 
     #[test]
-    fn automatic_refresh_is_single_flight_ignores_stale_reads_and_skips_sftp() {
+    fn automatic_refresh_is_single_flight_and_ignores_stale_reads() {
         let root = tempfile::tempdir().unwrap();
         let other = tempfile::tempdir().unwrap();
         std::fs::write(other.path().join("current"), "current").unwrap();
@@ -3826,25 +3837,51 @@ mod tests {
         tab.auto_refresh(&ctx, tab.next_auto_refresh);
         assert!(tab.automatic_loading);
         // Sending to the original receiver proves no second scan replaced it.
-        stale_tx.send(Ok(vec![])).unwrap();
+        stale_tx.send(Ok(Some(vec![]))).unwrap();
         tab.navigate(other.path().to_path_buf().into(), &ctx);
         wait_for_directory(&mut tab);
         assert_eq!(tab.entries.len(), 1);
         assert_eq!(tab.entries[0].name, "current");
+    }
+
+    #[test]
+    fn automatic_refresh_schedules_remote_tab_without_reconnecting_or_clearing_it() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        app.settings.split = false;
+        let tab = app.tab_mut();
+        wait_for_directory(tab);
         tab.path = Location::Sftp {
             endpoint: Endpoint {
-                host: "unused.invalid".into(),
-                port: 22,
+                host: "127.0.0.1".into(),
+                port: 0,
                 user: "test".into(),
                 key: None,
             },
             path: "/".into(),
         };
-        tab.auto_refresh(&ctx, tab.next_auto_refresh);
-        assert!(
-            tab.loading.is_none(),
-            "automatic refresh must never connect to SFTP"
-        );
+        let keep = tab.path.join("keep.txt");
+        tab.entries = vec![FileEntry {
+            path: keep.clone(),
+            name: "keep.txt".into(),
+            is_dir: false,
+            is_symlink: false,
+            size: 42,
+            modified: None,
+        }];
+        tab.selected.insert(keep.clone());
+        tab.next_auto_refresh = Instant::now();
+        app.poll(&ctx);
+        let tab = app.tab_mut();
+        assert!(tab.automatic_loading && !tab.blocking_load());
+        let started = Instant::now();
+        wait_for_directory(tab);
+        assert_eq!(tab.entries.len(), 1);
+        assert_eq!(tab.selected, BTreeSet::from([keep]));
+        assert!(tab.error.is_none(), "poll should skip an uncached session");
+        assert!(tab.next_auto_refresh >= started + SFTP_REFRESH_INTERVAL);
     }
 
     #[test]
@@ -4547,7 +4584,8 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         tab.loading = Some(rx);
         tab.reveal_after_load = Some(location.clone());
-        tx.send(fs_ops::read_directory(&tab.path)).unwrap();
+        tx.send(fs_ops::read_directory(&tab.path).map(Some))
+            .unwrap();
         tab.poll();
         assert_eq!(tab.selected, BTreeSet::from([location.clone()]));
         assert_eq!(tab.cursor, Some(location.clone()));
@@ -4562,7 +4600,8 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         tab.loading = Some(rx);
         tab.reveal_after_load = Some(location);
-        tx.send(fs_ops::read_directory(&tab.path)).unwrap();
+        tx.send(fs_ops::read_directory(&tab.path).map(Some))
+            .unwrap();
         tab.poll();
         assert!(tab.selected.is_empty());
         assert!(tab.error.unwrap().contains("index may be outdated"));

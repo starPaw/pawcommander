@@ -10,7 +10,7 @@ Click a breadcrumb to navigate, or press `Cmd/Ctrl+L` to enter a path. The addre
 
 Choose a language under **Settings → Language**. English is the default; Russian is also available. File names and contents are unchanged. Choose Latte, Frappé, Macchiato, or Mocha under **Settings → Catppuccin**. System appearance switches between Latte and Frappé.
 
-Visible local folders refresh in the background approximately two seconds after the previous read finishes. Selection is retained by path; filters, sorting, and scroll offsets are preserved. Hidden panes, inactive tabs, and SFTP folders are not polled. Large or slow folders may take longer. Use `F5` to refresh manually. The selected local file's preview reloads when observed metadata changes; this is not a content watcher.
+Visible folders refresh in the background after the previous read finishes: approximately every two seconds locally and every ten seconds for SFTP. Selection is retained by path; filters, sorting, and scroll offsets are preserved. Hidden panes and inactive tabs are not polled. SFTP polling uses an existing authenticated session and skips a busy refresh or unavailable session without clearing the listing or prompting for credentials. Automatic refresh pauses during file operations and dragging. Large or slow folders may take longer. Use `F5` to refresh manually. The selected local file's preview reloads when observed metadata changes; this is not a content watcher.
 
 ## Selection, clipboard, and drag and drop
 
@@ -69,7 +69,7 @@ The server must support `fstatvfs@openssh.com` free-space reporting and provide 
 
 A lost connection may leave a `.pawcommander-sftp-*` staging directory; the error identifies its path. Inspect the destination and staging directory before retrying. Reconnect with the SFTP dialog. There is no transfer resume. SSH operations use a 20-second timeout; TCP connection attempts use 10 seconds per address. DNS resolution is handled by the OS.
 
-Remote deletion recursively removes directories without a trash. Symlinks are removed without following them. An interrupted or failed deletion may already have removed part of the selection. Remote folders do not automatically refresh; use `F5` after external changes.
+Remote deletion recursively removes directories without a trash. Symlinks are removed without following them. An interrupted or failed deletion may already have removed part of the selection. Visible remote folders refresh automatically through an existing connection; use `F5` for an immediate refresh.
 
 ## Previews and properties
 
@@ -87,7 +87,7 @@ An index can omit restricted folders and contain stale paths. Search does not re
 
 **Open in Zed** sends a local path or an SSH URL to Zed. Normal opening of a remote file uses a bounded content check to recognize text (UTF-8 or BOM-marked UTF-16); explicitly choosing Zed bypasses that check. Other remote files must be copied locally before opening in external apps.
 
-Zed establishes its own SSH connection using its SSH configuration and authentication. PawCommander's stored secrets are not passed to Zed. A server must allow full SSH access and execution of Zed's helper; SFTP-only access is insufficient. Zed may install its remote server under `~/.zed_server`. Edits are saved on the server; refresh PawCommander afterwards. See [Zed Remote Development](https://zed.dev/docs/remote-development).
+Zed establishes its own SSH connection using its SSH configuration and authentication. PawCommander's stored secrets are not passed to Zed. A server must allow full SSH access and execution of Zed's helper; SFTP-only access is insufficient. Zed may install its remote server under `~/.zed_server`. Edits are saved on the server; the visible folder updates automatically, or use `F5` to refresh immediately. See [Zed Remote Development](https://zed.dev/docs/remote-development).
 
 ## Keyboard reference
 

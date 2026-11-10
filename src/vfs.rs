@@ -16,7 +16,7 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, TryLockError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -467,6 +467,31 @@ pub fn read_directory(location: &Location) -> Result<Vec<FileEntry>, String> {
         });
     }
     read_sftp_directory(location, &remote(location)?)
+}
+
+/// Poll existing sessions only. A busy poll or unavailable session leaves the
+/// previous listing intact and can be retried on the next scheduled refresh.
+pub fn read_automatic_directory(location: &Location) -> Result<Option<Vec<FileEntry>>, String> {
+    let Location::Sftp { endpoint, .. } = location else {
+        return read_directory(location).map(Some);
+    };
+    // A poll superseded by navigation may still be in SSH I/O. Keep at most
+    // one remote poll in flight across both panes and tabs, without queuing.
+    static REMOTE_POLL: Mutex<()> = Mutex::new(());
+    let _poll = match REMOTE_POLL.try_lock() {
+        Ok(poll) => poll,
+        Err(TryLockError::WouldBlock) => return Ok(None),
+        Err(error) => return Err(err(error)),
+    };
+    let session = match sessions().try_lock() {
+        Ok(sessions) => sessions.get(endpoint).cloned(),
+        Err(TryLockError::WouldBlock) => return Ok(None),
+        Err(error) => return Err(err(error)),
+    };
+    let Some(session) = session else {
+        return Ok(None);
+    };
+    read_sftp_directory(location, &session.sftp().map_err(err)?).map(Some)
 }
 
 /// Completion may browse an existing session without initiating authentication.
@@ -2125,12 +2150,24 @@ mod tests {
             endpoint: endpoint.clone(),
             path: root.join("remote"),
         };
+        assert!(read_automatic_directory(&remote_root).unwrap().is_none());
         assert!(read_address_directory(&remote_root).unwrap().is_empty());
         let session = connect(&endpoint, "", "test-passphrase", &known).unwrap();
         sessions().lock().unwrap().insert(endpoint.clone(), session);
         let local_root = Location::Local(root.join("local"));
         fs::create_dir(local_root.path()).unwrap();
         fs::create_dir(remote_root.path()).unwrap();
+        let refresh_file = remote_root.join("external.txt");
+        fs::write(refresh_file.path(), b"external edit").unwrap();
+        let entries = read_automatic_directory(&remote_root).unwrap().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, refresh_file);
+        assert_eq!(entries[0].size, 13);
+        fs::remove_file(refresh_file.path()).unwrap();
+        assert!(read_automatic_directory(&remote_root)
+            .unwrap()
+            .unwrap()
+            .is_empty());
         let completion_folder = remote_root.join("Completion folder");
         fs::create_dir(completion_folder.path()).unwrap();
         assert!(read_address_directory(&remote_root)

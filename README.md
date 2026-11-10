@@ -35,7 +35,7 @@ PawCommander brings a familiar two-pane workflow to a calm, colorful desktop app
 | **Move naturally.** Multiple selection, file clipboard, drag and drop, and keyboard shortcuts. | **Keep track of transfers.** Background operations, copy progress, conflict choices, and free-space checks. |
 | **Choose your mood.** All four Catppuccin palettes, system appearance, and English / Russian UI. | **Open in Zed.** Send local files or remote text files to your editor over SSH. |
 
-Visible local folders refresh automatically. On macOS, you can also drag local files out to Finder and other apps.
+Visible local and connected SFTP folders refresh automatically. On macOS, you can also drag local files out to Finder and other apps.
 
 ## Get started
 
