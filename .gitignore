@@ -1,0 +1,25 @@
+/target/
+/dist/
+/qa/
+.DS_Store
+
+
+# Local editor and development state
+.idea/
+.vscode/
+.local/
+
+# Credentials and machine-specific files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+known_hosts*
+*.log
+__pycache__/
+*.pyc

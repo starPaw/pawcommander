@@ -1,0 +1,18 @@
+PawCommander — third-party notices
+
+This distribution includes software and fonts from the projects listed below.
+Each component remains under its respective license.
+Corresponding source for MPL-2.0 components is included in third-party-sources.
+
+{{#each licenses}}
+======================================================================
+{{name}}
+======================================================================
+Used by:
+{{#each used_by}}
+- {{crate.name}} {{crate.version}} — https://crates.io/crates/{{crate.name}}/{{crate.version}}
+{{/each}}
+
+{{{text}}}
+
+{{/each}}

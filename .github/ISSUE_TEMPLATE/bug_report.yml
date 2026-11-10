@@ -1,0 +1,34 @@
+name: Bug report
+description: Help us reproduce a problem in PawCommander.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: "For vulnerabilities, use private reporting from SECURITY.md. Remove personal paths, server addresses, credentials, and private file contents."
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS version, CPU architecture, and PawCommander version or commit.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Use disposable sample files. Mention local or SFTP locations where relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the error text and a sanitized screenshot if useful.
+    validations:
+      required: true
