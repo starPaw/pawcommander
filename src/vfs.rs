@@ -19,6 +19,8 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock, TryLockError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+const MAX_TREE_DEPTH: usize = 128;
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Endpoint {
     pub host: String,
@@ -1181,7 +1183,14 @@ fn with_staging(
     if preserve {
         return result;
     }
-    let cleanup = remove_remote_tree(&sftp, staging.path(), 0, &mut Progress::default());
+    // The private staging directory adds one level above the payload, whose
+    // source tree may already use all 128 supported descendant levels.
+    let cleanup = remove_remote_tree(
+        &sftp,
+        staging.path(),
+        MAX_TREE_DEPTH + 1,
+        &mut Progress::default(),
+    );
     staging_result(result, cleanup, &staging, target)
 }
 
@@ -1211,7 +1220,7 @@ fn staged_copy(source: &Location, target: &Location) -> Result<(), String> {
     )
 }
 fn changed_source(source: &Location) -> String {
-    format!("Источник {source} изменился во время копирования; копия не опубликована. Повторите попытку после завершения записи в источник")
+    crate::i18n::source_changed_during_copy(source)
 }
 
 fn remote_source_matches(expected: &FileStat, actual: &FileStat) -> bool {
@@ -1329,7 +1338,7 @@ impl TransferSourceManifest {
     }
 
     fn capture_entry(&mut self, source: &Location, depth: usize) -> Result<(), String> {
-        if depth > 128 {
+        if depth > MAX_TREE_DEPTH {
             return Err("Слишком большая глубина папок (более 128)".into());
         }
         let metadata = entry_metadata(source)?.ok_or_else(|| changed_source(source))?;
@@ -1503,22 +1512,22 @@ fn copy_tree(
 fn remove_remote_tree(
     sftp: &Sftp,
     path: &Path,
-    depth: usize,
+    remaining_depth: usize,
     progress: &mut Progress,
 ) -> Result<(), String> {
     progress.item(path);
-    if depth > 128 {
-        return Err("Слишком большая глубина папок".into());
-    }
     let stat = sftp.lstat(path).map_err(err)?;
     if stat.is_dir() {
         for (child, _) in sftp.readdir(path).map_err(err)? {
+            let child_depth = remaining_depth
+                .checked_sub(1)
+                .ok_or("Слишком большая глубина папок")?;
             let name = child
                 .file_name()
                 .and_then(|n| n.to_str())
                 .ok_or("Некорректное имя SFTP")?;
             validate_name(name)?;
-            remove_remote_tree(sftp, &path.join(name), depth + 1, progress)?;
+            remove_remote_tree(sftp, &path.join(name), child_depth, progress)?;
         }
         progress.item(path);
         sftp.rmdir(path).map_err(err)
@@ -1545,7 +1554,7 @@ pub fn trash_entries_with_progress(
         }
         for (completed, path) in paths.iter().enumerate() {
             progress.item(path.path());
-            remove_remote_tree(&remote(path)?, path.path(), 0, progress).map_err(|e| format!("{e}. Удалено целых элементов: {completed}; текущая папка могла быть удалена частично."))?;
+            remove_remote_tree(&remote(path)?, path.path(), MAX_TREE_DEPTH, progress).map_err(|e| format!("{e}. Удалено целых элементов: {completed}; текущая папка могла быть удалена частично."))?;
         }
         return Ok(paths.len());
     }
@@ -1653,7 +1662,7 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert!(error.contains("изменился"), "{error}");
+        assert!(error.contains("changed during copying"), "{error}");
         assert_eq!(fs::read(target.path()).unwrap(), b"previous");
         assert_eq!(
             fs::read(source.join("a-early").path()).unwrap(),
@@ -1766,7 +1775,7 @@ mod tests {
                     // A directory metadata change may be observed before its
                     // new unsupported name; either must abort and clean up.
                     assert!(
-                        error.contains("SFTP") || error.contains("изменился"),
+                        error.contains("SFTP") || error.contains("changed during copying"),
                         "{error}"
                     );
                     assert!(
@@ -1787,6 +1796,81 @@ mod tests {
                     }));
                     // The destination parent remains readable by the UI.
                     read_directory(target_root, &|| false).unwrap();
+                }
+            }
+        }
+    }
+
+    fn check_sftp_source_change_cleanup_at_depth_limit(
+        local_root: &Location,
+        remote_root: &Location,
+    ) {
+        for direction in ["upload", "remote-copy"] {
+            let source_root = if direction == "upload" {
+                local_root
+            } else {
+                remote_root
+            };
+            for depth in [128, 129] {
+                let source = source_root.join(format!("deep-{direction}-{depth}-source"));
+                let target = remote_root.join(format!("deep-{direction}-{depth}-target"));
+                let sibling = remote_root.join(format!("deep-{direction}-{depth}-existing"));
+                let mut leaf = source.clone();
+                for _ in 1..depth {
+                    leaf = leaf.join("d");
+                }
+                fs::create_dir_all(leaf.path()).unwrap();
+                leaf = leaf.join("file");
+                fs::write(leaf.path(), b"original").unwrap();
+                fs::write(sibling.path(), b"existing destination sibling").unwrap();
+                let mut copied = false;
+                let error = copy_transfer_checked(
+                    &TransferItem::new(source.clone(), source.clone(), target.clone()),
+                    None,
+                    &mut Progress::default(),
+                    &mut |path, phase| {
+                        if path == &source && phase == CopyPhase::EntryCopied {
+                            copied = true;
+                            fs::write(leaf.path(), b"changed source").unwrap();
+                        }
+                        Ok(())
+                    },
+                )
+                .unwrap_err();
+                assert_eq!(copied, depth == 128, "{direction}/{depth}: {error}");
+                assert!(
+                    if copied {
+                        error.contains("changed during copying")
+                    } else {
+                        error.contains("Слишком большая глубина")
+                    },
+                    "{direction}/{depth}: {error}"
+                );
+                assert!(!error.contains("Осталась"), "{direction}/{depth}: {error}");
+                assert!(!target.path().exists());
+                assert_eq!(
+                    fs::read(sibling.path()).unwrap(),
+                    b"existing destination sibling"
+                );
+                assert_eq!(
+                    fs::read(leaf.path()).unwrap(),
+                    if copied {
+                        b"changed source".as_slice()
+                    } else {
+                        b"original"
+                    }
+                );
+                assert!(fs::read_dir(remote_root.path()).unwrap().all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".pawcommander-sftp-")));
+                if direction == "remote-copy" {
+                    // The extra staging allowance must not expand the depth
+                    // supported by ordinary user-requested remote deletion.
+                    let removed = trash_entries(std::slice::from_ref(&source));
+                    assert_eq!(removed.is_ok(), depth == 128);
+                    assert_eq!(leaf.path().exists(), depth == 129);
                 }
             }
         }
@@ -1902,7 +1986,7 @@ mod tests {
                 .unwrap_err();
                 assert!(mutated, "{direction}/{mutation}");
                 assert!(
-                    error.contains("изменился"),
+                    error.contains("changed during copying"),
                     "{direction}/{mutation}: {error}"
                 );
                 assert_eq!(fs::read(target.path()).unwrap(), b"previous destination");
@@ -2628,6 +2712,7 @@ mod tests {
             .to_string_lossy()
             .starts_with(".pawcommander-transfer-")));
         check_sftp_source_changes(&local_root, &remote_root);
+        check_sftp_source_change_cleanup_at_depth_limit(&local_root, &remote_root);
         #[cfg(unix)]
         check_sftp_unsupported_names(&local_root, &remote_root);
         sessions().lock().unwrap().remove(&endpoint);

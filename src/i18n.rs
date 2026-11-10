@@ -23,11 +23,25 @@ pub fn text(russian: &'static str) -> &'static str {
     translate(is_english(), russian)
 }
 
+pub(crate) fn source_changed_during_copy(source: impl std::fmt::Display) -> String {
+    format_source_changed(is_english(), source)
+}
+
+fn format_source_changed(english: bool, source: impl std::fmt::Display) -> String {
+    if english {
+        format!("Source “{source}” changed during copying; the copy was not published. Try again after writing to the source has finished")
+    } else {
+        format!("Источник «{source}» изменился во время копирования; копия не опубликована. Повторите попытку после завершения записи в источник")
+    }
+}
+
 fn translate(english: bool, russian: &'static str) -> &'static str {
     if !english {
         return russian;
     }
     match russian {
+        "Не удалось проверить источник" => "Could not check source",
+        "Не удалось скопировать" => "Could not copy",
         "Совпадение имён" => "Name conflict",
         "Совпадение {} из {}" => "Conflict {} of {}",
         "Исходный объект" => "Source",
@@ -407,8 +421,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn source_change_error_explains_safe_retry_in_both_languages() {
+        let source = "/tmp/Документы {name}.txt";
+        assert_eq!(
+            format_source_changed(true, source),
+            format!("Source “{source}” changed during copying; the copy was not published. Try again after writing to the source has finished")
+        );
+        assert_eq!(
+            format_source_changed(false, source),
+            format!("Источник «{source}» изменился во время копирования; копия не опубликована. Повторите попытку после завершения записи в источник")
+        );
+    }
+
+    #[test]
     fn translations_cover_navigation_dialogs_and_errors_without_touching_unknown_text() {
         for (ru, en) in [
+            ("Не удалось проверить источник", "Could not check source"),
+            ("Не удалось скопировать", "Could not copy"),
             ("Настройки", "Settings"),
             ("Домашняя", "Home"),
             (

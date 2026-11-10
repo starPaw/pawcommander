@@ -356,8 +356,13 @@ fn copy_atomically_checked(
     after_entry: &mut impl FnMut(&Path) -> io::Result<()>,
 ) -> Result<(), String> {
     progress.item(source);
-    let manifest = SourceManifest::capture(source)
-        .map_err(|e| at("Не удалось проверить источник", source, e))?;
+    let manifest = SourceManifest::capture(source).map_err(|e| {
+        at(
+            crate::i18n::text("Не удалось проверить источник"),
+            source,
+            e,
+        )
+    })?;
     let parent = destination
         .parent()
         .ok_or("Недопустимое место назначения копии")?;
@@ -373,7 +378,8 @@ fn copy_atomically_checked(
         // being copied without changing the parent directory's metadata.
         .and_then(|()| manifest.verify())
         .map_err(|e| {
-            copy_space_error(parent, &e).unwrap_or_else(|| at("Не удалось скопировать", source, e))
+            copy_space_error(parent, &e)
+                .unwrap_or_else(|| at(crate::i18n::text("Не удалось скопировать"), source, e))
         })
         .and_then(|()| publish(&payload, destination));
     // Only remove our own staging area, never a user's existing destination.
@@ -499,10 +505,7 @@ struct SourceManifest {
 }
 
 fn source_changed(path: &Path) -> io::Error {
-    io::Error::other(format!(
-        "Источник «{}» изменился во время копирования; копия не опубликована. Повторите попытку после завершения записи в источник",
-        path.display()
-    ))
+    io::Error::other(crate::i18n::source_changed_during_copy(path.display()))
 }
 
 fn directory_names(path: &Path) -> io::Result<Vec<OsString>> {
@@ -701,9 +704,7 @@ pub(crate) fn open_regular_source(source: &Path) -> io::Result<fs::File> {
     let input = options.open(source)?;
     let metadata = input.metadata()?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err(io::Error::other(
-            "Исходный файл изменился во время копирования; повторите попытку",
-        ));
+        return Err(source_changed(source));
     }
     Ok(input)
 }
@@ -906,7 +907,10 @@ mod tests {
                 },
             );
             let error = result.unwrap_err();
-            assert!(error.contains("изменился"), "{mutation}: {error}");
+            assert!(
+                error.contains("changed during copying"),
+                "{mutation}: {error}"
+            );
             assert!(!published, "{mutation}");
             assert_eq!(fs::read(&destination).unwrap(), b"previous target");
             assert!(!fs::read_dir(root.path()).unwrap().any(|entry| entry
@@ -958,7 +962,10 @@ mod tests {
                     Ok(())
                 },
             );
-            assert!(result.unwrap_err().contains("изменился"), "{mutation}");
+            assert!(
+                result.unwrap_err().contains("changed during copying"),
+                "{mutation}"
+            );
             assert_eq!(
                 fs::read(destination.join("precious")).unwrap(),
                 b"previous target"
@@ -1017,7 +1024,7 @@ mod tests {
                 Ok(())
             },
         );
-        assert!(result.unwrap_err().contains("изменился"));
+        assert!(result.unwrap_err().contains("changed during copying"));
         assert!(!destination.exists());
         assert_eq!(fs::read_link(link).unwrap(), outside);
         assert_eq!(fs::read(outside).unwrap(), b"precious");
