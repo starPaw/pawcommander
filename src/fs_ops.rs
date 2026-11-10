@@ -26,11 +26,40 @@ pub enum TransferKind {
     Move,
 }
 
-pub fn read_directory(path: &Path) -> Result<Vec<FileEntry>, String> {
-    let directory = fs::read_dir(path)
-        .map_err(|e| at(crate::i18n::text("Не удалось прочитать папку"), path, e))?;
+pub fn read_directory(
+    path: &Path,
+    cancelled: &impl Fn() -> bool,
+) -> Result<Vec<FileEntry>, String> {
     let mut entries = Vec::new();
-    for item in directory {
+    visit_directory(path, cancelled, |entry| entries.push(entry))?;
+    if !cancelled() {
+        entries.sort_by(|a, b| {
+            b.is_dir
+                .cmp(&a.is_dir)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+    }
+    Ok(entries)
+}
+
+pub fn visit_directory(
+    path: &Path,
+    cancelled: &impl Fn() -> bool,
+    mut visit: impl FnMut(FileEntry),
+) -> Result<(), String> {
+    if cancelled() {
+        return Ok(());
+    }
+    let mut directory = fs::read_dir(path)
+        .map_err(|e| at(crate::i18n::text("Не удалось прочитать папку"), path, e))?;
+    while !cancelled() {
+        let Some(item) = directory.next() else {
+            break;
+        };
+        if cancelled() {
+            break;
+        }
         let item = item.map_err(|e| {
             at(
                 crate::i18n::text("Не удалось прочитать элемент папки"),
@@ -51,13 +80,16 @@ pub fn read_directory(path: &Path) -> Result<Vec<FileEntry>, String> {
                 ))
             }
         };
+        if cancelled() {
+            break;
+        }
         let is_symlink = metadata.file_type().is_symlink();
         let target = if is_symlink {
             fs::metadata(&path).ok()
         } else {
             None
         };
-        entries.push(FileEntry {
+        visit(FileEntry {
             name: item.file_name().to_string_lossy().into_owned(),
             path,
             is_dir: target.as_ref().unwrap_or(&metadata).is_dir(),
@@ -66,13 +98,7 @@ pub fn read_directory(path: &Path) -> Result<Vec<FileEntry>, String> {
             modified: metadata.modified().ok(),
         });
     }
-    entries.sort_by(|a, b| {
-        b.is_dir
-            .cmp(&a.is_dir)
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-            .then_with(|| a.name.cmp(&b.name))
-    });
-    Ok(entries)
+    Ok(())
 }
 
 pub fn create_directory(parent: &Path, name: &str) -> Result<PathBuf, String> {
@@ -1008,7 +1034,7 @@ mod tests {
         fs::write(root.path().join(".hidden"), b"data").unwrap();
         fs::write(root.path().join("B.txt"), b"hi").unwrap();
         fs::create_dir(root.path().join("z folder")).unwrap();
-        let entries = read_directory(root.path()).unwrap();
+        let entries = read_directory(root.path(), &|| false).unwrap();
         assert_eq!(
             entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
             ["z folder", ".hidden", "B.txt"]
@@ -1144,7 +1170,7 @@ mod tests {
         fs::write(outside.join("precious"), b"data").unwrap();
         symlink(&outside, source.join("directory-link")).unwrap();
         symlink("missing", source.join("broken-link")).unwrap();
-        let entries = read_directory(&source).unwrap();
+        let entries = read_directory(&source, &|| false).unwrap();
         assert!(entries
             .iter()
             .any(|e| e.name == "directory-link" && e.is_dir && e.is_symlink));

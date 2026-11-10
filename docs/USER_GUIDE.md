@@ -10,6 +10,8 @@ Click a breadcrumb to navigate, or press `Cmd/Ctrl+L` to enter a path. The addre
 
 Choose a language under **Settings → Language**. English is the default; Russian is also available. File names and contents are unchanged. Choose Latte, Frappé, Macchiato, or Mocha under **Settings → Catppuccin**. System appearance switches between Latte and Frappé.
 
+Opening a local or SFTP folder shows entries progressively while **Reading folder…** remains visible. File metadata is read in the background. Navigating away, refreshing, or closing the tab cancels the previous read between filesystem or SSH calls; an already blocked call must finish or time out first. If a read fails after showing entries, the partial listing stays visible with an error. Refreshing a previously complete listing replaces it as a whole.
+
 Visible folders refresh in the background after the previous read finishes: approximately every two seconds locally and every ten seconds for SFTP. Selection is retained by path; filters, sorting, and scroll offsets are preserved. Hidden panes and inactive tabs are not polled. SFTP polling uses an existing authenticated session and skips a busy refresh or unavailable session without clearing the listing or prompting for credentials. Automatic refresh pauses during file operations and dragging. Large or slow folders may take longer. Use `F5` to refresh manually. The selected local file's preview reloads when observed metadata changes; this is not a content watcher.
 
 ## Selection, clipboard, and drag and drop

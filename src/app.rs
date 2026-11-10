@@ -12,8 +12,9 @@ use eframe::egui::{self, Color32, FontId, RichText, Sense, Stroke, Vec2};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[derive(Serialize, Deserialize)]
@@ -66,7 +67,65 @@ enum Sort {
 const AUTO_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const SFTP_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
 
-type DirectoryRead = Result<Option<Vec<FileEntry>>, String>;
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DirectoryLoadMode {
+    Progressive,
+    Reload,
+    Automatic,
+}
+
+enum DirectoryRead {
+    Batch(Vec<FileEntry>),
+    Finished(Result<Option<Vec<FileEntry>>, String>),
+}
+
+struct DirectoryLoad {
+    receiver: Receiver<DirectoryRead>,
+    cancelled: Arc<AtomicBool>,
+    mode: DirectoryLoadMode,
+}
+
+impl DirectoryLoad {
+    fn channel(mode: DirectoryLoadMode) -> (SyncSender<DirectoryRead>, Self) {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let load = Self {
+            receiver,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            mode,
+        };
+        (sender, load)
+    }
+}
+
+impl Drop for DirectoryLoad {
+    fn drop(&mut self) {
+        // The receiver also closes, unblocking a producer waiting to send.
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
+}
+
+fn send_progressive_listing(
+    read: impl FnOnce(&mut dyn FnMut(FileEntry)) -> Result<(), String>,
+    send: impl Fn(DirectoryRead) -> bool,
+) {
+    const BATCH_SIZE: usize = 1024;
+    const BATCH_INTERVAL: Duration = Duration::from_millis(40);
+    let mut batch = Vec::new();
+    let mut last_batch = None;
+    let result = read(&mut |entry| {
+        batch.push(entry);
+        // Publish the first entry immediately even if the next read stalls.
+        if batch.len() == BATCH_SIZE
+            || last_batch.is_none_or(|at: Instant| at.elapsed() >= BATCH_INTERVAL)
+        {
+            send(DirectoryRead::Batch(std::mem::take(&mut batch)));
+            last_batch = Some(Instant::now());
+        }
+    });
+    if batch.is_empty() || send(DirectoryRead::Batch(batch)) {
+        send(DirectoryRead::Finished(result.map(|()| None)));
+    }
+}
 
 struct Tab {
     id: u64,
@@ -86,8 +145,8 @@ struct Tab {
     reveal_after_load: Option<Location>,
     history: Vec<Location>,
     history_index: usize,
-    loading: Option<Receiver<DirectoryRead>>,
-    automatic_loading: bool,
+    loading: Option<DirectoryLoad>,
+    has_complete_listing: bool,
     next_auto_refresh: Instant,
     error: Option<String>,
     sort: Sort,
@@ -115,7 +174,7 @@ impl Tab {
             history: vec![path],
             history_index: 0,
             loading: None,
-            automatic_loading: false,
+            has_complete_listing: false,
             next_auto_refresh: Instant::now() + AUTO_REFRESH_INTERVAL,
             error: None,
             sort: Sort::Name,
@@ -135,26 +194,51 @@ impl Tab {
         self.start_load(ctx, false);
     }
     fn start_load(&mut self, ctx: &egui::Context, automatic: bool) {
-        let (tx, rx) = mpsc::channel();
+        let mode = if automatic {
+            DirectoryLoadMode::Automatic
+        } else if self.has_complete_listing {
+            DirectoryLoadMode::Reload
+        } else {
+            DirectoryLoadMode::Progressive
+        };
+        let (tx, load) = DirectoryLoad::channel(mode);
+        let cancelled = load.cancelled.clone();
         let path = self.path.clone();
         let ctx = ctx.clone();
         if !automatic {
             self.error = None;
         }
-        self.automatic_loading = automatic;
-        self.loading = Some(rx);
-        // Replacing the receiver on navigation/manual refresh discards any old
-        // directory result, including an automatic read finishing out of order.
+        if mode == DirectoryLoadMode::Progressive {
+            self.entries.clear();
+        }
+        self.loading = Some(load);
         if let Err(error) = std::thread::Builder::new()
             .name("pawcommander-directory-read".into())
             .spawn(move || {
-                let result = if automatic {
-                    fs_ops::read_automatic_directory(&path)
-                } else {
-                    fs_ops::read_directory(&path).map(Some)
+                let cancelled = || cancelled.load(Ordering::Relaxed);
+                let send = |update| {
+                    if cancelled() || tx.send(update).is_err() {
+                        return false;
+                    }
+                    ctx.request_repaint();
+                    true
                 };
-                let _ = tx.send(result);
-                ctx.request_repaint();
+                let result = match mode {
+                    DirectoryLoadMode::Progressive => {
+                        send_progressive_listing(
+                            |visit| fs_ops::visit_directory(&path, &cancelled, visit),
+                            send,
+                        );
+                        return;
+                    }
+                    DirectoryLoadMode::Reload => {
+                        fs_ops::read_directory(&path, &cancelled).map(Some)
+                    }
+                    DirectoryLoadMode::Automatic => {
+                        fs_ops::read_automatic_directory(&path, &cancelled)
+                    }
+                };
+                send(DirectoryRead::Finished(result));
             })
         {
             self.finish_load(Err(crate::tr_format!(
@@ -172,12 +256,23 @@ impl Tab {
         }
     }
     fn blocking_load(&self) -> bool {
-        self.loading.is_some() && !self.automatic_loading
+        self.loading.is_some() && !self.automatic_loading()
     }
-    fn finish_load(&mut self, result: DirectoryRead) {
+    fn automatic_loading(&self) -> bool {
+        self.loading
+            .as_ref()
+            .is_some_and(|load| load.mode == DirectoryLoadMode::Automatic)
+    }
+    fn finish_load(&mut self, result: Result<Option<Vec<FileEntry>>, String>) {
+        let mode = self.loading.take().expect("active directory load").mode;
         match result {
-            Ok(Some(entries)) => {
-                let paths: BTreeSet<_> = entries.iter().map(|entry| &entry.path).collect();
+            Ok(None) if mode != DirectoryLoadMode::Progressive => {}
+            Ok(entries) => {
+                if let Some(entries) = entries {
+                    self.entries = entries;
+                }
+                self.has_complete_listing = true;
+                let paths: BTreeSet<_> = self.entries.iter().map(|entry| &entry.path).collect();
                 self.selected.retain(|path| paths.contains(path));
                 if self
                     .anchor
@@ -193,7 +288,6 @@ impl Tab {
                 {
                     self.cursor = None;
                 }
-                self.entries = entries;
                 self.error = None;
                 if let Some(path) = self.reveal_after_load.take() {
                     if self.entries.iter().any(|entry| entry.path == path) {
@@ -209,19 +303,29 @@ impl Tab {
                     }
                 }
             }
-            Ok(None) => {}
             Err(error) => {
-                if self.automatic_loading {
-                    self.error = Some(crate::tr_format!("Автообновление: {error}. Показан последний прочитанный список; повторим попытку автоматически.", "Auto refresh: {error}. Showing the last successful listing; will retry automatically."));
+                self.reveal_after_load = None;
+                if !self.has_complete_listing && !self.entries.is_empty() {
+                    self.error = Some(crate::tr_format!(
+                        "Показана часть содержимого папки. {error}",
+                        "Showing an incomplete folder listing. {error}"
+                    ));
+                } else if mode == DirectoryLoadMode::Automatic {
+                    self.error = Some(if self.has_complete_listing {
+                        crate::tr_format!("Автообновление: {error}. Показан последний прочитанный список; повторим попытку автоматически.", "Auto refresh: {error}. Showing the last successful listing; will retry automatically.")
+                    } else {
+                        error
+                    });
                 } else {
                     self.error = Some(error);
+                    self.has_complete_listing = false;
                     self.entries.clear();
                     self.selected.clear();
+                    self.anchor = None;
+                    self.cursor = None;
                 }
             }
         }
-        self.loading = None;
-        self.automatic_loading = false;
         let interval = if self.path.remote() {
             SFTP_REFRESH_INTERVAL
         } else {
@@ -242,7 +346,7 @@ impl Tab {
         self.reset_and_load(ctx);
     }
     fn reset_and_load(&mut self, ctx: &egui::Context) {
-        self.entries.clear();
+        self.has_complete_listing = false;
         self.selected.clear();
         self.anchor = None;
         self.cursor = None;
@@ -262,10 +366,15 @@ impl Tab {
             self.reset_and_load(ctx);
         }
     }
-    fn poll(&mut self) {
-        if let Some(rx) = &self.loading {
-            match rx.try_recv() {
-                Ok(result) => {
+    // Consume at most one batch per pass so enumeration cannot monopolize the UI.
+    fn poll(&mut self) -> bool {
+        if let Some(load) = &self.loading {
+            match load.receiver.try_recv() {
+                Ok(DirectoryRead::Batch(entries)) => {
+                    self.entries.extend(entries);
+                    return true;
+                }
+                Ok(DirectoryRead::Finished(result)) => {
                     self.finish_load(result);
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
@@ -277,6 +386,7 @@ impl Tab {
                 Err(mpsc::TryRecvError::Empty) => {}
             }
         }
+        false
     }
     fn visible(&self, hidden: bool) -> Vec<usize> {
         let filter = self.filter.to_lowercase();
@@ -904,18 +1014,18 @@ impl PawCommander {
                 self.connection = None;
             }
         }
-        // Avoid reordering rows under a held pointer or during a transfer.
-        let automatic_allowed = self.job.is_none()
-            && self.transfer.is_none()
-            && !self.native_drag.active()
+        // Avoid reordering rows under a held pointer. Defer automatic updates
+        // during operations as well.
+        let can_reorder = !self.native_drag.active()
             && !ctx.input(|input| input.pointer.any_down() || input.pointer.any_released())
             && !egui::DragAndDrop::has_any_payload(ctx);
+        let automatic_allowed = self.job.is_none() && self.transfer.is_none() && can_reorder;
         let now = Instant::now();
         for (pane_index, pane) in self.panes.iter_mut().enumerate() {
             let displayed = self.settings.split || pane_index == 0;
             for (tab_index, tab) in pane.tabs.iter_mut().enumerate() {
-                if !tab.automatic_loading || automatic_allowed {
-                    tab.poll();
+                if can_reorder && (!tab.automatic_loading() || automatic_allowed) && tab.poll() {
+                    ctx.request_repaint();
                 }
                 if displayed && tab_index == pane.current {
                     if automatic_allowed {
@@ -3758,6 +3868,98 @@ mod tests {
     }
 
     #[test]
+    fn progressive_directory_shows_first_entry_before_stall_and_keeps_partial_results() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("first"), b"first").unwrap();
+        std::fs::write(root.path().join("second"), b"second").unwrap();
+        let ctx = egui::Context::default();
+        let mut tab = Tab::new(root.path().to_path_buf().into(), &ctx);
+        let mut entries = fs_ops::read_directory(&tab.path, &|| false)
+            .unwrap()
+            .into_iter();
+        let (tx, load) = DirectoryLoad::channel(DirectoryLoadMode::Progressive);
+        tab.loading = Some(load);
+        let (first_sent, first_received) = mpsc::channel();
+        let (resume, remainder) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            send_progressive_listing(
+                |visit| {
+                    visit(entries.next().unwrap());
+                    first_sent.send(()).unwrap();
+                    remainder.recv().unwrap();
+                    visit(entries.next().unwrap());
+                    Err("fixture read failed".into())
+                },
+                |update| tx.send(update).is_ok(),
+            );
+        });
+        first_received.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(tab.poll());
+        assert!(tab.blocking_load());
+        assert_eq!(tab.entries.len(), 1);
+        assert_eq!(tab.entries[0].name, "first");
+        assert_eq!(tab.entries[0].size, 5);
+        let first = tab.entries[0].path.clone();
+        tab.selected.insert(first.clone());
+        resume.send(()).unwrap();
+        wait_for_directory(&mut tab);
+        worker.join().unwrap();
+        assert_eq!(tab.entries.len(), 2);
+        assert_eq!(tab.selected, BTreeSet::from([first]));
+        let error = tab.error.as_deref().unwrap();
+        assert!(error.contains("incomplete folder listing"));
+        assert!(error.contains("fixture read failed"));
+
+        tab.auto_refresh(&ctx, tab.next_auto_refresh);
+        wait_for_directory(&mut tab);
+        assert!(tab.has_complete_listing);
+        assert!(tab.error.is_none());
+    }
+
+    #[test]
+    fn navigating_cancels_progressive_directory_and_discards_queued_entries() {
+        let old = tempfile::tempdir().unwrap();
+        let new = tempfile::tempdir().unwrap();
+        std::fs::write(old.path().join("old-first"), b"old").unwrap();
+        std::fs::write(old.path().join("old-second"), b"old").unwrap();
+        std::fs::write(new.path().join("current"), b"new").unwrap();
+        let ctx = egui::Context::default();
+        let mut tab = Tab::new(old.path().to_path_buf().into(), &ctx);
+        let (tx, load) = DirectoryLoad::channel(DirectoryLoadMode::Progressive);
+        let cancelled = load.cancelled.clone();
+        tab.loading = Some(load);
+        let location = tab.path.clone();
+        let (first_sent, first_received) = mpsc::channel();
+        let (resume, remainder) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut visited = 0;
+            let cancelled = || cancelled.load(Ordering::Relaxed);
+            send_progressive_listing(
+                |visit| {
+                    fs_ops::visit_directory(&location, &cancelled, |entry| {
+                        visited += 1;
+                        visit(entry);
+                        if visited == 1 {
+                            first_sent.send(()).unwrap();
+                            remainder.recv().unwrap();
+                        }
+                    })
+                },
+                |update| !cancelled() && tx.send(update).is_ok(),
+            );
+            visited
+        });
+        first_received.recv_timeout(Duration::from_secs(5)).unwrap();
+        tab.navigate(new.path().to_path_buf().into(), &ctx);
+        resume.send(()).unwrap();
+        wait_for_directory(&mut tab);
+        assert_eq!(worker.join().unwrap(), 1);
+        assert_eq!(tab.entries.len(), 1);
+        assert_eq!(tab.entries[0].name, "current");
+        assert!(tab.error.is_none());
+    }
+
+    #[test]
     fn automatic_refresh_reads_real_files_preserves_state_and_recovers_after_error() {
         let root = tempfile::tempdir().unwrap();
         let folder = root.path().join("watched");
@@ -3782,7 +3984,7 @@ mod tests {
         tab.auto_refresh(&ctx, tab.next_auto_refresh - Duration::from_millis(1));
         assert!(tab.loading.is_none(), "poll must respect its interval");
         tab.auto_refresh(&ctx, tab.next_auto_refresh);
-        assert!(tab.automatic_loading);
+        assert!(tab.automatic_loading());
         assert!(
             !tab.blocking_load(),
             "automatic reads must not add a spinner"
@@ -3831,14 +4033,17 @@ mod tests {
         let ctx = egui::Context::default();
         let mut tab = Tab::new(root.path().to_path_buf().into(), &ctx);
         wait_for_directory(&mut tab);
-        let (stale_tx, rx) = mpsc::channel();
-        tab.loading = Some(rx);
-        tab.automatic_loading = true;
+        let (stale_tx, load) = DirectoryLoad::channel(DirectoryLoadMode::Automatic);
+        let cancelled = load.cancelled.clone();
+        tab.loading = Some(load);
         tab.auto_refresh(&ctx, tab.next_auto_refresh);
-        assert!(tab.automatic_loading);
+        assert!(tab.automatic_loading());
         // Sending to the original receiver proves no second scan replaced it.
-        stale_tx.send(Ok(Some(vec![]))).unwrap();
+        stale_tx
+            .send(DirectoryRead::Finished(Ok(Some(vec![]))))
+            .unwrap();
         tab.navigate(other.path().to_path_buf().into(), &ctx);
+        assert!(cancelled.load(Ordering::Relaxed));
         wait_for_directory(&mut tab);
         assert_eq!(tab.entries.len(), 1);
         assert_eq!(tab.entries[0].name, "current");
@@ -3875,7 +4080,7 @@ mod tests {
         tab.next_auto_refresh = Instant::now();
         app.poll(&ctx);
         let tab = app.tab_mut();
-        assert!(tab.automatic_loading && !tab.blocking_load());
+        assert!(tab.automatic_loading() && !tab.blocking_load());
         let started = Instant::now();
         wait_for_directory(tab);
         assert_eq!(tab.entries.len(), 1);
@@ -3963,7 +4168,7 @@ mod tests {
         );
         // Start in a fresh input frame with no held/released pointer.
         let _ = ctx.run(egui::RawInput::default(), |ctx| app.poll(ctx));
-        assert!(app.panes[0].tabs[0].automatic_loading);
+        assert!(app.panes[0].tabs[0].automatic_loading());
         assert!(
             app.panes[0].tabs[1].loading.is_none(),
             "inactive tab stays idle"
@@ -3976,7 +4181,7 @@ mod tests {
         app.settings.split = true;
         app.poll(&ctx);
         assert!(
-            app.panes[1].tab().automatic_loading,
+            app.panes[1].tab().automatic_loading(),
             "displayed pane resumes scanning"
         );
         wait_for_directory(app.panes[1].tab_mut());
@@ -4581,11 +4786,13 @@ mod tests {
         let location: Location = path.clone().into();
         let ctx = egui::Context::default();
         let mut tab = Tab::new(root.path().to_path_buf().into(), &ctx);
-        let (tx, rx) = mpsc::channel();
-        tab.loading = Some(rx);
+        let (tx, load) = DirectoryLoad::channel(DirectoryLoadMode::Reload);
+        tab.loading = Some(load);
         tab.reveal_after_load = Some(location.clone());
-        tx.send(fs_ops::read_directory(&tab.path).map(Some))
-            .unwrap();
+        tx.send(DirectoryRead::Finished(
+            fs_ops::read_directory(&tab.path, &|| false).map(Some),
+        ))
+        .unwrap();
         tab.poll();
         assert_eq!(tab.selected, BTreeSet::from([location.clone()]));
         assert_eq!(tab.cursor, Some(location.clone()));
@@ -4597,11 +4804,13 @@ mod tests {
             .any(|i| tab.entries[*i].path == location));
 
         std::fs::remove_file(path).unwrap();
-        let (tx, rx) = mpsc::channel();
-        tab.loading = Some(rx);
+        let (tx, load) = DirectoryLoad::channel(DirectoryLoadMode::Reload);
+        tab.loading = Some(load);
         tab.reveal_after_load = Some(location);
-        tx.send(fs_ops::read_directory(&tab.path).map(Some))
-            .unwrap();
+        tx.send(DirectoryRead::Finished(
+            fs_ops::read_directory(&tab.path, &|| false).map(Some),
+        ))
+        .unwrap();
         tab.poll();
         assert!(tab.selected.is_empty());
         assert!(tab.error.unwrap().contains("index may be outdated"));
@@ -4754,7 +4963,7 @@ mod tests {
             }
             let mut tab = Tab::new(source.into(), &ctx);
             tab.loading = None;
-            tab.entries = fs_ops::read_directory(&tab.path).unwrap();
+            tab.entries = fs_ops::read_directory(&tab.path, &|| false).unwrap();
             tab.selected = tab.entries.iter().map(|e| e.path.clone()).collect();
             let mut source_pos = egui::Pos2::ZERO;
             let mut target_pos = egui::Pos2::ZERO;

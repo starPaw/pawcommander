@@ -450,30 +450,59 @@ pub struct FileEntry {
     pub size: u64,
     pub modified: Option<SystemTime>,
 }
-pub fn read_directory(location: &Location) -> Result<Vec<FileEntry>, String> {
-    if let Some(path) = location.local() {
-        return fs_ops::read_directory(path).map(|entries| {
-            entries
-                .into_iter()
-                .map(|e| FileEntry {
-                    path: e.path.into(),
-                    name: e.name,
-                    is_dir: e.is_dir,
-                    is_symlink: e.is_symlink,
-                    size: e.size,
-                    modified: e.modified,
-                })
-                .collect()
-        });
+
+impl From<fs_ops::FileEntry> for FileEntry {
+    fn from(entry: fs_ops::FileEntry) -> Self {
+        Self {
+            path: entry.path.into(),
+            name: entry.name,
+            is_dir: entry.is_dir,
+            is_symlink: entry.is_symlink,
+            size: entry.size,
+            modified: entry.modified,
+        }
     }
-    read_sftp_directory(location, &remote(location)?)
+}
+
+pub fn visit_directory(
+    location: &Location,
+    cancelled: &impl Fn() -> bool,
+    mut visit: impl FnMut(FileEntry),
+) -> Result<(), String> {
+    if cancelled() {
+        return Ok(());
+    }
+    if let Some(path) = location.local() {
+        return fs_ops::visit_directory(path, cancelled, |entry| visit(entry.into()));
+    }
+    visit_sftp_directory(location, &remote(location)?, cancelled, visit)
+}
+
+pub fn read_directory(
+    location: &Location,
+    cancelled: &impl Fn() -> bool,
+) -> Result<Vec<FileEntry>, String> {
+    if cancelled() {
+        return Ok(Vec::new());
+    }
+    if let Some(path) = location.local() {
+        return fs_ops::read_directory(path, cancelled)
+            .map(|entries| entries.into_iter().map(FileEntry::from).collect());
+    }
+    read_sftp_directory(location, &remote(location)?, cancelled)
 }
 
 /// Poll existing sessions only. A busy poll or unavailable session leaves the
 /// previous listing intact and can be retried on the next scheduled refresh.
-pub fn read_automatic_directory(location: &Location) -> Result<Option<Vec<FileEntry>>, String> {
+pub fn read_automatic_directory(
+    location: &Location,
+    cancelled: &impl Fn() -> bool,
+) -> Result<Option<Vec<FileEntry>>, String> {
+    if cancelled() {
+        return Ok(None);
+    }
     let Location::Sftp { endpoint, .. } = location else {
-        return read_directory(location).map(Some);
+        return read_directory(location, cancelled).map(Some);
     };
     // A poll superseded by navigation may still be in SSH I/O. Keep at most
     // one remote poll in flight across both panes and tabs, without queuing.
@@ -491,37 +520,65 @@ pub fn read_automatic_directory(location: &Location) -> Result<Option<Vec<FileEn
     let Some(session) = session else {
         return Ok(None);
     };
-    read_sftp_directory(location, &session.sftp().map_err(err)?).map(Some)
+    read_sftp_directory(location, &session.sftp().map_err(err)?, cancelled).map(Some)
 }
 
 /// Completion may browse an existing session without initiating authentication.
 pub fn read_address_directory(location: &Location) -> Result<Vec<FileEntry>, String> {
     let Location::Sftp { endpoint, .. } = location else {
-        return read_directory(location);
+        return read_directory(location, &|| false);
     };
     let session = sessions().lock().map_err(err)?.get(endpoint).cloned();
     match session {
-        Some(session) => read_sftp_directory(location, &session.sftp().map_err(err)?),
+        Some(session) => read_sftp_directory(location, &session.sftp().map_err(err)?, &|| false),
         None => Ok(vec![]),
     }
 }
 
-fn read_sftp_directory(location: &Location, sftp: &Sftp) -> Result<Vec<FileEntry>, String> {
+fn read_sftp_directory(
+    location: &Location,
+    sftp: &Sftp,
+    cancelled: &impl Fn() -> bool,
+) -> Result<Vec<FileEntry>, String> {
     let mut entries = Vec::new();
-    for (path, stat) in sftp.readdir(location.path()).map_err(err)? {
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
+    visit_sftp_directory(location, sftp, cancelled, |entry| entries.push(entry))?;
+    Ok(entries)
+}
+
+fn visit_sftp_directory(
+    location: &Location,
+    sftp: &Sftp,
+    cancelled: &impl Fn() -> bool,
+    mut visit: impl FnMut(FileEntry),
+) -> Result<(), String> {
+    if cancelled() {
+        return Ok(());
+    }
+    let mut dir = sftp.opendir(location.path()).map_err(err)?;
+    // ssh2::File::readdir reports directory EOF as LIBSSH2_ERROR_FILE (-16).
+    const END_OF_DIRECTORY: ErrorCode = ErrorCode::Session(-16);
+    while !cancelled() {
+        let (filename, stat) = match dir.readdir() {
+            Ok(entry) => entry,
+            Err(e) if e.code() == END_OF_DIRECTORY => break,
+            Err(e) => return Err(err(e)),
+        };
+        if cancelled() {
+            break;
+        }
+        if filename == Path::new(".") || filename == Path::new("..") {
+            continue;
+        }
+        let name = filename
+            .to_str()
             .ok_or("Имя файла SFTP не является UTF-8")?;
         validate_name(name)?;
-        if path != location.path().join(name) {
-            return Err("Сервер вернул имя, несовместимое с путями этой ОС".into());
-        }
+        let path = location.join(name);
         let is_symlink = stat.file_type().is_symlink();
-        let is_dir =
-            stat.is_dir() || (is_symlink && sftp.stat(&path).map(|s| s.is_dir()).unwrap_or(false));
-        entries.push(FileEntry {
-            path: location.join(name),
+        let is_dir = stat.is_dir()
+            || (is_symlink && sftp.stat(path.path()).map(|s| s.is_dir()).unwrap_or(false));
+        visit(FileEntry {
+            path,
             name: name.into(),
             is_dir,
             is_symlink,
@@ -531,7 +588,7 @@ fn read_sftp_directory(location: &Location, sftp: &Sftp) -> Result<Vec<FileEntry
                 .and_then(|s| UNIX_EPOCH.checked_add(Duration::from_secs(s))),
         });
     }
-    Ok(entries)
+    Ok(())
 }
 fn validate_name(name: &str) -> Result<(), String> {
     let mut components = Path::new(name).components();
@@ -1687,7 +1744,7 @@ mod tests {
                             && !name.starts_with(".pawcommander-transfer-")
                     }));
                     // The destination parent remains readable by the UI.
-                    read_directory(target_root).unwrap();
+                    read_directory(target_root, &|| false).unwrap();
                 }
             }
         }
@@ -2150,7 +2207,9 @@ mod tests {
             endpoint: endpoint.clone(),
             path: root.join("remote"),
         };
-        assert!(read_automatic_directory(&remote_root).unwrap().is_none());
+        assert!(read_automatic_directory(&remote_root, &|| false)
+            .unwrap()
+            .is_none());
         assert!(read_address_directory(&remote_root).unwrap().is_empty());
         let session = connect(&endpoint, "", "test-passphrase", &known).unwrap();
         sessions().lock().unwrap().insert(endpoint.clone(), session);
@@ -2159,12 +2218,14 @@ mod tests {
         fs::create_dir(remote_root.path()).unwrap();
         let refresh_file = remote_root.join("external.txt");
         fs::write(refresh_file.path(), b"external edit").unwrap();
-        let entries = read_automatic_directory(&remote_root).unwrap().unwrap();
+        let entries = read_automatic_directory(&remote_root, &|| false)
+            .unwrap()
+            .unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].path, refresh_file);
         assert_eq!(entries[0].size, 13);
         fs::remove_file(refresh_file.path()).unwrap();
-        assert!(read_automatic_directory(&remote_root)
+        assert!(read_automatic_directory(&remote_root, &|| false)
             .unwrap()
             .unwrap()
             .is_empty());
@@ -2174,6 +2235,15 @@ mod tests {
             .unwrap()
             .iter()
             .any(|entry| entry.is_dir && entry.path == completion_folder));
+        fs::write(refresh_file.path(), b"another entry").unwrap();
+        let visited = std::cell::Cell::new(0);
+        visit_directory(&remote_root, &|| visited.get() == 1, |entry| {
+            assert!(entry.path == completion_folder || entry.path == refresh_file);
+            visited.set(visited.get() + 1);
+        })
+        .unwrap();
+        assert_eq!(visited.get(), 1);
+        fs::remove_file(refresh_file.path()).unwrap();
         fs::remove_dir(completion_folder.path()).unwrap();
         let source = create_directory(&local_root, "папка ' [test]").unwrap();
         fs::write(source.path().join("hello world.txt"), "Привет, SFTP!\n").unwrap();
@@ -2186,7 +2256,7 @@ mod tests {
             let error = staged_copy(&source, &target).unwrap_err();
             assert!(error.contains("fstatvfs@openssh.com"), "{error}");
             assert!(!target.path().exists());
-            assert!(read_directory(&remote_root).unwrap().is_empty());
+            assert!(read_directory(&remote_root, &|| false).unwrap().is_empty());
             assert_eq!(fs::read(source.path().join(".hidden")).unwrap(), b"hidden");
             sessions().lock().unwrap().remove(&endpoint);
             return;
@@ -2220,7 +2290,7 @@ mod tests {
             view.snapshot().total_written,
             512 * 1024 + "Привет, SFTP!\n".len() as u64 + "hidden".len() as u64
         );
-        let entries = read_directory(&remote_root).unwrap();
+        let entries = read_directory(&remote_root, &|| false).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, source.name());
         assert!(entries[0].is_dir);
@@ -2235,7 +2305,7 @@ mod tests {
             &local_root,
         )
         .unwrap();
-        assert_eq!(read_directory(&uploaded).unwrap().len(), 4);
+        assert_eq!(read_directory(&uploaded, &|| false).unwrap().len(), 4);
         assert!(transfer(
             std::slice::from_ref(&source),
             &remote_root,
@@ -2388,7 +2458,7 @@ mod tests {
         {
             std::os::unix::fs::symlink(source.path(), remote_root.path().join("alias")).unwrap();
             let link = remote_root.join("alias");
-            assert!(read_directory(&remote_root)
+            assert!(read_directory(&remote_root, &|| false)
                 .unwrap()
                 .iter()
                 .any(|e| e.is_symlink && e.is_dir));
