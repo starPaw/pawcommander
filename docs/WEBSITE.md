@@ -1,6 +1,8 @@
 # Product website
 
-The public site is [pawcommander.capture402.xyz](https://pawcommander.capture402.xyz/). Its source lives in `website/` alongside the application. It is static HTML, CSS, and JavaScript, with no build dependencies, external fonts, analytics, wallet connections, or application backend.
+The public site is [pawcommander.capture402.xyz](https://pawcommander.capture402.xyz/). Its source lives in `website/` alongside the application. It is static HTML, CSS, and JavaScript, with no build dependencies, third-party font requests, analytics, wallet connections, or application backend.
+
+The design uses the official [Catppuccin Frappé palette](https://catppuccin.com/palette/). Outfit (headings) and Manrope (body text) are self-hosted Latin WOFF2 fonts from Google Fonts; their SIL Open Font Licenses are included in `website/assets/fonts/`. The supplied application screenshot is preserved as `website/assets/workspace.png`; its rounded corners are CSS, not edits to the image.
 
 ## Preview and edit
 
@@ -9,6 +11,8 @@ python3 -m http.server 4173 --bind 127.0.0.1 --directory website
 ```
 
 Open `http://127.0.0.1:4173/`. Edit `index.html`, `styles.css`, and `script.js`. Check desktop and mobile layouts, keyboard navigation, roadmap disclosures, and both copy-address buttons. The copy buttons require a secure context (HTTPS or localhost); their fallback selects the address for manual copying.
+
+The cat companion appears at the lower right, with a second invitation in the hero. Clicking or pressing Enter on **Pet me** changes its expression, shows hearts, and updates a polite status message. Pet counts are only in memory for the current page visit. The minus control or Escape minimizes it; the paw button restores it. Check these interactions, focus handling, and reduced-motion behavior when changing the companion. The original community-section cat is a separate decorative illustration.
 
 Keep release links, version, archive size, platform requirements, and first-launch notes aligned with the actual GitHub release. The six roadmap phases are an editorial snapshot of the development plan, not a live integration. Update their descriptions, status, and date after checking the current roadmap; keep planned capabilities separate from released ones. Do not publish internal task notes, account details, or private workspace links.
 

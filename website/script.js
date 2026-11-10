@@ -29,13 +29,50 @@ document.querySelectorAll('[data-copy]').forEach((button) => {
 });
 
 const cat = document.getElementById('pet-cat');
+const companion = document.getElementById('cat-companion');
+const expandedCat = document.getElementById('cat-expanded');
+const catLauncher = document.getElementById('cat-launcher');
+const catMinimize = document.getElementById('cat-minimize');
+const petInvite = document.getElementById('pet-invite');
 const petMessage = document.getElementById('pet-message');
-const purrs = ['Prrrr. You made my day ♡', 'Your files are in good paws.', 'One more pet? Pretty please.', 'A tiny purr of appreciation.'];
+const petCount = document.getElementById('pet-count');
+const purrs = [
+  'Prrrr… that’s the spot. ♡',
+  'Excellent human. 10/10.',
+  'Your files are in good paws.',
+  'One more? Pretty please.',
+  'Favorite human detected. ♡',
+];
 let pets = 0;
 let petTimer;
+
+function showCat(expanded) {
+  expandedCat.hidden = !expanded;
+  catLauncher.hidden = expanded;
+  companion.classList.toggle('is-collapsed', !expanded);
+  catLauncher.setAttribute('aria-expanded', String(expanded));
+  (expanded ? cat : catLauncher).focus({ preventScroll: true });
+}
+
+catMinimize.addEventListener('click', () => showCat(false));
+catLauncher.addEventListener('click', () => showCat(true));
+petInvite.addEventListener('click', () => showCat(true));
+companion.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && !expandedCat.hidden) {
+    showCat(false);
+    event.preventDefault();
+  }
+});
+
 cat.addEventListener('click', () => {
-  petMessage.textContent = purrs[pets++ % purrs.length];
+  petMessage.textContent = purrs[pets % purrs.length];
+  pets += 1;
+  petCount.textContent = `${pets} ${pets === 1 ? 'pet' : 'pets'} this visit · one happy cat`;
   cat.classList.add('is-purring');
   clearTimeout(petTimer);
-  petTimer = setTimeout(() => cat.classList.remove('is-purring'), 750);
+  petTimer = setTimeout(() => cat.classList.remove('is-purring'), 1600);
 });
+
+// Keep the content usable without JavaScript; reveal the companion once ready.
+companion.hidden = false;
+petInvite.hidden = false;

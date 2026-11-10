@@ -14,9 +14,11 @@ node --check website/script.js
 archive_dir="$(mktemp -d /tmp/pawcommander-site.XXXXXX)"
 archive="$archive_dir/site.tar.gz"
 trap 'rm -f "$archive"; rmdir "$archive_dir"' EXIT
-COPYFILE_DISABLE=1 tar -czf "$archive" -C website \
+COPYFILE_DISABLE=1 tar --no-xattrs -czf "$archive" -C website \
   index.html styles.css script.js robots.txt sitemap.xml \
-  assets/logo.svg assets/workspace.jpg assets/icon.png
+  assets/logo.svg assets/workspace.png assets/icon.png \
+  assets/fonts/manrope-latin.woff2 assets/fonts/outfit-latin.woff2 \
+  assets/fonts/Manrope-OFL.txt assets/fonts/Outfit-OFL.txt
 archive_sha="$(shasum -a 256 "$archive" | cut -d ' ' -f 1)"
 index_sha="$(shasum -a 256 website/index.html | cut -d ' ' -f 1)"
 release="$(date -u +%Y%m%dT%H%M%SZ)-${archive_sha:0:8}"
