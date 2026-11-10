@@ -876,6 +876,12 @@ pub fn transfer_with_conflicts(
                 && !source_meta.same_object(&target_meta)
                 && (!item.source.same_backend(&item.target)
                     || canonical(&item.source)? != canonical(&item.target)?);
+            #[cfg(windows)]
+            let can_replace = can_replace
+                && !matches!(
+                    (item.source.local(), item.target.local()),
+                    (Some(source), Some(target)) if fs_ops::same_windows_file(source, target)
+                );
             let decision = match group {
                 Some(Decision::Replace) if !can_replace => None,
                 saved => saved,
@@ -2179,6 +2185,40 @@ mod tests {
             fs::read(destination.join("existing (2).txt").path()).unwrap(),
             b"existing"
         );
+    }
+
+    #[test]
+    fn conflict_keeps_hard_link_aliases_and_creates_an_independent_copy() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root: Location = fixture.path().to_path_buf().into();
+        let source = root.join("report.txt");
+        let target_dir = create_directory(&root, "target").unwrap();
+        let target = target_dir.join("report.txt");
+        let copy = target_dir.join("report (2).txt");
+        fs::write(source.path(), b"original").unwrap();
+        fs::hard_link(source.path(), target.path()).unwrap();
+        assert_ne!(canonical(&source).unwrap(), canonical(&target).unwrap());
+
+        let report = transfer_with_conflicts(
+            std::slice::from_ref(&source),
+            &target_dir,
+            TransferKind::Copy,
+            &mut Progress::default(),
+            |conflict| {
+                assert!(!conflict.can_replace);
+                Ok(Answer {
+                    decision: Decision::KeepBoth,
+                    apply_to_group: false,
+                })
+            },
+            |_| panic!("copy must not report a move"),
+        )
+        .unwrap();
+        assert_eq!(report.completed, 1);
+        assert_eq!(fs::read(target.path()).unwrap(), b"original");
+        fs::write(source.path(), b"updated").unwrap();
+        assert_eq!(fs::read(target.path()).unwrap(), b"updated");
+        assert_eq!(fs::read(copy.path()).unwrap(), b"original");
     }
 
     #[test]

@@ -33,6 +33,7 @@ objc2-app-kit = { version = "=0.2.2", default-features = false, features = ["std
 [target.'cfg(target_os = "windows")'.dependencies]
 clipboard-win = { version = "=5.4.3", features = ["std"] }
 raw-window-handle = "=0.6.2"
+windows-sys = { version = "=0.61.2", features = ["Win32_Storage_FileSystem"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 clipboard-rs = { version = "=0.3.2", default-features = false }

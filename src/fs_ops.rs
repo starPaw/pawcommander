@@ -709,6 +709,41 @@ pub(crate) fn open_regular_source(source: &Path) -> io::Result<fs::File> {
     Ok(input)
 }
 
+#[cfg(windows)]
+pub(crate) fn same_windows_file(source: &Path, target: &Path) -> bool {
+    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileIdInfo, GetFileInformationByHandleEx, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO,
+    };
+
+    // Metadata access is sufficient. Keep both handles open during comparison
+    // and do not follow a final-component symlink changed since inspection.
+    let mut options = OpenOptions::new();
+    options
+        .access_mode(0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    let (Ok(source), Ok(target)) = (options.open(source), options.open(target)) else {
+        return false;
+    };
+    let file_id = |file: &fs::File| {
+        let mut info = FILE_ID_INFO::default();
+        // SAFETY: the open handle is valid and the output buffer matches FileIdInfo.
+        let result = unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle(),
+                FileIdInfo,
+                (&raw mut info).cast(),
+                size_of::<FILE_ID_INFO>() as u32,
+            )
+        };
+        let id = info.FileId.Identifier;
+        // All zeros and all ones denote unavailable identifiers.
+        (result != 0 && id != [0; 16] && id != [u8::MAX; 16])
+            .then_some((info.VolumeSerialNumber, id))
+    };
+    file_id(&source).is_some_and(|id| file_id(&target) == Some(id))
+}
+
 #[cfg(unix)]
 fn copy_symlink(source: &Path, destination: &Path, _: &fs::Metadata) -> io::Result<()> {
     std::os::unix::fs::symlink(fs::read_link(source)?, destination)

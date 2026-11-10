@@ -2919,6 +2919,7 @@ dependencies = [
  "tempfile",
  "trash",
  "url",
+ "windows-sys 0.61.2",
  "wl-clipboard-rs",
 ]
 
