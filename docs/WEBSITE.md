@@ -2,7 +2,7 @@
 
 The public site is [pawcommander.capture402.xyz](https://pawcommander.capture402.xyz/). Its source lives in `website/` alongside the application. It is static HTML, CSS, and JavaScript, with no build dependencies, third-party font requests, analytics, wallet connections, or application backend.
 
-The design uses the official [Catppuccin Frappé palette](https://catppuccin.com/palette/). Outfit (headings) and Manrope (body text) are self-hosted Latin WOFF2 fonts from Google Fonts; their SIL Open Font Licenses are included in `website/assets/fonts/`. The supplied application screenshot is preserved as `website/assets/workspace.png`; its rounded corners are CSS, not edits to the image.
+The design uses the official [Catppuccin Frappé palette](https://catppuccin.com/palette/). Outfit (headings) and Manrope (body text) are self-hosted Latin WOFF2 fonts from Google Fonts; their SIL Open Font Licenses are included in `website/assets/fonts/`. The supplied application screenshot is preserved as `website/assets/workspace.png`; its rounded corners and surrounding surface are CSS, not edits to the image.
 
 ## Preview and edit
 

@@ -90,7 +90,7 @@ p { color: var(--muted); }
 .button-dark { background: var(--lavender); color: var(--crust); }
 .button-dark:hover { background: var(--text); }
 
-/* A clean product hero. The screenshot is the original image, with CSS corners only. */
+/* The original screenshot sits in a Frappé surface, without extra window chrome. */
 .hero { text-align: center; padding-top: 48px; }
 .hero-kicker { display: inline-flex; align-items: center; gap: 10px; font-size: 11px; letter-spacing: .01em; border: 1px solid var(--line); background: var(--mantle); padding: 6px 13px; border-radius: 30px; color: var(--subtext); }
 .status-dot { display: inline-block; width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px #a6d18912; }
@@ -108,8 +108,8 @@ h1 span { color: var(--lavender); font-weight: 400; }
 .pet-invite { display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; margin-top: 16px; border-radius: 9px; background: transparent; color: var(--mauve); font-size: 11px; }
 .pet-invite:hover { background: #ca9ee610; }
 .pet-invite .icon { width: 15px; height: 15px; fill: currentColor; stroke: none; transform: rotate(-14deg); }
-.app-showcase { margin-top: 48px; border-radius: 18px; overflow: hidden; box-shadow: 0 20px 55px -20px #181a2580; }
-.workspace-image { width: 100%; height: auto; border-radius: inherit; }
+.app-showcase { margin-top: 48px; padding: 12px; border: 1px solid var(--surface-2); background: var(--surface); border-radius: 28px; overflow: hidden; box-shadow: 0 24px 60px -22px #181a2590, inset 0 1px 0 #babbf112; }
+.workspace-image { width: 100%; height: auto; border-radius: 16px; }
 .showcase-caption { display: flex; justify-content: space-between; align-items: center; gap: 15px; margin-top: 20px; font-size: 10px; color: var(--muted); }
 .showcase-caption>span { display: inline-flex; align-items: center; gap: 9px; }
 .palette-caption i { width: 8px; height: 8px; background: var(--lavender); border-radius: 50%; margin-right: -4px; }
@@ -186,7 +186,7 @@ h1 span { color: var(--lavender); font-weight: 400; }
 .community-actions .button { min-height: 46px; font-size: 12px; padding: 12px 16px; }
 .community-actions .text-link { font-size: 11px; }
 .download { display: grid; grid-template-columns: 1fr 1fr; gap: 110px; align-items: center; padding-top: 50px; }
-.download-heading>img { margin-bottom: 25px; width: 65px; height: 65px; }
+.download-heading>img { margin-bottom: 25px; width: 65px; height: 65px; transform: rotate(-6deg); }
 .download-heading>p:last-child { font-size: 13px; margin-top: 23px; max-width: 280px; }
 .download-panel { background: var(--mantle); border: 1px solid var(--surface-1); border-radius: 20px; padding: 32px; text-align: center; }
 .download-version { display: flex; align-items: center; justify-content: center; gap: 9px; font-size: 12px; margin-bottom: 24px; flex-wrap: wrap; }
@@ -306,7 +306,8 @@ h1 span { color: var(--lavender); font-weight: 400; }
   .hero-actions .arrow { display: none; }
   .hero-note { font-size: 9px; }
   .pet-invite { font-size: 10px; margin-top: 10px; }
-  .app-showcase { margin-top: 32px; border-radius: 11px; }
+  .app-showcase { margin-top: 32px; padding: 6px; border-radius: 18px; }
+  .workspace-image { border-radius: 11px; }
   .showcase-caption { font-size: 9px; margin-top: 14px; justify-content: center; }
   .showcase-caption>span:last-child { display: none; }
   .section-heading { display: block; margin-bottom: 34px; }
