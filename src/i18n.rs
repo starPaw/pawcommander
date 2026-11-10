@@ -83,6 +83,7 @@ fn translate(english: bool, russian: &'static str) -> &'static str {
         "Подсчёт остановлен — частичный результат" => "Calculation stopped — partial result",
         "Подсчёт завершён с ошибками — частичный результат" => "Calculation completed with errors — partial result",
         "Подсчёт завершён" => "Calculation complete",
+        "Папка изменилась во время подсчёта" => "Folder changed during calculation",
         "Размер файлов: {} байт" => "File size: {} bytes",
         "Файлов: {} · Папок: {} · Ссылок: {} · Других: {}" => "Files: {} · Folders: {} · Links: {} · Other: {}",
         "Включая выбранные объекты и скрытые файлы. Ссылки не раскрываются. Размер — сумма длин обычных файлов, не занятое место на диске." => "Includes selected items and hidden files. Links are not followed. Size is the sum of regular file lengths, not disk usage.",

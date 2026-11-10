@@ -10,6 +10,11 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+use macos::scan_root;
+
 #[derive(Default, Clone, Debug)]
 struct Summary {
     files: u64,
@@ -209,59 +214,70 @@ fn scan(paths: &[PathBuf], cancel: &AtomicBool, mut progress: impl FnMut(&Summar
             accepted.insert(path.clone());
         }
 
-        let mut root_metadata = Some(metadata);
-        // Hold one directory iterator at a time. Count ordinary entries while
-        // reading them and only queue subdirectories for later descent.
-        let mut pending = vec![path];
-        while let Some(path) = pending.pop() {
-            if cancel.load(Ordering::Relaxed) {
-                break;
-            }
-            // Recheck queued directories before opening them in case an entry
-            // has been replaced since it was read from its parent.
-            let metadata = match root_metadata
-                .take()
-                .map_or_else(|| fs::symlink_metadata(&path), Ok)
-            {
-                Ok(metadata) => metadata,
-                Err(error) => {
-                    summary.error(&path, error);
-                    progress(&summary);
-                    continue;
-                }
-            };
-            summary.count(&metadata);
-            if !metadata.is_dir() || cancel.load(Ordering::Relaxed) {
-                progress(&summary);
-                continue;
-            }
-            let mut entries = match fs::read_dir(&path) {
-                Ok(entries) => entries,
-                Err(error) => {
-                    summary.error(&path, error);
-                    progress(&summary);
-                    continue;
-                }
-            };
-            progress(&summary);
-            while !cancel.load(Ordering::Relaxed) {
-                match entries.next() {
-                    // DirEntry::metadata reports the link itself.
-                    Some(Ok(entry)) => match entry.metadata() {
-                        Ok(metadata) if metadata.is_dir() => pending.push(entry.path()),
-                        Ok(metadata) => summary.count(&metadata),
-                        Err(error) => summary.error(&entry.path(), error),
-                    },
-                    Some(Err(error)) => summary.error(&path, error),
-                    None => break,
-                }
-                progress(&summary);
-            }
-        }
+        scan_root(path, metadata, cancel, &mut summary, &mut progress);
     }
     summary.cancelled = cancel.load(Ordering::Relaxed);
     summary.done = true;
     summary
+}
+
+#[cfg(not(target_os = "macos"))]
+fn scan_root(
+    path: PathBuf,
+    metadata: Metadata,
+    cancel: &AtomicBool,
+    summary: &mut Summary,
+    progress: &mut impl FnMut(&Summary),
+) {
+    let mut root_metadata = Some(metadata);
+    // Hold one directory iterator at a time. Count ordinary entries while
+    // reading them and only queue subdirectories for later descent.
+    let mut pending = vec![path];
+    while let Some(path) = pending.pop() {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        // Recheck queued directories before opening them in case an entry
+        // has been replaced since it was read from its parent.
+        let metadata = match root_metadata
+            .take()
+            .map_or_else(|| fs::symlink_metadata(&path), Ok)
+        {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                summary.error(&path, error);
+                progress(summary);
+                continue;
+            }
+        };
+        summary.count(&metadata);
+        if !metadata.is_dir() || cancel.load(Ordering::Relaxed) {
+            progress(summary);
+            continue;
+        }
+        let mut entries = match fs::read_dir(&path) {
+            Ok(entries) => entries,
+            Err(error) => {
+                summary.error(&path, error);
+                progress(summary);
+                continue;
+            }
+        };
+        progress(summary);
+        while !cancel.load(Ordering::Relaxed) {
+            match entries.next() {
+                // DirEntry::metadata reports the link itself.
+                Some(Ok(entry)) => match entry.metadata() {
+                    Ok(metadata) if metadata.is_dir() => pending.push(entry.path()),
+                    Ok(metadata) => summary.count(&metadata),
+                    Err(error) => summary.error(&entry.path(), error),
+                },
+                Some(Err(error)) => summary.error(&path, error),
+                None => break,
+            }
+            progress(summary);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -387,6 +403,85 @@ mod tests {
             (result.files, result.directories, result.links, result.bytes),
             (0, 1, 1, 0)
         );
+        assert_eq!(result.errors, 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn replacing_an_open_ancestor_keeps_the_scan_in_the_original_directory() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let ancestor = root.join("ancestor");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(ancestor.join("nested")).unwrap();
+        fs::create_dir_all(outside.join("nested")).unwrap();
+        fs::write(ancestor.join("nested/file"), b"yes").unwrap();
+        fs::write(outside.join("nested/file"), [0; 101]).unwrap();
+
+        let mut ancestor_updates = 0;
+        let result = scan(&[root], &AtomicBool::new(false), |summary| {
+            if summary.directories == 2 {
+                ancestor_updates += 1;
+                // The ancestor was opened on the first update. The next one
+                // observed its nested directory and has yet to open it.
+                if ancestor_updates == 2 {
+                    fs::rename(&ancestor, temp.path().join("moved")).unwrap();
+                    symlink(&outside, &ancestor).unwrap();
+                }
+            }
+        });
+        assert_eq!(ancestor_updates, 2);
+        assert_eq!(
+            (result.files, result.directories, result.links, result.bytes),
+            (1, 3, 0, 3)
+        );
+        assert_eq!(result.errors, 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn replaced_child_directory_reports_partial_result_without_counting_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let child = root.join("child");
+        fs::create_dir_all(&child).unwrap();
+        fs::write(child.join("file"), b"original").unwrap();
+
+        let mut updates = 0;
+        let result = scan(&[root], &AtomicBool::new(false), |_| {
+            updates += 1;
+            if updates == 2 {
+                fs::rename(&child, temp.path().join("moved")).unwrap();
+                fs::create_dir(&child).unwrap();
+                fs::write(child.join("file"), b"replacement").unwrap();
+            }
+        });
+        assert!(result.done && !result.cancelled);
+        assert_eq!((result.files, result.directories, result.bytes), (0, 1, 0));
+        assert_eq!(result.errors, 1);
+        assert!(result.error_examples[0].contains(&child.display().to_string()));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cancellation_after_observing_a_subdirectory_skips_descent() {
+        let temp = tempfile::tempdir().unwrap();
+        let child = temp.path().join("child");
+        fs::create_dir(&child).unwrap();
+        fs::write(child.join("file"), b"data").unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut updates = 0;
+        let result = scan(&[temp.path().into()], &cancel, |_| {
+            updates += 1;
+            if updates == 2 {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        });
+
+        assert!(result.done && result.cancelled);
+        assert_eq!((result.files, result.directories, result.bytes), (0, 1, 0));
         assert_eq!(result.errors, 0);
     }
 
