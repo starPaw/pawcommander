@@ -1009,7 +1009,14 @@ fn copy_transfer_checked(
     with_staging(&item.target, |staging, preserve| {
         check_copy_space(manifest.bytes, &item.target, staging)?;
         let payload = staging.join("payload");
-        copy_tree(&item.source, &payload, progress, &manifest, observe)?;
+        copy_tree(
+            &item.source,
+            &payload,
+            staging.local().and_then(Path::parent),
+            progress,
+            &manifest,
+            observe,
+        )?;
         manifest.verify()?;
         if let Some(expected) = expected {
             publish_replacement(&payload, &item.target, staging, expected, preserve)
@@ -1042,10 +1049,13 @@ fn check_copy_space(required: u64, target: &Location, staging: &Location) -> Res
         let stat = handle.statvfs();
         handle.close().map_err(err)?;
         sftp.unlink(probe.path()).map_err(err)?;
-        let stat = stat.map_err(|e| format!("Не удалось проверить свободное место SFTP для {parent}: {e}. Сервер должен поддерживать fstatvfs@openssh.com; данные текущего объекта не записаны"))?;
+        let stat = stat.map_err(|e| crate::tr_format!(
+            "Не удалось проверить свободное место SFTP для {parent}: {e}. Сервер должен поддерживать fstatvfs@openssh.com; данные текущего объекта не записаны",
+            "Could not check available SFTP space in {parent}: {e}. The server must support fstatvfs@openssh.com; no data for this item was written"
+        ))?;
         u128::from(stat.f_bavail) * u128::from(stat.f_frsize)
     };
-    fs_ops::ensure_copy_space(required, available)
+    fs_ops::ensure_copy_space(required, available, parent)
 }
 
 fn rename_without_replacing(source: &Location, target: &Location) -> Result<(), String> {
@@ -1134,7 +1144,9 @@ fn with_staging(
             use std::os::unix::fs::PermissionsExt;
             builder.permissions(fs::Permissions::from_mode(0o700));
         }
-        let staging = builder.tempdir_in(parent).map_err(err)?;
+        let staging = builder
+            .tempdir_in(parent)
+            .map_err(|e| fs_ops::copy_space_error(parent, &e).unwrap_or_else(|| err(e)))?;
         let location = Location::Local(staging.path().into());
         let result = work(&location, &mut preserve);
         if preserve {
@@ -1397,6 +1409,7 @@ impl Read for SourceReader {
 fn copy_tree(
     source: &Location,
     target: &Location,
+    local_parent: Option<&Path>,
     progress: &mut Progress,
     manifest: &TransferSourceManifest,
     observe: &mut impl FnMut(&Location, CopyPhase) -> Result<(), String>,
@@ -1407,9 +1420,14 @@ fn copy_tree(
         .get(source)
         .ok_or_else(|| changed_source(source))?;
     entry.verify(source)?;
+    let local_write_error = |e| {
+        local_parent
+            .and_then(|parent| fs_ops::copy_space_error(parent, &e))
+            .unwrap_or_else(|| err(e))
+    };
     if let Some(children) = &entry.children {
         if let Some(path) = target.local() {
-            fs::create_dir(path).map_err(err)?;
+            fs::create_dir(path).map_err(local_write_error)?;
         } else {
             remote(target)?.mkdir(target.path(), 0o755).map_err(err)?;
         }
@@ -1417,6 +1435,7 @@ fn copy_tree(
             copy_tree(
                 &source.join(name),
                 &target.join(name),
+                local_parent,
                 progress,
                 manifest,
                 observe,
@@ -1440,7 +1459,7 @@ fn copy_tree(
             .write(true)
             .create_new(true)
             .open(path)
-            .map_err(err)?;
+            .map_err(local_write_error)?;
         let written = progress
             .copy(
                 source.path(),
@@ -1448,8 +1467,8 @@ fn copy_tree(
                 &mut bounded,
                 &mut output,
             )
-            .map_err(err)?;
-        output.sync_all().map_err(err)?;
+            .map_err(local_write_error)?;
+        output.sync_all().map_err(local_write_error)?;
         written
     } else {
         let mut output = remote(target)?
