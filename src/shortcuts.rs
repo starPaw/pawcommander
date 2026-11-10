@@ -27,10 +27,11 @@ pub enum Command {
     Trash,
     CopyToPane,
     MoveToPane,
+    FocusToolbar,
 }
 
 impl Command {
-    const ALL: [Self; 22] = [
+    const ALL: [Self; 23] = [
         Self::EditPath,
         Self::Filter,
         Self::Search,
@@ -53,6 +54,7 @@ impl Command {
         Self::Trash,
         Self::CopyToPane,
         Self::MoveToPane,
+        Self::FocusToolbar,
     ];
 
     pub fn label(self) -> &'static str {
@@ -79,13 +81,16 @@ impl Command {
             Self::Trash => "В корзину с подтверждением",
             Self::CopyToPane => "Копировать в соседнюю панель",
             Self::MoveToPane => "Переместить в соседнюю панель",
+            Self::FocusToolbar => "Фокус на панели инструментов",
         })
     }
 
-    // These three shortcuts also work from the path and filter text fields.
+    // Only dedicated default navigation chords may leave a text field.
     pub fn works_in_text_field(self, chord: Chord) -> bool {
-        matches!(self, Self::EditPath | Self::Filter | Self::Search)
-            && Profile::Default.chord(self) == Some(chord)
+        matches!(
+            self,
+            Self::EditPath | Self::Filter | Self::Search | Self::FocusToolbar
+        ) && Profile::Default.chord(self) == Some(chord)
     }
 }
 
@@ -137,6 +142,7 @@ impl Profile {
             Rename => (Modifiers::NONE, Key::F2),
             NewFolder => (CMD_SHIFT, Key::N),
             Trash => (Modifiers::NONE, Key::Delete),
+            FocusToolbar => (Modifiers::NONE, Key::F10),
             Preview | EditInZed | CopyToPane | MoveToPane => return None,
         };
         Some(Chord::new(modifiers, key))
@@ -199,6 +205,16 @@ impl Shortcuts {
     }
 
     pub fn validate(&mut self) {
+        // Keep a user's existing F10 binding when loading settings saved before
+        // the toolbar command was introduced.
+        if !self.overrides.contains_key(&Command::FocusToolbar)
+            && self
+                .overrides
+                .values()
+                .any(|binding| *binding == self.profile.chord(Command::FocusToolbar))
+        {
+            self.overrides.insert(Command::FocusToolbar, None);
+        }
         // Reject inconsistent saved overrides without discarding other app settings.
         for command in Command::ALL {
             if let Some(chord) = self.overrides.get(&command).copied().flatten() {

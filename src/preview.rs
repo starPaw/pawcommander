@@ -139,12 +139,13 @@ impl Preview {
             }
         }
 
+        let muted = Palette::from_ctx(ui.ctx()).muted;
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(crate::i18n::text("СВЕДЕНИЯ"))
                     .size(11.0)
                     .strong()
-                    .weak(),
+                    .color(muted),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
@@ -176,7 +177,7 @@ impl Preview {
                     RichText::new(crate::i18n::text(
                         "Выберите файл или папку,\nчтобы увидеть подробности.",
                     ))
-                    .weak(),
+                    .color(muted),
                 );
             });
             return;
@@ -230,14 +231,14 @@ impl Preview {
                     None => {
                         ui.horizontal(|ui| {
                             ui.spinner();
-                            ui.weak(crate::i18n::text("Загрузка сведений…"));
+                            ui.colored_label(muted, crate::i18n::text("Загрузка сведений…"));
                         });
                     }
                     Some(Err(error)) => {
                         ui.colored_label(ui.visuals().error_fg_color, error);
                     }
                     Some(Ok(loaded)) => {
-                        ui.weak(&loaded.kind);
+                        ui.colored_label(muted, &loaded.kind);
                         ui.add_space(18.0);
                         ui.separator();
                         ui.add_space(10.0);
@@ -266,7 +267,7 @@ impl Preview {
                                 RichText::new(crate::i18n::text("ПРЕДПРОСМОТР"))
                                     .size(11.0)
                                     .strong()
-                                    .weak(),
+                                    .color(muted),
                             );
                             ui.add_space(8.0);
                             egui::Frame::new()
@@ -275,7 +276,7 @@ impl Preview {
                                 .inner_margin(10)
                                 .show(ui, |ui| {
                                     if body.is_empty() {
-                                        ui.weak(crate::i18n::text("Пустой файл"));
+                                        ui.colored_label(muted, crate::i18n::text("Пустой файл"));
                                     } else {
                                         ui.add(
                                             egui::Label::new(
@@ -288,12 +289,15 @@ impl Preview {
                                 });
                             if *truncated {
                                 ui.add_space(6.0);
-                                ui.weak(crate::i18n::text("Показано начало файла (до 32 КиБ)."));
+                                ui.colored_label(
+                                    muted,
+                                    crate::i18n::text("Показано начало файла (до 32 КиБ)."),
+                                );
                             }
                         }
                         Content::Message(message) => {
                             ui.add_space(12.0);
-                            ui.weak(message);
+                            ui.colored_label(muted, message);
                         }
                         _ => {}
                     }
@@ -309,8 +313,10 @@ impl Default for Preview {
 }
 
 fn detail(ui: &mut egui::Ui, label: &str, value: &str) {
-    ui.label(RichText::new(label).size(11.0).weak());
-    ui.add(egui::Label::new(value).wrap().selectable(true));
+    let muted = Palette::from_ctx(ui.ctx()).muted;
+    let label = ui.label(RichText::new(label).size(11.0).color(muted));
+    ui.add(egui::Label::new(value).wrap().selectable(true))
+        .labelled_by(label.id);
     ui.add_space(10.0);
 }
 

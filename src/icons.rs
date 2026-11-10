@@ -120,14 +120,14 @@ pub fn button_width(
     } else {
         label
     };
-    response.widget_info(|| {
-        egui::WidgetInfo::selected(
-            egui::WidgetType::Button,
-            ui.is_enabled(),
-            selected,
-            accessible_label,
-        )
-    });
+    let accessible_label = match icon {
+        Icon::Server => crate::i18n::text("Подключиться по SFTP"),
+        Icon::Settings => crate::i18n::text("Настройки"),
+        Icon::Search => crate::i18n::text("Поиск файлов"),
+        Icon::Info => crate::i18n::text("Панель сведений"),
+        _ => accessible_label,
+    };
+    button_info(ui, &response, icon, accessible_label, selected);
     let color = tint(icon, p);
     let fill = if selected {
         p.bg.lerp_to_gamma(color, 0.24)
@@ -156,6 +156,7 @@ pub fn button_width(
             p.ink,
         );
     }
+    crate::theme::paint_focus(ui, &response, 8);
     response
 }
 
@@ -465,9 +466,7 @@ pub const COMPACT_SIZE: f32 = 28.0;
 pub fn compact_button(ui: &mut egui::Ui, icon: Icon, label: &str, selected: bool) -> Response {
     let p = Palette::from_ctx(ui.ctx());
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(COMPACT_SIZE), Sense::click());
-    response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, label)
-    });
+    button_info(ui, &response, icon, label, selected);
     let color = tint(icon, p);
     ui.painter().rect(
         rect,
@@ -497,5 +496,16 @@ pub fn compact_button(ui: &mut egui::Ui, icon: Icon, label: &str, selected: bool
         icon,
         if selected { color } else { p.muted },
     );
+    crate::theme::paint_focus(ui, &response, 6);
     response.on_hover_text(label)
+}
+
+fn button_info(ui: &egui::Ui, response: &Response, icon: Icon, label: &str, selected: bool) {
+    response.widget_info(|| {
+        if matches!(icon, Icon::Split | Icon::Info | Icon::Grid | Icon::List) {
+            egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, label)
+        } else {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+        }
+    });
 }

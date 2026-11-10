@@ -7,12 +7,12 @@ use crate::operations::{Progress, ProgressView};
 use crate::preview::Preview;
 use crate::shortcuts::{self, Command, ShortcutEditor, Shortcuts};
 use crate::tab_drag::{DragTab, TabDrop, TabDropTargets};
-use crate::theme::{appearance_menu, Palette, Theme};
+use crate::theme::{appearance_menu, paint_focus, Palette, Theme};
 use crate::vfs::{self as fs_ops, Endpoint, FileEntry, Location};
 use eframe::egui::{self, Color32, FontId, RichText, Sense, Stroke, Vec2};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -32,11 +32,24 @@ struct Settings {
     grid: bool,
     pane_grid: Option<[bool; 2]>,
     theme: Theme,
+    ui_scale: u16,
+    high_contrast: bool,
     language: crate::i18n::Language,
     sftp_profiles: Vec<Location>,
     shortcuts: Shortcuts,
 }
 impl Settings {
+    const UI_SCALES: [u16; 5] = [90, 100, 110, 125, 150];
+
+    fn set_ui_scale(&mut self, ctx: &egui::Context, scale: u16) {
+        self.ui_scale = if Self::UI_SCALES.contains(&scale) {
+            scale
+        } else {
+            100
+        };
+        ctx.set_zoom_factor(f32::from(self.ui_scale) / 100.0);
+    }
+
     fn grid_for(&self, index: usize) -> bool {
         self.pane_grid.unwrap_or([self.grid; 2])[index]
     }
@@ -55,6 +68,8 @@ impl Default for Settings {
             grid: false,
             pane_grid: None,
             theme: Theme::Frappe,
+            ui_scale: 100,
+            high_contrast: false,
             language: crate::i18n::Language::default(),
             sftp_profiles: vec![],
             shortcuts: Shortcuts::default(),
@@ -260,6 +275,7 @@ struct Tab {
     selected: BTreeSet<Location>,
     anchor: Option<Location>,
     cursor: Option<Location>,
+    rendered_rows: HashMap<egui::Id, Location>,
     scroll_to: Option<Location>,
     reveal_after_load: Option<Location>,
     history: Vec<Location>,
@@ -288,6 +304,7 @@ impl Tab {
             selected: BTreeSet::new(),
             anchor: None,
             cursor: None,
+            rendered_rows: HashMap::new(),
             scroll_to: None,
             reveal_after_load: None,
             history: vec![path],
@@ -552,6 +569,21 @@ impl Tab {
         }
     }
 
+    fn entry_id(&self, path: &Location) -> egui::Id {
+        egui::Id::new(("file_entry", self.id, path))
+    }
+
+    fn focus_cursor(&self, ctx: &egui::Context) {
+        if let Some(path) = &self.cursor {
+            ctx.memory_mut(|memory| memory.request_focus(self.entry_id(path)));
+        }
+    }
+
+    fn focused_cursor(&self, ctx: &egui::Context) -> Option<egui::Id> {
+        let id = self.entry_id(self.cursor.as_ref()?);
+        ctx.memory(|memory| memory.has_focus(id)).then_some(id)
+    }
+
     fn selected_visible(&self, hidden: bool) -> Vec<Location> {
         self.visible(hidden)
             .iter()
@@ -796,6 +828,7 @@ pub struct PawCommander {
     system_clipboard: SystemClipboard,
     dialog: Option<Dialog>,
     dialog_focus: bool,
+    dialog_file_focus: Option<(u64, Location)>,
     job: Option<Job>,
     transfer: Option<TransferInteraction>,
     notice: Option<(String, bool)>,
@@ -803,7 +836,10 @@ pub struct PawCommander {
     shortcut_editor: Option<ShortcutEditor>,
     keyboard_had_focus: bool,
     tab_held: bool,
-    pane_tab_presses: Vec<(usize, egui::Event)>,
+    pane_key_presses: Vec<(usize, egui::Event)>,
+    focus_toolbar: bool,
+    show_accessibility: bool,
+    accessibility_focus: bool,
     sftp_form: Option<SftpForm>,
     connection: Option<ConnectionJob>,
     native_drag: crate::native_drag::NativeDrag,
@@ -819,7 +855,10 @@ impl PawCommander {
             .unwrap_or_default();
         settings.shortcuts.validate();
         crate::i18n::set_language(settings.language);
-        settings.theme.apply(&cc.egui_ctx);
+        settings.theme.apply(&cc.egui_ctx, settings.high_contrast);
+        cc.egui_ctx
+            .options_mut(|options| options.zoom_with_keyboard = false);
+        settings.set_ui_scale(&cc.egui_ctx, settings.ui_scale);
         egui_extras::install_image_loaders(&cc.egui_ctx);
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
         if let Some(start) = start {
@@ -859,6 +898,7 @@ impl PawCommander {
             system_clipboard: SystemClipboard::new(cc),
             dialog: None,
             dialog_focus: false,
+            dialog_file_focus: None,
             job: None,
             transfer: None,
             notice: None,
@@ -866,7 +906,10 @@ impl PawCommander {
             shortcut_editor: None,
             keyboard_had_focus: false,
             tab_held: false,
-            pane_tab_presses: Vec::new(),
+            pane_key_presses: Vec::new(),
+            focus_toolbar: false,
+            show_accessibility: false,
+            accessibility_focus: false,
             sftp_form: None,
             connection: None,
             native_drag: Default::default(),
@@ -1303,6 +1346,7 @@ impl PawCommander {
             Action::MoveSelection { delta, extend } => {
                 let hidden = self.settings.hidden;
                 self.tab_mut().move_selection(delta, hidden, extend);
+                self.tab().focus_cursor(ctx);
             }
             Action::ClearSelection => {
                 let tab = self.tab_mut();
@@ -1417,6 +1461,7 @@ impl PawCommander {
                 );
             }
             Action::NewFolder if self.job.is_none() => {
+                self.remember_dialog_file_focus(ctx);
                 self.dialog = Some(Dialog::NewFolder {
                     parent: self.tab().path.clone(),
                     name: String::new(),
@@ -1426,6 +1471,7 @@ impl PawCommander {
             Action::Rename if self.job.is_none() => {
                 let selected = self.selected();
                 if selected.len() == 1 {
+                    self.remember_dialog_file_focus(ctx);
                     let source = selected[0].clone();
                     let name = file_name(&source);
                     self.dialog = Some(Dialog::Rename { source, name });
@@ -1435,7 +1481,9 @@ impl PawCommander {
             Action::Trash if self.job.is_none() => {
                 let paths = self.selected();
                 if !paths.is_empty() {
+                    self.remember_dialog_file_focus(ctx);
                     self.dialog = Some(Dialog::Trash { paths });
+                    self.dialog_focus = true;
                 }
             }
             Action::Bookmark => {
@@ -1533,6 +1581,10 @@ impl PawCommander {
                 return;
             }
             Command::Search => return self.open_search(),
+            Command::FocusToolbar => {
+                self.focus_toolbar = true;
+                return;
+            }
             Command::NewTab => Action::NewTab(self.active),
             Command::CloseTab => Action::CloseTab(self.active, self.panes[self.active].current),
             Command::Back => Action::Back,
@@ -1561,7 +1613,26 @@ impl PawCommander {
             Command::Split => return self.toggle_split(),
             Command::OtherPane => {
                 if self.settings.split {
+                    let previous_focus = self.tab().focused_cursor(ctx);
+                    if let Some(id) = previous_focus {
+                        ctx.memory_mut(|memory| memory.surrender_focus(id));
+                    }
                     self.active = 1 - self.active;
+                    if previous_focus.is_some() {
+                        let hidden = self.settings.hidden;
+                        let tab = self.tab_mut();
+                        let visible = tab.visible(hidden);
+                        let path = visible
+                            .iter()
+                            .map(|&index| &tab.entries[index].path)
+                            .find(|path| Some(*path) == tab.cursor.as_ref())
+                            .or_else(|| visible.first().map(|&index| &tab.entries[index].path));
+                        if let Some(path) = path.cloned() {
+                            tab.scroll_to = Some(path.clone());
+                            tab.cursor = Some(path);
+                            tab.focus_cursor(ctx);
+                        }
+                    }
                 }
                 return;
             }
@@ -1612,6 +1683,7 @@ impl PawCommander {
             || self.sftp_form.is_some()
             || self.show_help
             || self.shortcut_editor.is_some()
+            || self.show_accessibility
             || self.native_drag.active()
             || self.search.visible
     }
@@ -1625,17 +1697,27 @@ impl PawCommander {
     }
 
     fn keyboard(&mut self, ctx: &egui::Context) {
-        let pane_tab_presses = std::mem::take(&mut self.pane_tab_presses);
+        let pane_key_presses = std::mem::take(&mut self.pane_key_presses);
         if self.keyboard_blocked(ctx) {
             return;
         }
         // egui drops a text field's focus on Escape before this update runs.
-        let focused = ctx.wants_keyboard_input()
-            || (self.keyboard_had_focus && ctx.input(|input| input.key_pressed(egui::Key::Escape)));
+        let file_focus = if let Some((pane, path)) = self.file_row_focus(ctx) {
+            let path = path.clone();
+            self.active = pane;
+            self.tab_mut().cursor = Some(path);
+            true
+        } else {
+            false
+        };
+        let focused = !file_focus
+            && (ctx.wants_keyboard_input()
+                || (self.keyboard_had_focus
+                    && ctx.input(|input| input.key_pressed(egui::Key::Escape))));
         let mut actions = Vec::new();
         ctx.input_mut(|input| {
             if !focused {
-                for (index, event) in pane_tab_presses {
+                for (index, event) in pane_key_presses {
                     input.events.insert(index.min(input.events.len()), event);
                 }
             }
@@ -1693,15 +1775,150 @@ impl PawCommander {
             if self.keyboard_blocked(ctx) {
                 break;
             }
-            let begins_text_entry = matches!(
+            let moves_widget_focus = matches!(
                 action,
-                Action::Shortcut(Command::EditPath | Command::Filter)
+                Action::Shortcut(Command::EditPath | Command::Filter | Command::FocusToolbar)
             );
+            if self.tab().focused_cursor(ctx).is_some() {
+                let tab = self.tab();
+                if matches!(action, Action::Shortcut(Command::Open)) {
+                    let cursor = tab.cursor.as_ref();
+                    if let Some(path) = tab
+                        .visible(self.settings.hidden)
+                        .iter()
+                        .map(|&index| &tab.entries[index].path)
+                        .find(|path| Some(*path) == cursor)
+                    {
+                        self.action(Action::Open(self.active, path.clone()), ctx);
+                    }
+                    continue;
+                }
+                if matches!(
+                    action,
+                    Action::Copy(_)
+                        | Action::Shortcut(
+                            Command::Rename
+                                | Command::Trash
+                                | Command::Properties
+                                | Command::CopyToPane
+                                | Command::MoveToPane
+                                | Command::EditInZed
+                        )
+                ) && !tab
+                    .cursor
+                    .as_ref()
+                    .is_some_and(|path| tab.selected.contains(path))
+                {
+                    // A focus-only move must never act on another file's selection.
+                    continue;
+                }
+            }
             self.action(action, ctx);
-            // The text field takes focus later in this frame, when it is rendered.
-            if begins_text_entry {
+            // The requested control takes focus later in this frame, when rendered.
+            if moves_widget_focus {
                 break;
             }
+        }
+    }
+
+    fn file_row_focus(&self, ctx: &egui::Context) -> Option<(usize, &Location)> {
+        let id = ctx.memory(|memory| memory.focused())?;
+        self.panes
+            .iter()
+            .enumerate()
+            .take(if self.settings.split { 2 } else { 1 })
+            .find_map(|(pane, state)| state.tab().rendered_rows.get(&id).map(|path| (pane, path)))
+    }
+
+    fn remember_dialog_file_focus(&mut self, ctx: &egui::Context) {
+        self.dialog_file_focus = self
+            .file_row_focus(ctx)
+            .map(|(pane, path)| (self.panes[pane].tab().id, path.clone()));
+    }
+
+    fn restore_dialog_file_focus(&mut self, ctx: &egui::Context) {
+        if self.dialog.is_some() {
+            return;
+        }
+        let Some((tab_id, path)) = self.dialog_file_focus.take() else {
+            return;
+        };
+        if self.keyboard_blocked(ctx) || self.tab().id != tab_id {
+            return;
+        }
+        let tab = self.tab();
+        let id = tab.entry_id(&path);
+        let target = tab
+            .rendered_rows
+            .contains_key(&id)
+            .then_some(id)
+            .or_else(|| {
+                tab.visible(self.settings.hidden)
+                    .iter()
+                    .map(|&index| tab.entry_id(&tab.entries[index].path))
+                    .find(|id| tab.rendered_rows.contains_key(id))
+            });
+        if let Some(id) = target {
+            // Render has run, so the just-closed modal cannot clear this request.
+            ctx.memory_mut(|memory| memory.request_focus(id));
+            ctx.request_repaint();
+        }
+    }
+
+    fn scale_shortcuts(&mut self, ctx: &egui::Context) {
+        use egui::gui_zoom::kb_shortcuts::{ZOOM_IN, ZOOM_IN_SECONDARY, ZOOM_OUT, ZOOM_RESET};
+        let scales = Settings::UI_SCALES;
+        let scale = self.settings.ui_scale;
+        let next = ctx.input_mut(|input| {
+            if input.consume_shortcut(&ZOOM_RESET) {
+                Some(100)
+            } else if input.consume_shortcut(&ZOOM_IN) || input.consume_shortcut(&ZOOM_IN_SECONDARY)
+            {
+                scales.into_iter().find(|&candidate| candidate > scale)
+            } else if input.consume_shortcut(&ZOOM_OUT) {
+                scales.into_iter().rfind(|&candidate| candidate < scale)
+            } else {
+                None
+            }
+        });
+        if let Some(next) = next {
+            self.settings.set_ui_scale(ctx, next);
+        }
+    }
+
+    fn accessibility_dialog(&mut self, ctx: &egui::Context) {
+        if !self.show_accessibility {
+            return;
+        }
+        let response = egui::Modal::new(egui::Id::new("accessibility")).show(ctx, |ui| {
+            ui.set_width(300.0);
+            ui.heading(crate::i18n::text("Доступность"));
+            let contrast = ui.checkbox(
+                &mut self.settings.high_contrast,
+                crate::i18n::text("Высокая контрастность"),
+            );
+            if self.accessibility_focus && !ui.is_sizing_pass() {
+                contrast.request_focus();
+                self.accessibility_focus = false;
+            }
+            if contrast.changed() {
+                self.settings.theme.apply(ctx, self.settings.high_contrast);
+            }
+            ui.add_space(6.0);
+            ui.label(crate::i18n::text("Масштаб интерфейса"));
+            for scale in Settings::UI_SCALES {
+                let response = ui.radio(self.settings.ui_scale == scale, format!("{scale}%"));
+                if response.clicked() {
+                    self.settings.set_ui_scale(ctx, scale);
+                }
+            }
+            ui.add_space(6.0);
+            ui.button(crate::i18n::text("Закрыть")).clicked()
+        });
+        if response.inner || response.should_close() {
+            self.show_accessibility = false;
+            self.focus_toolbar = true;
+            ctx.request_repaint();
         }
     }
     fn toolbar(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
@@ -1756,10 +1973,40 @@ impl PawCommander {
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let menu_id = ui.id().with("settings_menu");
-                        let button = icons::button(ui, Icon::Settings, crate::i18n::text("Настройки"), false);
+                        let settings_label = if ctx.screen_rect().width() >= 760.0 {
+                            crate::i18n::text("Настройки")
+                        } else {
+                            ""
+                        };
+                        let button = icons::button(ui, Icon::Settings, settings_label, false);
+                        if self.focus_toolbar && !self.show_accessibility {
+                            button.request_focus();
+                            paint_focus(ui, &button, 8);
+                            self.focus_toolbar = false;
+                        }
                         let mut menu = egui::menu::BarState::load(ctx, menu_id);
-                        menu.bar_menu(&button, |ui| {
-                            if ui.button(crate::i18n::text("Горячие клавиши")).clicked() {
+                        let opened = button.clicked() && menu.is_none();
+                        let focus_entry = ui.data_mut(|data| {
+                            if opened {
+                                data.insert_temp(menu_id.with("focus_entry"), true);
+                            }
+                            data.get_temp::<bool>(menu_id.with("focus_entry")).unwrap_or(false)
+                        });
+                        let shown = menu.bar_menu(&button, |ui| {
+                            let response = ui.button(crate::i18n::text("Доступность"));
+                            if focus_entry && !ui.is_sizing_pass() {
+                                response.request_focus();
+                                ui.data_mut(|data| data.remove::<bool>(menu_id.with("focus_entry")));
+                            }
+                            paint_focus(ui, &response, 5);
+                            if response.clicked() {
+                                self.show_accessibility = true;
+                                self.accessibility_focus = true;
+                                ui.close_menu();
+                            }
+                            let shortcuts = ui.button(crate::i18n::text("Горячие клавиши"));
+                            paint_focus(ui, &shortcuts, 5);
+                            if shortcuts.clicked() {
                                 self.shortcut_editor = Some(ShortcutEditor::new(&self.settings.shortcuts));
                                 ctx.memory_mut(|memory| {
                                     if let Some(id) = memory.focused() {
@@ -1768,8 +2015,10 @@ impl PawCommander {
                                 });
                                 ui.close_menu();
                             }
-                            if ui.button(crate::i18n::text("О PawCommander")).clicked() { self.show_help = true; ui.close_menu(); }
-                            ui.menu_button("Язык / Language", |ui| {
+                            let about = ui.button(crate::i18n::text("О PawCommander"));
+                            paint_focus(ui, &about, 5);
+                            if about.clicked() { self.show_help = true; ui.close_menu(); }
+                            let language_menu = ui.menu_button("Язык / Language", |ui| {
                                 for (language, label) in [
                                     (crate::i18n::Language::English, "English"),
                                     (crate::i18n::Language::Russian, "Русский"),
@@ -1781,11 +2030,13 @@ impl PawCommander {
                                     }
                                 }
                             });
+                            paint_focus(ui, &language_menu.response, 5);
                             ui.separator();
-                            appearance_menu(ui, &mut self.settings.theme);
+                            appearance_menu(ui, &mut self.settings.theme, self.settings.high_contrast);
                             ui.separator();
-                            ui.checkbox(&mut self.settings.hidden, crate::i18n::text("Скрытые файлы"));
-                            ui.menu_button(crate::i18n::text("Инструменты"), |ui| {
+                            let hidden = ui.checkbox(&mut self.settings.hidden, crate::i18n::text("Скрытые файлы"));
+                            paint_focus(ui, &hidden, 5);
+                            let tools_menu = ui.menu_button(crate::i18n::text("Инструменты"), |ui| {
                                 for (name, path) in [("locate", &self.tools.locate), ("Zed", &self.tools.zed)] {
                                     if let Some(path) = path {
                                         ui.label(crate::tr_format!("{name}: найден", "{name}: found")).on_hover_text(path.display().to_string());
@@ -1797,7 +2048,12 @@ impl PawCommander {
                                 ui.small(crate::i18n::text("Zed: установите редактор; для нестандартного пути — cli: install cli binary."));
                                 if ui.button(crate::i18n::text("Проверить снова")).clicked() { self.tools = crate::tools::Tools::detect(); }
                             });
+                            paint_focus(ui, &tools_menu.response, 5);
                         });
+                        if shown.is_some() && menu.is_none() && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+                            button.request_focus();
+                        }
+                        ctx.accesskit_node_builder(button.id, |node| node.set_expanded(menu.is_some()));
                         menu.store(ctx, menu_id);
                         if icons::button(ui, Icon::Info, "", self.settings.preview).on_hover_text(self.settings.shortcuts.hint(ctx, Command::Preview, Command::Preview.label())).clicked() {
                             self.settings.preview = !self.settings.preview;
@@ -1821,7 +2077,11 @@ impl PawCommander {
     fn sidebar(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         let colors = Palette::from_ctx(ctx);
         egui::SidePanel::left("places")
-            .exact_width(204.0)
+            .exact_width(if ctx.screen_rect().width() < 900.0 {
+                148.0
+            } else {
+                204.0
+            })
             .resizable(false)
             .show_separator_line(false)
             .frame(egui::Frame::new().fill(colors.surface))
@@ -2103,13 +2363,27 @@ impl PawCommander {
                     }
                 });
                 egui::Grid::new("sftp_fields").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-                    ui.label(crate::i18n::text("Сервер")); ui.text_edit_singleline(&mut form.host); ui.end_row();
-                    ui.label(crate::i18n::text("Порт")); ui.add(egui::DragValue::new(&mut form.port).range(1..=65535)); ui.end_row();
-                    ui.label(crate::i18n::text("Пользователь")); ui.text_edit_singleline(&mut form.user); ui.end_row();
-                    ui.label(crate::i18n::text("Начальная папка")); ui.text_edit_singleline(&mut form.path); ui.end_row();
-                    ui.label(crate::i18n::text("Пароль")); ui.add(egui::TextEdit::singleline(&mut form.password).password(true)); ui.end_row();
-                    ui.label(crate::i18n::text("Приватный ключ")); ui.add(egui::TextEdit::singleline(&mut form.key).hint_text(crate::i18n::text("Путь к ключу (необязательно)"))); ui.end_row();
-                    ui.label(crate::i18n::text("Пароль ключа")); ui.add(egui::TextEdit::singleline(&mut form.passphrase).password(true)); ui.end_row();
+                    let label = ui.label(crate::i18n::text("Сервер"));
+                    ui.text_edit_singleline(&mut form.host).labelled_by(label.id);
+                    ui.end_row();
+                    let label = ui.label(crate::i18n::text("Порт"));
+                    ui.add(egui::DragValue::new(&mut form.port).range(1..=65535)).labelled_by(label.id);
+                    ui.end_row();
+                    let label = ui.label(crate::i18n::text("Пользователь"));
+                    ui.text_edit_singleline(&mut form.user).labelled_by(label.id);
+                    ui.end_row();
+                    let label = ui.label(crate::i18n::text("Начальная папка"));
+                    ui.text_edit_singleline(&mut form.path).labelled_by(label.id);
+                    ui.end_row();
+                    let label = ui.label(crate::i18n::text("Пароль"));
+                    ui.add(egui::TextEdit::singleline(&mut form.password).password(true)).labelled_by(label.id);
+                    ui.end_row();
+                    let label = ui.label(crate::i18n::text("Приватный ключ"));
+                    ui.add(egui::TextEdit::singleline(&mut form.key).hint_text(crate::i18n::text("Путь к ключу (необязательно)"))).labelled_by(label.id);
+                    ui.end_row();
+                    let label = ui.label(crate::i18n::text("Пароль ключа"));
+                    ui.add(egui::TextEdit::singleline(&mut form.passphrase).password(true)).labelled_by(label.id);
+                    ui.end_row();
                 });
                 ui.add_space(10.0);
                 ui.checkbox(&mut form.use_saved, crate::i18n::text("Использовать сохранённый ключ и фразу"));
@@ -2233,6 +2507,7 @@ impl PawCommander {
                             .hint_text(crate::i18n::text("Имя папки"))
                             .desired_width(f32::INFINITY),
                     );
+                    ctx.accesskit_node_builder(response.id, |node| node.set_label(crate::i18n::text("Имя папки")));
                     if self.dialog_focus {
                         response.request_focus();
                     }
@@ -2241,6 +2516,7 @@ impl PawCommander {
                     ui.label(RichText::new(source.display().to_string()).color(colors.muted));
                     let response =
                         ui.add(egui::TextEdit::singleline(name).desired_width(f32::INFINITY));
+                    ctx.accesskit_node_builder(response.id, |node| node.set_label(crate::i18n::text("Имя файла")));
                     if self.dialog_focus {
                         response.request_focus();
                     }
@@ -2257,7 +2533,6 @@ impl PawCommander {
                     ui.label(if paths.iter().any(Location::remote) { crate::i18n::text("Файлы и содержимое папок будут удалены с сервера без возможности восстановления из корзины.") } else { crate::i18n::text("Их можно будет восстановить из системной корзины.") });
                 }
             }
-            self.dialog_focus = false;
             ui.add_space(16.0);
             let valid = match &dialog {
                 Dialog::NewFolder { name, .. } | Dialog::Rename { name, .. } => {
@@ -2266,19 +2541,25 @@ impl PawCommander {
                 Dialog::Trash { .. } => true,
             };
             ui.horizontal(|ui| {
-                cancel = ui.button(crate::i18n::text("Отмена")).clicked();
+                let cancel_button = ui.button(crate::i18n::text("Отмена"));
+                if self.dialog_focus && matches!(dialog, Dialog::Trash { .. }) {
+                    cancel_button.request_focus();
+                }
+                cancel = cancel_button.clicked();
                 let label = if matches!(dialog, Dialog::Trash { .. }) {
                     if matches!(&dialog, Dialog::Trash { paths } if paths.iter().any(Location::remote)) { crate::i18n::text("Удалить навсегда") } else { crate::i18n::text("В корзину") }
                 } else {
                     crate::i18n::text("Сохранить")
                 };
-                confirm = ui
-                    .add_enabled(
-                        valid,
-                        egui::Button::new(RichText::new(label).color(Color32::WHITE)).fill(Color32::from_rgb(45, 105, 220)),
-                    )
-                    .clicked();
+                let button = if self.settings.high_contrast {
+                    egui::Button::new(label)
+                } else {
+                    egui::Button::new(RichText::new(label).color(Color32::WHITE))
+                        .fill(Color32::from_rgb(45, 105, 220))
+                };
+                confirm = ui.add_enabled(valid, button).clicked();
             });
+            self.dialog_focus = false;
             // Enter is only an editing shortcut; trash always requires its explicit button.
             if !matches!(dialog, Dialog::Trash { .. })
                 && valid
@@ -2329,6 +2610,9 @@ impl PawCommander {
         } else if !cancel {
             self.dialog = Some(dialog);
         }
+        if self.dialog.is_none() && self.dialog_file_focus.is_some() {
+            ctx.request_repaint();
+        }
     }
 }
 impl eframe::App for PawCommander {
@@ -2342,12 +2626,13 @@ impl eframe::App for PawCommander {
             }
         }
 
-        self.pane_tab_presses.clear();
+        self.pane_key_presses.clear();
         if !input.focused {
             self.tab_held = false;
             return;
         }
-        let pane_keys = !ctx.wants_keyboard_input() && !self.keyboard_blocked(ctx);
+        let pane_keys = (!ctx.wants_keyboard_input() || self.file_row_focus(ctx).is_some())
+            && !self.keyboard_blocked(ctx);
         let mut index = 0;
         input.events.retain_mut(|event| {
             let event_index = index;
@@ -2371,7 +2656,24 @@ impl eframe::App for PawCommander {
                         // egui uses raw Tab presses for focus traversal before update.
                         // Dispatch this press in order without letting it move widget focus.
                         *repeat |= was_held;
-                        self.pane_tab_presses.push((event_index, event.clone()));
+                        self.pane_key_presses.push((event_index, event.clone()));
+                        return false;
+                    }
+                }
+                egui::Event::Key {
+                    key: key @ (egui::Key::ArrowUp | egui::Key::ArrowDown),
+                    modifiers,
+                    pressed: true,
+                    ..
+                } if pane_keys => {
+                    let chord = shortcuts::chord(*key, *modifiers);
+                    if matches!(
+                        chord.modifiers,
+                        egui::Modifiers::NONE | egui::Modifiers::SHIFT
+                    ) || self.bound_pane_command(chord).is_some()
+                    {
+                        // Arrow navigation moves file selection rather than geometric widget focus.
+                        self.pane_key_presses.push((event_index, event.clone()));
                         return false;
                     }
                 }
@@ -2398,6 +2700,9 @@ impl eframe::App for PawCommander {
                 editor.capture(ctx);
             }
         }
+        if self.shortcut_editor.is_none() {
+            self.scale_shortcuts(ctx);
+        }
         self.keyboard(ctx);
         let mut actions = vec![];
         let mut drop_targets = DropTargets::default();
@@ -2413,9 +2718,10 @@ impl eframe::App for PawCommander {
                 .first()
                 .and_then(|path| self.tab().entries.iter().find(|entry| &entry.path == path))
                 .map(|entry| (entry.size, entry.modified));
+            let narrow = ctx.screen_rect().width() < 900.0;
             egui::SidePanel::right("preview")
-                .default_width(260.0)
-                .width_range(200.0..=380.0)
+                .default_width(if narrow { 155.0 } else { 260.0 })
+                .width_range(if narrow { 145.0..=165.0 } else { 200.0..=380.0 })
                 .show_separator_line(false)
                 .frame(egui::Frame::new().fill(colors.surface))
                 .show(ctx, |panel_ui| {
@@ -2485,6 +2791,7 @@ impl eframe::App for PawCommander {
             && self.sftp_form.is_none()
             && !self.show_help
             && self.shortcut_editor.is_none()
+            && !self.show_accessibility
             && !self.search.visible
         {
             for action in actions {
@@ -2515,6 +2822,8 @@ impl eframe::App for PawCommander {
                 return;
             }
         }
+        self.restore_dialog_file_focus(ctx);
+        self.accessibility_dialog(ctx);
         self.dialogs(ctx);
         if self
             .properties
@@ -2544,7 +2853,7 @@ impl eframe::App for PawCommander {
         {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
-        self.keyboard_had_focus = ctx.wants_keyboard_input();
+        self.keyboard_had_focus = ctx.wants_keyboard_input() && self.file_row_focus(ctx).is_none();
     }
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         self.settings.locations = self
@@ -2657,6 +2966,10 @@ fn tab_strip(
                                     &name,
                                 )
                             });
+                            ui.ctx().accesskit_node_builder(response.id, |node| {
+                                node.set_role(egui::accesskit::Role::Tab);
+                                node.set_selected(selected);
+                            });
                             if selected {
                                 active_tab = Some(rect);
                             } else {
@@ -2712,9 +3025,10 @@ fn tab_strip(
                                 colors.ink,
                             );
                             targets.add(ui, rect, index, path, true);
-                            if changed && selected {
+                            if (changed && selected) || response.gained_focus() {
                                 response.scroll_to_me(Some(egui::Align::Center));
                             }
+                            paint_focus(ui, &response, 5);
                             if idle && response.drag_started_by(egui::PointerButton::Primary) {
                                 egui::DragAndDrop::set_payload(
                                     ui.ctx(),
@@ -2753,6 +3067,10 @@ fn tab_strip(
                                     ui.painter().rect_filled(close_rect, 5, colors.selection);
                                 }
                                 icons::paint(ui, close_rect.shrink(5.0), Icon::Close, colors.muted);
+                                if close.gained_focus() {
+                                    close.scroll_to_me(Some(egui::Align::Center));
+                                }
+                                paint_focus(ui, &close, 5);
                                 if close.clicked() {
                                     actions.push(Action::CloseTab(index, i));
                                 }
@@ -2817,6 +3135,7 @@ fn tab_strip(
                 Icon::Plus,
                 colors.ink,
             );
+            paint_focus(ui, &response, 5);
             if response
                 .on_hover_text(crate::i18n::text("Новая вкладка"))
                 .clicked()
@@ -3120,12 +3439,8 @@ fn edit_address(
         .lock_focus(!suggestions.is_empty())
         .show(ui);
     let response = &output.response;
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(
-            egui::WidgetType::TextEdit,
-            true,
-            crate::i18n::text("Путь к папке"),
-        )
+    ui.ctx().accesskit_node_builder(response.id, |node| {
+        node.set_label(crate::i18n::text("Путь к папке"));
     });
     let mut cursor_range = None;
     if tab.focus_address {
@@ -3284,6 +3599,9 @@ fn breadcrumb(
         Sense::click(),
     );
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    if response.gained_focus() {
+        response.scroll_to_me(Some(egui::Align::Center));
+    }
     let highlight = response.hovered() || response.has_focus();
     if highlight {
         ui.painter().rect_filled(rect, 5, colors.raised);
@@ -3308,6 +3626,7 @@ fn breadcrumb(
         text,
         color,
     );
+    paint_focus(ui, &response, 5);
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -3359,6 +3678,7 @@ fn render_pane(
             let ui = &mut content.content_ui;
             let grid = settings.grid_for(pane_index);
             let tab = pane.tab_mut();
+            tab.rendered_rows.clear();
             address_bar(ui, tab, pane_index, actions, drop_targets);
             let response = ui
                 .horizontal(|ui| {
@@ -3385,6 +3705,9 @@ fn render_pane(
                     response
                 })
                 .inner;
+            ui.ctx().accesskit_node_builder(response.id, |node| {
+                node.set_label(crate::i18n::text("Фильтр по имени"));
+            });
             if tab.focus_filter {
                 response.request_focus();
                 tab.focus_filter = false;
@@ -3411,7 +3734,15 @@ fn render_pane(
                     .hline(band.x_range(), y, Stroke::new(1.0, border));
             }
             let wide = header.width() > 380.0;
-            let name_end = header.right() - if wide { 182.0 } else { 72.0 };
+            let show_size = header.width() >= 200.0;
+            let name_end = header.right()
+                - if wide {
+                    182.0
+                } else if show_size {
+                    72.0
+                } else {
+                    0.0
+                };
             for (label, sort, left, right) in [
                 (
                     crate::i18n::text("Имя"),
@@ -3436,7 +3767,7 @@ fn render_pane(
                     header.right(),
                 ),
             ] {
-                if sort == Sort::Modified && !wide {
+                if (sort == Sort::Modified && !wide) || (sort == Sort::Size && !show_size) {
                     continue;
                 }
                 let r = egui::Rect::from_min_max(
@@ -3476,6 +3807,7 @@ fn render_pane(
                         Stroke::new(1.2, colors.muted),
                     ));
                 }
+                paint_focus(ui, &response, 4);
                 if response.clicked() {
                     if tab.sort == sort {
                         tab.descending = !tab.descending;
@@ -3546,55 +3878,73 @@ fn render_pane(
             let status_height =
                 STATUS_HEIGHT + STATUS_RULE_HEIGHT + 2.0 * ui.spacing().item_spacing.y;
             let files_height = (ui.available_height() - status_height).max(40.0);
-            scroll
-                .max_height(files_height)
-                .min_scrolled_height(files_height)
-                .id_salt((&tab.path, "files"))
-                .auto_shrink([false, false])
-                .show_rows(ui, row_height, rows, |ui, range| {
-                    for row in range {
-                        if grid {
-                            ui.horizontal(|ui| {
-                                for col in 0..columns {
-                                    let position = row * columns + col;
-                                    if position < visible.len() {
-                                        entry_widget(
-                                            ui,
-                                            tab,
-                                            position,
-                                            &visible,
-                                            EntryOptions {
-                                                pane: pane_index,
-                                                split: settings.split,
-                                                grid: true,
-                                                idle,
-                                                zed_available,
-                                            },
-                                            actions,
-                                            drop_targets,
-                                        );
+            let files_id = ui.id().with(("file_list", tab.id));
+            let ctx = ui.ctx().clone();
+            ctx.accesskit_node_builder(files_id, |node| {
+                node.set_role(egui::accesskit::Role::List);
+                let pane = if pane_index == 0 {
+                    crate::i18n::text("Левая панель")
+                } else {
+                    crate::i18n::text("Правая панель")
+                };
+                let view = if grid {
+                    crate::i18n::text("Сетка")
+                } else {
+                    crate::i18n::text("Список")
+                };
+                node.set_label(format!("{pane}, {view}, {}", tab.path.display()));
+            });
+            ctx.with_accessibility_parent(files_id, || {
+                scroll
+                    .max_height(files_height)
+                    .min_scrolled_height(files_height)
+                    .id_salt((&tab.path, "files"))
+                    .auto_shrink([false, false])
+                    .show_rows(ui, row_height, rows, |ui, range| {
+                        for row in range {
+                            if grid {
+                                ui.horizontal(|ui| {
+                                    for col in 0..columns {
+                                        let position = row * columns + col;
+                                        if position < visible.len() {
+                                            entry_widget(
+                                                ui,
+                                                tab,
+                                                position,
+                                                &visible,
+                                                EntryOptions {
+                                                    pane: pane_index,
+                                                    split: settings.split,
+                                                    grid: true,
+                                                    idle,
+                                                    zed_available,
+                                                },
+                                                actions,
+                                                drop_targets,
+                                            );
+                                        }
                                     }
-                                }
-                            });
-                        } else if row < visible.len() {
-                            entry_widget(
-                                ui,
-                                tab,
-                                row,
-                                &visible,
-                                EntryOptions {
-                                    pane: pane_index,
-                                    split: settings.split,
-                                    grid: false,
-                                    idle,
-                                    zed_available,
-                                },
-                                actions,
-                                drop_targets,
-                            );
+                                });
+                            } else if row < visible.len() {
+                                entry_widget(
+                                    ui,
+                                    tab,
+                                    row,
+                                    &visible,
+                                    EntryOptions {
+                                        pane: pane_index,
+                                        split: settings.split,
+                                        grid: false,
+                                        idle,
+                                        zed_available,
+                                    },
+                                    actions,
+                                    drop_targets,
+                                );
+                            }
                         }
-                    }
-                });
+                    })
+            });
             ui.add(egui::Separator::default().spacing(STATUS_RULE_HEIGHT));
             ui.allocate_ui_with_layout(
                 Vec2::new(ui.available_width(), STATUS_HEIGHT),
@@ -3675,7 +4025,9 @@ fn entry_widget(
     } else {
         Vec2::new(ui.available_width(), 36.0)
     };
-    let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
+    let (_, rect) = ui.allocate_space(size);
+    let response = ui.interact(rect, tab.entry_id(&path), Sense::click_and_drag());
+    tab.rendered_rows.insert(response.id, path.clone());
     if entry.is_dir {
         drop_targets.add(
             ui,
@@ -3685,14 +4037,10 @@ fn entry_widget(
             !tab.blocking_load() && tab.error.is_none(),
         );
     }
-    response.widget_info(|| {
-        egui::WidgetInfo::selected(
-            egui::WidgetType::SelectableLabel,
-            ui.is_enabled(),
-            selected,
-            &entry.name,
-        )
-    });
+    if response.has_focus() && (response.gained_focus() || tab.cursor.as_ref() != Some(&path)) {
+        tab.cursor = Some(path.clone());
+        actions.push(Action::Focus(pane));
+    }
     if !grid && position.is_multiple_of(2) {
         ui.painter()
             .rect_filled(rect, 6, colors.bg.lerp_to_gamma(colors.raised, 0.22));
@@ -3773,7 +4121,14 @@ fn entry_widget(
             name_color,
         );
     } else {
-        let right_width = if rect.width() > 380.0 { 182.0 } else { 72.0 };
+        let show_size = rect.width() >= 200.0;
+        let right_width = if rect.width() > 380.0 {
+            182.0
+        } else if show_size {
+            72.0
+        } else {
+            0.0
+        };
         let name_rect = egui::Rect::from_min_max(
             rect.min + Vec2::new(64.0, 0.0),
             egui::pos2(rect.right() - right_width, rect.bottom()),
@@ -3813,7 +4168,7 @@ fn entry_widget(
                 FontId::proportional(10.0),
                 colors.muted,
             );
-        } else {
+        } else if show_size {
             ui.painter().text(
                 rect.right_center() - Vec2::new(5.0, 0.0),
                 egui::Align2::RIGHT_CENTER,
@@ -3823,6 +4178,7 @@ fn entry_widget(
             );
         }
     }
+    paint_focus(ui, &response, 5);
     if idle && response.drag_started_by(egui::PointerButton::Primary) {
         egui::DragAndDrop::set_payload(ui.ctx(), DragFiles(tab.drag_paths(index, visible)));
         actions.push(Action::Focus(pane));
@@ -3831,12 +4187,20 @@ fn entry_widget(
         && response
             .interact_pointer_pos()
             .is_some_and(|p| check_rect.expand(4.0).contains(p));
-    if response.clicked() {
-        let mut modifiers = ui.input(|i| i.modifiers);
-        if on_checkbox {
+    if response.clicked() && ui.memory(|memory| memory.allows_interaction(ui.layer_id())) {
+        let pointer = response.clicked_by(egui::PointerButton::Primary);
+        let mut modifiers = if pointer {
+            ui.input(|i| i.modifiers)
+        } else {
+            egui::Modifiers::NONE
+        };
+        if !pointer || on_checkbox {
             modifiers.command = true;
         }
         tab.choose(index, visible, modifiers);
+        if !pointer {
+            response.request_focus();
+        }
         actions.push(Action::Focus(pane));
     }
     if response.double_clicked() && !on_checkbox {
@@ -3850,6 +4214,22 @@ fn entry_widget(
         }
         actions.push(Action::Focus(pane));
     }
+    response.widget_info(|| {
+        let entry = &tab.entries[index];
+        let kind = crate::i18n::text(if entry.is_symlink {
+            "Символическая ссылка"
+        } else if entry.is_dir {
+            "Папка"
+        } else {
+            "Файл"
+        });
+        egui::WidgetInfo::selected(
+            egui::WidgetType::Checkbox,
+            ui.is_enabled(),
+            tab.selected.contains(&path),
+            format!("{}, {kind}", entry.name),
+        )
+    });
     response
         .on_hover_text(path.display().to_string())
         .context_menu(|ui| {
@@ -4067,6 +4447,10 @@ fn place_button(ui: &mut egui::Ui, label: &str, selected: bool) -> bool {
         FontId::proportional(14.0),
         colors.ink,
     );
+    if response.gained_focus() {
+        response.scroll_to_me(Some(egui::Align::Center));
+    }
+    paint_focus(ui, &response, 6);
     response.on_hover_text(label).clicked()
 }
 
@@ -4438,6 +4822,169 @@ mod tests {
             false,
         );
         assert!(!app.settings.split);
+    }
+
+    #[test]
+    fn custom_toolbar_shortcut_does_not_consume_text_editing_keys() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        let enter = egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::Enter);
+        app.settings.shortcuts = serde_json::from_value(serde_json::json!({
+            "overrides": {"Open": null, "FocusToolbar": enter}
+        }))
+        .unwrap();
+        let _ = ctx.run(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.text_edit_singleline(&mut app.tab_mut().address)
+                        .request_focus();
+                });
+                app.keyboard(ctx);
+                assert!(ctx.input(|input| input.key_pressed(egui::Key::Enter)));
+            },
+        );
+        assert!(!app.focus_toolbar);
+    }
+
+    #[test]
+    fn accessibility_tree_keeps_file_focus_and_selection_distinct_in_list_and_grid() {
+        use egui::accesskit::{Action as AxAction, ActionRequest, Role, Toggled};
+
+        let root = tempfile::tempdir().unwrap();
+        let folder: Location = root.path().join("Folder").into();
+        let file: Location = root.path().join("Note.txt").into();
+        std::fs::create_dir(folder.path()).unwrap();
+        std::fs::write(file.path(), "example").unwrap();
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        wait_for_directory(app.tab_mut());
+        wait_for_directory(app.panes[1].tab_mut());
+        app.tab_mut().selected.insert(file.clone());
+        app.panes[1].tab_mut().selected.insert(file.clone());
+        let ax_id = |id: egui::Id| egui::accesskit::NodeId(id.value());
+        let folder_id = ax_id(app.tab().entry_id(&folder));
+        let file_id = ax_id(app.tab().entry_id(&file));
+        assert_ne!(file_id, ax_id(app.panes[1].tab().entry_id(&file)));
+
+        let mut run = |app: &mut PawCommander, events| {
+            let mut input = egui::RawInput {
+                events,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(1440.0, 860.0),
+                )),
+                ..Default::default()
+            };
+            eframe::App::raw_input_hook(app, &ctx, &mut input);
+            ctx.run(input, |ctx| eframe::App::update(app, ctx, &mut frame))
+                .platform_output
+                .accesskit_update
+                .unwrap()
+        };
+        let request = |action| {
+            vec![egui::Event::AccessKitActionRequest(ActionRequest {
+                action,
+                target: folder_id,
+                data: None,
+            })]
+        };
+        let key = |key| {
+            [true, false]
+                .into_iter()
+                .map(move |pressed| egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                })
+                .collect::<Vec<_>>()
+        };
+        let list = run(&mut app, vec![]);
+        let row = list.nodes.iter().find(|(id, _)| *id == file_id).unwrap();
+        assert_eq!(row.1.role(), Role::CheckBox);
+        assert!(row.1.label().unwrap().starts_with("Note.txt, "));
+        assert_eq!(row.1.toggled(), Some(Toggled::True));
+
+        let focused = run(&mut app, request(AxAction::Focus));
+        assert_eq!(focused.focus, folder_id);
+        assert_eq!(app.selected(), vec![file.clone()]);
+        let mut switch_then_delete = key(egui::Key::Tab);
+        switch_then_delete.extend(key(egui::Key::Delete));
+        let switched = run(&mut app, switch_then_delete);
+        assert_eq!(app.active, 1);
+        assert_eq!(switched.focus, ax_id(app.tab().entry_id(&folder)));
+        assert_eq!(app.selected(), vec![file.clone()]);
+        assert!(
+            app.dialog.is_none(),
+            "Delete must respect the destination row after Tab"
+        );
+        run(&mut app, request(AxAction::Focus));
+        run(&mut app, key(egui::Key::Delete));
+        assert!(
+            app.dialog.is_none(),
+            "Delete must not act on the other selected file"
+        );
+
+        app.settings.set_grid(0, true);
+        let grid = run(&mut app, request(AxAction::Click));
+        assert_eq!(grid.focus, folder_id);
+        assert_eq!(app.selected(), vec![folder.clone(), file]);
+        let row = grid.nodes.iter().find(|(id, _)| *id == folder_id).unwrap();
+        assert_eq!(row.1.role(), Role::CheckBox);
+        assert_eq!(row.1.toggled(), Some(Toggled::True));
+        app.tab_mut().selected = BTreeSet::from([folder.clone()]);
+        let spatial_focus = run(&mut app, key(egui::Key::ArrowRight));
+        assert_eq!(spatial_focus.focus, file_id);
+        run(&mut app, key(egui::Key::Delete));
+        assert!(
+            app.dialog.is_none(),
+            "spatial focus cannot delete the old selection"
+        );
+        run(&mut app, request(AxAction::Focus));
+        run(&mut app, key(egui::Key::F2));
+        assert!(matches!(app.dialog, Some(Dialog::Rename { .. })));
+        run(&mut app, vec![]);
+        run(&mut app, key(egui::Key::Escape));
+        let returned = run(&mut app, vec![]);
+        assert_eq!(returned.focus, folder_id);
+        assert_eq!(app.selected(), vec![folder.clone()]);
+        run(&mut app, key(egui::Key::Enter));
+        assert_eq!(app.tab().path, folder, "Enter opens the focused folder");
+    }
+
+    #[test]
+    fn accessibility_settings_migrate_and_round_trip() {
+        let mut settings: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings.ui_scale, 100);
+        assert!(!settings.high_contrast);
+        let ctx = egui::Context::default();
+        settings.set_ui_scale(&ctx, 999);
+        assert_eq!(settings.ui_scale, 100);
+        settings.set_ui_scale(&ctx, 150);
+        settings.high_contrast = true;
+        let mut storage = MemoryStorage::default();
+        eframe::set_value(&mut storage, "settings", &settings);
+        let restored: Settings = eframe::get_value(&storage, "settings").unwrap();
+        assert_eq!(restored.ui_scale, 150);
+        assert!(restored.high_contrast);
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        assert_eq!(ctx.zoom_factor(), 1.5);
     }
 
     #[test]
@@ -5064,7 +5611,7 @@ mod tests {
     #[test]
     fn address_editor_submits_typed_paths_completes_folders_and_cancels() {
         let ctx = egui::Context::default();
-        Theme::Frappe.apply(&ctx);
+        Theme::Frappe.apply(&ctx, false);
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir(root.path().join("Two Paths")).unwrap();
         std::fs::create_dir_all(root.path().join("Two Words/Nested folder")).unwrap();

@@ -25,15 +25,22 @@ impl Theme {
         }
     }
 
-    pub fn apply(self, ctx: &egui::Context) {
-        ctx.data_mut(|data| data.insert_temp(egui::Id::new("catppuccin.theme"), self));
+    pub fn apply(self, ctx: &egui::Context, high_contrast: bool) {
+        ctx.data_mut(|data| {
+            data.insert_temp(egui::Id::new("catppuccin.theme"), (self, high_contrast));
+        });
         ctx.set_theme(match self {
             Self::Latte | Self::Light => egui::ThemePreference::Light,
             Self::System => egui::ThemePreference::System,
             _ => egui::ThemePreference::Dark,
         });
         for mode in [egui::Theme::Light, egui::Theme::Dark] {
-            let p = Palette::new(self.resolved(mode == egui::Theme::Dark));
+            let dark = mode == egui::Theme::Dark;
+            let p = if high_contrast {
+                Palette::high_contrast(dark)
+            } else {
+                Palette::new(self.resolved(dark))
+            };
             ctx.style_mut_of(mode, |style| {
                 let v = &mut style.visuals;
                 v.override_text_color = Some(p.ink);
@@ -45,7 +52,7 @@ impl Theme {
                 v.extreme_bg_color = p.bg;
                 v.faint_bg_color = p.raised;
                 v.selection.bg_fill = p.selection;
-                v.selection.stroke = Stroke::new(1.0, p.ink);
+                v.selection.stroke = Stroke::new(2.0, p.ink);
                 v.hyperlink_color = p.blue;
                 v.error_fg_color = p.error;
                 v.warn_fg_color = p.peach;
@@ -63,7 +70,7 @@ impl Theme {
                 ] {
                     w.bg_fill = p.selection;
                     w.weak_bg_fill = p.selection;
-                    w.bg_stroke = Stroke::new(1.0, p.mauve);
+                    w.bg_stroke = Stroke::new(2.0, p.ink);
                     w.fg_stroke = Stroke::new(1.5, p.ink);
                     w.corner_radius = 8.into();
                     w.expansion = 0.0;
@@ -113,10 +120,50 @@ pub struct Palette {
 
 impl Palette {
     pub fn from_ctx(ctx: &egui::Context) -> Self {
-        let theme = ctx
-            .data(|d| d.get_temp::<Theme>(egui::Id::new("catppuccin.theme")))
+        let (theme, high_contrast) = ctx
+            .data(|d| d.get_temp::<(Theme, bool)>(egui::Id::new("catppuccin.theme")))
             .unwrap_or_default();
-        Self::new(theme.resolved(ctx.style().visuals.dark_mode))
+        let dark = ctx.style().visuals.dark_mode;
+        if high_contrast {
+            Self::high_contrast(dark)
+        } else {
+            Self::new(theme.resolved(dark))
+        }
+    }
+
+    fn high_contrast(dark: bool) -> Self {
+        let (bg, raised, ink, line, selection) = if dark {
+            (0x080808, 0x1c1c1c, 0xffffff, 0xa8a8a8, 0x344668)
+        } else {
+            (0xffffff, 0xf0f0f0, 0x111111, 0x575757, 0xc5d8ff)
+        };
+        let color = |hex: u32| Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
+        let [blue, mauve, teal, peach, yellow, error, success] = if dark {
+            [
+                0xadc8ff, 0xe7c1ff, 0xa1f1e9, 0xffce9e, 0xffe09a, 0xffaaaa, 0xa9eea0,
+            ]
+        } else {
+            [
+                0x103a8c, 0x5b1e80, 0x004d49, 0x782b00, 0x604600, 0x990b20, 0x0b5517,
+            ]
+        }
+        .map(color);
+        Self {
+            bg: color(bg),
+            surface: color(bg),
+            raised: color(raised),
+            ink: color(ink),
+            muted: color(ink),
+            line: color(line),
+            selection: color(selection),
+            blue,
+            mauve,
+            teal,
+            peach,
+            yellow,
+            error,
+            success,
+        }
     }
 
     pub fn new(theme: Theme) -> Self {
@@ -159,7 +206,7 @@ impl Palette {
     }
 }
 
-pub fn appearance_menu(ui: &mut egui::Ui, theme: &mut Theme) {
+pub fn appearance_menu(ui: &mut egui::Ui, theme: &mut Theme, high_contrast: bool) {
     // Normalize old persisted names without changing their light/dark preference.
     *theme = match *theme {
         Theme::Light => Theme::Latte,
@@ -177,8 +224,10 @@ pub fn appearance_menu(ui: &mut egui::Ui, theme: &mut Theme) {
         Theme::System,
     ] {
         ui.horizontal(|ui| {
-            if ui.radio_value(theme, value, value.name()).changed() {
-                theme.apply(ui.ctx());
+            let response = ui.radio_value(theme, value, value.name());
+            paint_focus(ui, &response, 5);
+            if response.changed() {
+                theme.apply(ui.ctx(), high_contrast);
             }
             if value != Theme::System {
                 let p = Palette::new(value);
@@ -191,6 +240,17 @@ pub fn appearance_menu(ui: &mut egui::Ui, theme: &mut Theme) {
     }
 }
 
+pub fn paint_focus(ui: &egui::Ui, response: &egui::Response, radius: u8) {
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            response.rect,
+            radius,
+            Stroke::new(2.0, Palette::from_ctx(ui.ctx()).ink),
+            egui::StrokeKind::Inside,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,7 +259,7 @@ mod tests {
     fn switching_flavours_updates_widgets_and_custom_painters_together() {
         let ctx = egui::Context::default();
         for theme in [Theme::Latte, Theme::Frappe, Theme::Macchiato, Theme::Mocha] {
-            theme.apply(&ctx);
+            theme.apply(&ctx, false);
             let p = Palette::from_ctx(&ctx);
             assert_eq!(ctx.style().visuals.panel_fill, p.bg);
             assert_eq!(ctx.style().visuals.override_text_color, Some(p.ink));

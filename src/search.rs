@@ -112,6 +112,9 @@ impl Search {
                             .hint_text(crate::i18n::text("Часть пути или маска: Cargo, *.rs, */Documents/*"))
                             .desired_width((ui.available_width() - 175.0).max(120.0)),
                     );
+                    ctx.accesskit_node_builder(response.id, |node| {
+                        node.set_label(crate::i18n::text("Запрос поиска"));
+                    });
                     if self.focus {
                         response.request_focus();
                         self.focus = false;

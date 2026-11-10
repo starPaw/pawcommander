@@ -91,6 +91,14 @@ An index can omit restricted folders and contain stale paths. Search does not re
 
 Zed establishes its own SSH connection using its SSH configuration and authentication. PawCommander's stored secrets are not passed to Zed. A server must allow full SSH access and execution of Zed's helper; SFTP-only access is insufficient. Zed may install its remote server under `~/.zed_server`. Edits are saved on the server; the visible folder updates automatically, or use `F5` to refresh immediately. See [Zed Remote Development](https://zed.dev/docs/remote-development).
 
+## Accessibility
+
+Open **Settings → Accessibility** to choose an interface scale from 90% to 150% or enable high contrast. Both choices are saved. `Cmd/Ctrl+=` and `Cmd/Ctrl+-` change the scale, and `Cmd/Ctrl+0` resets it to 100%.
+
+Press `F10` to focus Settings on the toolbar. `Tab` and `Shift+Tab` move between controls, and `Enter` or `Space` activates the focused button. In the file area, Up/Down selects and focuses files, and `Shift` with Up/Down extends the selection. `Space` toggles selection of the focused file, and `Enter` opens it. The default `Tab` binding switches panes from the file area when both panes are visible.
+
+List rows and grid tiles expose their full names, types, and selection states to screen readers. Screen reader activation toggles a file's selection. Keyboard focus can move to a file without changing the selection.
+
 ## Keyboard shortcuts
 
 Open **Settings → Keyboard Shortcuts** to view and change bindings. Click a binding and press the new shortcut. If it is already assigned, PawCommander shows which action uses it. Clear that action's binding first if you want to reassign the key. Press `Esc` to stop recording. Use **Save** to apply and remember your changes, or **Cancel** to discard them.
@@ -104,7 +112,8 @@ Choosing another profile replaces custom bindings in the editor. **Reset to defa
 | Action | Shortcut |
 | --- | --- |
 | Show / hide the second pane | `F3` |
-| Switch panes | `Tab` (outside text editing) |
+| Switch panes | `Tab` (from the file area) |
+| Focus toolbar | `F10` |
 | New / close tab | `Cmd/Ctrl+T` / `Cmd/Ctrl+W` |
 | Back / forward | `Alt+Left` / `Alt+Right` |
 | Parent folder | `Alt+Up` |
@@ -120,4 +129,4 @@ Choosing another profile replaces custom bindings in the editor. **Reset to defa
 | Local properties | `Alt+Enter` |
 | Create folder | `Cmd/Ctrl+Shift+N` |
 | Delete with confirmation | `Delete` / `Cmd/Ctrl+Backspace` |
-| Open selected item | `Enter` |
+| Open focused or selected item | `Enter` |
