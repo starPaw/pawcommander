@@ -433,9 +433,12 @@ fn remote(location: &Location) -> Result<Sftp, String> {
             session
         }
     };
-    session
-        .sftp()
-        .map_err(|e| format!("SFTP: {e}. Для повторного подключения используйте кнопку SFTP."))
+    session.sftp().map_err(|e| {
+        crate::tr_format!(
+            "SFTP: {e}. Для повторного подключения используйте кнопку SFTP.",
+            "SFTP: {e}. Use the SFTP button to reconnect."
+        )
+    })
 }
 fn err(error: impl fmt::Display) -> String {
     error.to_string()
@@ -758,11 +761,12 @@ fn transfer_plan(
     sources: &[Location],
     destination: &Location,
     kind: TransferKind,
+    progress: &mut Progress,
 ) -> Result<Vec<TransferItem>, String> {
     if let Some(dest) = destination.local() {
         if sources.iter().all(|p| !p.remote()) {
             let paths = sources.iter().map(|p| p.path().into()).collect::<Vec<_>>();
-            return fs_ops::plan_transfer(&paths, dest).map(|plan| {
+            return fs_ops::plan_transfer(&paths, dest, progress).map(|plan| {
                 plan.into_iter()
                     .map(|(original, source, target)| {
                         TransferItem::new(original.into(), source.into(), target.into())
@@ -775,6 +779,7 @@ fn transfer_plan(
     let mut names = HashSet::new();
     let mut plan = Vec::new();
     for source in sources {
+        progress.item(source.path());
         let name = source
             .path()
             .file_name()
@@ -832,11 +837,14 @@ pub fn transfer_with_conflicts(
     mut decide: impl FnMut(Conflict) -> Result<Answer, String>,
     mut moved: impl FnMut(&Location),
 ) -> Result<TransferSummary, String> {
-    let plan = transfer_plan(sources, destination, kind)?;
+    let plan = transfer_plan(sources, destination, kind, progress)?;
     let mut reserved: HashSet<_> = plan.iter().map(|item| item.target.clone()).collect();
     let targets = plan
         .iter()
-        .map(|item| entry_metadata(&item.target))
+        .map(|item| {
+            progress.item(item.original.path());
+            entry_metadata(&item.target)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let count = targets.iter().flatten().count();
     let mut index = 0;
@@ -846,6 +854,7 @@ pub fn transfer_with_conflicts(
 
     for (mut item, target_meta) in plan.into_iter().zip(targets) {
         if let Some(target_meta) = target_meta {
+            progress.item(item.original.path());
             index += 1;
             let source_meta = entry_metadata(&item.source)?
                 .ok_or_else(|| format!("Исходный объект {} исчез", item.source))?;
@@ -920,7 +929,10 @@ pub fn transfer_with_conflicts(
         };
         if let Err(error) = result {
             let completed = summary.completed;
-            return Err(format!("{error}. До текущего элемента завершено: {completed}. Обновите обе папки перед повтором."));
+            return Err(crate::tr_format!(
+                "{error}. До текущего элемента завершено: {completed}. Обновите обе папки перед повтором.",
+                "{error}. Items completed before this one: {completed}. Refresh both folders before retrying."
+            ));
         }
         summary.completed += 1;
     }
@@ -2148,6 +2160,31 @@ mod tests {
         assert!(transfer(std::slice::from_ref(&a), &b, TransferKind::Copy).is_err());
         let remote = resolve("sftp://alice@example.com/a", &local).unwrap();
         assert!(trash_entries(&[remote.with_path("/".into())]).is_err());
+    }
+
+    #[test]
+    fn failed_transfer_preflight_reports_the_source_and_leaves_the_batch_unstarted() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = Location::Local(fixture.path().into());
+        let first = root.join("first.txt");
+        let missing = root.join("missing.txt");
+        fs::write(first.path(), b"keep this source").unwrap();
+        let destination = create_directory(&root, "destination").unwrap();
+        let (mut progress, mut view) = Progress::tracked();
+
+        let result = transfer_with_conflicts(
+            &[first.clone(), missing.clone()],
+            &destination,
+            TransferKind::Move,
+            &mut progress,
+            |_| panic!("unexpected conflict"),
+            |_| panic!("preflight must finish before moving files"),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(view.snapshot().item.as_deref(), Some(missing.path()));
+        assert_eq!(fs::read(first.path()).unwrap(), b"keep this source");
+        assert!(fs::read_dir(destination.path()).unwrap().next().is_none());
     }
 
     // Run with scripts/test-sftp.sh: a disposable loopback-only OpenSSH server

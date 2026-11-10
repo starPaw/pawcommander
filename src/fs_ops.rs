@@ -142,12 +142,15 @@ pub fn rename_entry(source: &Path, name: &str) -> Result<PathBuf, String> {
 pub(crate) fn plan_transfer(
     sources: &[PathBuf],
     destination: &Path,
+    progress: &mut Progress,
 ) -> Result<Vec<(PathBuf, PathBuf, PathBuf)>, String> {
+    progress.item(destination);
     let destination = directory_path(destination)?;
-    let sources = normalize_selection(sources)?;
+    let sources = normalize_selection(sources, progress)?;
     let mut names = HashSet::new();
     let mut plan = Vec::new();
     for (original, source) in sources {
+        progress.item(&original);
         let metadata = fs::symlink_metadata(&source).map_err(|e| {
             at(
                 crate::i18n::text("Не удалось получить сведения об элементе"),
@@ -185,7 +188,7 @@ fn transfer(sources: &[PathBuf], destination: &Path, kind: TransferKind) -> Resu
 }
 
 pub fn trash_entries(paths: &[PathBuf], progress: &mut Progress) -> Result<usize, String> {
-    let paths = normalize_selection(paths)?;
+    let paths = normalize_selection(paths, progress)?;
     for (completed, (_, path)) in paths.iter().enumerate() {
         progress.item(path);
         // Use the operating system's trash. There is deliberately no permanent
@@ -250,10 +253,14 @@ fn entry_path(path: &Path) -> Result<PathBuf, String> {
     }
 }
 
-fn normalize_selection(paths: &[PathBuf]) -> Result<Vec<(PathBuf, PathBuf)>, String> {
+fn normalize_selection(
+    paths: &[PathBuf],
+    progress: &mut Progress,
+) -> Result<Vec<(PathBuf, PathBuf)>, String> {
     let mut unique = HashSet::new();
     let mut entries = Vec::new();
     for original in paths {
+        progress.item(original);
         let path = entry_path(original)?;
         let metadata = fs::symlink_metadata(&path)
             .map_err(|e| at("Не удалось получить сведения об элементе", &path, e))?;
