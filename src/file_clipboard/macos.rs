@@ -1,19 +1,29 @@
 use super::{local_file_url, FileList};
-use objc2::rc::autoreleasepool;
+use objc2::rc::{autoreleasepool, Retained};
 use objc2::runtime::ProtocolObject;
 use objc2_app_kit::{NSPasteboard, NSPasteboardTypeFileURL};
 use objc2_foundation::{NSArray, NSString, NSURL};
+use std::collections::HashSet;
 use std::ffi::{CStr, CString, OsStr};
 use std::os::unix::ffi::OsStrExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+#[derive(Default)]
 pub struct SystemClipboard {
     cut_revision: Option<isize>,
+    selection: Selection,
+}
+
+#[derive(Default)]
+struct Selection {
+    revision: Option<isize>,
+    paths: Vec<(usize, PathBuf)>,
+    consumed: HashSet<usize>,
 }
 
 impl SystemClipboard {
     pub fn new(_: &eframe::CreationContext<'_>) -> Self {
-        Self { cut_revision: None }
+        Self::default()
     }
 
     pub fn write(&mut self, paths: &[PathBuf], cut: bool) -> Result<(), String> {
@@ -51,25 +61,70 @@ impl SystemClipboard {
         autoreleasepool(|_| {
             let pasteboard = unsafe { NSPasteboard::generalPasteboard() };
             let revision = unsafe { pasteboard.changeCount() };
-            let mut paths = Vec::new();
-            if let Some(items) = unsafe { pasteboard.pasteboardItems() } {
-                for item in items.iter() {
-                    if let Some(url) = unsafe { item.stringForType(NSPasteboardTypeFileURL) } {
-                        paths.push(clipboard_path(&url)?);
-                    }
-                }
-            }
-            if revision != unsafe { pasteboard.changeCount() } {
-                return Err(
-                    crate::i18n::text("Системный буфер изменился. Повторите вставку.").into(),
-                );
-            }
-            FileList::new(
-                paths,
-                self.cut_revision == Some(revision),
-                Some(revision.to_string()),
+            let items = unsafe { pasteboard.pasteboardItems() };
+            self.read_items(
+                revision,
+                items.iter().flat_map(|items| items.iter()),
+                |item| unsafe { item.stringForType(NSPasteboardTypeFileURL) },
+                || unsafe { pasteboard.changeCount() },
             )
         })
+    }
+
+    fn read_items<T>(
+        &mut self,
+        revision: isize,
+        items: impl Iterator<Item = T>,
+        mut file_url: impl FnMut(T) -> Option<Retained<NSString>>,
+        current_revision: impl FnOnce() -> isize,
+    ) -> Result<Option<FileList>, String> {
+        let same_revision = self.selection.revision == Some(revision);
+        let mut paths = Vec::new();
+        for (slot, item) in items.enumerate() {
+            // Finder references can follow a move without a pasteboard change.
+            // Skip completed items by slot before resolving the remaining URLs.
+            if same_revision && self.selection.consumed.contains(&slot) {
+                continue;
+            }
+            if let Some(url) = file_url(item) {
+                paths.push((slot, clipboard_path(&url)?));
+            }
+        }
+        if revision != current_revision() {
+            return Err(crate::i18n::text("Системный буфер изменился. Повторите вставку.").into());
+        }
+        let files = FileList::new(
+            paths.iter().map(|(_, path)| path.clone()).collect(),
+            self.cut_revision == Some(revision),
+            Some(revision.to_string()),
+        )?;
+        if !same_revision {
+            self.selection.consumed.clear();
+        }
+        self.selection.revision = Some(revision);
+        self.selection.paths = paths;
+        Ok(files)
+    }
+
+    pub fn consume_moved(&mut self, files: &FileList, source: &Path) {
+        let revision = files
+            .revision
+            .as_deref()
+            .and_then(|value| value.parse().ok());
+        if revision.is_none() || self.selection.revision != revision {
+            return;
+        }
+        let Selection {
+            paths, consumed, ..
+        } = &mut self.selection;
+        paths.retain(|(slot, path)| {
+            if path.starts_with(source) {
+                consumed.insert(*slot);
+                false
+            } else {
+                true
+            }
+        });
     }
 }
 
@@ -97,9 +152,7 @@ fn clipboard_path(value: &NSString) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use objc2::rc::Retained;
     use std::os::unix::fs::symlink;
-    use std::path::Path;
 
     fn native_url(path: &Path) -> Retained<NSURL> {
         let value = url::Url::from_file_path(path).unwrap();
@@ -110,6 +163,51 @@ mod tests {
         let reference = unsafe { native_url(path).fileReferenceURL() }.unwrap();
         assert!(unsafe { reference.isFileReferenceURL() });
         unsafe { reference.absoluteString() }.unwrap()
+    }
+
+    #[test]
+    fn retries_only_pending_finder_items_and_reresolves_their_paths() {
+        autoreleasepool(|_| {
+            let root = tempfile::tempdir_in("/private/tmp").unwrap();
+            let folder = root.path().join("folder");
+            let child = folder.join("child.txt");
+            let pending = root.path().join("pending.txt");
+            std::fs::create_dir(&folder).unwrap();
+            std::fs::write(&child, b"child").unwrap();
+            std::fs::write(&pending, b"pending").unwrap();
+
+            let urls = [&folder, &child, &folder, &pending].map(|path| reference_string(path));
+            let read = |clipboard: &mut SystemClipboard, revision, urls: &[Retained<NSString>]| {
+                clipboard
+                    .read_items(revision, urls.iter(), |url| Some(url.clone()), || revision)
+                    .unwrap()
+            };
+            let mut clipboard = SystemClipboard::default();
+            let before = read(&mut clipboard, 1, &urls).unwrap();
+            assert_eq!(
+                before.paths,
+                [&folder, &child, &pending].map(PathBuf::as_path)
+            );
+
+            let moved = root.path().join("moved");
+            std::fs::rename(&folder, &moved).unwrap();
+            clipboard.consume_moved(&before, &folder);
+            let renamed = root.path().join("renamed.txt");
+            std::fs::rename(&pending, &renamed).unwrap();
+            let retry = read(&mut clipboard, 1, &urls).unwrap();
+            assert_eq!(retry.revision, before.revision);
+            assert_eq!(retry.paths, [renamed.as_path()]);
+
+            std::fs::remove_dir_all(&moved).unwrap();
+            assert_eq!(read(&mut clipboard, 1, &urls), Some(retry));
+
+            let new_urls = [reference_string(&renamed)];
+            let after = read(&mut clipboard, 2, &new_urls).unwrap();
+            assert_ne!(after.revision, before.revision);
+            assert_eq!(after.paths, [renamed.as_path()]);
+            clipboard.consume_moved(&before, &renamed);
+            assert_eq!(read(&mut clipboard, 2, &new_urls), Some(after));
+        });
     }
 
     #[test]

@@ -301,7 +301,7 @@ fn translate(english: bool, russian: &'static str) -> &'static str {
         "Фильтр текущей папки" => "Filter current folder",
         "Выделить всё" => "Select all",
         "В корзину с подтверждением" => "Move to trash with confirmation",
-        "Буфер файлов работает внутри PawCommander. «Копировать путь» использует системный буфер." => "The file clipboard works inside PawCommander. “Copy path” uses the system clipboard.",
+        "Для локальных файлов используется системный буфер, если он доступен. Для SFTP используется буфер PawCommander." => "Local files use the system clipboard when available. SFTP files use the PawCommander clipboard.",
         "При совпадении имён выберите действие в диалоге. Удаление SFTP — навсегда с подтверждением; локальные файлы отправляются в корзину." => "Choose an action in the name conflict dialog. SFTP deletion is permanent and requires confirmation; local files go to the trash.",
         "Новая папка" => "New folder",
         "Переименовать" => "Rename",

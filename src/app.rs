@@ -1337,6 +1337,12 @@ impl PawCommander {
             .as_mut()
             .filter(|clipboard| clipboard.generation == generation)
         {
+            #[cfg(target_os = "macos")]
+            if let (ClipboardOrigin::System(files), Some(source)) =
+                (&clipboard.origin, source.local())
+            {
+                self.system_clipboard.consume_moved(files, source);
+            }
             clipboard.paths.retain(|path| {
                 !path.same_backend(source) || !path.path().starts_with(source.path())
             });
@@ -2477,7 +2483,7 @@ impl PawCommander {
                 });
                 ui.add_space(12.0);
                 ui.label(crate::i18n::text("Действующие сочетания показаны в разделе Настройки → Горячие клавиши."));
-                ui.add_space(14.0); ui.label(crate::i18n::text("Буфер файлов работает внутри PawCommander. «Копировать путь» использует системный буфер."));
+                ui.add_space(14.0); ui.label(crate::i18n::text("Для локальных файлов используется системный буфер, если он доступен. Для SFTP используется буфер PawCommander."));
                 ui.label(crate::i18n::text("При совпадении имён выберите действие в диалоге. Удаление SFTP — навсегда с подтверждением; локальные файлы отправляются в корзину."));
             });
         }
@@ -4476,6 +4482,22 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn unrevisioned_file_clipboard_uses_observed_contents() {
+        let file_list = FileList {
+            paths: vec![PathBuf::from("first.txt")],
+            cut: true,
+            revision: None,
+        };
+        let mut different = file_list.clone();
+        different.paths.push(PathBuf::from("second.txt"));
+        let clipboard =
+            Clipboard::new(Vec::new(), true, ClipboardOrigin::System(file_list.clone()));
+        assert!(clipboard.matches(Some(&file_list)));
+        assert!(!clipboard.matches(Some(&different)));
+        assert!(!clipboard.matches(None));
+    }
 
     fn wait_for_directory(tab: &mut Tab) {
         let deadline = Instant::now() + Duration::from_secs(5);
