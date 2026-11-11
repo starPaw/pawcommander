@@ -1,4 +1,5 @@
 mod column_view;
+mod selection;
 
 use crate::command_palette::{CommandPalette, PaletteOutcome};
 use crate::conflict::{Answer, ConflictDialog, Decision};
@@ -16,6 +17,7 @@ use crate::tab_drag::{clamp_tab_slot, DragTab, TabDrop, TabDropTargets};
 use crate::theme::{appearance_menu, paint_focus, Palette, Theme};
 use crate::vfs::{self as fs_ops, Endpoint, FileEntry, Location};
 use eframe::egui::{self, Color32, FontId, RichText, Sense, Stroke, Vec2};
+use selection::{EntryIdentity, Rule, RuleKind};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -870,6 +872,7 @@ struct Tab {
     filter: String,
     entries: DirectoryEntries,
     selected: BTreeSet<Location>,
+    previous_selection: Option<BTreeMap<Location, EntryIdentity>>,
     anchor: Option<Location>,
     cursor: Option<Location>,
     rendered_rows: HashMap<egui::Id, Location>,
@@ -907,6 +910,7 @@ impl Tab {
             filter: String::new(),
             entries: DirectoryEntries::default(),
             selected: BTreeSet::new(),
+            previous_selection: None,
             anchor: None,
             cursor: None,
             rendered_rows: HashMap::new(),
@@ -1086,6 +1090,7 @@ impl Tab {
                         self.cursor = None;
                     }
                 }
+                self.reconcile_previous_selection();
                 self.error = None;
                 if let Some(path) = self.column_reveal.take() {
                     if self.entries.iter().any(|entry| entry.path == path) {
@@ -1122,6 +1127,7 @@ impl Tab {
                     self.has_complete_listing = false;
                     self.entries.replace(Vec::new());
                     self.selected.clear();
+                    self.previous_selection = None;
                     self.anchor = None;
                     self.cursor = None;
                 }
@@ -1163,6 +1169,7 @@ impl Tab {
         self.has_complete_listing = false;
         self.folder_visit = FolderVisit::CountOnOpen;
         self.selected.clear();
+        self.previous_selection = None;
         self.anchor = None;
         self.cursor = None;
         self.scroll_to = None;
@@ -1328,6 +1335,94 @@ impl Tab {
             .filter(|path| self.selected.contains(*path))
             .cloned()
             .collect()
+    }
+
+    fn remember_selection(&mut self, visible: &[usize]) {
+        self.previous_selection = Some(
+            visible
+                .iter()
+                .map(|&index| &self.entries[index])
+                .filter(|entry| self.selected.contains(&entry.path))
+                .map(|entry| (entry.path.clone(), EntryIdentity::from(entry)))
+                .collect(),
+        );
+    }
+
+    fn reconcile_previous_selection(&mut self) {
+        let Some(previous) = self
+            .previous_selection
+            .as_mut()
+            .filter(|paths| !paths.is_empty())
+        else {
+            return;
+        };
+        let still_present: HashSet<_> = self
+            .entries
+            .iter()
+            .filter(|entry| {
+                previous
+                    .get(&entry.path)
+                    .is_some_and(|identity| *identity == EntryIdentity::from(*entry))
+            })
+            .map(|entry| &entry.path)
+            .collect();
+        previous.retain(|path, _| still_present.contains(path));
+        if previous.is_empty() {
+            self.previous_selection = None;
+        }
+    }
+
+    fn change_selection(&mut self, view: FolderView, change: SelectionChange) {
+        let visible = self.visible(view);
+        let select_all = matches!(change, SelectionChange::All);
+        let restored = if matches!(change, SelectionChange::Restore) {
+            let Some(previous) = self.previous_selection.take() else {
+                return;
+            };
+            Some(previous)
+        } else {
+            None
+        };
+        let selected = match change {
+            SelectionChange::Matches(selected) => selected,
+            _ => visible
+                .iter()
+                .map(|&index| &self.entries[index])
+                .filter(|entry| match &change {
+                    SelectionChange::All => true,
+                    SelectionChange::Invert => !self.selected.contains(&entry.path),
+                    SelectionChange::Restore => restored.as_ref().is_some_and(|previous| {
+                        previous.get(&entry.path) == Some(&EntryIdentity::from(*entry))
+                    }),
+                    SelectionChange::Matches(_) => {
+                        unreachable!("matched selection already computed")
+                    }
+                })
+                .map(|entry| entry.path.clone())
+                .collect(),
+        };
+        if restored.is_none() && selected != self.selected {
+            self.remember_selection(&visible);
+        }
+        self.selected = selected;
+        self.column_reveal = None;
+        // Keep the existing navigation cursor and Shift range anchor for Select All.
+        if select_all {
+            return;
+        }
+        self.reveal_after_load = None;
+        self.cursor = self
+            .cursor
+            .take()
+            .filter(|path| self.selected.contains(path))
+            .or_else(|| {
+                visible
+                    .iter()
+                    .map(|&index| &self.entries[index].path)
+                    .find(|&path| self.selected.contains(path))
+                    .cloned()
+            });
+        self.anchor = self.cursor.clone();
     }
 
     fn drag_paths(&mut self, index: usize, visible: &[usize]) -> Vec<Location> {
@@ -1630,7 +1725,54 @@ fn file_clipboard_action(event: &egui::Event) -> Option<Action> {
         _ => None,
     }
 }
+enum SelectionChange {
+    All,
+    Invert,
+    Restore,
+    Matches(BTreeSet<Location>),
+}
+
+struct SelectionScan {
+    rule: Rule,
+    rows: Rc<Vec<usize>>,
+    next: usize,
+    matches: BTreeSet<Location>,
+}
+
+impl SelectionScan {
+    fn new(rule: Rule, rows: Rc<Vec<usize>>) -> Self {
+        Self {
+            rule,
+            rows,
+            next: 0,
+            matches: BTreeSet::new(),
+        }
+    }
+
+    fn step(&mut self, entries: &[FileEntry], deadline: Instant) -> bool {
+        while let Some(&index) = self.rows.get(self.next) {
+            if self.next.is_multiple_of(32) && Instant::now() >= deadline {
+                return false;
+            }
+            let entry = &entries[index];
+            if self.rule.matches(entry) {
+                self.matches.insert(entry.path.clone());
+            }
+            self.next += 1;
+        }
+        true
+    }
+}
+
 enum Dialog {
+    SelectionRule {
+        command: Command,
+        kind: RuleKind,
+        tab: u64,
+        location: Location,
+        input: String,
+        scan: Option<SelectionScan>,
+    },
     NewFolder {
         parent: Location,
         name: String,
@@ -2209,11 +2351,19 @@ impl PawCommander {
             && !ctx.input(|input| input.pointer.any_down() || input.pointer.any_released())
             && !egui::DragAndDrop::has_any_payload(ctx);
         let automatic_allowed = self.job.is_none() && self.transfer.is_none() && can_reorder;
+        // Hold automatic refresh results while a rule examines this tab's visible rows.
+        let scanning_tab = match &self.dialog {
+            Some(Dialog::SelectionRule {
+                tab, scan: Some(_), ..
+            }) => Some(*tab),
+            _ => None,
+        };
         let now = Instant::now();
         for (pane_index, pane) in self.panes.iter_mut().enumerate() {
             let displayed = self.settings.split || pane_index == 0;
             for (tab_index, tab) in pane.tabs.iter_mut().enumerate() {
                 let current = displayed && tab_index == pane.current;
+                let automatic_allowed = automatic_allowed && scanning_tab != Some(tab.id);
                 if can_reorder && (!tab.automatic_loading() || automatic_allowed) && tab.poll() {
                     ctx.request_repaint();
                 }
@@ -2415,7 +2565,11 @@ impl PawCommander {
                 self.tab().focus_cursor(ctx);
             }
             Action::ClearSelection => {
+                let view = self.folder_view(self.active);
                 let tab = self.tab_mut();
+                if !tab.selected.is_empty() {
+                    tab.remember_selection(&tab.visible(view));
+                }
                 tab.selected.clear();
                 tab.cursor = None;
                 tab.anchor = None;
@@ -2869,15 +3023,31 @@ impl PawCommander {
                 };
                 Action::Open(self.active, path)
             }
-            Command::SelectAll => {
-                let view = self.folder_view(self.active);
-                let tab = self.tab_mut();
-                tab.column_reveal = None;
-                tab.selected = tab
-                    .visible(view)
-                    .iter()
-                    .map(|&index| tab.entries[index].path.clone())
-                    .collect();
+            Command::SelectAll | Command::InvertSelection | Command::RestoreSelection => {
+                let change = match command {
+                    Command::SelectAll => SelectionChange::All,
+                    Command::InvertSelection => SelectionChange::Invert,
+                    _ => SelectionChange::Restore,
+                };
+                self.apply_selection(change, ctx);
+                return;
+            }
+            Command::SelectByMask | Command::SelectByExtension => {
+                let kind = if command == Command::SelectByMask {
+                    RuleKind::Mask
+                } else {
+                    RuleKind::Extension
+                };
+                self.remember_dialog_file_focus(ctx);
+                self.dialog = Some(Dialog::SelectionRule {
+                    command,
+                    kind,
+                    tab: self.tab().id,
+                    location: self.tab().path.clone(),
+                    input: String::new(),
+                    scan: None,
+                });
+                self.dialog_focus = true;
                 return;
             }
             Command::Hidden => {
@@ -2949,6 +3119,47 @@ impl PawCommander {
             Command::MoveToPane => Action::Transfer(TransferKind::Move),
         };
         self.action(action, ctx);
+    }
+
+    fn apply_selection(&mut self, change: SelectionChange, ctx: &egui::Context) {
+        if matches!(change, SelectionChange::Restore) && self.tab().previous_selection.is_none() {
+            return;
+        }
+        let view = self.folder_view(self.active);
+        if matches!(change, SelectionChange::All) {
+            self.tab_mut().change_selection(view, change);
+            return;
+        }
+        let rule = matches!(change, SelectionChange::Matches(_));
+        let focused = self
+            .file_row_focus(ctx)
+            .is_some_and(|(pane, _)| pane == self.active)
+            || self.tab().focused_cursor(ctx).is_some();
+        self.tab_mut().change_selection(view, change);
+        let tab = self.tab();
+        if focused {
+            Self::restore_focus(ctx, tab.cursor.as_ref().map(|path| tab.entry_id(path)));
+        }
+        let modal_row_focus = self
+            .dialog_file_focus
+            .as_ref()
+            .is_some_and(|(id, _)| *id == tab.id);
+        if modal_row_focus {
+            self.dialog_file_focus = tab.cursor.clone().map(|path| (tab.id, path));
+        }
+        if focused || modal_row_focus {
+            let tab = self.tab_mut();
+            tab.scroll_to = tab.cursor.clone();
+        }
+        if rule {
+            self.notice = self.tab().selected.is_empty().then(|| {
+                (
+                    crate::i18n::text("Нет подходящих видимых объектов").into(),
+                    false,
+                )
+            });
+        }
+        ctx.request_repaint();
     }
 
     fn keyboard_blocked(&self, ctx: &egui::Context) -> bool {
@@ -3227,6 +3438,7 @@ impl PawCommander {
                         || (self.tools.zed.is_some() && self.editor_job.is_none())
                 }),
                 Command::OtherPane => self.settings.split,
+                Command::RestoreSelection => tab.previous_selection.is_some(),
                 Command::NewFolder => idle,
                 Command::Rename => idle && has_selection && selected.len() == 1,
                 Command::Trash => idle && has_selection,
@@ -3310,7 +3522,12 @@ impl PawCommander {
     fn remember_dialog_file_focus(&mut self, ctx: &egui::Context) {
         self.dialog_file_focus = self
             .file_row_focus(ctx)
-            .map(|(pane, path)| (self.panes[pane].tab().id, path.clone()));
+            .map(|(pane, path)| (self.panes[pane].tab().id, path.clone()))
+            .or_else(|| {
+                let tab = self.tab();
+                tab.focused_cursor(ctx)?;
+                Some((tab.id, tab.cursor.clone()?))
+            });
     }
 
     fn restore_dialog_file_focus(&mut self, ctx: &egui::Context) {
@@ -4271,6 +4488,7 @@ impl PawCommander {
         let mut cancel = false;
         let mut confirm = false;
         let title = match &dialog {
+            Dialog::SelectionRule { command, .. } => command.label(),
             Dialog::NewFolder { .. } => crate::i18n::text("Новая папка"),
             Dialog::Rename { .. } => crate::i18n::text("Переименовать"),
             Dialog::WorkspaceName { editing, .. } => {
@@ -4294,6 +4512,39 @@ impl PawCommander {
             ui.heading(title);
             ui.add_space(12.0);
             match &mut dialog {
+                Dialog::SelectionRule { kind, input, scan, .. } => {
+                    let (field, hint) = match kind {
+                        RuleKind::Mask => (crate::i18n::text("Маска имени файла"), "photo-?.jpg"),
+                        RuleKind::Extension => (crate::i18n::text("Расширение"), "txt"),
+                    };
+                    let label = ui.label(field);
+                    let response = ui
+                        .add_enabled(
+                            scan.is_none(),
+                            egui::TextEdit::singleline(input)
+                                .hint_text(hint)
+                                .desired_width(f32::INFINITY)
+                                .return_key(None),
+                        )
+                        .labelled_by(label.id);
+                    if self.dialog_focus {
+                        response.request_focus();
+                    }
+                    if matches!(kind, RuleKind::Mask) {
+                        ui.weak(crate::i18n::text("Звёздочка * заменяет любое число символов, знак ? — один символ."));
+                    }
+                    if let Some(scan) = scan {
+                        let progress = scan.next as f32 / scan.rows.len().max(1) as f32;
+                        ui.add(egui::ProgressBar::new(progress)
+                            .text(crate::i18n::text("Поиск подходящих объектов…")));
+                    } else if !input.is_empty() && kind.pattern(input).is_none() {
+                        let error = match kind {
+                            RuleKind::Mask => "Длина маски не должна превышать 1024 байта.",
+                            RuleKind::Extension => "Введите одно расширение, например txt или .txt.",
+                        };
+                        ui.colored_label(colors.error, crate::i18n::text(error));
+                    }
+                }
                 Dialog::NewFolder { parent, name } => {
                     ui.label(RichText::new(parent.display().to_string()).color(colors.muted));
                     let response = ui.add(
@@ -4356,6 +4607,9 @@ impl PawCommander {
             }
             ui.add_space(16.0);
             let valid = match &dialog {
+                Dialog::SelectionRule { kind, input, scan, .. } => {
+                    scan.is_none() && kind.pattern(input).is_some()
+                }
                 Dialog::NewFolder { name, .. } | Dialog::Rename { name, .. } => {
                     !name.trim().is_empty()
                 }
@@ -4372,6 +4626,8 @@ impl PawCommander {
                 cancel = cancel_button.clicked();
                 let label = if matches!(dialog, Dialog::Trash { .. }) {
                     if matches!(&dialog, Dialog::Trash { paths } if paths.iter().any(Location::remote)) { crate::i18n::text("Удалить навсегда") } else { crate::i18n::text("В корзину") }
+                } else if matches!(dialog, Dialog::SelectionRule { .. }) {
+                    crate::i18n::text("Выделить")
                 } else {
                     crate::i18n::text("Сохранить")
                 };
@@ -4386,7 +4642,7 @@ impl PawCommander {
             let submit_on_enter = match dialog {
                 Dialog::Trash { .. } => false,
                 // The Enter that opens the dialog belongs to its sidebar control.
-                Dialog::WorkspaceName { .. } => !self.dialog_focus,
+                Dialog::WorkspaceName { .. } | Dialog::SelectionRule { .. } => !self.dialog_focus,
                 _ => true,
             };
             if submit_on_enter && valid && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -4397,8 +4653,69 @@ impl PawCommander {
                 cancel = true;
             }
         });
+        if matches!(dialog, Dialog::SelectionRule { .. }) && (confirm || cancel) {
+            let key = if cancel {
+                egui::Key::Escape
+            } else {
+                egui::Key::Enter
+            };
+            if ctx.input(|input| input.key_pressed(key)) {
+                self.guard_picker_close_key(ctx, &[key], key);
+            }
+        }
+        if let Dialog::SelectionRule {
+            kind,
+            tab,
+            location,
+            input,
+            scan,
+            ..
+        } = &mut dialog
+        {
+            if cancel {
+                ctx.request_repaint();
+                return;
+            }
+            if scan.is_none() && !confirm {
+                self.dialog = Some(dialog);
+                return;
+            }
+            let current = self.tab();
+            let rows = current.visible(self.folder_view(self.active));
+            if current.id != *tab
+                || current.path != *location
+                || scan
+                    .as_ref()
+                    .is_some_and(|scan| !Rc::ptr_eq(&scan.rows, &rows))
+            {
+                self.notice = Some((
+                    crate::i18n::text("Папка или список изменились. Повторите выделение.").into(),
+                    false,
+                ));
+                ctx.request_repaint();
+                return;
+            }
+            if confirm {
+                *scan = kind
+                    .compile(input)
+                    .map(|rule| SelectionScan::new(rule, rows));
+            }
+            if let Some(scan) = scan {
+                if scan.step(&current.entries, Instant::now() + Duration::from_millis(4)) {
+                    self.apply_selection(
+                        SelectionChange::Matches(std::mem::take(&mut scan.matches)),
+                        ctx,
+                    );
+                    return;
+                }
+            }
+            self.dialog = Some(dialog);
+            ctx.request_repaint();
+            return;
+        }
         if confirm && !cancel {
             match dialog {
+                Dialog::SelectionRule { .. } => unreachable!("rule handled above"),
                 Dialog::NewFolder { parent, name } => self.start_progress_job(
                     ctx,
                     crate::i18n::text("Создание папки"),
@@ -6992,6 +7309,171 @@ mod tests {
         assert_eq!(tab.selected, BTreeSet::from([keep]));
         assert!(tab.error.is_none(), "poll should skip an uncached session");
         assert!(tab.next_auto_refresh >= started + SFTP_REFRESH_INTERVAL);
+    }
+
+    #[test]
+    fn selection_rules_use_only_visible_current_folder_rows() {
+        let root = tempfile::tempdir().unwrap();
+        for name in [
+            "report.TXT",
+            "report-2.txt",
+            "report.csv",
+            "other.txt",
+            ".report.txt",
+        ] {
+            std::fs::write(root.path().join(name), b"fixture").unwrap();
+        }
+        std::fs::create_dir(root.path().join("report-folder.txt")).unwrap();
+        let location = Location::from(root.path().to_path_buf());
+        let ctx = egui::Context::default();
+        let mut tab = Tab::new(location.clone(), &ctx);
+        wait_for_directory(&mut tab);
+        tab.filter = "report".into();
+        let view = FolderView {
+            mode: FolderMode::Columns,
+            ..FolderView::default()
+        };
+        let txt = location.join("report.TXT");
+        let txt2 = location.join("report-2.txt");
+        let csv = location.join("report.csv");
+        let folder = location.join("report-folder.txt");
+        tab.selected = BTreeSet::from([csv.clone(), location.join("other.txt")]);
+        let extension = RuleKind::Extension.compile(".txt").unwrap();
+        let mut scan = SelectionScan::new(extension, tab.visible(view));
+        assert!(!scan.step(&tab.entries, Instant::now()));
+        assert!(scan.matches.is_empty());
+        assert!(scan.step(&tab.entries, Instant::now() + Duration::from_secs(1)));
+        tab.change_selection(view, SelectionChange::Matches(scan.matches));
+        assert_eq!(tab.selected, BTreeSet::from([txt.clone(), txt2.clone()]));
+        tab.change_selection(view, SelectionChange::Restore);
+        assert_eq!(tab.selected, BTreeSet::from([csv.clone()]));
+
+        let mask = RuleKind::Mask.compile("REPORT*.TXT").unwrap();
+        let mut scan = SelectionScan::new(mask, tab.visible(view));
+        assert!(scan.step(&tab.entries, Instant::now() + Duration::from_secs(1)));
+        tab.change_selection(view, SelectionChange::Matches(scan.matches));
+        assert_eq!(tab.selected, BTreeSet::from([txt, txt2, folder]));
+        tab.change_selection(view, SelectionChange::Invert);
+        assert_eq!(tab.selected, BTreeSet::from([csv]));
+        tab.filter = "report-2".into();
+        tab.change_selection(view, SelectionChange::Restore);
+        assert_eq!(
+            tab.selected,
+            BTreeSet::from([location.join("report-2.txt")])
+        );
+        assert!(tab.previous_selection.is_none());
+    }
+
+    #[test]
+    fn selection_scan_discards_matches_if_the_visible_rows_change() {
+        let root = tempfile::tempdir().unwrap();
+        for name in ["first.txt", "second.txt"] {
+            std::fs::write(root.path().join(name), b"fixture").unwrap();
+        }
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        wait_for_directory(app.tab_mut());
+        let first = app.tab().path.join("first.txt");
+        let second = app.tab().path.join("second.txt");
+        app.tab_mut().selected.insert(second.clone());
+        app.run_shortcut(Command::SelectByMask, &ctx);
+        let mut scan = SelectionScan::new(
+            RuleKind::Mask.compile("*.txt").unwrap(),
+            app.tab().visible(app.folder_view(app.active)),
+        );
+        // Model a completed slice whose matches have yet to be published.
+        scan.next = 1;
+        scan.matches.insert(first);
+        if let Some(Dialog::SelectionRule { scan: pending, .. }) = &mut app.dialog {
+            *pending = Some(scan);
+        } else {
+            panic!("expected a selection rule dialog");
+        }
+        app.tab_mut().filter = "second".into();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| app.dialogs(ctx));
+        assert!(app.dialog.is_none());
+        assert_eq!(app.selected(), vec![second]);
+        assert!(app.tab().previous_selection.is_none());
+    }
+
+    #[test]
+    fn selection_restore_discards_disappeared_and_replaced_entries_and_is_tab_local() {
+        let root = tempfile::tempdir().unwrap();
+        let location = Location::from(root.path().to_path_buf());
+        let stable = location.join("stable");
+        let gone = location.join("gone");
+        let replaced = location.join("replaced");
+        for file in [&stable, &gone, &replaced] {
+            std::fs::write(file.path(), b"fixture").unwrap();
+        }
+        let ctx = egui::Context::default();
+        let mut tab = Tab::new(location.clone(), &ctx);
+        wait_for_directory(&mut tab);
+        let view = FolderView::default();
+        tab.change_selection(view, SelectionChange::All);
+        tab.change_selection(view, SelectionChange::Invert);
+        let mut other = Tab::new(location.clone(), &ctx);
+        wait_for_directory(&mut other);
+        other.change_selection(view, SelectionChange::Restore);
+        assert!(other.selected.is_empty());
+
+        std::fs::remove_file(gone.path()).unwrap();
+        std::fs::remove_file(replaced.path()).unwrap();
+        std::fs::create_dir(replaced.path()).unwrap();
+        tab.reload(&ctx);
+        wait_for_directory(&mut tab);
+        std::fs::write(gone.path(), b"fixture").unwrap();
+        tab.reload(&ctx);
+        wait_for_directory(&mut tab);
+        tab.change_selection(view, SelectionChange::Restore);
+        assert_eq!(tab.selected, BTreeSet::from([stable]));
+        tab.change_selection(view, SelectionChange::Invert);
+        tab.navigate(replaced, &ctx);
+        tab.history_go(-1, &ctx);
+        wait_for_directory(&mut tab);
+        assert!(tab.previous_selection.is_none());
+    }
+
+    #[test]
+    fn selection_commands_retarget_file_focus_and_keep_select_all_cursor() {
+        let root = tempfile::tempdir().unwrap();
+        let location = Location::from(root.path().to_path_buf());
+        let first = location.join("a.txt");
+        let second = location.join("b.csv");
+        for file in [&first, &second] {
+            std::fs::write(file.path(), b"fixture").unwrap();
+        }
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        wait_for_directory(app.tab_mut());
+        let first_id = app.tab().entry_id(&first);
+        let second_id = app.tab().entry_id(&second);
+        app.tab_mut()
+            .rendered_rows
+            .extend([(first_id, first.clone()), (second_id, second.clone())]);
+        app.tab_mut().selected = BTreeSet::from([first.clone()]);
+        app.tab_mut().cursor = Some(first.clone());
+        app.tab_mut().anchor = Some(second.clone());
+        ctx.memory_mut(|memory| memory.request_focus(first_id));
+
+        app.run_shortcut(Command::SelectAll, &ctx);
+        assert_eq!(app.tab().anchor.as_ref(), Some(&second));
+        assert_eq!(app.tab().cursor.as_ref(), Some(&first));
+        assert!(app.tab().scroll_to.is_none());
+        app.run_shortcut(Command::RestoreSelection, &ctx);
+        assert_eq!(app.selected(), vec![first.clone()]);
+        // A same-input-batch movement can give focus to a row before it renders.
+        app.tab_mut().rendered_rows.remove(&first_id);
+        app.run_shortcut(Command::InvertSelection, &ctx);
+        assert_eq!(app.selected(), vec![second.clone()]);
+        assert!(ctx.memory(|memory| memory.has_focus(second_id)));
+        app.run_shortcut(Command::RestoreSelection, &ctx);
+        assert_eq!(app.selected(), vec![first.clone()]);
+        assert!(ctx.memory(|memory| memory.has_focus(first_id)));
+        app.run_pane_action(Action::Shortcut(Command::Trash), &ctx);
+        assert!(matches!(app.dialog, Some(Dialog::Trash { ref paths }) if paths == &[first]));
     }
 
     #[test]

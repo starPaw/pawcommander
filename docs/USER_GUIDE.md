@@ -28,6 +28,8 @@ Visible folders refresh in the background after the previous read finishes: appr
 
 Click a row or tile to select it, use `Cmd/Ctrl` for individual additions and `Shift` for a range, or use the selection checkboxes. File commands apply to the active pane.
 
+Use the command palette to select by mask or extension, invert the selection, or restore the previous selection. A mask matches the whole name and supports `*` for any number of characters and `?` for one character. Extension matching uses the final extension. Matching ignores case. These commands work on visible entries in the active tab. You can restore the previous selection once after applying a rule, inverting, selecting all, or clearing with Esc. Restore uses available metadata to keep matching entries in the current folder.
+
 Copy and cut local files to the system clipboard with `Cmd/Ctrl+C` / `X`; paste with `Cmd/Ctrl+V`. If the OS clipboard is unavailable, PawCommander reports it and falls back to its internal clipboard. SFTP sources use the internal clipboard.
 
 - **macOS:** copy with `Cmd+C` and move at the destination with `Option+Cmd+V`, including between Finder and PawCommander. A cut inside PawCommander can also be moved by ordinary paste inside PawCommander.

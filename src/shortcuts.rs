@@ -18,6 +18,10 @@ pub enum Command {
     Parent,
     Open,
     SelectAll,
+    SelectByMask,
+    SelectByExtension,
+    InvertSelection,
+    RestoreSelection,
     Hidden,
     Split,
     OtherPane,
@@ -37,7 +41,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Self; 28] = [
+    pub const ALL: [Self; 32] = [
         Self::EditPath,
         Self::Filter,
         Self::Search,
@@ -51,6 +55,10 @@ impl Command {
         Self::Parent,
         Self::Open,
         Self::SelectAll,
+        Self::SelectByMask,
+        Self::SelectByExtension,
+        Self::InvertSelection,
+        Self::RestoreSelection,
         Self::Hidden,
         Self::Split,
         Self::OtherPane,
@@ -83,6 +91,10 @@ impl Command {
             Self::Parent => "Родительская папка",
             Self::Open => "Открыть",
             Self::SelectAll => "Выделить всё",
+            Self::SelectByMask => "Выделить по маске",
+            Self::SelectByExtension => "Выделить по расширению",
+            Self::InvertSelection => "Инвертировать выделение",
+            Self::RestoreSelection => "Восстановить выделение",
             Self::Hidden => "Скрытые файлы",
             Self::Split => "Две панели",
             Self::OtherPane => "Переключить панель",
@@ -167,9 +179,8 @@ impl Profile {
             FocusToolbar => (Modifiers::NONE, Key::F10),
             Palette => (CMD_SHIFT, Key::P),
             FolderJump => (CMD_SHIFT, Key::J),
-            Preview | EditInZed | CopyToPane | MoveToPane | TogglePinTab | DuplicateTab => {
-                return None
-            }
+            Preview | EditInZed | CopyToPane | MoveToPane | TogglePinTab | DuplicateTab
+            | SelectByMask | SelectByExtension | InvertSelection | RestoreSelection => return None,
         };
         Some(Chord::new(modifiers, key))
     }
