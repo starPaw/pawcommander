@@ -34,6 +34,7 @@ pub enum Icon {
     Breadcrumbs,
     Plus,
     Close,
+    Pin,
 }
 
 pub fn file_icon(name: &str, folder: bool) -> Icon {
@@ -214,6 +215,20 @@ pub fn paint(ui: &egui::Ui, rect: Rect, icon: Icon, color: Color32) {
         Icon::Close => {
             line(&[(6.0, 6.0), (18.0, 18.0)]);
             line(&[(18.0, 6.0), (6.0, 18.0)]);
+        }
+        Icon::Pin => {
+            line(&[
+                (8.0, 3.0),
+                (16.0, 3.0),
+                (15.0, 9.0),
+                (18.0, 12.0),
+                (18.0, 14.0),
+                (6.0, 14.0),
+                (6.0, 12.0),
+                (9.0, 9.0),
+                (8.0, 3.0),
+            ]);
+            line(&[(12.0, 14.0), (12.0, 21.0)]);
         }
         Icon::Document | Icon::Code | Icon::Archive => {
             painter.add(Shape::convex_polygon(

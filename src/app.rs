@@ -8,13 +8,13 @@ use crate::icons::{self, Icon};
 use crate::operations::{Progress, ProgressView};
 use crate::preview::Preview;
 use crate::shortcuts::{self, Command, ShortcutEditor, Shortcuts};
-use crate::tab_drag::{DragTab, TabDrop, TabDropTargets};
+use crate::tab_drag::{clamp_tab_slot, DragTab, TabDrop, TabDropTargets};
 use crate::theme::{appearance_menu, paint_focus, Palette, Theme};
 use crate::vfs::{self as fs_ops, Endpoint, FileEntry, Location};
 use eframe::egui::{self, Color32, FontId, RichText, Sense, Stroke, Vec2};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 #[serde(default)]
 struct Settings {
     locations: Vec<Vec<Location>>,
+    pinned_tab_counts: [usize; 2],
     bookmarks: Vec<Location>,
     folder_history: FolderHistory,
     split: bool,
@@ -64,6 +65,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             locations: vec![],
+            pinned_tab_counts: [0; 2],
             bookmarks: vec![],
             folder_history: FolderHistory::default(),
             split: true,
@@ -275,6 +277,7 @@ impl DirectoryEntries {
 struct Tab {
     id: u64,
     path: Location,
+    pinned: bool,
     address: String,
     edit_address: bool,
     focus_address: bool,
@@ -306,6 +309,7 @@ impl Tab {
             id: NEXT_TAB_ID.fetch_add(1, Ordering::Relaxed),
             address: path.display().to_string(),
             path: path.clone(),
+            pinned: false,
             edit_address: false,
             focus_address: false,
             address_error: None,
@@ -650,8 +654,67 @@ impl Tab {
 struct Pane {
     tabs: Vec<Tab>,
     current: usize,
+    closed_tabs: VecDeque<(usize, Location)>,
+    tab_context_menu: Option<egui::Id>,
 }
 impl Pane {
+    const MAX_CLOSED_TABS: usize = 16;
+
+    fn new(tabs: Vec<Tab>) -> Self {
+        Self {
+            tabs,
+            current: 0,
+            closed_tabs: VecDeque::new(),
+            tab_context_menu: None,
+        }
+    }
+
+    fn pinned_count(&self) -> usize {
+        self.tabs.iter().take_while(|tab| tab.pinned).count()
+    }
+
+    fn toggle_pin(&mut self, index: usize) {
+        let selected = index == self.current;
+        let mut tab = self.remove_tab(index);
+        tab.pinned = !tab.pinned;
+        let slot = self.pinned_count();
+        self.tabs.insert(slot, tab);
+        if selected {
+            self.current = slot;
+        } else if slot <= self.current {
+            self.current += 1;
+        }
+    }
+
+    fn can_close_tab(&self, index: usize) -> bool {
+        self.tabs.len() > 1 && !self.tabs[index].pinned
+    }
+
+    fn close_tab(&mut self, index: usize) {
+        if self.can_close_tab(index) {
+            let tab = self.remove_tab(index);
+            if self.closed_tabs.len() == Self::MAX_CLOSED_TABS {
+                self.closed_tabs.pop_front();
+            }
+            self.closed_tabs.push_back((index, tab.path));
+        }
+    }
+
+    fn insert_selected_tab(&mut self, index: usize, tab: Tab) {
+        self.tab_mut().address_completion.suspend();
+        self.tabs.insert(index, tab);
+        self.current = index;
+    }
+
+    fn reopen_tab(&mut self, ctx: &egui::Context) -> bool {
+        let Some((index, path)) = self.closed_tabs.pop_back() else {
+            return false;
+        };
+        let slot = index.clamp(self.pinned_count(), self.tabs.len());
+        self.insert_selected_tab(slot, Tab::new(path, ctx));
+        true
+    }
+
     fn remove_tab(&mut self, index: usize) -> Tab {
         let tab = self.tabs.remove(index);
         if index < self.current {
@@ -683,6 +746,13 @@ fn move_tab(panes: &mut [Pane], drop: TabDrop, ctx: &egui::Context) -> bool {
     let Some(index) = panes[source].tabs.iter().position(|tab| tab.id == id) else {
         return false;
     };
+    let destination_pane = &panes[destination];
+    let slot = clamp_tab_slot(
+        slot,
+        panes[source].tabs[index].pinned,
+        destination_pane.pinned_count(),
+        destination_pane.tabs.len(),
+    );
     if source == destination && (slot == index || slot == index + 1) {
         return false;
     }
@@ -718,6 +788,9 @@ enum Action {
     Refresh,
     NewTab(usize),
     CloseTab(usize, usize),
+    TogglePinTab(usize, usize),
+    DuplicateTab(usize, usize),
+    ReopenTab(usize),
     Copy(bool),
     Paste(bool),
     NewFolder,
@@ -896,22 +969,24 @@ impl PawCommander {
                     .join(start)
             };
             settings.locations = vec![vec![path.clone().into()], vec![path.into()]];
+            settings.pinned_tab_counts = [0; 2];
         }
         let mut panes: Vec<_> = (0..2)
             .map(|i| {
-                let locations = settings
-                    .locations
-                    .get(i)
-                    .cloned()
-                    .filter(|v| !v.is_empty())
-                    .unwrap_or_else(|| vec![home.clone().into()]);
-                Pane {
-                    tabs: locations
-                        .into_iter()
-                        .map(|p| Tab::new(p, &cc.egui_ctx))
+                let Some(locations) = settings.locations.get(i).filter(|v| !v.is_empty()) else {
+                    return Pane::new(vec![Tab::new(home.clone().into(), &cc.egui_ctx)]);
+                };
+                Pane::new(
+                    locations
+                        .iter()
+                        .enumerate()
+                        .map(|(index, path)| {
+                            let mut tab = Tab::new(path.clone(), &cc.egui_ctx);
+                            tab.pinned = index < settings.pinned_tab_counts[i];
+                            tab
+                        })
                         .collect(),
-                    current: 0,
-                }
+                )
             })
             .collect();
         if opened_start {
@@ -1503,15 +1578,25 @@ impl PawCommander {
             }
             Action::Refresh => self.refresh(ctx),
             Action::NewTab(i) => {
-                let path = self.panes[i].tab().path.clone();
-                self.panes[i].tabs.push(Tab::new(path, ctx));
-                let index = self.panes[i].tabs.len() - 1;
-                self.panes[i].select_tab(index);
+                let pane = &mut self.panes[i];
+                let path = pane.tab().path.clone();
+                pane.insert_selected_tab(pane.tabs.len(), Tab::new(path, ctx));
                 self.active = i;
             }
             Action::CloseTab(i, t) => {
-                if self.panes[i].tabs.len() > 1 {
-                    self.panes[i].remove_tab(t);
+                self.panes[i].close_tab(t);
+            }
+            Action::TogglePinTab(i, t) => self.panes[i].toggle_pin(t),
+            Action::DuplicateTab(i, t) => {
+                let pane = &mut self.panes[i];
+                let tab = Tab::new(pane.tabs[t].path.clone(), ctx);
+                let slot = (t + 1).max(pane.pinned_count());
+                pane.insert_selected_tab(slot, tab);
+                self.active = i;
+            }
+            Action::ReopenTab(i) => {
+                if self.panes[i].reopen_tab(ctx) {
+                    self.active = i;
                 }
             }
             Action::Copy(cut) => self.copy_files(cut),
@@ -1670,6 +1755,13 @@ impl PawCommander {
             }
             Command::NewTab => Action::NewTab(self.active),
             Command::CloseTab => Action::CloseTab(self.active, self.panes[self.active].current),
+            Command::TogglePinTab => {
+                Action::TogglePinTab(self.active, self.panes[self.active].current)
+            }
+            Command::DuplicateTab => {
+                Action::DuplicateTab(self.active, self.panes[self.active].current)
+            }
+            Command::ReopenTab => Action::ReopenTab(self.active),
             Command::Back => Action::Back,
             Command::Forward => Action::Forward,
             Command::Parent => Action::Up,
@@ -1757,9 +1849,16 @@ impl PawCommander {
     }
 
     fn keyboard_blocked(&self, ctx: &egui::Context) -> bool {
+        let visible_panes = 1 + usize::from(self.settings.split);
         egui::DragAndDrop::has_payload_of_type::<DragTab>(ctx)
             || egui::DragAndDrop::has_payload_of_type::<DragFiles>(ctx)
             || ctx.memory(|memory| memory.any_popup_open())
+            // Legacy egui context menus are tracked separately from other popups.
+            || self.panes[..visible_panes].iter().any(|pane| {
+                pane.tab_context_menu
+                    .and_then(|id| ctx.read_response(id))
+                    .is_some_and(|response| response.context_menu_opened())
+            })
             || self.dialog.is_some()
             || self.properties.is_some()
             || self.conflict_open()
@@ -1963,7 +2062,11 @@ impl PawCommander {
                 Command::Back => tab.history_index > 0,
                 Command::Forward => tab.history_index + 1 < tab.history.len(),
                 Command::Parent => tab.path.parent().is_some(),
-                Command::CloseTab => self.panes[self.active].tabs.len() > 1,
+                Command::CloseTab => {
+                    let pane = &self.panes[self.active];
+                    pane.can_close_tab(pane.current)
+                }
+                Command::ReopenTab => !self.panes[self.active].closed_tabs.is_empty(),
                 Command::Open => open_target.is_some_and(|path| {
                     !path.remote()
                         || tab
@@ -3145,6 +3248,8 @@ impl eframe::App for PawCommander {
             .iter()
             .map(|p| p.tabs.iter().map(|t| t.path.clone()).collect())
             .collect();
+        self.settings.pinned_tab_counts =
+            [self.panes[0].pinned_count(), self.panes[1].pinned_count()];
         eframe::set_value(storage, "pawcommander.settings", &self.settings);
     }
 }
@@ -3193,6 +3298,7 @@ fn tab_strip(
     let mut visible_tabs = Vec::new();
     let mut active_tab = None;
     let mut clicked_tab = None;
+    let mut tab_context_menu = None;
     let strip = ui
         .horizontal(|ui| {
             ui.set_min_width(ui.available_width());
@@ -3230,7 +3336,8 @@ fn tab_strip(
                                 rect.right_center() - Vec2::new(16.0, 0.0),
                                 Vec2::splat(24.0),
                             );
-                            let body = if pane.tabs.len() > 1 {
+                            let can_close = pane.can_close_tab(i);
+                            let body = if can_close {
                                 egui::Rect::from_min_max(
                                     rect.min,
                                     egui::pos2(close_rect.left(), rect.bottom()),
@@ -3244,11 +3351,16 @@ fn tab_strip(
                                 Sense::click_and_drag(),
                             );
                             response.widget_info(|| {
+                                let label = if tab.pinned {
+                                    crate::tr_format!("{name} (закреплена)", "{name} (pinned)")
+                                } else {
+                                    name.clone()
+                                };
                                 egui::WidgetInfo::selected(
                                     egui::WidgetType::SelectableLabel,
                                     true,
                                     selected,
-                                    &name,
+                                    label,
                                 )
                             });
                             ui.ctx().accesskit_node_builder(response.id, |node| {
@@ -3283,17 +3395,21 @@ fn tab_strip(
                                 icon,
                                 icons::tint(icon, colors),
                             );
+                            let text_right = if tab.pinned {
+                                close_rect.left()
+                            } else {
+                                body.right()
+                            };
                             let text_rect = egui::Rect::from_min_max(
                                 rect.min + Vec2::new(32.0, 0.0),
-                                egui::pos2(body.right() - 3.0, rect.bottom()),
-                            )
-                            .intersect(ui.clip_rect());
-                            let text = if text.size().x > body.width() - 35.0 {
+                                egui::pos2(text_right - 3.0, rect.bottom()),
+                            );
+                            let text = if text.size().x > text_rect.width() {
                                 let mut job = egui::text::LayoutJob::simple(
                                     name.clone(),
                                     FontId::proportional(13.0),
                                     colors.ink,
-                                    body.width() - 35.0,
+                                    text_rect.width(),
                                 );
                                 job.wrap.max_rows = 1;
                                 job.wrap.break_anywhere = true;
@@ -3301,14 +3417,16 @@ fn tab_strip(
                             } else {
                                 text
                             };
-                            ui.painter().with_clip_rect(text_rect).galley(
-                                egui::pos2(
-                                    rect.left() + 32.0,
-                                    rect.center().y - text.size().y / 2.0,
-                                ),
-                                text,
-                                colors.ink,
-                            );
+                            ui.painter()
+                                .with_clip_rect(text_rect.intersect(ui.clip_rect()))
+                                .galley(
+                                    egui::pos2(
+                                        rect.left() + 32.0,
+                                        rect.center().y - text.size().y / 2.0,
+                                    ),
+                                    text,
+                                    colors.ink,
+                                );
                             targets.add(ui, rect, index, path, true);
                             if (changed && selected) || response.gained_focus() {
                                 response.scroll_to_me(Some(egui::Align::Center));
@@ -3321,6 +3439,7 @@ fn tab_strip(
                                         id: tab.id,
                                         pane: index,
                                         label: name.clone(),
+                                        pinned: tab.pinned,
                                     },
                                 );
                             } else if response.clicked() {
@@ -3328,11 +3447,48 @@ fn tab_strip(
                                 actions.push(Action::Focus(index));
                             }
                             if !dragging {
+                                response.context_menu(|ui| {
+                                    tab_context_menu = Some(response.id);
+                                    let pin = if tab.pinned {
+                                        crate::i18n::text("Открепить вкладку")
+                                    } else {
+                                        crate::i18n::text("Закрепить вкладку")
+                                    };
+                                    let reopen = Command::ReopenTab.label();
+                                    for (label, action, enabled) in [
+                                        (pin, Action::TogglePinTab(index, i), true),
+                                        (
+                                            Command::DuplicateTab.label(),
+                                            Action::DuplicateTab(index, i),
+                                            true,
+                                        ),
+                                        (
+                                            Command::CloseTab.label(),
+                                            Action::CloseTab(index, i),
+                                            can_close,
+                                        ),
+                                        (
+                                            reopen,
+                                            Action::ReopenTab(index),
+                                            !pane.closed_tabs.is_empty(),
+                                        ),
+                                    ] {
+                                        if ui
+                                            .add_enabled(enabled, egui::Button::new(label))
+                                            .clicked()
+                                        {
+                                            actions.push(action);
+                                            ui.close_menu();
+                                        }
+                                    }
+                                });
                                 response
                                     .on_hover_text(path.display())
                                     .on_hover_cursor(egui::CursorIcon::Grab);
                             }
-                            if pane.tabs.len() > 1 {
+                            if tab.pinned {
+                                icons::paint(ui, close_rect.shrink(5.0), Icon::Pin, colors.mauve);
+                            } else if can_close {
                                 let close = ui.interact(
                                     close_rect,
                                     ui.id().with(("close_tab", tab.id)),
@@ -3433,7 +3589,15 @@ fn tab_strip(
     if let Some(index) = clicked_tab {
         pane.select_tab(index);
     }
-    tab_targets.add_strip(ui, index, strip, pane.tabs.len(), visible_tabs);
+    pane.tab_context_menu = tab_context_menu;
+    tab_targets.add_strip(
+        ui,
+        index,
+        strip,
+        pane.tabs.len(),
+        pane.pinned_count(),
+        visible_tabs,
+    );
     (strip, active_tab)
 }
 
@@ -5759,10 +5923,7 @@ mod tests {
             wait_for_directory(&mut tab);
             let selected = tab.path.join("file035");
             tab.selected.insert(selected.clone());
-            let mut pane = Pane {
-                tabs: vec![tab],
-                current: 0,
-            };
+            let mut pane = Pane::new(vec![tab]);
             let settings = Settings {
                 grid,
                 ..Default::default()
@@ -5973,14 +6134,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let make_tab = |name| Tab::new(dir.path().join(name).into(), &ctx);
         let mut panes = [
-            Pane {
-                tabs: vec![make_tab("alpha"), make_tab("beta")],
-                current: 0,
-            },
-            Pane {
-                tabs: vec![make_tab("gamma")],
-                current: 0,
-            },
+            Pane::new(vec![make_tab("alpha"), make_tab("beta")]),
+            Pane::new(vec![make_tab("gamma")]),
         ];
         let alpha_id = panes[0].tab().id;
         let output = frame(&ctx, &mut panes, vec![]);
@@ -6054,15 +6209,10 @@ mod tests {
         let other = Tab::new(path.clone(), &ctx);
         let other_id = other.id;
         let mut panes = [
-            Pane {
-                tabs: vec![moved, other],
-                current: 1,
-            },
-            Pane {
-                tabs: vec![Tab::new(path.clone(), &ctx)],
-                current: 0,
-            },
+            Pane::new(vec![moved, other]),
+            Pane::new(vec![Tab::new(path.clone(), &ctx)]),
         ];
+        panes[0].select_tab(1);
         assert!(move_tab(
             &mut panes,
             TabDrop {
@@ -6116,6 +6266,208 @@ mod tests {
         assert_ne!(panes[0].tab().id, other_id);
         assert_eq!(panes[1].tab().id, other_id);
         assert_eq!(panes[1].tabs.len(), 3);
+    }
+
+    #[test]
+    fn tab_moves_respect_pin_group_boundaries_in_both_panes() {
+        let ctx = egui::Context::default();
+        let root = tempfile::tempdir().unwrap();
+        let make_tab = |name| Tab::new(root.path().join(name).into(), &ctx);
+        let mut panes = [
+            Pane::new(vec![make_tab("a"), make_tab("b"), make_tab("c")]),
+            Pane::new(vec![make_tab("d"), make_tab("e")]),
+        ];
+        for (pane, index) in [(0, 0), (0, 1), (1, 0)] {
+            panes[pane].toggle_pin(index);
+        }
+        let a = panes[0].tabs[0].id;
+        let c = panes[0].tabs[2].id;
+        assert!(!move_tab(
+            &mut panes,
+            TabDrop {
+                source: 0,
+                id: c,
+                destination: 0,
+                slot: 0,
+            },
+            &ctx,
+        ));
+        assert!(move_tab(
+            &mut panes,
+            TabDrop {
+                source: 0,
+                id: a,
+                destination: 0,
+                slot: 3,
+            },
+            &ctx,
+        ));
+        assert_eq!(panes[0].tabs[1].id, a);
+        assert_eq!(panes[0].pinned_count(), 2);
+
+        for (id, slot) in [(a, 2), (c, 0)] {
+            assert!(move_tab(
+                &mut panes,
+                TabDrop {
+                    source: 0,
+                    id,
+                    destination: 1,
+                    slot,
+                },
+                &ctx,
+            ));
+        }
+        assert_eq!(panes[0].pinned_count(), 1);
+        assert_eq!(panes[1].pinned_count(), 2);
+        assert_eq!(panes[1].tabs[1].id, a);
+        assert_eq!(panes[1].tabs[2].id, c);
+        assert!(panes.iter().all(|pane| pane.closed_tabs.is_empty()));
+    }
+
+    #[test]
+    fn tab_context_menu_blocks_pane_shortcuts_until_escape_dismisses_it() {
+        use egui::{Event, Key, Modifiers, PointerButton};
+
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("tab-menu");
+        std::fs::create_dir(&folder).unwrap();
+        let file = folder.join("selected.txt");
+        std::fs::write(&file, "example").unwrap();
+        let file: Location = file.into();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut app = PawCommander::new(&cc, Some(folder));
+        app.action(Action::NewTab(0), &ctx);
+        wait_for_directory(app.tab_mut());
+        app.tab_mut().selected.insert(file.clone());
+
+        let mut run = |app: &mut PawCommander, events| {
+            let mut input = egui::RawInput {
+                events,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(1440.0, 860.0),
+                )),
+                ..Default::default()
+            };
+            eframe::App::raw_input_hook(app, &ctx, &mut input);
+            ctx.run(input, |ctx| eframe::App::update(app, ctx, &mut frame))
+        };
+        let key = |key, modifiers| {
+            [true, false].map(|pressed| Event::Key {
+                key,
+                physical_key: None,
+                pressed,
+                repeat: false,
+                modifiers,
+            })
+        };
+        let output = run(&mut app, vec![]);
+        let pos = output
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) if text.galley.text() == "tab-menu" => {
+                    Some(text.pos + text.galley.size() * 0.5)
+                }
+                _ => None,
+            })
+            .unwrap();
+        for pressed in [true, false] {
+            run(
+                &mut app,
+                vec![
+                    Event::PointerMoved(pos),
+                    Event::PointerButton {
+                        pos,
+                        button: PointerButton::Secondary,
+                        pressed,
+                        modifiers: Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        assert!(ctx.is_context_menu_open());
+        assert!(app.keyboard_blocked(&ctx));
+
+        run(&mut app, key(Key::W, Modifiers::COMMAND).to_vec());
+        assert_eq!(app.panes[0].tabs.len(), 2);
+        assert!(ctx.is_context_menu_open());
+        run(&mut app, key(Key::Escape, Modifiers::NONE).to_vec());
+        assert!(!ctx.is_context_menu_open());
+        assert!(app.tab().selected.contains(&file));
+        run(&mut app, key(Key::W, Modifiers::COMMAND).to_vec());
+        assert_eq!(app.panes[0].tabs.len(), 1);
+    }
+
+    #[test]
+    fn tab_actions_duplicate_and_reopen_exact_locations_and_persist_pins() {
+        let ctx = egui::Context::default();
+        let root = tempfile::tempdir().unwrap();
+        let local: Location = root.path().to_path_buf().into();
+        let remote = Location::Sftp {
+            endpoint: Endpoint {
+                host: "127.0.0.1".into(),
+                port: 2222,
+                user: "test".into(),
+                key: Some(root.path().join("key with spaces")),
+            },
+            path: "/папка/two words".into(),
+        };
+        let open = |storage: &MemoryStorage, start| {
+            let mut cc = eframe::CreationContext::_new_kittest(ctx.clone());
+            cc.storage = Some(storage);
+            PawCommander::new(&cc, start)
+        };
+        let mut storage = MemoryStorage::default();
+        let mut app = open(&storage, Some(root.path().into()));
+        app.panes[0].tabs.push(Tab::new(remote.clone(), &ctx));
+        let local_id = app.tab().id;
+        let remote_id = app.panes[0].tabs[1].id;
+
+        app.action(Action::TogglePinTab(0, 1), &ctx);
+        assert_eq!(app.tab().id, local_id);
+        assert_eq!(app.panes[0].tabs[0].id, remote_id);
+        assert!(app.panes[0].tabs[0].pinned);
+        assert!(!app.panes[0].can_close_tab(0));
+        app.action(Action::CloseTab(0, 0), &ctx);
+        app.panes[0].select_tab(0);
+        app.run_shortcut(Command::CloseTab, &ctx);
+        assert_eq!(app.panes[0].tabs.len(), 2);
+        assert!(app.panes[0].closed_tabs.is_empty());
+
+        app.action(Action::DuplicateTab(0, 0), &ctx);
+        let duplicate_id = app.tab().id;
+        assert_ne!(duplicate_id, remote_id);
+        assert_eq!(app.tab().path, remote);
+        assert!(!app.tab().pinned);
+        app.action(Action::CloseTab(0, 1), &ctx);
+        app.action(Action::CloseTab(0, 1), &ctx);
+        app.action(Action::CloseTab(0, 0), &ctx);
+        app.action(Action::ReopenTab(1), &ctx);
+        assert_eq!(app.active, 0);
+        assert_eq!(app.panes[1].tabs.len(), 1);
+
+        app.run_shortcut(Command::ReopenTab, &ctx);
+        assert_eq!(app.tab().path, local);
+        app.run_shortcut(Command::ReopenTab, &ctx);
+        assert_eq!(app.panes[0].current, 1);
+        assert_eq!(app.tab().path, remote);
+        assert_ne!(app.tab().id, duplicate_id);
+        assert!(app.panes[0].closed_tabs.is_empty());
+        app.action(Action::CloseTab(0, 1), &ctx);
+
+        eframe::App::save(&mut app, &mut storage);
+        let restored = open(&storage, None);
+        assert!(restored.panes[0].closed_tabs.is_empty());
+        assert_eq!(restored.panes[0].pinned_count(), 1);
+        assert_eq!(restored.panes[0].tabs[0].path, remote);
+        assert_eq!(restored.panes[0].tabs[1].path, local);
+        assert_eq!(restored.panes[1].pinned_count(), 0);
+        let explicit_start = open(&storage, Some(root.path().into()));
+        assert!(!explicit_start.tab().pinned);
+        assert_eq!(explicit_start.tab().path, local);
     }
 
     #[test]
@@ -6295,6 +6647,7 @@ mod tests {
         );
         assert_eq!(legacy.theme, Theme::Frappe);
         assert_eq!(legacy.shortcuts, Shortcuts::default());
+        assert_eq!(legacy.pinned_tab_counts, [0; 2]);
         let remote =
             fs_ops::resolve("sftp://alice@example.com:2222/папка", &legacy.bookmarks[0]).unwrap();
         let settings = Settings {

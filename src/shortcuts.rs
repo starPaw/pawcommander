@@ -10,6 +10,9 @@ pub enum Command {
     Search,
     NewTab,
     CloseTab,
+    TogglePinTab,
+    DuplicateTab,
+    ReopenTab,
     Back,
     Forward,
     Parent,
@@ -34,12 +37,15 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Self; 25] = [
+    pub const ALL: [Self; 28] = [
         Self::EditPath,
         Self::Filter,
         Self::Search,
         Self::NewTab,
         Self::CloseTab,
+        Self::TogglePinTab,
+        Self::DuplicateTab,
+        Self::ReopenTab,
         Self::Back,
         Self::Forward,
         Self::Parent,
@@ -69,6 +75,9 @@ impl Command {
             Self::Search => "Поиск файлов",
             Self::NewTab => "Новая вкладка",
             Self::CloseTab => "Закрыть вкладку",
+            Self::TogglePinTab => "Закрепить или открепить вкладку",
+            Self::DuplicateTab => "Дублировать вкладку",
+            Self::ReopenTab => "Восстановить закрытую вкладку",
             Self::Back => "Назад",
             Self::Forward => "Вперёд",
             Self::Parent => "Родительская папка",
@@ -141,6 +150,7 @@ impl Profile {
             Search => (CMD_SHIFT, Key::F),
             NewTab => (Modifiers::COMMAND, Key::T),
             CloseTab => (Modifiers::COMMAND, Key::W),
+            ReopenTab => (CMD_SHIFT, Key::T),
             Back => (Modifiers::ALT, Key::ArrowLeft),
             Forward => (Modifiers::ALT, Key::ArrowRight),
             Parent => (Modifiers::ALT, Key::ArrowUp),
@@ -157,7 +167,9 @@ impl Profile {
             FocusToolbar => (Modifiers::NONE, Key::F10),
             Palette => (CMD_SHIFT, Key::P),
             FolderJump => (CMD_SHIFT, Key::J),
-            Preview | EditInZed | CopyToPane | MoveToPane => return None,
+            Preview | EditInZed | CopyToPane | MoveToPane | TogglePinTab | DuplicateTab => {
+                return None
+            }
         };
         Some(Chord::new(modifiers, key))
     }
@@ -220,7 +232,12 @@ impl Shortcuts {
 
     pub fn validate(&mut self) {
         // Keep explicit bindings saved before these default shortcuts existed.
-        for command in [Command::FocusToolbar, Command::Palette, Command::FolderJump] {
+        for command in [
+            Command::FocusToolbar,
+            Command::Palette,
+            Command::FolderJump,
+            Command::ReopenTab,
+        ] {
             if !self.overrides.contains_key(&command)
                 && self
                     .overrides
@@ -646,10 +663,14 @@ mod tests {
     }
 
     #[test]
-    fn picker_defaults_preserve_legacy_shortcuts_and_can_be_reassigned() {
+    fn new_defaults_preserve_legacy_shortcuts_and_can_be_reassigned() {
         let custom = chord(Key::F9, Modifiers::NONE);
         for profile in [Profile::Default, Profile::Commander] {
-            for (key, picker) in [(Key::P, Command::Palette), (Key::J, Command::FolderJump)] {
+            for (key, command) in [
+                (Key::P, Command::Palette),
+                (Key::J, Command::FolderJump),
+                (Key::T, Command::ReopenTab),
+            ] {
                 let default = chord(key, CMD_SHIFT);
                 let mut shortcuts: Shortcuts = serde_json::from_value(serde_json::json!({
                     "profile": profile,
@@ -658,14 +679,14 @@ mod tests {
                 .unwrap();
                 shortcuts.validate();
                 assert_eq!(shortcuts.command(default), Some(Command::Refresh));
-                assert_eq!(shortcuts.chord(picker), None);
+                assert_eq!(shortcuts.chord(command), None);
 
-                shortcuts.set(picker, Some(custom)).unwrap();
+                shortcuts.set(command, Some(custom)).unwrap();
                 shortcuts.validate();
                 let ctx = egui::Context::default();
-                assert_eq!(shortcuts.command(custom), Some(picker));
+                assert_eq!(shortcuts.command(custom), Some(command));
                 let _ = ctx.run(Default::default(), |ctx| {
-                    assert_eq!(shortcuts.keys(ctx, picker), ctx.format_shortcut(&custom));
+                    assert_eq!(shortcuts.keys(ctx, command), ctx.format_shortcut(&custom));
                 });
             }
         }

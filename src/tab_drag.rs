@@ -5,6 +5,7 @@ pub struct DragTab {
     pub id: u64,
     pub pane: usize,
     pub label: String,
+    pub pinned: bool,
 }
 
 pub struct TabDrop {
@@ -15,12 +16,21 @@ pub struct TabDrop {
     pub slot: usize,
 }
 
+pub fn clamp_tab_slot(slot: usize, pinned: bool, pinned_count: usize, count: usize) -> usize {
+    if pinned {
+        slot.min(pinned_count)
+    } else {
+        slot.clamp(pinned_count, count)
+    }
+}
+
 struct Strip {
     pane: usize,
     layer: LayerId,
     rect: Rect,
     pane_rect: Rect,
     count: usize,
+    pinned_count: usize,
     tabs: Vec<(usize, Rect)>,
 }
 
@@ -41,6 +51,15 @@ impl Strip {
                 .map_or(self.rect.left(), |(_, r)| r.right()),
         )
     }
+
+    fn slot_x(&self, slot: usize) -> f32 {
+        self.tabs
+            .iter()
+            .find(|(index, _)| *index >= slot)
+            .map(|(_, rect)| rect.left())
+            .or_else(|| self.tabs.last().map(|(_, rect)| rect.right()))
+            .unwrap_or(self.rect.left())
+    }
 }
 
 #[derive(Default)]
@@ -53,6 +72,7 @@ impl TabDropTargets {
         pane: usize,
         rect: Rect,
         count: usize,
+        pinned_count: usize,
         tabs: Vec<(usize, Rect)>,
     ) {
         self.0.push(Strip {
@@ -61,6 +81,7 @@ impl TabDropTargets {
             rect: rect.intersect(ui.clip_rect()),
             pane_rect: Rect::NOTHING,
             count,
+            pinned_count,
             tabs,
         });
     }
@@ -94,12 +115,18 @@ impl TabDropTargets {
         let target = strip.map(|strip| {
             let slot = if strip.rect.contains(pos) {
                 let (slot, x) = strip.slot(pos);
+                let allowed = clamp_tab_slot(slot, drag.pinned, strip.pinned_count, strip.count);
+                let x = if allowed == slot {
+                    x
+                } else {
+                    strip.slot_x(allowed)
+                };
                 painter.vline(
                     x.clamp(strip.rect.left() + 1.0, strip.rect.right() - 1.0),
                     strip.rect.y_range().shrink(2.0),
                     Stroke::new(2.5, colors.blue),
                 );
-                slot
+                allowed
             } else {
                 painter.rect_stroke(
                     strip.pane_rect.shrink(1.0),
@@ -107,7 +134,7 @@ impl TabDropTargets {
                     Stroke::new(2.0, colors.blue),
                     StrokeKind::Inside,
                 );
-                strip.count
+                clamp_tab_slot(strip.count, drag.pinned, strip.pinned_count, strip.count)
             };
             TabDrop {
                 source: drag.pane,
@@ -162,6 +189,7 @@ mod tests {
             rect,
             pane_rect: rect,
             count: 6,
+            pinned_count: 0,
             tabs: vec![
                 (2, Rect::from_min_max(rect.min, egui::pos2(44.0, 32.0))),
                 (

@@ -41,6 +41,8 @@ Use the arrow beside the breadcrumbs to type a path. Folder suggestions work for
 
 Open **Go to Folder** from the sidebar or command palette, or press `Ctrl+Shift+J` (`Cmd+Shift+J` on macOS). Type part of a folder name or path to search your last 128 distinct visited folders. Results rank by match quality, recency, and visit frequency. Select a folder to open it in the active pane.
 
+Right-click a tab to pin, unpin, or duplicate it. Drag tabs to rearrange them or move them between panes. Pinned tabs stay at the start of each pane and must be unpinned before closing. Press `Ctrl+Shift+T` (`Cmd+Shift+T` on macOS) to reopen the most recently closed tab in the active pane during the current session.
+
 ## Get started
 
 **PawCommander is an early release.** macOS is the primary development platform. Linux and Windows have platform-specific implementations and CI checks; desktop integration on those systems still needs broader testing. Feedback and reproducible bug reports are welcome.
