@@ -101,6 +101,8 @@ List rows and grid tiles expose their full names, types, and selection states to
 
 ## Keyboard shortcuts
 
+Open **Settings → Command Palette** or press `Cmd/Ctrl+Shift+P`. Type words from a command name to filter the list, use `↑` or `↓` to select an available command, and press `Enter` to run it. Press `Esc` to return to the previous control. The list shows the shortcuts from your active profile, including custom bindings. You can run a command from the palette even if it has no shortcut.
+
 Open **Settings → Keyboard Shortcuts** to view and change bindings. Click a binding and press the new shortcut. If it is already assigned, PawCommander shows which action uses it. Clear that action's binding first if you want to reassign the key. Press `Esc` to stop recording. Use **Save** to apply and remember your changes, or **Cancel** to discard them.
 
 The **Commander** profile changes the function row. `F3` toggles the details panel, `F4` opens the selected file in Zed when available, `F5` copies to the other pane, `F6` moves to the other pane, `F7` creates a folder, and `F8` opens the deletion confirmation. Refresh moves to `Cmd/Ctrl+R` and the dual-pane toggle moves to `Cmd/Ctrl+Shift+D`. Copying and moving between panes require both panes to be visible.
@@ -120,6 +122,7 @@ Choosing another profile replaces custom bindings in the editor. **Reset to defa
 | Enter a path | `Cmd/Ctrl+L` |
 | Filter current folder | `Cmd/Ctrl+F` |
 | Search indexed local paths | `Cmd/Ctrl+Shift+F` |
+| Open the command palette | `Cmd/Ctrl+Shift+P` |
 | Show / hide hidden files | `Cmd/Ctrl+H` |
 | Refresh | `F5` |
 | Select all | `Cmd/Ctrl+A` |

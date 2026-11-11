@@ -3,7 +3,7 @@ use eframe::egui::{self, Event, Key, KeyboardShortcut as Chord, Modifiers};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum Command {
     EditPath,
     Filter,
@@ -28,10 +28,12 @@ pub enum Command {
     CopyToPane,
     MoveToPane,
     FocusToolbar,
+    #[serde(rename = "CommandPalette")]
+    Palette,
 }
 
 impl Command {
-    const ALL: [Self; 23] = [
+    pub const ALL: [Self; 24] = [
         Self::EditPath,
         Self::Filter,
         Self::Search,
@@ -55,6 +57,7 @@ impl Command {
         Self::CopyToPane,
         Self::MoveToPane,
         Self::FocusToolbar,
+        Self::Palette,
     ];
 
     pub fn label(self) -> &'static str {
@@ -82,6 +85,7 @@ impl Command {
             Self::CopyToPane => "Копировать в соседнюю панель",
             Self::MoveToPane => "Переместить в соседнюю панель",
             Self::FocusToolbar => "Фокус на панели инструментов",
+            Self::Palette => "Палитра команд",
         })
     }
 
@@ -89,7 +93,7 @@ impl Command {
     pub fn works_in_text_field(self, chord: Chord) -> bool {
         matches!(
             self,
-            Self::EditPath | Self::Filter | Self::Search | Self::FocusToolbar
+            Self::EditPath | Self::Filter | Self::Search | Self::FocusToolbar | Self::Palette
         ) && Profile::Default.chord(self) == Some(chord)
     }
 }
@@ -143,6 +147,7 @@ impl Profile {
             NewFolder => (CMD_SHIFT, Key::N),
             Trash => (Modifiers::NONE, Key::Delete),
             FocusToolbar => (Modifiers::NONE, Key::F10),
+            Palette => (CMD_SHIFT, Key::P),
             Preview | EditInZed | CopyToPane | MoveToPane => return None,
         };
         Some(Chord::new(modifiers, key))
@@ -205,15 +210,16 @@ impl Shortcuts {
     }
 
     pub fn validate(&mut self) {
-        // Keep a user's existing F10 binding when loading settings saved before
-        // the toolbar command was introduced.
-        if !self.overrides.contains_key(&Command::FocusToolbar)
-            && self
-                .overrides
-                .values()
-                .any(|binding| *binding == self.profile.chord(Command::FocusToolbar))
-        {
-            self.overrides.insert(Command::FocusToolbar, None);
+        // Keep explicit bindings saved before these default shortcuts existed.
+        for command in [Command::FocusToolbar, Command::Palette] {
+            if !self.overrides.contains_key(&command)
+                && self
+                    .overrides
+                    .values()
+                    .any(|binding| *binding == self.profile.chord(command))
+            {
+                self.overrides.insert(command, None);
+            }
         }
         // Reject inconsistent saved overrides without discarding other app settings.
         for command in Command::ALL {
@@ -233,7 +239,7 @@ impl Shortcuts {
         }
     }
 
-    fn keys(&self, ctx: &egui::Context, command: Command) -> String {
+    pub fn keys(&self, ctx: &egui::Context, command: Command) -> String {
         self.chord(command)
             .into_iter()
             .chain(self.alternate(command))
@@ -628,5 +634,32 @@ mod tests {
         shortcuts.validate();
         assert_eq!(shortcuts.command(f5), Some(Command::CopyToPane));
         assert_eq!(shortcuts.profile, Profile::Commander);
+    }
+
+    #[test]
+    fn palette_default_preserves_legacy_shortcut_and_can_be_reassigned() {
+        let palette_default = chord(Key::P, CMD_SHIFT);
+        let custom = chord(Key::F9, Modifiers::NONE);
+        for profile in [Profile::Default, Profile::Commander] {
+            let mut shortcuts: Shortcuts = serde_json::from_value(serde_json::json!({
+                "profile": profile,
+                "overrides": {"Refresh": palette_default}
+            }))
+            .unwrap();
+            shortcuts.validate();
+            assert_eq!(shortcuts.command(palette_default), Some(Command::Refresh));
+            assert_eq!(shortcuts.chord(Command::Palette), None);
+
+            shortcuts.set(Command::Palette, Some(custom)).unwrap();
+            shortcuts.validate();
+            let ctx = egui::Context::default();
+            assert_eq!(shortcuts.command(custom), Some(Command::Palette));
+            let _ = ctx.run(Default::default(), |ctx| {
+                assert_eq!(
+                    shortcuts.keys(ctx, Command::Palette),
+                    ctx.format_shortcut(&custom)
+                );
+            });
+        }
     }
 }

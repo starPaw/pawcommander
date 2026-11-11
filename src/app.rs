@@ -1,3 +1,4 @@
+use crate::command_palette::{CommandPalette, PaletteOutcome};
 use crate::conflict::{Answer, ConflictDialog, Decision};
 use crate::drag_drop::{DragFiles, DropRequest, DropTargets};
 use crate::file_clipboard::{FileList, SystemClipboard};
@@ -834,6 +835,9 @@ pub struct PawCommander {
     notice: Option<(String, bool)>,
     show_help: bool,
     shortcut_editor: Option<ShortcutEditor>,
+    command_palette: Option<CommandPalette>,
+    palette_release_key: Option<egui::Key>,
+    palette_focus_to_restore: Option<egui::Id>,
     keyboard_had_focus: bool,
     tab_held: bool,
     pane_key_presses: Vec<(usize, egui::Event)>,
@@ -904,6 +908,9 @@ impl PawCommander {
             notice: None,
             show_help: false,
             shortcut_editor: None,
+            command_palette: None,
+            palette_release_key: None,
+            palette_focus_to_restore: None,
             keyboard_had_focus: false,
             tab_held: false,
             pane_key_presses: Vec::new(),
@@ -991,6 +998,7 @@ impl PawCommander {
             && self.sftp_form.is_none()
             && !self.show_help
             && self.shortcut_editor.is_none()
+            && self.command_palette.is_none()
             && !self.search.visible
     }
 
@@ -1598,6 +1606,10 @@ impl PawCommander {
                 return;
             }
             Command::Search => return self.open_search(),
+            Command::Palette => {
+                let previous_focus = ctx.memory(|memory| memory.focused());
+                return self.open_command_palette(ctx, previous_focus);
+            }
             Command::FocusToolbar => {
                 self.focus_toolbar = true;
                 return;
@@ -1700,6 +1712,7 @@ impl PawCommander {
             || self.sftp_form.is_some()
             || self.show_help
             || self.shortcut_editor.is_some()
+            || self.command_palette.is_some()
             || self.show_accessibility
             || self.native_drag.active()
             || self.search.visible
@@ -1796,46 +1809,152 @@ impl PawCommander {
                 action,
                 Action::Shortcut(Command::EditPath | Command::Filter | Command::FocusToolbar)
             );
-            if self.tab().focused_cursor(ctx).is_some() {
-                let tab = self.tab();
-                if matches!(action, Action::Shortcut(Command::Open)) {
-                    let cursor = tab.cursor.as_ref();
-                    if let Some(path) = tab
-                        .visible(self.settings.hidden)
-                        .iter()
-                        .map(|&index| &tab.entries[index].path)
-                        .find(|path| Some(*path) == cursor)
-                    {
-                        self.action(Action::Open(self.active, path.clone()), ctx);
-                    }
-                    continue;
-                }
-                if matches!(
-                    action,
-                    Action::Copy(_)
-                        | Action::Shortcut(
-                            Command::Rename
-                                | Command::Trash
-                                | Command::Properties
-                                | Command::CopyToPane
-                                | Command::MoveToPane
-                                | Command::EditInZed
-                        )
-                ) && !tab
-                    .cursor
-                    .as_ref()
-                    .is_some_and(|path| tab.selected.contains(path))
-                {
-                    // A focus-only move must never act on another file's selection.
-                    continue;
-                }
-            }
-            self.action(action, ctx);
+            self.run_pane_action(action, ctx);
             // The requested control takes focus later in this frame, when rendered.
             if moves_widget_focus {
                 break;
             }
         }
+    }
+
+    fn run_pane_action(&mut self, action: Action, ctx: &egui::Context) {
+        if self.tab().focused_cursor(ctx).is_some() {
+            let tab = self.tab();
+            if matches!(action, Action::Shortcut(Command::Open)) {
+                let cursor = tab.cursor.as_ref();
+                if let Some(path) = tab
+                    .visible(self.settings.hidden)
+                    .iter()
+                    .map(|&index| &tab.entries[index].path)
+                    .find(|path| Some(*path) == cursor)
+                {
+                    self.action(Action::Open(self.active, path.clone()), ctx);
+                }
+                return;
+            }
+            if matches!(
+                action,
+                Action::Copy(_)
+                    | Action::Shortcut(
+                        Command::Rename
+                            | Command::Trash
+                            | Command::Properties
+                            | Command::CopyToPane
+                            | Command::MoveToPane
+                            | Command::EditInZed
+                    )
+            ) && !tab
+                .cursor
+                .as_ref()
+                .is_some_and(|path| tab.selected.contains(path))
+            {
+                // A focus-only move must never act on another file's selection.
+                return;
+            }
+        }
+        self.action(action, ctx);
+    }
+
+    fn open_command_palette(&mut self, ctx: &egui::Context, previous_focus: Option<egui::Id>) {
+        let focused_file = self
+            .file_row_focus(ctx)
+            .filter(|(pane, file)| Some(self.panes[*pane].tab().entry_id(file)) == previous_focus)
+            .map(|(_, file)| file.clone());
+        self.command_palette = Some(CommandPalette::new(previous_focus, focused_file));
+        ctx.memory_mut(|memory| {
+            if let Some(id) = memory.focused() {
+                memory.surrender_focus(id);
+            }
+        });
+    }
+
+    fn show_command_palette(&mut self, ctx: &egui::Context, keys: &[egui::Key]) {
+        let Some(mut palette) = self.command_palette.take() else {
+            return;
+        };
+        let tab = self.tab();
+        let focused_file = palette.focused_file.as_ref();
+        let selected = self.selected();
+        let has_selection =
+            !selected.is_empty() && focused_file.is_none_or(|file| selected.contains(file));
+        let open_target = if let Some(file) = focused_file {
+            tab.visible(self.settings.hidden)
+                .iter()
+                .map(|&index| &tab.entries[index].path)
+                .find(|&path| path == file)
+        } else {
+            selected.first()
+        };
+        let restore_file_cursor = focused_file.is_some() && open_target.is_some();
+        let idle = self.job.is_none();
+        let outcome = palette.show(
+            ctx,
+            &self.settings.shortcuts,
+            keys,
+            |command| match command {
+                Command::Back => tab.history_index > 0,
+                Command::Forward => tab.history_index + 1 < tab.history.len(),
+                Command::Parent => tab.path.parent().is_some(),
+                Command::CloseTab => self.panes[self.active].tabs.len() > 1,
+                Command::Open => open_target.is_some_and(|path| {
+                    !path.remote()
+                        || tab
+                            .entries
+                            .iter()
+                            .any(|entry| entry.path == *path && entry.is_dir)
+                        || (self.tools.zed.is_some() && self.editor_job.is_none())
+                }),
+                Command::OtherPane => self.settings.split,
+                Command::NewFolder => idle,
+                Command::Rename => idle && has_selection && selected.len() == 1,
+                Command::Trash => idle && has_selection,
+                Command::Properties => has_selection && selected.iter().all(|path| !path.remote()),
+                Command::CopyToPane | Command::MoveToPane => {
+                    idle && self.transfer.is_none() && self.settings.split && has_selection
+                }
+                Command::EditInZed => {
+                    has_selection
+                        && selected.len() == 1
+                        && self.tools.zed.is_some()
+                        && self.editor_job.is_none()
+                        && tab
+                            .entries
+                            .iter()
+                            .any(|entry| !entry.is_dir && entry.path == selected[0])
+                }
+                _ => true,
+            },
+        );
+        if matches!(outcome, PaletteOutcome::Open) {
+            self.command_palette = Some(palette);
+            return;
+        }
+        let close_key = if matches!(outcome, PaletteOutcome::Dismissed) {
+            egui::Key::Escape
+        } else {
+            egui::Key::Enter
+        };
+        if keys.contains(&close_key) && ctx.input(|input| input.key_down(close_key)) {
+            self.palette_release_key = Some(close_key);
+        }
+        ctx.memory_mut(|memory| {
+            if let Some(id) = memory.focused() {
+                memory.surrender_focus(id);
+            }
+            if let Some(id) = palette.previous_focus {
+                memory.request_focus(id);
+            }
+        });
+        if let PaletteOutcome::Run(command) = outcome {
+            if restore_file_cursor {
+                self.tab_mut().cursor = palette.focused_file;
+            }
+            self.run_pane_action(Action::Shortcut(command), ctx);
+        }
+        // egui keeps the old modal layer active through the next render and
+        // can clear the workspace's focus when drawing the underlying widget.
+        self.palette_focus_to_restore = ctx.memory(|memory| memory.focused());
+        ctx.request_repaint();
     }
 
     fn file_row_focus(&self, ctx: &egui::Context) -> Option<(usize, &Location)> {
@@ -2030,6 +2149,13 @@ impl PawCommander {
                                         memory.surrender_focus(id);
                                     }
                                 });
+                                ui.close_menu();
+                            }
+                            let palette_label = Command::Palette.label();
+                            let palette = ui.button(self.settings.shortcuts.hint(ctx, Command::Palette, palette_label));
+                            paint_focus(ui, &palette, 5);
+                            if palette.clicked() {
+                                self.open_command_palette(ctx, Some(button.id));
                                 ui.close_menu();
                             }
                             let about = ui.button(crate::i18n::text("О PawCommander"));
@@ -2646,8 +2772,19 @@ impl eframe::App for PawCommander {
         self.pane_key_presses.clear();
         if !input.focused {
             self.tab_held = false;
+            self.palette_release_key = None;
             return;
         }
+        // A held key that closed the palette must not activate a control behind it.
+        input.events.retain(|event| match *event {
+            egui::Event::Key { key, pressed, .. } if self.palette_release_key == Some(key) => {
+                if !pressed {
+                    self.palette_release_key = None;
+                }
+                !pressed
+            }
+            _ => true,
+        });
         let pane_keys = (!ctx.wants_keyboard_input() || self.file_row_focus(ctx).is_some())
             && !self.keyboard_blocked(ctx);
         let mut index = 0;
@@ -2720,6 +2857,11 @@ impl eframe::App for PawCommander {
         if self.shortcut_editor.is_none() {
             self.scale_shortcuts(ctx);
         }
+        let palette_keys = if self.command_palette.is_some() && !self.conflict_open() {
+            CommandPalette::take_keys(ctx)
+        } else {
+            Vec::new()
+        };
         self.keyboard(ctx);
         let mut actions = vec![];
         let mut drop_targets = DropTargets::default();
@@ -2808,6 +2950,7 @@ impl eframe::App for PawCommander {
             && self.sftp_form.is_none()
             && !self.show_help
             && self.shortcut_editor.is_none()
+            && self.command_palette.is_none()
             && !self.show_accessibility
             && !self.search.visible
         {
@@ -2835,12 +2978,22 @@ impl eframe::App for PawCommander {
             if let Some(conflict) = &mut transfer.conflict {
                 if conflict.show(ctx) {
                     transfer.conflict = None;
+                    if let Some(palette) = &mut self.command_palette {
+                        palette.refocus_query();
+                    }
                     ctx.request_repaint();
                 }
                 return;
             }
         }
         self.restore_dialog_file_focus(ctx);
+        if let Some(id) = self.palette_focus_to_restore.take() {
+            if !self.keyboard_blocked(ctx) && !ctx.wants_keyboard_input() {
+                ctx.memory_mut(|memory| memory.request_focus(id));
+                ctx.request_repaint();
+            }
+        }
+        self.show_command_palette(ctx, &palette_keys);
         self.accessibility_dialog(ctx);
         self.dialogs(ctx);
         if self
@@ -4890,6 +5043,82 @@ mod tests {
             },
         );
         assert!(!app.focus_toolbar);
+    }
+
+    #[test]
+    fn command_palette_filters_navigates_runs_and_restores_focus() {
+        use egui::{Event, Key, Modifiers};
+
+        let root = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        app.action(Action::NewTab(0), &ctx);
+        app.settings.shortcuts = serde_json::from_value(serde_json::json!({
+            "overrides": {"NewTab": shortcuts::chord(Key::F9, Modifiers::NONE)}
+        }))
+        .unwrap();
+        app.tab_mut().focus_filter = true;
+
+        let mut run = |app: &mut PawCommander, events| {
+            let mut input = egui::RawInput {
+                events,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(1440.0, 860.0),
+                )),
+                ..Default::default()
+            };
+            eframe::App::raw_input_hook(app, &ctx, &mut input);
+            ctx.run(input, |ctx| eframe::App::update(app, ctx, &mut frame))
+        };
+        let key = |key, pressed, modifiers| Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers,
+        };
+        let open = || {
+            let modifiers = Modifiers::COMMAND | Modifiers::SHIFT;
+            vec![key(Key::P, true, modifiers), key(Key::P, false, modifiers)]
+        };
+
+        run(&mut app, vec![]);
+        let previous = ctx.memory(|memory| memory.focused()).unwrap();
+        run(&mut app, open());
+        assert!(app.command_palette.is_some());
+        run(&mut app, vec![]);
+        run(&mut app, vec![Event::Text("not-a-command".into())]);
+        run(&mut app, vec![key(Key::Escape, true, Modifiers::NONE)]);
+        assert!(app.command_palette.is_none());
+        assert!(ctx.memory(|memory| memory.has_focus(previous)));
+        assert!(app.tab().filter.is_empty());
+        run(
+            &mut app,
+            vec![
+                key(Key::Escape, true, Modifiers::NONE),
+                key(Key::Escape, false, Modifiers::NONE),
+            ],
+        );
+        assert!(ctx.memory(|memory| memory.has_focus(previous)));
+
+        run(&mut app, open());
+        run(&mut app, vec![]);
+        let output = run(&mut app, vec![Event::Text("TAB".into())]);
+        let tree = output.platform_output.accesskit_update.unwrap();
+        assert!(tree.nodes.iter().any(|(_, node)| {
+            node.label() == Some(Command::NewTab.label()) && node.keyboard_shortcut() == Some("F9")
+        }));
+        assert!(!tree.nodes.iter().any(|(_, node)| {
+            node.label() == Some(Command::NewFolder.label()) && node.keyboard_shortcut().is_some()
+        }));
+        run(&mut app, vec![key(Key::ArrowDown, true, Modifiers::NONE)]);
+        run(&mut app, vec![key(Key::Enter, true, Modifiers::NONE)]);
+        assert!(app.command_palette.is_none());
+        assert_eq!(app.panes[0].tabs.len(), 1);
     }
 
     #[test]

@@ -128,6 +128,7 @@ These are the default bindings. Use **Settings → Keyboard Shortcuts** to custo
 | Enter a path | `Cmd/Ctrl+L` |
 | Filter this folder | `Cmd/Ctrl+F` |
 | Search local paths | `Cmd/Ctrl+Shift+F` |
+| Search and run commands | `Cmd/Ctrl+Shift+P` |
 | Copy / cut / paste | `Cmd/Ctrl+C` / `X` / `V` |
 | Create a folder | `Cmd/Ctrl+Shift+N` |
 | Rename | `F2` |
