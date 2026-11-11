@@ -14,7 +14,7 @@ use crate::vfs::{self as fs_ops, Endpoint, FileEntry, Location};
 use eframe::egui::{self, Color32, FontId, RichText, Sense, Stroke, Vec2};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -393,9 +393,6 @@ impl Settings {
     fn grid_for(&self, index: usize) -> bool {
         self.pane_grid.unwrap_or([self.grid; 2])[index]
     }
-    fn set_grid(&mut self, index: usize, grid: bool) {
-        self.pane_grid.get_or_insert([self.grid; 2])[index] = grid;
-    }
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -420,12 +417,83 @@ impl Default for Settings {
     }
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 enum Sort {
     #[default]
     Name,
     Size,
     Modified,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct FileOrder {
+    key: Sort,
+    descending: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+enum Density {
+    #[default]
+    Standard,
+    Compact,
+}
+
+impl Density {
+    fn label(self) -> &'static str {
+        crate::i18n::text(match self {
+            Self::Standard => "Обычная",
+            Self::Compact => "Компактная",
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct FolderView {
+    grid: bool,
+    hidden: bool,
+    density: Density,
+    order: FileOrder,
+}
+
+#[derive(Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct FolderViewOverrides {
+    grid: Option<bool>,
+    hidden: Option<bool>,
+    density: Option<Density>,
+    order: Option<FileOrder>,
+}
+
+impl FolderViewOverrides {
+    fn resolve(&self, defaults: FolderView) -> FolderView {
+        FolderView {
+            grid: self.grid.unwrap_or(defaults.grid),
+            hidden: self.hidden.unwrap_or(defaults.hidden),
+            density: self.density.unwrap_or(defaults.density),
+            order: self.order.unwrap_or(defaults.order),
+        }
+    }
+}
+
+type FolderViews = BTreeMap<Location, FolderViewOverrides>;
+
+fn is_dot_file(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| name.to_string_lossy().starts_with('.'))
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedFolderView {
+    location: SavedLocation,
+    view: FolderViewOverrides,
+}
+
+#[derive(Clone, Copy)]
+enum FolderViewChange {
+    Grid(bool),
+    Hidden(bool),
+    Density(Density),
+    Sort(Sort),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1069,14 +1137,56 @@ impl Tab {
         }
         false
     }
-    fn sort_by(&mut self, sort: Sort) {
-        self.descending = self.sort == sort && !self.descending;
-        self.sort = sort;
+    fn folder_view(&self, settings: &Settings, pane: usize, views: &FolderViews) -> FolderView {
+        let defaults = FolderView {
+            grid: settings.grid_for(pane),
+            hidden: settings.hidden,
+            density: Density::default(),
+            order: self.legacy_order(),
+        };
+        views
+            .get(&self.path)
+            .map_or(defaults, |view| view.resolve(defaults))
     }
 
-    fn visible(&self, hidden: bool) -> Rc<Vec<usize>> {
-        self.entries
-            .visible(hidden, &self.filter, self.sort, self.descending)
+    fn folder_view_action(&self, pane: usize, change: FolderViewChange) -> Action {
+        Action::FolderView {
+            pane,
+            tab: self.id,
+            location: self.path.clone(),
+            change,
+        }
+    }
+
+    fn legacy_order(&self) -> FileOrder {
+        FileOrder {
+            key: self.sort,
+            descending: self.descending,
+        }
+    }
+
+    fn visible(&self, view: FolderView) -> Rc<Vec<usize>> {
+        self.entries.visible(
+            view.hidden,
+            &self.filter,
+            view.order.key,
+            view.order.descending,
+        )
+    }
+
+    fn hide_dot_file_selection(&mut self) {
+        self.selected.retain(|path| !is_dot_file(path.path()));
+        // Keep the cursor while egui still focuses the row from the last render.
+        // Further commands in this input batch must respect that focus.
+        for target in [
+            &mut self.anchor,
+            &mut self.scroll_to,
+            &mut self.reveal_after_load,
+        ] {
+            if target.as_ref().is_some_and(|path| is_dot_file(path.path())) {
+                *target = None;
+            }
+        }
     }
     fn choose(&mut self, index: usize, visible: &[usize], modifiers: egui::Modifiers) {
         let path = self.entries[index].path.clone();
@@ -1123,8 +1233,8 @@ impl Tab {
         ctx.memory(|memory| memory.has_focus(id)).then_some(id)
     }
 
-    fn selected_visible(&self, hidden: bool) -> Vec<Location> {
-        self.visible(hidden)
+    fn selected_visible(&self, view: FolderView) -> Vec<Location> {
+        self.visible(view)
             .iter()
             .map(|&i| &self.entries[i].path)
             .filter(|path| self.selected.contains(*path))
@@ -1145,8 +1255,8 @@ impl Tab {
             .collect()
     }
 
-    fn move_selection(&mut self, delta: isize, hidden: bool, shift: bool) {
-        let visible = self.visible(hidden);
+    fn move_selection(&mut self, delta: isize, view: FolderView, shift: bool) {
+        let visible = self.visible(view);
         if visible.is_empty() {
             return;
         }
@@ -1316,10 +1426,18 @@ fn move_tab(panes: &mut [Pane], drop: TabDrop, ctx: &egui::Context) -> bool {
 #[derive(Clone)]
 enum Action {
     Shortcut(Command),
-    MoveSelection { delta: isize, extend: bool },
+    MoveSelection {
+        delta: isize,
+        extend: bool,
+    },
     ClearSelection,
     Focus(usize),
-    SetGrid(usize, bool),
+    FolderView {
+        pane: usize,
+        tab: u64,
+        location: Location,
+        change: FolderViewChange,
+    },
     Navigate(usize, Location),
     BookmarkSlot(u8),
     Open(usize, Location),
@@ -1475,6 +1593,7 @@ pub struct PawCommander {
     panes: Vec<Pane>,
     active: usize,
     settings: Settings,
+    folder_views: FolderViews,
     bookmarks: Vec<Bookmark>,
     bookmark_menu_open: Option<u64>,
     bookmark_editor: Option<BookmarkEditor>,
@@ -1513,6 +1632,7 @@ impl PawCommander {
     const SESSION_KEY: &str = "pawcommander.session";
     const WORKSPACES_KEY: &str = "pawcommander.workspaces";
     const BOOKMARKS_KEY: &str = "pawcommander.bookmarks";
+    const FOLDER_VIEWS_KEY: &str = "pawcommander.folder_views";
 
     pub fn new(cc: &eframe::CreationContext<'_>, start: Option<PathBuf>) -> Self {
         let mut settings: Settings = cc
@@ -1523,6 +1643,15 @@ impl PawCommander {
             .storage
             .and_then(|storage| eframe::get_value(storage, Self::WORKSPACES_KEY))
             .unwrap_or_default();
+        let folder_views = cc
+            .storage
+            .and_then(|storage| {
+                eframe::get_value::<Vec<SavedFolderView>>(storage, Self::FOLDER_VIEWS_KEY)
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|saved| Some((saved.location.into_location()?, saved.view)))
+            .collect();
         let saved_bookmarks = cc.storage.and_then(|storage| {
             eframe::get_value::<Vec<SavedBookmark>>(storage, Self::BOOKMARKS_KEY)
         });
@@ -1608,6 +1737,7 @@ impl PawCommander {
             panes,
             active,
             settings,
+            folder_views,
             bookmarks,
             bookmark_menu_open: None,
             bookmark_editor: None,
@@ -1656,10 +1786,45 @@ impl PawCommander {
     fn tab_mut(&mut self) -> &mut Tab {
         self.panes[self.active].tab_mut()
     }
+
+    fn folder_view(&self, index: usize) -> FolderView {
+        self.panes[index]
+            .tab()
+            .folder_view(&self.settings, index, &self.folder_views)
+    }
+
+    fn folder_view_action(&self, index: usize, change: FolderViewChange) -> Action {
+        self.panes[index].tab().folder_view_action(index, change)
+    }
+
+    fn change_folder_view(&mut self, index: usize, change: FolderViewChange) {
+        let current = self.folder_view(index);
+        let location = self.panes[index].tab().path.clone();
+        let view = self.folder_views.entry(location.clone()).or_default();
+        match change {
+            FolderViewChange::Grid(grid) => view.grid = Some(grid),
+            FolderViewChange::Hidden(hidden) => {
+                view.hidden = Some(hidden);
+                if !hidden {
+                    for tab in self.panes.iter_mut().flat_map(|pane| &mut pane.tabs) {
+                        if tab.path == location {
+                            tab.hide_dot_file_selection();
+                        }
+                    }
+                }
+            }
+            FolderViewChange::Density(density) => view.density = Some(density),
+            FolderViewChange::Sort(key) => {
+                view.order = Some(FileOrder {
+                    key,
+                    descending: current.order.key == key && !current.order.descending,
+                });
+            }
+        }
+    }
+
     fn selected(&self) -> Vec<Location> {
-        // Actions can run in the same frame as a visibility toggle, before the
-        // pane has rendered and removed its now-hidden selection.
-        self.tab().selected_visible(self.settings.hidden)
+        self.tab().selected_visible(self.folder_view(self.active))
     }
     fn refresh(&mut self, ctx: &egui::Context) {
         self.preview.refresh();
@@ -2112,8 +2277,8 @@ impl PawCommander {
         match action {
             Action::Shortcut(command) => self.run_shortcut(command, ctx),
             Action::MoveSelection { delta, extend } => {
-                let hidden = self.settings.hidden;
-                self.tab_mut().move_selection(delta, hidden, extend);
+                let view = self.folder_view(self.active);
+                self.tab_mut().move_selection(delta, view, extend);
                 self.tab().focus_cursor(ctx);
             }
             Action::ClearSelection => {
@@ -2123,9 +2288,18 @@ impl PawCommander {
                 tab.anchor = None;
                 tab.filter.clear();
             }
-            Action::SetGrid(index, grid) => {
-                self.settings.set_grid(index, grid);
-                self.active = index;
+            Action::FolderView {
+                pane,
+                tab,
+                location,
+                change,
+            } => {
+                let current = self.panes[pane].tab();
+                if current.id == tab && current.path == location {
+                    self.change_folder_view(pane, change);
+                    self.active = pane;
+                    ctx.request_repaint();
+                }
             }
             Action::ConnectSftp => {
                 let mut form = SftpForm::default();
@@ -2410,15 +2584,12 @@ impl PawCommander {
         let Some(parent) = path.parent() else {
             return;
         };
-        // A result can be hidden. Make it visible before selecting it.
-        if path
-            .components()
-            .any(|part| part.as_os_str().to_string_lossy().starts_with('.'))
-        {
-            self.settings.hidden = true;
+        self.tab_mut().navigate(parent.to_path_buf().into(), ctx);
+        // A hidden result needs to be visible in its destination folder.
+        if is_dot_file(&path) && !self.folder_view(self.active).hidden {
+            self.change_folder_view(self.active, FolderViewChange::Hidden(true));
         }
         let tab = self.tab_mut();
-        tab.navigate(parent.to_path_buf().into(), ctx);
         tab.filter.clear();
         tab.selected.clear();
         tab.reveal_after_load = Some(path.into());
@@ -2473,17 +2644,21 @@ impl PawCommander {
                 Action::Open(self.active, path)
             }
             Command::SelectAll => {
-                let hidden = self.settings.hidden;
+                let view = self.folder_view(self.active);
                 let tab = self.tab_mut();
                 tab.selected = tab
-                    .visible(hidden)
+                    .visible(view)
                     .iter()
                     .map(|&index| tab.entries[index].path.clone())
                     .collect();
                 return;
             }
             Command::Hidden => {
-                self.settings.hidden = !self.settings.hidden;
+                let hidden = !self.folder_view(self.active).hidden;
+                self.action(
+                    self.folder_view_action(self.active, FolderViewChange::Hidden(hidden)),
+                    ctx,
+                );
                 return;
             }
             Command::Split => return self.toggle_split(),
@@ -2495,9 +2670,9 @@ impl PawCommander {
                     }
                     self.active = 1 - self.active;
                     if previous_focus.is_some() {
-                        let hidden = self.settings.hidden;
+                        let view = self.folder_view(self.active);
                         let tab = self.tab_mut();
-                        let visible = tab.visible(hidden);
+                        let visible = tab.visible(view);
                         let path = visible
                             .iter()
                             .map(|&index| &tab.entries[index].path)
@@ -2708,7 +2883,7 @@ impl PawCommander {
             if matches!(action, Action::Shortcut(Command::Open)) {
                 let cursor = tab.cursor.as_ref();
                 if let Some(path) = tab
-                    .visible(self.settings.hidden)
+                    .visible(self.folder_view(self.active))
                     .iter()
                     .map(|&index| &tab.entries[index].path)
                     .find(|path| Some(*path) == cursor)
@@ -2776,7 +2951,7 @@ impl PawCommander {
         let has_selection =
             !selected.is_empty() && focused_file.is_none_or(|file| selected.contains(file));
         let open_target = if let Some(file) = focused_file {
-            tab.visible(self.settings.hidden)
+            tab.visible(self.folder_view(self.active))
                 .iter()
                 .map(|&index| &tab.entries[index].path)
                 .find(|&path| path == file)
@@ -2910,7 +3085,7 @@ impl PawCommander {
             .contains_key(&id)
             .then_some(id)
             .or_else(|| {
-                tab.visible(self.settings.hidden)
+                tab.visible(self.folder_view(self.active))
                     .iter()
                     .map(|&index| tab.entry_id(&tab.entries[index].path))
                     .find(|id| tab.rendered_rows.contains_key(id))
@@ -3110,8 +3285,25 @@ impl PawCommander {
                                 }
                             });
                             ui.separator();
-                            let hidden = ui.checkbox(&mut self.settings.hidden, crate::i18n::text("Скрытые файлы"));
-                            paint_focus(ui, &hidden, 5);
+                            ui.label(crate::i18n::text("Вид текущей папки"));
+                            let view = self.folder_view(self.active);
+                            let mut hidden = view.hidden;
+                            let response = ui.checkbox(&mut hidden, crate::i18n::text("Скрытые файлы"));
+                            paint_focus(ui, &response, 5);
+                            if response.changed() {
+                                actions.push(self.folder_view_action(self.active, FolderViewChange::Hidden(hidden)));
+                            }
+                            ui.horizontal(|ui| {
+                                ui.label(crate::i18n::text("Плотность"));
+                                for density in [Density::Standard, Density::Compact] {
+                                    let response = ui.radio(view.density == density, density.label());
+                                    paint_focus(ui, &response, 5);
+                                    if response.clicked() {
+                                        actions.push(self.folder_view_action(self.active, FolderViewChange::Density(density)));
+                                    }
+                                }
+                            });
+                            ui.separator();
                             let tools_menu = ui.menu_button(crate::i18n::text("Инструменты"), |ui| {
                                 for (name, path) in [("locate", &self.tools.locate), ("Zed", &self.tools.zed)] {
                                     if let Some(path) = path {
@@ -3525,15 +3717,20 @@ impl PawCommander {
                             .color(colors.muted),
                     );
                     ui.add_space(10.0);
-                    ui.checkbox(
-                        &mut self.settings.hidden,
-                        crate::i18n::text("Скрытые файлы"),
-                    )
-                    .on_hover_text(self.settings.shortcuts.hint(
-                        ctx,
-                        Command::Hidden,
-                        Command::Hidden.label(),
-                    ));
+                    let mut hidden = self.folder_view(self.active).hidden;
+                    let response = ui
+                        .checkbox(&mut hidden, crate::i18n::text("Скрытые файлы"))
+                        .on_hover_text(self.settings.shortcuts.hint(
+                            ctx,
+                            Command::Hidden,
+                            Command::Hidden.label(),
+                        ));
+                    paint_focus(ui, &response, 5);
+                    if response.changed() {
+                        actions.push(
+                            self.folder_view_action(self.active, FolderViewChange::Hidden(hidden)),
+                        );
+                    }
                 });
                 card.end(panel_ui);
             });
@@ -3573,7 +3770,7 @@ impl PawCommander {
                     });
                 } else {
                     ui.horizontal(|ui| {
-                        let visible = self.tab().visible(self.settings.hidden).len();
+                        let visible = self.tab().visible(self.folder_view(self.active)).len();
                         ui.label(
                             RichText::new(crate::tr_format!(
                                 "{} объектов  ·  Выбрано: {}",
@@ -4147,6 +4344,7 @@ impl eframe::App for PawCommander {
                             index,
                             active: self.active == index,
                             settings: &self.settings,
+                            folder_views: &self.folder_views,
                             idle: drop_enabled,
                             zed_available,
                         },
@@ -4291,10 +4489,19 @@ impl eframe::App for PawCommander {
             panes: std::array::from_fn(|i| self.panes[i].session()),
             active: self.active,
         };
+        let saved_views: Vec<_> = self
+            .folder_views
+            .iter()
+            .map(|(location, &view)| SavedFolderView {
+                location: location.into(),
+                view,
+            })
+            .collect();
         eframe::set_value(storage, Self::SETTINGS_KEY, &self.settings);
         eframe::set_value(storage, Self::BOOKMARKS_KEY, &saved_bookmarks);
         eframe::set_value(storage, Self::SESSION_KEY, &session);
         eframe::set_value(storage, Self::WORKSPACES_KEY, &self.workspaces);
+        eframe::set_value(storage, Self::FOLDER_VIEWS_KEY, &saved_views);
     }
 }
 
@@ -4302,6 +4509,7 @@ struct PaneOptions<'a> {
     index: usize,
     active: bool,
     settings: &'a Settings,
+    folder_views: &'a FolderViews,
     idle: bool,
     zed_available: bool,
 }
@@ -5149,6 +5357,7 @@ fn render_pane(
         index: pane_index,
         active,
         settings,
+        folder_views,
         idle,
         zed_available,
     } = options;
@@ -5189,8 +5398,15 @@ fn render_pane(
                 .inner_margin(egui::Margin::symmetric(PANE_PADDING, 0))
                 .begin(pane_ui);
             let ui = &mut content.content_ui;
-            let grid = settings.grid_for(pane_index);
             let tab = pane.tab_mut();
+            let view = tab.folder_view(settings, pane_index, folder_views);
+            let FolderView {
+                grid,
+                order,
+                density,
+                ..
+            } = view;
+            let compact_rows = compact || density == Density::Compact;
             tab.rendered_rows.clear();
             address_bar(ui, tab, pane_index, actions, drop_targets);
             let response = ui
@@ -5219,12 +5435,15 @@ fn render_pane(
                     if icons::compact_button(ui, Icon::Grid, crate::i18n::text("Сетка"), grid)
                         .clicked()
                     {
-                        actions.push(Action::SetGrid(pane_index, true));
+                        actions
+                            .push(tab.folder_view_action(pane_index, FolderViewChange::Grid(true)));
                     }
                     if icons::compact_button(ui, Icon::List, crate::i18n::text("Список"), !grid)
                         .clicked()
                     {
-                        actions.push(Action::SetGrid(pane_index, false));
+                        actions.push(
+                            tab.folder_view_action(pane_index, FolderViewChange::Grid(false)),
+                        );
                     }
                     if compact {
                         let sort_menu = ui.menu_button(sort_label, |ui| {
@@ -5234,17 +5453,19 @@ fn render_pane(
                                 (Sort::Modified, "Изменён"),
                             ] {
                                 let label = crate::i18n::text(label);
-                                let selected = tab.sort == sort;
+                                let selected = order.key == sort;
                                 let title = if selected {
-                                    format!("{label} {}", if tab.descending { "↓" } else { "↑" })
+                                    format!("{label} {}", if order.descending { "↓" } else { "↑" })
                                 } else {
                                     label.to_owned()
                                 };
                                 let response = ui.selectable_label(selected, title);
                                 paint_focus(ui, &response, 4);
                                 if response.clicked() {
-                                    tab.sort_by(sort);
-                                    actions.push(Action::Focus(pane_index));
+                                    actions.push(tab.folder_view_action(
+                                        pane_index,
+                                        FolderViewChange::Sort(sort),
+                                    ));
                                     ui.close_menu();
                                 }
                             }
@@ -5266,7 +5487,7 @@ fn render_pane(
             }
             if response.changed() && !tab.selected.is_empty() {
                 let visible_paths: BTreeSet<_> = tab
-                    .visible(settings.hidden)
+                    .visible(view)
                     .iter()
                     .map(|i| &tab.entries[*i].path)
                     .filter(|path| tab.selected.contains(*path))
@@ -5344,10 +5565,10 @@ fn render_pane(
                             colors.muted
                         },
                     );
-                    if tab.sort == sort {
+                    if order.key == sort {
                         let x = text.right() + 6.0;
                         let y = r.center().y;
-                        let direction = if tab.descending { -1.0 } else { 1.0 };
+                        let direction = if order.descending { -1.0 } else { 1.0 };
                         painter.add(egui::Shape::line(
                             vec![
                                 egui::pos2(x, y + 2.0 * direction),
@@ -5359,8 +5580,8 @@ fn render_pane(
                     }
                     paint_focus(ui, &response, 4);
                     if response.clicked() {
-                        tab.sort_by(sort);
-                        actions.push(Action::Focus(pane_index));
+                        actions
+                            .push(tab.folder_view_action(pane_index, FolderViewChange::Sort(sort)));
                     }
                 }
             }
@@ -5380,7 +5601,7 @@ fn render_pane(
                     ui.label(crate::i18n::text("Чтение папки…"));
                 });
             }
-            let visible = tab.visible(settings.hidden);
+            let visible = tab.visible(view);
             if visible.is_empty() && !tab.blocking_load() && tab.error.is_none() {
                 if !compact {
                     ui.add_space(50.0);
@@ -5408,7 +5629,7 @@ fn render_pane(
                     }
                 });
             }
-            let row_height = if compact {
+            let row_height = if compact_rows {
                 COMPACT_FILE_ROW_HEIGHT
             } else if grid {
                 104.0
@@ -5497,7 +5718,7 @@ fn render_pane(
                     .id_salt((tab.id, &tab.path, "files"))
                     .auto_shrink([false, false])
                     .show_rows(ui, row_height, rows, |ui, range| {
-                        if grid && compact {
+                        if grid && compact_rows {
                             ui.spacing_mut().interact_size.y = row_height;
                         }
                         for row in range {
@@ -5515,7 +5736,7 @@ fn render_pane(
                                                     pane: pane_index,
                                                     split: settings.split,
                                                     grid: true,
-                                                    compact,
+                                                    compact: compact_rows,
                                                     idle,
                                                     zed_available,
                                                 },
@@ -5535,7 +5756,7 @@ fn render_pane(
                                         pane: pane_index,
                                         split: settings.split,
                                         grid: false,
-                                        compact,
+                                        compact: compact_rows,
                                         idle,
                                         zed_available,
                                     },
@@ -6800,7 +7021,7 @@ mod tests {
             "Delete must not act on the other selected file"
         );
 
-        app.settings.set_grid(0, true);
+        app.settings.pane_grid = Some([true, false]);
         let grid = run(&mut app, request(AxAction::Click));
         assert_eq!(grid.focus, folder_id);
         assert_eq!(app.selected(), vec![folder.clone(), file]);
@@ -7063,6 +7284,7 @@ mod tests {
                                 index,
                                 active: true,
                                 settings,
+                                folder_views: &FolderViews::new(),
                                 idle: true,
                                 zed_available: false,
                             },
@@ -7911,7 +8133,7 @@ mod tests {
             wait_for_directory(app.panes[0].tab_mut());
             wait_for_directory(app.panes[1].tab_mut());
             app.active = 1;
-            app.settings.set_grid(1, grid);
+            app.settings.pane_grid = Some([false, grid]);
             let tab_id = app.tab().id;
             app.tab_mut().scroll_to = Some(selected.clone());
             app.tab_mut().cursor = Some(selected.clone());
@@ -7950,7 +8172,7 @@ mod tests {
             );
 
             app.settings.pane_layout.sidebar_visible = true;
-            app.settings.set_grid(0, grid);
+            app.settings.pane_grid = Some([grid; 2]);
             for (height, fraction) in [
                 (400.0, 0.0),
                 (400.0, 1.0),
@@ -8061,12 +8283,239 @@ mod tests {
             ..Default::default()
         };
         assert!(settings.grid_for(0) && settings.grid_for(1));
-        settings.set_grid(0, false);
+        settings.pane_grid = Some([false, true]);
         let mut storage = MemoryStorage::default();
         eframe::set_value(&mut storage, "views", &settings);
         let restored: Settings = eframe::get_value(&storage, "views").unwrap();
         assert!(!restored.grid_for(0));
         assert!(restored.grid_for(1));
+    }
+
+    #[test]
+    fn folder_view_follows_location_across_panes_refresh_and_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first");
+        let other = root.path().join("other");
+        for folder in [&first, &other] {
+            std::fs::create_dir(folder).unwrap();
+        }
+        for (name, data) in [("small", "s"), ("big", "large"), (".hidden", "xx")] {
+            std::fs::write(first.join(name), data).unwrap();
+        }
+        let hidden: Location = first.join(".hidden").into();
+        let big: Location = first.join("big").into();
+        let small: Location = first.join("small").into();
+        let other: Location = other.into();
+        let ctx = egui::Context::default();
+        let mut cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(first.clone()));
+
+        app.action(
+            app.folder_view_action(0, FolderViewChange::Grid(true)),
+            &ctx,
+        );
+        app.action(
+            app.folder_view_action(1, FolderViewChange::Density(Density::Compact)),
+            &ctx,
+        );
+        app.action(
+            app.folder_view_action(1, FolderViewChange::Sort(Sort::Size)),
+            &ctx,
+        );
+        assert!(!app.folder_view(0).order.descending);
+        app.action(
+            app.folder_view_action(0, FolderViewChange::Sort(Sort::Size)),
+            &ctx,
+        );
+        app.run_shortcut(Command::Hidden, &ctx);
+        let expected = FolderView {
+            grid: true,
+            hidden: true,
+            density: Density::Compact,
+            order: FileOrder {
+                key: Sort::Size,
+                descending: true,
+            },
+        };
+        assert_eq!(app.folder_view(0), expected);
+        assert_eq!(app.folder_view(1), expected);
+        app.action(Action::Refresh, &ctx);
+        for pane in &mut app.panes {
+            wait_for_directory(pane.tab_mut());
+        }
+        app.run_shortcut(Command::SelectAll, &ctx);
+        assert_eq!(
+            app.selected(),
+            vec![big.clone(), hidden.clone(), small.clone()]
+        );
+        app.panes[1].tab_mut().selected.insert(hidden.clone());
+        app.run_shortcut(Command::Hidden, &ctx);
+        assert!(!app.panes[1].tab().selected.contains(&hidden));
+        assert_eq!(app.selected(), vec![big, small]);
+        app.run_shortcut(Command::Hidden, &ctx);
+
+        let stale_sort = app.folder_view_action(0, FolderViewChange::Sort(Sort::Name));
+        app.action(Action::Navigate(0, other.clone()), &ctx);
+        app.action(stale_sort, &ctx);
+        assert_eq!(app.folder_view(0), FolderView::default());
+        app.action(Action::Back, &ctx);
+        assert_eq!(app.folder_view(0), expected);
+        app.action(Action::Forward, &ctx);
+        assert_eq!(app.folder_view(0), FolderView::default());
+        assert_eq!(app.folder_view(1), expected);
+        app.action(Action::Navigate(1, other), &ctx);
+
+        let mut storage = MemoryStorage::default();
+        eframe::App::save(&mut app, &mut storage);
+        cc.storage = Some(&storage);
+        let mut reopened = PawCommander::new(&cc, None);
+        assert_eq!(reopened.folder_view(0), FolderView::default());
+        assert_eq!(reopened.folder_view(1), FolderView::default());
+        reopened.action(Action::Back, &ctx);
+        assert_eq!(reopened.folder_view(1), expected);
+        reopened.action(Action::Navigate(0, first.into()), &ctx);
+        assert_eq!(reopened.folder_view(0), expected);
+    }
+
+    #[test]
+    fn folder_view_storage_keeps_native_names_and_distinct_sftp_keys() {
+        #[cfg(unix)]
+        let native = {
+            use std::os::unix::ffi::OsStringExt;
+            std::ffi::OsString::from_vec(vec![b'x', 0xff])
+        };
+        #[cfg(windows)]
+        let native = {
+            use std::os::windows::ffi::OsStringExt;
+            std::ffi::OsString::from_wide(&[u16::from(b'x'), 0xd800])
+        };
+        let root = tempfile::tempdir().unwrap();
+        let local: Location = root.path().join(&native).into();
+        let remote_path = PathBuf::from("/folder").join(&native);
+        let mut endpoint = Endpoint {
+            host: "example.invalid".into(),
+            port: 2022,
+            user: "reader".into(),
+            key: None,
+        };
+        let remote = Location::Sftp {
+            endpoint: endpoint.clone(),
+            path: remote_path.clone(),
+        };
+        endpoint.key = Some(root.path().join(&native));
+        let keyed = Location::Sftp {
+            endpoint,
+            path: remote_path,
+        };
+
+        let ctx = egui::Context::default();
+        let mut cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        app.action(Action::Navigate(0, local.clone()), &ctx);
+        app.action(
+            app.folder_view_action(0, FolderViewChange::Grid(true)),
+            &ctx,
+        );
+        app.action(Action::Navigate(0, remote.clone()), &ctx);
+        app.action(
+            app.folder_view_action(0, FolderViewChange::Hidden(true)),
+            &ctx,
+        );
+        app.action(Action::Navigate(0, keyed.clone()), &ctx);
+        app.action(
+            app.folder_view_action(0, FolderViewChange::Density(Density::Compact)),
+            &ctx,
+        );
+        let mut storage = MemoryStorage::default();
+        eframe::App::save(&mut app, &mut storage);
+        cc.storage = Some(&storage);
+        let mut reopened = PawCommander::new(&cc, Some(root.path().into()));
+        for (location, expected) in [
+            (
+                local,
+                FolderView {
+                    grid: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                remote,
+                FolderView {
+                    hidden: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                keyed,
+                FolderView {
+                    density: Density::Compact,
+                    ..Default::default()
+                },
+            ),
+        ] {
+            reopened.action(Action::Navigate(0, location), &ctx);
+            assert_eq!(reopened.folder_view(0), expected);
+        }
+    }
+
+    #[test]
+    fn folder_view_hiding_focused_row_cannot_delete_another_selected_file() {
+        use egui::accesskit::{Action as AxAction, ActionRequest, NodeId};
+
+        let root = tempfile::tempdir().unwrap();
+        let hidden: Location = root.path().join(".hidden").into();
+        let visible: Location = root.path().join("visible").into();
+        for path in [&hidden, &visible] {
+            std::fs::write(path.path(), "data").unwrap();
+        }
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        app.run_shortcut(Command::Hidden, &ctx);
+        wait_for_directory(app.tab_mut());
+        app.tab_mut().selected.insert(visible.clone());
+        let hidden_id = app.tab().entry_id(&hidden);
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut run = |app: &mut PawCommander, events| {
+            let mut input = egui::RawInput {
+                events,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(1440.0, 860.0),
+                )),
+                ..Default::default()
+            };
+            eframe::App::raw_input_hook(app, &ctx, &mut input);
+            let _ = ctx.run(input, |ctx| eframe::App::update(app, ctx, &mut frame));
+        };
+        run(&mut app, vec![]);
+        run(
+            &mut app,
+            vec![egui::Event::AccessKitActionRequest(ActionRequest {
+                action: AxAction::Focus,
+                target: NodeId(hidden_id.value()),
+                data: None,
+            })],
+        );
+        assert_eq!(app.file_row_focus(&ctx), Some((0, &hidden)));
+        let key = |key, modifiers| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+        run(
+            &mut app,
+            vec![
+                key(egui::Key::H, egui::Modifiers::COMMAND),
+                key(egui::Key::Delete, egui::Modifiers::NONE),
+            ],
+        );
+        assert!(!app.folder_view(0).hidden);
+        assert_eq!(app.selected(), vec![visible]);
+        assert!(app.dialog.is_none());
     }
 
     #[test]
@@ -8091,7 +8540,10 @@ mod tests {
         app.action(Action::Back, &ctx);
         app.panes[0].tab_mut().sort = Sort::Size;
         app.panes[0].tab_mut().descending = true;
-        app.action(Action::SetGrid(0, true), &ctx);
+        app.action(
+            app.folder_view_action(0, FolderViewChange::Grid(true)),
+            &ctx,
+        );
         app.action(Action::NewTab(1), &ctx);
         app.action(Action::Navigate(1, missing.clone()), &ctx);
         app.panes[1].tab_mut().sort = Sort::Modified;
@@ -8111,8 +8563,8 @@ mod tests {
         assert!(reopened.panes[0].tab().descending);
         assert!(reopened.tab().sort == Sort::Modified);
         assert!(!reopened.tab().descending);
-        assert!(reopened.settings.grid_for(0));
-        assert!(!reopened.settings.grid_for(1));
+        assert!(reopened.folder_view(0).grid);
+        assert!(!reopened.folder_view(1).grid);
         wait_for_directory(reopened.panes[0].tab_mut());
         wait_for_directory(reopened.tab_mut());
         assert_eq!(reopened.panes[0].tab().entries[0].name, "present");
@@ -8147,7 +8599,11 @@ mod tests {
         assert_eq!(legacy_fallback.panes[0].pinned_count(), 1);
         assert_eq!(legacy_fallback.panes[0].tabs[1].path, left);
         assert_eq!(legacy_fallback.panes[1].tabs[1].path, missing);
-        assert!(legacy_fallback.settings.grid_for(0));
+        assert!(
+            legacy_fallback.panes[0].tabs[1]
+                .folder_view(&legacy_fallback.settings, 0, &legacy_fallback.folder_views)
+                .grid
+        );
     }
 
     #[test]
@@ -8744,8 +9200,7 @@ mod tests {
         assert_eq!(tab.cursor, Some(location.clone()));
         assert_eq!(tab.scroll_to, Some(location.clone()));
         assert!(tab.reveal_after_load.is_none());
-        assert!(tab
-            .visible(true)
+        assert!(visible_rows(&tab, true)
             .iter()
             .any(|i| tab.entries[*i].path == location));
 
@@ -8943,7 +9398,7 @@ mod tests {
                             );
                             source_pos =
                                 cols[1].available_rect_before_wrap().min + Vec2::splat(10.0);
-                            let visible = tab.visible(false);
+                            let visible = visible_rows(&tab, false);
                             entry_widget(
                                 &mut cols[1],
                                 &mut tab,
@@ -9001,11 +9456,19 @@ mod tests {
             // Dragging an unselected item replaces the group without interpreting
             // Shift (which controls the drop operation) as range selection.
             tab.selected.clear();
-            let visible = tab.visible(false);
+            let visible = visible_rows(&tab, false);
             let paths = tab.drag_paths(visible[0], &visible);
             assert_eq!(paths.len(), 1);
             assert_eq!(tab.selected.len(), 1);
         }
+    }
+
+    fn visible_rows(tab: &Tab, hidden: bool) -> Rc<Vec<usize>> {
+        tab.visible(FolderView {
+            hidden,
+            order: tab.legacy_order(),
+            ..Default::default()
+        })
     }
 
     #[test]
@@ -9031,16 +9494,16 @@ mod tests {
             })
             .collect(),
         );
-        let visible = tab.visible(false);
+        let visible = visible_rows(&tab, false);
         assert_eq!(visible.as_slice(), &[1, 2, 0]);
         tab.choose(1, &visible, egui::Modifiers::NONE);
         tab.choose(0, &visible, egui::Modifiers::SHIFT);
         assert_eq!(tab.selected.len(), 3);
         tab.filter = "TXT".into();
-        assert_eq!(tab.visible(false).as_slice(), &[2, 0]);
+        assert_eq!(visible_rows(&tab, false).as_slice(), &[2, 0]);
         tab.descending = true;
         tab.filter.clear();
-        assert_eq!(tab.visible(false).as_slice(), &[1, 0, 2]);
+        assert_eq!(visible_rows(&tab, false).as_slice(), &[1, 0, 2]);
     }
 
     #[test]
@@ -9065,11 +9528,11 @@ mod tests {
         ]))
         .unwrap();
         assert!(tab.poll());
-        let initial = tab.visible(false);
+        let initial = visible_rows(&tab, false);
         assert_eq!(initial.as_slice(), &[0, 1]);
-        assert!(Rc::ptr_eq(&initial, &tab.visible(false)));
+        assert!(Rc::ptr_eq(&initial, &visible_rows(&tab, false)));
         tab.descending = true;
-        assert_eq!(tab.visible(false).as_slice(), &[1, 0]);
+        assert_eq!(visible_rows(&tab, false).as_slice(), &[1, 0]);
 
         tx.send(DirectoryRead::Batch(vec![
             entry("D", 2, true),
@@ -9077,14 +9540,14 @@ mod tests {
         ]))
         .unwrap();
         assert!(tab.poll());
-        assert_eq!(tab.visible(false).as_slice(), &[3, 4, 1, 0]);
+        assert_eq!(visible_rows(&tab, false).as_slice(), &[3, 4, 1, 0]);
         assert_eq!(initial.as_slice(), &[0, 1]);
         tab.filter = "Ä.TXT".into();
-        assert_eq!(tab.visible(false).as_slice(), &[4, 1]);
+        assert_eq!(visible_rows(&tab, false).as_slice(), &[4, 1]);
         tab.filter.clear();
-        assert_eq!(tab.visible(true).as_slice(), &[3, 4, 1, 0, 2]);
+        assert_eq!(visible_rows(&tab, true).as_slice(), &[3, 4, 1, 0, 2]);
         tab.sort = Sort::Modified;
-        assert_eq!(tab.visible(true).as_slice(), &[3, 0, 2, 4, 1]);
+        assert_eq!(visible_rows(&tab, true).as_slice(), &[3, 0, 2, 4, 1]);
 
         tx.send(DirectoryRead::Finished(Ok(None))).unwrap();
         assert!(!tab.poll());
@@ -9095,17 +9558,17 @@ mod tests {
         tx.send(DirectoryRead::Finished(Ok(Some(replacement))))
             .unwrap();
         assert!(!tab.poll());
-        assert_eq!(tab.visible(true).as_slice(), &[3, 2, 4, 1, 0]);
+        assert_eq!(visible_rows(&tab, true).as_slice(), &[3, 2, 4, 1, 0]);
         tab.sort = Sort::Name;
         tab.filter = "B.TXT".into();
-        assert_eq!(tab.visible(false).as_slice(), &[0]);
+        assert_eq!(visible_rows(&tab, false).as_slice(), &[0]);
 
         let next = tempfile::tempdir().unwrap();
         std::fs::write(next.path().join("next"), "").unwrap();
         tab.navigate(next.path().to_path_buf().into(), &ctx);
-        assert!(tab.visible(false).is_empty());
+        assert!(visible_rows(&tab, false).is_empty());
         wait_for_directory(&mut tab);
-        assert_eq!(tab.visible(false).as_slice(), &[0]);
+        assert_eq!(visible_rows(&tab, false).as_slice(), &[0]);
         assert_eq!(tab.entries[0].name, "next");
     }
 }
