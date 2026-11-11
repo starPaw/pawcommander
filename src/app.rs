@@ -33,6 +33,7 @@ struct Settings {
     bookmarks: Vec<Location>,
     folder_history: FolderHistory,
     split: bool,
+    pane_layout: PaneLayout,
     preview: bool,
     hidden: bool,
     grid: bool,
@@ -43,6 +44,125 @@ struct Settings {
     language: crate::i18n::Language,
     sftp_profiles: Vec<Location>,
     shortcuts: Shortcuts,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+enum PaneOrientation {
+    #[default]
+    SideBySide,
+    Stacked,
+}
+
+impl PaneOrientation {
+    fn axis(self) -> usize {
+        match self {
+            Self::SideBySide => 0,
+            Self::Stacked => 1,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        crate::i18n::text(match self {
+            Self::SideBySide => "Рядом",
+            Self::Stacked => "Одна над другой",
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(default)]
+struct PaneLayout {
+    orientation: PaneOrientation,
+    fractions: [f32; 2],
+    sidebar_visible: bool,
+}
+
+impl Default for PaneLayout {
+    fn default() -> Self {
+        Self {
+            orientation: PaneOrientation::default(),
+            fractions: [0.5; 2],
+            sidebar_visible: true,
+        }
+    }
+}
+
+impl PaneLayout {
+    fn rects(&mut self, ui: &mut egui::Ui, workspace: egui::Rect) -> [egui::Rect; 2] {
+        let axis = self.orientation.axis();
+        let extent = workspace.size()[axis];
+        let gap = extent.min(8.0);
+        let usable = extent - gap;
+        // Keep both panes usable when space allows. On smaller workspaces,
+        // reserve most of the available space for the panes equally.
+        let minimum = [180.0_f32, 220.0][axis].min(usable * 0.45);
+        let fraction = &mut self.fractions[axis];
+        if !fraction.is_finite() {
+            *fraction = 0.5;
+        }
+        let mut first = (usable * *fraction).clamp(minimum, usable - minimum);
+        let mut divider = workspace;
+        divider.min[axis] += first;
+        divider.max[axis] = divider.min[axis] + gap;
+        let response = ui.interact(divider, ui.id().with(("pane_divider", axis)), Sense::DRAG);
+        let primary = egui::PointerButton::Primary;
+        let grab_id = response.id.with("grab_offset");
+        if response.drag_started_by(primary) {
+            if let Some(origin) = ui.input(|input| input.pointer.press_origin()) {
+                ui.data_mut(|data| {
+                    data.insert_temp(grab_id, origin[axis] - divider.center()[axis]);
+                });
+            }
+        }
+        if usable > 0.0 && (response.dragged_by(primary) || response.drag_stopped_by(primary)) {
+            let grab_offset = ui.data(|data| data.get_temp::<f32>(grab_id));
+            if let (Some(pointer), Some(grab_offset)) =
+                (response.interact_pointer_pos(), grab_offset)
+            {
+                let proposed = pointer[axis] - grab_offset - workspace.min[axis] - gap * 0.5;
+                let resized = proposed.clamp(minimum, usable - minimum);
+                if (resized - first).abs() >= 0.5 {
+                    first = resized;
+                    *fraction = first / usable;
+                    divider.min[axis] = workspace.min[axis] + first;
+                    divider.max[axis] = divider.min[axis] + gap;
+                }
+            }
+        }
+        if response.drag_stopped() {
+            ui.data_mut(|data| data.remove::<f32>(grab_id));
+        }
+        let cursor = if axis == 0 {
+            egui::CursorIcon::ResizeHorizontal
+        } else {
+            egui::CursorIcon::ResizeVertical
+        };
+        let response = response.on_hover_and_drag_cursor(cursor);
+        let colors = Palette::from_ctx(ui.ctx());
+        let stroke = Stroke::new(
+            if response.hovered() || response.dragged() {
+                2.0
+            } else {
+                1.0
+            },
+            if response.hovered() || response.dragged() {
+                colors.blue
+            } else {
+                workspace_border(colors)
+            },
+        );
+        if axis == 0 {
+            ui.painter()
+                .vline(divider.center().x, divider.y_range(), stroke);
+        } else {
+            ui.painter()
+                .hline(divider.x_range(), divider.center().y, stroke);
+        }
+        let mut panes = [workspace; 2];
+        panes[0].max[axis] = divider.min[axis];
+        panes[1].min[axis] = divider.max[axis];
+        panes
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -285,6 +405,7 @@ impl Default for Settings {
             bookmarks: vec![],
             folder_history: FolderHistory::default(),
             split: true,
+            pane_layout: PaneLayout::default(),
             preview: true,
             hidden: false,
             grid: false,
@@ -640,6 +761,7 @@ struct Tab {
     scroll_offset: f32,
     scroll_restore: Option<f32>,
     file_scroll_scope: Option<egui::Id>,
+    file_scroll_geometry: Option<(usize, f32)>,
     reveal_after_load: Option<Location>,
     history: Vec<Location>,
     history_index: usize,
@@ -674,6 +796,7 @@ impl Tab {
             scroll_offset: 0.0,
             scroll_restore: None,
             file_scroll_scope: None,
+            file_scroll_geometry: None,
             reveal_after_load: None,
             history: vec![path],
             history_index: 0,
@@ -908,6 +1031,7 @@ impl Tab {
         self.scroll_offset = 0.0;
         self.scroll_restore = None;
         self.file_scroll_scope = None;
+        self.file_scroll_geometry = None;
         self.reveal_after_load = None;
         self.filter.clear();
         self.edit_address = false;
@@ -945,6 +1069,11 @@ impl Tab {
         }
         false
     }
+    fn sort_by(&mut self, sort: Sort) {
+        self.descending = self.sort == sort && !self.descending;
+        self.sort = sort;
+    }
+
     fn visible(&self, hidden: bool) -> Rc<Vec<usize>> {
         self.entries
             .visible(hidden, &self.filter, self.sort, self.descending)
@@ -2873,7 +3002,7 @@ impl PawCommander {
                         }
                     }
                     ui.separator();
-                    let search_width = (ui.available_width() - 395.0).clamp(icons::TOOLBAR_BUTTON_SIZE, 420.0);
+                    let search_width = (ui.available_width() - 432.0).clamp(icons::TOOLBAR_BUTTON_SIZE, 420.0);
                     let search_label = if search_width >= 150.0 {
                         crate::i18n::text("Поиск файлов…")
                     } else if search_width >= 95.0 {
@@ -2969,6 +3098,18 @@ impl PawCommander {
                             ui.separator();
                             appearance_menu(ui, &mut self.settings.theme, self.settings.high_contrast);
                             ui.separator();
+                            ui.label(crate::i18n::text("Расположение панелей"));
+                            ui.horizontal(|ui| {
+                                for orientation in [PaneOrientation::SideBySide, PaneOrientation::Stacked] {
+                                    let response = ui.radio_value(
+                                        &mut self.settings.pane_layout.orientation,
+                                        orientation,
+                                        orientation.label(),
+                                    );
+                                    paint_focus(ui, &response, 5);
+                                }
+                            });
+                            ui.separator();
                             let hidden = ui.checkbox(&mut self.settings.hidden, crate::i18n::text("Скрытые файлы"));
                             paint_focus(ui, &hidden, 5);
                             let tools_menu = ui.menu_button(crate::i18n::text("Инструменты"), |ui| {
@@ -2993,8 +3134,21 @@ impl PawCommander {
                         if icons::button(ui, Icon::Info, "", self.settings.preview).on_hover_text(self.settings.shortcuts.hint(ctx, Command::Preview, Command::Preview.label())).clicked() {
                             self.settings.preview = !self.settings.preview;
                         }
-                        if icons::button(ui, Icon::Split, "", self.settings.split).on_hover_text(self.settings.shortcuts.hint(ctx, Command::Split, Command::Split.label())).clicked() {
+                        let split_icon = match self.settings.pane_layout.orientation {
+                            PaneOrientation::SideBySide => Icon::Split,
+                            PaneOrientation::Stacked => Icon::SplitStacked,
+                        };
+                        if icons::button(ui, split_icon, "", self.settings.split).on_hover_text(self.settings.shortcuts.hint(ctx, Command::Split, Command::Split.label())).clicked() {
                             self.toggle_split();
+                        }
+                        let sidebar = self.settings.pane_layout.sidebar_visible;
+                        let hint = crate::i18n::text(if sidebar {
+                            "Скрыть боковую панель"
+                        } else {
+                            "Показать боковую панель"
+                        });
+                        if icons::button(ui, Icon::Sidebar, "", sidebar).on_hover_text(hint).clicked() {
+                            self.settings.pane_layout.sidebar_visible = !sidebar;
                         }
                         if cfg!(target_os = "macos") && ui.available_width() > 0.0 {
                             let (_, drag) = ui.allocate_exact_size(
@@ -3013,6 +3167,9 @@ impl PawCommander {
         // Rebuild this from visible menu responses every frame. The keyboard
         // guard checks the row ID too, so a removed bookmark cannot leave it set.
         self.bookmark_menu_open = None;
+        if !self.settings.pane_layout.sidebar_visible {
+            return;
+        }
         let colors = Palette::from_ctx(ctx);
         egui::SidePanel::left("places")
             .exact_width(if ctx.screen_rect().width() < 900.0 {
@@ -3968,32 +4125,27 @@ impl eframe::App for PawCommander {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(colors.surface).inner_margin(8))
             .show(ctx, |ui| {
-                if self.settings.split {
-                    ui.columns(2, |cols| {
-                        for (index, col) in cols.iter_mut().enumerate() {
-                            render_pane(
-                                col,
-                                &mut self.panes[index],
-                                PaneOptions {
-                                    index,
-                                    active: self.active == index,
-                                    settings: &self.settings,
-                                    idle: drop_enabled,
-                                    zed_available,
-                                },
-                                &mut actions,
-                                &mut drop_targets,
-                                &mut tab_targets,
-                            );
-                        }
-                    });
+                let workspace = ui.available_rect_before_wrap();
+                let rects = if self.settings.split {
+                    self.settings.pane_layout.rects(ui, workspace)
                 } else {
+                    [workspace, egui::Rect::NOTHING]
+                };
+                let pane_count = if self.settings.split { 2 } else { 1 };
+                for (index, rect) in rects.into_iter().take(pane_count).enumerate() {
+                    let mut pane_ui = ui.new_child(
+                        egui::UiBuilder::new()
+                            .id_salt(("workspace_pane", index))
+                            .max_rect(rect)
+                            .layout(egui::Layout::top_down(egui::Align::Min)),
+                    );
+                    pane_ui.set_clip_rect(ui.clip_rect().intersect(rect));
                     render_pane(
-                        ui,
-                        &mut self.panes[0],
+                        &mut pane_ui,
+                        &mut self.panes[index],
                         PaneOptions {
-                            index: 0,
-                            active: true,
+                            index,
+                            active: self.active == index,
                             settings: &self.settings,
                             idle: drop_enabled,
                             zed_available,
@@ -4003,6 +4155,7 @@ impl eframe::App for PawCommander {
                         &mut tab_targets,
                     );
                 }
+                ui.advance_cursor_after_rect(workspace);
             });
         if self.dialog.is_none()
             && !self.conflict_open()
@@ -5000,7 +5153,13 @@ fn render_pane(
         zed_available,
     } = options;
     let colors = Palette::from_ctx(ui.ctx());
+    // Below this height the regular pane chrome can obscure a grid tile's name.
+    let compact = ui.available_height() < 280.0;
+    let sort_label = crate::i18n::text("Сортировка");
     ui.push_id(pane_index, |ui| {
+        if compact {
+            ui.spacing_mut().item_spacing.y = 1.0;
+        }
         let border = workspace_border(colors);
         const PANE_PADDING: i8 = 10;
         let outline = if active {
@@ -5013,10 +5172,10 @@ fn render_pane(
             left: 1,
             right: 1,
             top: 1,
-            bottom: PANE_PADDING + 1,
+            bottom: if compact { 1 } else { PANE_PADDING + 1 },
         });
         let frame = frame.show(ui, |pane_ui| {
-            pane_ui.set_min_height(pane_ui.available_height() - 1.0);
+            pane_ui.set_min_height((pane_ui.available_height() - 1.0).max(0.0));
             let (strip, active_tab) = tab_strip(
                 pane_ui,
                 pane,
@@ -5037,7 +5196,18 @@ fn render_pane(
             let response = ui
                 .horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    let controls = 2.0 * (icons::COMPACT_SIZE + ui.spacing().item_spacing.x);
+                    let mut controls = 2.0 * (icons::COMPACT_SIZE + ui.spacing().item_spacing.x);
+                    if compact {
+                        let font = egui::TextStyle::Button.resolve(ui.style());
+                        let label_width = ui
+                            .painter()
+                            .layout_no_wrap(sort_label.into(), font, Color32::WHITE)
+                            .size()
+                            .x;
+                        controls += label_width
+                            + 2.0 * ui.spacing().button_padding.x
+                            + ui.spacing().item_spacing.x;
+                    }
                     let filter_width = (ui.available_width() - controls).max(24.0);
                     let response = ui.add_sized(
                         [filter_width, icons::COMPACT_SIZE],
@@ -5055,6 +5225,31 @@ fn render_pane(
                         .clicked()
                     {
                         actions.push(Action::SetGrid(pane_index, false));
+                    }
+                    if compact {
+                        let sort_menu = ui.menu_button(sort_label, |ui| {
+                            for (sort, label) in [
+                                (Sort::Name, "Имя"),
+                                (Sort::Size, "Размер"),
+                                (Sort::Modified, "Изменён"),
+                            ] {
+                                let label = crate::i18n::text(label);
+                                let selected = tab.sort == sort;
+                                let title = if selected {
+                                    format!("{label} {}", if tab.descending { "↓" } else { "↑" })
+                                } else {
+                                    label.to_owned()
+                                };
+                                let response = ui.selectable_label(selected, title);
+                                paint_focus(ui, &response, 4);
+                                if response.clicked() {
+                                    tab.sort_by(sort);
+                                    actions.push(Action::Focus(pane_index));
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                        paint_focus(ui, &sort_menu.response, 4);
                     }
                     response
                 })
@@ -5078,98 +5273,95 @@ fn render_pane(
                     .collect();
                 tab.selected.retain(|p| visible_paths.contains(p));
             }
-            ui.add_space(4.0);
-            let (header, _) =
-                ui.allocate_exact_size(Vec2::new(ui.available_width(), 36.0), Sense::hover());
-            let band = header.expand2(Vec2::new(f32::from(PANE_PADDING), 0.0));
-            ui.painter().rect_filled(band, 0, colors.raised);
-            for y in [band.top(), band.bottom()] {
-                ui.painter()
-                    .hline(band.x_range(), y, Stroke::new(1.0, border));
-            }
-            let wide = header.width() > 380.0;
-            let show_size = header.width() >= 200.0;
-            let name_end = header.right()
-                - if wide {
-                    182.0
-                } else if show_size {
-                    72.0
-                } else {
-                    0.0
-                };
-            for (label, sort, left, right) in [
-                (
-                    crate::i18n::text("Имя"),
-                    Sort::Name,
-                    header.left() + 8.0,
-                    name_end,
-                ),
-                (
-                    crate::i18n::text("Размер"),
-                    Sort::Size,
-                    name_end,
-                    if wide {
-                        header.right() - 113.0
-                    } else {
-                        header.right()
-                    },
-                ),
-                (
-                    crate::i18n::text("Изменён"),
-                    Sort::Modified,
-                    header.right() - 108.0,
-                    header.right(),
-                ),
-            ] {
-                if (sort == Sort::Modified && !wide) || (sort == Sort::Size && !show_size) {
-                    continue;
+            if !compact {
+                ui.add_space(4.0);
+                let (header, _) =
+                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 36.0), Sense::hover());
+                let band = header.expand2(Vec2::new(f32::from(PANE_PADDING), 0.0));
+                ui.painter().rect_filled(band, 0, colors.raised);
+                for y in [band.top(), band.bottom()] {
+                    ui.painter()
+                        .hline(band.x_range(), y, Stroke::new(1.0, border));
                 }
-                let r = egui::Rect::from_min_max(
-                    egui::pos2(left, header.top()),
-                    egui::pos2(right, header.bottom()),
-                );
-                let response = ui.interact(r, ui.id().with(label), Sense::click());
-                response.widget_info(|| {
-                    egui::WidgetInfo::labeled(
-                        egui::WidgetType::Button,
-                        ui.is_enabled(),
-                        crate::tr_format!("Сортировка: {label}", "Sort: {label}"),
-                    )
-                });
-                let painter = ui.painter().with_clip_rect(r);
-                let text = painter.text(
-                    r.left_center(),
-                    egui::Align2::LEFT_CENTER,
-                    label,
-                    FontId::proportional(13.0),
-                    if response.hovered() {
-                        colors.ink
+                let wide = header.width() > 380.0;
+                let show_size = header.width() >= 200.0;
+                let name_end = header.right()
+                    - if wide {
+                        182.0
+                    } else if show_size {
+                        72.0
                     } else {
-                        colors.muted
-                    },
-                );
-                if tab.sort == sort {
-                    let x = text.right() + 6.0;
-                    let y = r.center().y;
-                    let direction = if tab.descending { -1.0 } else { 1.0 };
-                    painter.add(egui::Shape::line(
-                        vec![
-                            egui::pos2(x, y + 2.0 * direction),
-                            egui::pos2(x + 4.0, y - 2.0 * direction),
-                            egui::pos2(x + 8.0, y + 2.0 * direction),
-                        ],
-                        Stroke::new(1.2, colors.muted),
-                    ));
-                }
-                paint_focus(ui, &response, 4);
-                if response.clicked() {
-                    if tab.sort == sort {
-                        tab.descending = !tab.descending;
-                    } else {
-                        tab.sort = sort;
-                        tab.descending = false;
+                        0.0
+                    };
+                for (label, sort, left, right) in [
+                    (
+                        crate::i18n::text("Имя"),
+                        Sort::Name,
+                        header.left() + 8.0,
+                        name_end,
+                    ),
+                    (
+                        crate::i18n::text("Размер"),
+                        Sort::Size,
+                        name_end,
+                        if wide {
+                            header.right() - 113.0
+                        } else {
+                            header.right()
+                        },
+                    ),
+                    (
+                        crate::i18n::text("Изменён"),
+                        Sort::Modified,
+                        header.right() - 108.0,
+                        header.right(),
+                    ),
+                ] {
+                    if (sort == Sort::Modified && !wide) || (sort == Sort::Size && !show_size) {
+                        continue;
                     }
-                    actions.push(Action::Focus(pane_index));
+                    let r = egui::Rect::from_min_max(
+                        egui::pos2(left, header.top()),
+                        egui::pos2(right, header.bottom()),
+                    );
+                    let response = ui.interact(r, ui.id().with(label), Sense::click());
+                    response.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            ui.is_enabled(),
+                            crate::tr_format!("Сортировка: {label}", "Sort: {label}"),
+                        )
+                    });
+                    let painter = ui.painter().with_clip_rect(r);
+                    let text = painter.text(
+                        r.left_center(),
+                        egui::Align2::LEFT_CENTER,
+                        label,
+                        FontId::proportional(13.0),
+                        if response.hovered() {
+                            colors.ink
+                        } else {
+                            colors.muted
+                        },
+                    );
+                    if tab.sort == sort {
+                        let x = text.right() + 6.0;
+                        let y = r.center().y;
+                        let direction = if tab.descending { -1.0 } else { 1.0 };
+                        painter.add(egui::Shape::line(
+                            vec![
+                                egui::pos2(x, y + 2.0 * direction),
+                                egui::pos2(x + 4.0, y - 2.0 * direction),
+                                egui::pos2(x + 8.0, y + 2.0 * direction),
+                            ],
+                            Stroke::new(1.2, colors.muted),
+                        ));
+                    }
+                    paint_focus(ui, &response, 4);
+                    if response.clicked() {
+                        tab.sort_by(sort);
+                        actions.push(Action::Focus(pane_index));
+                    }
                 }
             }
             drop_targets.add(
@@ -5190,7 +5382,9 @@ fn render_pane(
             }
             let visible = tab.visible(settings.hidden);
             if visible.is_empty() && !tab.blocking_load() && tab.error.is_none() {
-                ui.add_space(50.0);
+                if !compact {
+                    ui.add_space(50.0);
+                }
                 ui.vertical_centered(|ui| {
                     ui.label(
                         RichText::new(if tab.filter.is_empty() {
@@ -5198,21 +5392,29 @@ fn render_pane(
                         } else {
                             crate::i18n::text("Ничего не найдено")
                         })
-                        .size(20.0)
+                        .size(if compact { 13.0 } else { 20.0 })
                         .color(colors.muted),
                     );
-                    ui.label(
-                        RichText::new(if tab.filter.is_empty() {
-                            crate::i18n::text("Создайте папку или вставьте файлы")
-                        } else {
-                            crate::i18n::text("Попробуйте другое имя")
-                        })
-                        .size(12.0)
-                        .color(colors.muted),
-                    );
+                    if !compact {
+                        ui.label(
+                            RichText::new(if tab.filter.is_empty() {
+                                crate::i18n::text("Создайте папку или вставьте файлы")
+                            } else {
+                                crate::i18n::text("Попробуйте другое имя")
+                            })
+                            .size(12.0)
+                            .color(colors.muted),
+                        );
+                    }
                 });
             }
-            let row_height = if grid { 104.0 } else { 36.0 };
+            let row_height = if compact {
+                COMPACT_FILE_ROW_HEIGHT
+            } else if grid {
+                104.0
+            } else {
+                36.0
+            };
             let columns = if grid {
                 (ui.available_width() / 108.0).floor().max(1.0) as usize
             } else {
@@ -5222,12 +5424,18 @@ fn render_pane(
             const STATUS_HEIGHT: f32 = 22.0;
             const STATUS_RULE_HEIGHT: f32 = 1.0;
             let spacing = ui.spacing().item_spacing.y;
-            let status_height = STATUS_HEIGHT + STATUS_RULE_HEIGHT + 2.0 * spacing;
-            let files_height = (ui.available_height() - status_height).max(40.0);
+            let status_height = if !compact {
+                STATUS_HEIGHT + STATUS_RULE_HEIGHT + 2.0 * spacing
+            } else {
+                0.0
+            };
+            let files_height = (ui.available_height() - status_height).max(0.0);
             let mut scroll = egui::ScrollArea::vertical();
             let scope = ui.id();
             let previous_scope = tab.file_scroll_scope;
+            let row_pitch = row_height + spacing;
             if !ui.is_sizing_pass() {
+                let previous_geometry = tab.file_scroll_geometry.replace((columns, row_pitch));
                 if previous_scope.is_some_and(|previous| previous != scope) {
                     tab.scroll_restore.get_or_insert(tab.scroll_offset);
                 }
@@ -5238,16 +5446,24 @@ fn render_pane(
                     .and_then(|path| visible.iter().position(|i| tab.entries[*i].path == path))
                 {
                     tab.scroll_restore = None;
-                    scroll = scroll.vertical_scroll_offset(
-                        (position / columns) as f32 * (row_height + spacing),
-                    );
+                    scroll = scroll.vertical_scroll_offset((position / columns) as f32 * row_pitch);
                 } else if tab.has_complete_listing {
                     // Progressive batches can initially be too short to hold
                     // the offset or may still change which rows are at that offset.
-                    if let Some(offset) = tab.scroll_restore.take() {
+                    let offset = tab.scroll_restore.take().or_else(|| {
+                        let (old_columns, old_pitch) = previous_geometry?;
+                        if (old_columns, old_pitch) == (columns, row_pitch) {
+                            return None;
+                        }
+                        // Keep the first visible item in view when the grid reflows.
+                        let old_row = tab.scroll_offset / old_pitch;
+                        let item = old_row as usize * old_columns;
+                        let row = item / columns;
+                        Some((row as f32 + old_row.fract()) * row_pitch)
+                    });
+                    if let Some(offset) = offset {
                         let max_offset =
-                            (rows as f32 * (row_height + spacing) - spacing - files_height)
-                                .max(0.0);
+                            (rows as f32 * row_pitch - spacing - files_height).max(0.0);
                         scroll = scroll.vertical_scroll_offset(offset.min(max_offset));
                     }
                 }
@@ -5256,11 +5472,17 @@ fn render_pane(
             let ctx = ui.ctx().clone();
             ctx.accesskit_node_builder(files_id, |node| {
                 node.set_role(egui::accesskit::Role::List);
-                let pane = if pane_index == 0 {
-                    crate::i18n::text("Левая панель")
-                } else {
-                    crate::i18n::text("Правая панель")
-                };
+                let pane = crate::i18n::text(
+                    match (
+                        settings.split.then_some(settings.pane_layout.orientation),
+                        pane_index,
+                    ) {
+                        (Some(PaneOrientation::Stacked), 0) => "Верхняя панель",
+                        (Some(PaneOrientation::Stacked), _) => "Нижняя панель",
+                        (_, 0) => "Левая панель",
+                        _ => "Правая панель",
+                    },
+                );
                 let view = if grid {
                     crate::i18n::text("Сетка")
                 } else {
@@ -5275,6 +5497,9 @@ fn render_pane(
                     .id_salt((tab.id, &tab.path, "files"))
                     .auto_shrink([false, false])
                     .show_rows(ui, row_height, rows, |ui, range| {
+                        if grid && compact {
+                            ui.spacing_mut().interact_size.y = row_height;
+                        }
                         for row in range {
                             if grid {
                                 ui.horizontal(|ui| {
@@ -5290,6 +5515,7 @@ fn render_pane(
                                                     pane: pane_index,
                                                     split: settings.split,
                                                     grid: true,
+                                                    compact,
                                                     idle,
                                                     zed_available,
                                                 },
@@ -5309,6 +5535,7 @@ fn render_pane(
                                         pane: pane_index,
                                         split: settings.split,
                                         grid: false,
+                                        compact,
                                         idle,
                                         zed_available,
                                     },
@@ -5327,33 +5554,35 @@ fn render_pane(
                 }
                 tab.scroll_offset = offset;
             }
-            ui.add(egui::Separator::default().spacing(STATUS_RULE_HEIGHT));
-            ui.allocate_ui_with_layout(
-                Vec2::new(ui.available_width(), STATUS_HEIGHT),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    ui.label(
-                        RichText::new(crate::tr_format!(
-                            "Выбрано: {}",
-                            "Selected: {}",
-                            tab.selected.len()
-                        ))
-                        .size(11.0)
-                        .color(colors.muted),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if !compact {
+                ui.add(egui::Separator::default().spacing(STATUS_RULE_HEIGHT));
+                ui.allocate_ui_with_layout(
+                    Vec2::new(ui.available_width(), STATUS_HEIGHT),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
                         ui.label(
                             RichText::new(crate::tr_format!(
-                                "{} объектов",
-                                "{} items",
-                                visible.len()
+                                "Выбрано: {}",
+                                "Selected: {}",
+                                tab.selected.len()
                             ))
                             .size(11.0)
                             .color(colors.muted),
                         );
-                    });
-                },
-            );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                RichText::new(crate::tr_format!(
+                                    "{} объектов",
+                                    "{} items",
+                                    visible.len()
+                                ))
+                                .size(11.0)
+                                .color(colors.muted),
+                            );
+                        });
+                    },
+                );
+            }
             content.end(pane_ui);
             (strip, active_tab)
         });
@@ -5372,10 +5601,13 @@ fn render_pane(
     });
 }
 
+const COMPACT_FILE_ROW_HEIGHT: f32 = 24.0;
+
 struct EntryOptions {
     pane: usize,
     split: bool,
     grid: bool,
+    compact: bool,
     idle: bool,
     zed_available: bool,
 }
@@ -5395,6 +5627,7 @@ fn entry_widget(
         pane,
         split,
         grid,
+        compact,
         idle,
         zed_available,
     } = options;
@@ -5402,7 +5635,10 @@ fn entry_widget(
     let is_dir = entry.is_dir;
     let path = entry.path.clone();
     let selected = tab.selected.contains(&path);
-    let size = if grid {
+    let size = if compact {
+        let width = if grid { 100.0 } else { ui.available_width() };
+        Vec2::new(width, COMPACT_FILE_ROW_HEIGHT)
+    } else if grid {
         Vec2::new(100.0, 98.0)
     } else {
         Vec2::new(ui.available_width(), 36.0)
@@ -5471,7 +5707,10 @@ fn entry_widget(
             ));
         }
     }
-    let icon_rect = if grid {
+    let icon_rect = if compact {
+        let left = if grid { 11.0 } else { 44.0 };
+        egui::Rect::from_center_size(rect.left_center() + Vec2::new(left, 0.0), Vec2::splat(16.0))
+    } else if grid {
         egui::Rect::from_center_size(rect.center_top() + Vec2::new(0.0, 30.0), Vec2::splat(37.0))
     } else {
         egui::Rect::from_min_size(rect.min + Vec2::new(32.0, 6.0), Vec2::splat(24.0))
@@ -5488,7 +5727,19 @@ fn entry_widget(
         );
     }
     let name_color = colors.ink;
-    if grid {
+    if grid && compact {
+        let clip = egui::Rect::from_min_max(
+            rect.left_top() + Vec2::new(23.0, 0.0),
+            rect.right_bottom() - Vec2::new(3.0, 0.0),
+        );
+        ui.painter().with_clip_rect(clip).text(
+            clip.left_center(),
+            egui::Align2::LEFT_CENTER,
+            &entry.name,
+            FontId::proportional(12.0),
+            name_color,
+        );
+    } else if grid {
         let galley = ui.painter().layout(
             entry.name.clone(),
             FontId::proportional(12.0),
@@ -7529,6 +7780,281 @@ mod tests {
     }
 
     #[test]
+    fn pane_layout_defaults_and_persists_through_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut storage = MemoryStorage::default();
+        eframe::Storage::set_string(
+            &mut storage,
+            PawCommander::SETTINGS_KEY,
+            "(split:false,preview:false)".into(),
+        );
+        let mut cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        cc.storage = Some(&storage);
+        let mut app = PawCommander::new(&cc, Some(directory.path().into()));
+        assert!(!app.settings.split);
+        assert!(!app.settings.preview);
+        assert_eq!(
+            app.settings.pane_layout.orientation,
+            PaneOrientation::SideBySide
+        );
+        assert_eq!(app.settings.pane_layout.fractions, [0.5, 0.5]);
+        assert!(app.settings.pane_layout.sidebar_visible);
+
+        app.settings.pane_layout.orientation = PaneOrientation::Stacked;
+        app.settings.pane_layout.fractions = [0.35, 0.6];
+        app.settings.pane_layout.sidebar_visible = false;
+        eframe::App::save(&mut app, &mut storage);
+        let mut cc = eframe::CreationContext::_new_kittest(ctx);
+        cc.storage = Some(&storage);
+        let reopened = PawCommander::new(&cc, None);
+        assert_eq!(
+            reopened.settings.pane_layout.orientation,
+            PaneOrientation::Stacked
+        );
+        assert_eq!(reopened.settings.pane_layout.fractions, [0.35, 0.6]);
+        assert!(!reopened.settings.pane_layout.sidebar_visible);
+        assert!(!reopened.settings.split);
+        assert!(!reopened.settings.preview);
+    }
+
+    #[test]
+    fn pane_layout_drag_is_bounded_and_remembers_both_orientations() {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 720.0));
+        let draw = |layout: &mut PaneLayout, events| {
+            let mut result = [egui::Rect::NOTHING; 2];
+            let output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        result = layout.rects(ui, ui.available_rect_before_wrap());
+                    });
+                },
+            );
+            (result, output.platform_output.cursor_icon)
+        };
+        let mut layout = PaneLayout::default();
+        for orientation in [PaneOrientation::SideBySide, PaneOrientation::Stacked] {
+            layout.orientation = orientation;
+            let axis = orientation.axis();
+            let (panes, _) = draw(&mut layout, vec![]);
+            assert_eq!(panes[0].size(), panes[1].size());
+            assert_eq!(panes[1].min[axis] - panes[0].max[axis], 8.0);
+            let mut center = panes[0].center();
+            center[axis] = panes[0].max[axis] + 4.0;
+            let button = |pos, pressed| egui::Event::PointerButton {
+                pos,
+                pressed,
+                button: egui::PointerButton::Primary,
+                modifiers: egui::Modifiers::NONE,
+            };
+            let (_, cursor) = draw(&mut layout, vec![egui::Event::PointerMoved(center)]);
+            assert_eq!(
+                cursor,
+                if axis == 0 {
+                    egui::CursorIcon::ResizeHorizontal
+                } else {
+                    egui::CursorIcon::ResizeVertical
+                }
+            );
+            draw(&mut layout, vec![button(center, true)]);
+            let mut edge = center;
+            edge[axis] = screen.max[axis] - 1.0;
+            let (resized, _) = draw(&mut layout, vec![egui::Event::PointerMoved(edge)]);
+            draw(&mut layout, vec![button(edge, false)]);
+            assert!(resized[0].size()[axis] > panes[0].size()[axis]);
+            assert!(resized[1].size()[axis] >= [180.0, 220.0][axis]);
+            assert_eq!(resized[1].min[axis] - resized[0].max[axis], 8.0);
+        }
+        assert!(layout.fractions.into_iter().all(|fraction| fraction > 0.5));
+        layout.orientation = PaneOrientation::SideBySide;
+        let (panes, _) = draw(&mut layout, vec![]);
+        assert!(panes[0].width() > panes[1].width());
+    }
+
+    #[test]
+    fn pane_layout_preserves_selection_and_scroll_at_minimum_size() {
+        let root = tempfile::tempdir().unwrap();
+        for index in 0..100 {
+            std::fs::write(root.path().join(format!("file{index:03}")), b"test").unwrap();
+        }
+        for grid in [false, true] {
+            let ctx = egui::Context::default();
+            let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+            let mut app = PawCommander::new(&cc, Some(root.path().into()));
+            let mut frame = eframe::Frame::_new_kittest();
+            let selected = app.tab().path.join("file040");
+            let mut draw = |app: &mut PawCommander, height, events| {
+                let mut input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(640.0, height),
+                    )),
+                    events,
+                    ..Default::default()
+                };
+                eframe::App::raw_input_hook(app, &ctx, &mut input);
+                let mut rows = [None, None];
+                let output = ctx.run(input, |ctx| {
+                    eframe::App::update(app, ctx, &mut frame);
+                    for (index, pane) in app.panes.iter().enumerate() {
+                        rows[index] = ctx.read_response(pane.tab().entry_id(&selected));
+                    }
+                });
+                (output, rows)
+            };
+            wait_for_directory(app.panes[0].tab_mut());
+            wait_for_directory(app.panes[1].tab_mut());
+            app.active = 1;
+            app.settings.set_grid(1, grid);
+            let tab_id = app.tab().id;
+            app.tab_mut().scroll_to = Some(selected.clone());
+            app.tab_mut().cursor = Some(selected.clone());
+            app.tab_mut().selected.insert(selected.clone());
+            let (_, rows) = draw(&mut app, 400.0, vec![]);
+            let scope = app.tab().file_scroll_scope;
+            let row = app.tab().entry_id(&selected);
+            assert!(rows[1].as_ref().unwrap().interact_rect.is_positive());
+            ctx.memory_mut(|memory| memory.request_focus(row));
+
+            app.settings.pane_layout.orientation = PaneOrientation::Stacked;
+            app.settings.pane_layout.sidebar_visible = false;
+            let (_, rows) = draw(&mut app, 400.0, vec![]);
+            assert_eq!(app.active, 1);
+            assert_eq!(app.tab().id, tab_id);
+            assert_eq!(app.tab().file_scroll_scope, scope);
+            assert_eq!(app.tab().selected, BTreeSet::from([selected.clone()]));
+            assert_eq!(app.file_row_focus(&ctx), Some((1, &selected)));
+            assert!(rows[1].as_ref().unwrap().interact_rect.is_positive());
+
+            draw(
+                &mut app,
+                400.0,
+                vec![egui::Event::Key {
+                    key: egui::Key::ArrowDown,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+            assert_eq!(app.active, 1);
+            assert_eq!(
+                app.tab().selected,
+                BTreeSet::from([app.tab().path.join("file041")])
+            );
+
+            app.settings.pane_layout.sidebar_visible = true;
+            app.settings.set_grid(0, grid);
+            for (height, fraction) in [
+                (400.0, 0.0),
+                (400.0, 1.0),
+                (560.0, 0.0),
+                (560.0, 1.0),
+                (670.0, 0.5),
+                (690.0, 0.5),
+            ] {
+                app.settings.pane_layout.fractions[1] = fraction;
+                for pane in &mut app.panes {
+                    pane.tab_mut().scroll_to = Some(selected.clone());
+                }
+                let (output, rows) = draw(&mut app, height, vec![]);
+                for row in rows {
+                    let row = row.unwrap();
+                    assert!(
+                        row.interact_rect.height() >= COMPACT_FILE_ROW_HEIGHT - 1.0,
+                        "clickable file row at height {height}, fraction {fraction}, grid {grid}: {row:?}"
+                    );
+                    let labels = output
+                        .shapes
+                        .iter()
+                        .filter_map(|clipped| match &clipped.shape {
+                            egui::Shape::Text(text) if text.galley.text() == "file040" => {
+                                Some((text.visual_bounding_rect(), clipped.clip_rect))
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    assert!(labels.iter().any(|(label, clip)| {
+                        row.interact_rect.contains_rect(*label) && clip.contains_rect(*label)
+                    }), "filename must be visible in both panes at height {height}, fraction {fraction}, grid {grid}. Row {row:?}, labels {labels:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pane_layout_accepts_tab_drops_between_stacked_panes() {
+        let root = tempfile::tempdir().unwrap();
+        let top: Location = root.path().join("top").into();
+        let bottom: Location = root.path().join("bottom").into();
+        std::fs::create_dir(top.path()).unwrap();
+        std::fs::create_dir(bottom.path()).unwrap();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(bottom.path().into()));
+        app.settings.pane_layout.orientation = PaneOrientation::Stacked;
+        let tab = Tab::new(top, &ctx);
+        let id = tab.id;
+        app.panes[0].tabs.push(tab);
+
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut draw = |app: &mut PawCommander, events| {
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1000.0, 700.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| eframe::App::update(app, ctx, &mut frame),
+            )
+        };
+        let output = draw(&mut app, vec![]);
+        let mut top_tab = None;
+        let mut bottom_tab = None;
+        for clipped in &output.shapes {
+            if let egui::Shape::Text(text) = &clipped.shape {
+                let center = text.pos + text.galley.size() * 0.5;
+                if text.galley.text() == "top" {
+                    top_tab = Some(center);
+                }
+                if text.galley.text() == "bottom"
+                    && bottom_tab.is_none_or(|previous: egui::Pos2| previous.y < center.y)
+                    && clipped.clip_rect.contains(center)
+                {
+                    bottom_tab = Some(center);
+                }
+            }
+        }
+        let start = top_tab.unwrap();
+        let end = bottom_tab.unwrap();
+        assert!(start.y < end.y);
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            pressed,
+            button: egui::PointerButton::Primary,
+            modifiers: egui::Modifiers::NONE,
+        };
+        draw(
+            &mut app,
+            vec![egui::Event::PointerMoved(start), button(start, true)],
+        );
+        draw(&mut app, vec![egui::Event::PointerMoved(end)]);
+        draw(&mut app, vec![button(end, false)]);
+        assert_eq!(app.panes[0].tabs.len(), 1);
+        assert_eq!(app.panes[1].tab().id, id);
+        assert_eq!(app.active, 1);
+    }
+
+    #[test]
     fn pane_views_migrate_and_persist_independently() {
         let mut settings = Settings {
             grid: true,
@@ -8308,6 +8834,7 @@ mod tests {
                                     pane: 1,
                                     split: true,
                                     grid: false,
+                                    compact: false,
                                     idle: true,
                                     zed_available,
                                 },
@@ -8426,6 +8953,7 @@ mod tests {
                                     pane: 1,
                                     split: true,
                                     grid,
+                                    compact: false,
                                     idle: true,
                                     zed_available: true,
                                 },

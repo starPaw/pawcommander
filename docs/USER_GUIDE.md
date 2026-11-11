@@ -6,6 +6,8 @@
 
 Use one pane for browsing or enable **Dual pane** (`F3`) to keep two locations open. Each pane has its own tabs, history, filter, sort order, and list/grid view. Drag a tab to reorder it or move it to the other pane. Moving the last tab opens a home tab in its place.
 
+In **Settings**, choose **Side by side** or **Top and bottom** under **Pane layout**. Drag the divider to resize the panes. The **Sidebar** button on the toolbar hides or shows the sidebar. PawCommander remembers the layout, the divider position for each orientation, and sidebar visibility.
+
 Click a breadcrumb to navigate, or press `Cmd/Ctrl+L` to enter a path. The address editor offers folder completion. `Enter` opens the entered path; `Esc` returns to breadcrumbs. Use the sidebar for common folders and bookmarks.
 
 Choose a language under **Settings → Language**. English is the default; Russian is also available. File names and contents are unchanged. Choose Latte, Frappé, Macchiato, or Mocha under **Settings → Catppuccin**. System appearance switches between Latte and Frappé.

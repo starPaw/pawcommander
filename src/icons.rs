@@ -28,6 +28,8 @@ pub enum Icon {
     Grid,
     List,
     Split,
+    SplitStacked,
+    Sidebar,
     Info,
     Settings,
     ChevronDown,
@@ -114,7 +116,8 @@ pub fn button_width(
             Icon::Paste => crate::i18n::text("Вставить"),
             Icon::Grid => crate::i18n::text("Сетка"),
             Icon::List => crate::i18n::text("Список"),
-            Icon::Split => crate::i18n::text("Две панели"),
+            Icon::Split | Icon::SplitStacked => crate::i18n::text("Две панели"),
+            Icon::Sidebar => crate::i18n::text("Боковая панель"),
             Icon::Info => crate::i18n::text("Сведения"),
             _ => crate::i18n::text("Действие"),
         }
@@ -398,6 +401,14 @@ pub fn paint(ui: &egui::Ui, rect: Rect, icon: Icon, color: Color32) {
             outline(rr(2.0, 3.0, 20.0, 18.0), 2);
             line(&[(12.0, 3.0), (12.0, 21.0)]);
         }
+        Icon::SplitStacked => {
+            outline(rr(2.0, 3.0, 20.0, 18.0), 2);
+            line(&[(2.0, 12.0), (22.0, 12.0)]);
+        }
+        Icon::Sidebar => {
+            outline(rr(2.0, 3.0, 20.0, 18.0), 2);
+            line(&[(8.0, 3.0), (8.0, 21.0)]);
+        }
         Icon::Info => {
             painter.circle_stroke(pt(12.0, 12.0), rect.width() * 0.43, stroke);
             line(&[(12.0, 10.0), (12.0, 18.0)]);
@@ -517,7 +528,10 @@ pub fn compact_button(ui: &mut egui::Ui, icon: Icon, label: &str, selected: bool
 
 fn button_info(ui: &egui::Ui, response: &Response, icon: Icon, label: &str, selected: bool) {
     response.widget_info(|| {
-        if matches!(icon, Icon::Split | Icon::Info | Icon::Grid | Icon::List) {
+        if matches!(
+            icon,
+            Icon::Split | Icon::SplitStacked | Icon::Sidebar | Icon::Info | Icon::Grid | Icon::List
+        ) {
             egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, label)
         } else {
             egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
