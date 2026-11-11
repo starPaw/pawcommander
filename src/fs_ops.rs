@@ -18,6 +18,36 @@ pub struct FileEntry {
     pub is_symlink: bool,
     pub size: u64,
     pub modified: Option<SystemTime>,
+    pub metadata: ListingMetadata,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ListingMetadata {
+    pub mode: Option<u16>,
+    pub owner_id: Option<u32>,
+    pub created: Option<SystemTime>,
+    pub accessed: Option<SystemTime>,
+}
+
+impl ListingMetadata {
+    fn from_local(metadata: &fs::Metadata) -> Self {
+        #[cfg(unix)]
+        let (mode, owner_id) = {
+            use std::os::unix::fs::MetadataExt;
+            (
+                Some((metadata.mode() & 0o7777) as u16),
+                Some(metadata.uid()),
+            )
+        };
+        #[cfg(not(unix))]
+        let (mode, owner_id) = (None, None);
+        Self {
+            mode,
+            owner_id,
+            created: metadata.created().ok(),
+            accessed: metadata.accessed().ok(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,6 +126,7 @@ pub fn visit_directory(
             is_symlink,
             size: metadata.len(),
             modified: metadata.modified().ok(),
+            metadata: ListingMetadata::from_local(&metadata),
         });
     }
     Ok(())

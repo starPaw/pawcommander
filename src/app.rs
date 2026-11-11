@@ -5,6 +5,7 @@ use crate::file_clipboard::{FileList, SystemClipboard};
 use crate::folder_jump::{FolderHistory, FolderJump, JumpOutcome};
 use crate::fs_ops::TransferKind;
 use crate::icons::{self, Icon};
+use crate::list_columns::{Column, ColumnLayout, ListColumns};
 use crate::operations::{Progress, ProgressView};
 use crate::preview::Preview;
 use crate::shortcuts::{self, Command, ShortcutEditor, Shortcuts};
@@ -38,6 +39,7 @@ struct Settings {
     hidden: bool,
     grid: bool,
     pane_grid: Option<[bool; 2]>,
+    list_columns: ListColumns,
     theme: Theme,
     ui_scale: u16,
     high_contrast: bool,
@@ -407,6 +409,7 @@ impl Default for Settings {
             hidden: false,
             grid: false,
             pane_grid: None,
+            list_columns: ListColumns::default(),
             theme: Theme::Frappe,
             ui_scale: 100,
             high_contrast: false,
@@ -1620,6 +1623,8 @@ pub struct PawCommander {
     focus_toolbar: bool,
     show_accessibility: bool,
     accessibility_focus: bool,
+    show_list_columns: bool,
+    list_columns_focus: bool,
     sftp_form: Option<SftpForm>,
     connection: Option<ConnectionJob>,
     native_drag: crate::native_drag::NativeDrag,
@@ -1673,6 +1678,7 @@ impl PawCommander {
         );
         reserve_bookmark_ids(&bookmarks);
         settings.shortcuts.validate();
+        settings.list_columns.validate();
         let bookmark_shortcut_conflict =
             validate_bookmark_shortcuts(&mut bookmarks, &settings.shortcuts);
         crate::i18n::set_language(settings.language);
@@ -1772,6 +1778,8 @@ impl PawCommander {
             focus_toolbar: false,
             show_accessibility: false,
             accessibility_focus: false,
+            show_list_columns: false,
+            list_columns_focus: false,
             sftp_form: None,
             connection: None,
             native_drag: Default::default(),
@@ -1890,6 +1898,7 @@ impl PawCommander {
             && self.shortcut_editor.is_none()
             && self.command_palette.is_none()
             && self.folder_jump.is_none()
+            && !self.show_list_columns
             && !self.search.visible
     }
 
@@ -2748,6 +2757,7 @@ impl PawCommander {
             || self.command_palette.is_some()
             || self.folder_jump.is_some()
             || self.show_accessibility
+            || self.show_list_columns
             || self.native_drag.active()
             || self.search.visible
     }
@@ -3303,6 +3313,19 @@ impl PawCommander {
                                     }
                                 }
                             });
+                            ui.horizontal(|ui| {
+                                ui.label(crate::i18n::text("Сортировка"));
+                                sort_controls(ui, view.order, |sort| {
+                                    actions.push(self.folder_view_action(self.active, FolderViewChange::Sort(sort)));
+                                });
+                            });
+                            let columns = ui.button(crate::i18n::text("Столбцы списка"));
+                            paint_focus(ui, &columns, 5);
+                            if columns.clicked() {
+                                self.show_list_columns = true;
+                                self.list_columns_focus = true;
+                                ui.close_menu();
+                            }
                             ui.separator();
                             let tools_menu = ui.menu_button(crate::i18n::text("Инструменты"), |ui| {
                                 for (name, path) in [("locate", &self.tools.locate), ("Zed", &self.tools.zed)] {
@@ -4363,6 +4386,7 @@ impl eframe::App for PawCommander {
             && self.command_palette.is_none()
             && self.folder_jump.is_none()
             && !self.show_accessibility
+            && !self.show_list_columns
             && !self.search.visible
         {
             for action in actions {
@@ -4413,6 +4437,16 @@ impl eframe::App for PawCommander {
             self.show_folder_jump(ctx, &picker_keys);
         }
         self.accessibility_dialog(ctx);
+        if self.show_list_columns
+            && self
+                .settings
+                .list_columns
+                .dialog(ctx, &mut self.list_columns_focus)
+        {
+            self.show_list_columns = false;
+            self.focus_toolbar = true;
+            ctx.request_repaint();
+        }
         self.dialogs(ctx);
         if self
             .properties
@@ -5345,6 +5379,142 @@ fn breadcrumb(
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+fn sort_controls(ui: &mut egui::Ui, order: FileOrder, mut choose: impl FnMut(Sort)) {
+    for (sort, column) in [
+        (Sort::Name, Column::Name),
+        (Sort::Size, Column::Size),
+        (Sort::Modified, Column::Modified),
+    ] {
+        let label = column.label();
+        let selected = order.key == sort;
+        let title = if selected {
+            format!("{label} {}", if order.descending { "↓" } else { "↑" })
+        } else {
+            label.to_owned()
+        };
+        let response = ui.selectable_label(selected, title);
+        paint_focus(ui, &response, 4);
+        if response.clicked() {
+            choose(sort);
+            ui.close_menu();
+        }
+    }
+}
+
+fn list_header(
+    ui: &mut egui::Ui,
+    layout: &ColumnLayout,
+    order: FileOrder,
+    padding: f32,
+    compact: bool,
+    mut choose_sort: impl FnMut(Sort),
+) {
+    if !compact {
+        ui.add_space(4.0);
+    }
+    let height = if compact { 22.0 } else { 36.0 };
+    let (header, _) = ui.allocate_exact_size(Vec2::new(layout.width, height), Sense::hover());
+    let band = header.expand2(Vec2::new(padding, 0.0));
+    let colors = Palette::from_ctx(ui.ctx());
+    ui.painter().rect_filled(band, 0, colors.raised);
+    for y in [band.top(), band.bottom()] {
+        ui.painter().hline(
+            band.x_range(),
+            y,
+            Stroke::new(1.0, workspace_border(colors)),
+        );
+    }
+    for (column, rect) in layout.cells(header) {
+        let label = column.label();
+        let sort = match column {
+            Column::Name => Some(Sort::Name),
+            Column::Size => Some(Sort::Size),
+            Column::Modified => Some(Sort::Modified),
+            _ => None,
+        };
+        let response = sort.map(|sort| {
+            let response = ui.interact(rect, ui.id().with(column as u8), Sense::click());
+            response.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Button,
+                    ui.is_enabled(),
+                    crate::tr_format!("Сортировка: {label}", "Sort: {label}"),
+                )
+            });
+            paint_focus(ui, &response, 4);
+            if response.clicked() {
+                choose_sort(sort);
+            }
+            response
+        });
+        let painter = ui.painter().with_clip_rect(rect);
+        let text = painter.text(
+            rect.left_center() + Vec2::new(8.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            label,
+            FontId::proportional(13.0),
+            if response.is_some_and(|response| response.hovered()) {
+                colors.ink
+            } else {
+                colors.muted
+            },
+        );
+        if sort == Some(order.key) {
+            let x = text.right() + 6.0;
+            let y = rect.center().y;
+            let direction = if order.descending { -1.0 } else { 1.0 };
+            painter.add(egui::Shape::line(
+                vec![
+                    egui::pos2(x, y + 2.0 * direction),
+                    egui::pos2(x + 4.0, y - 2.0 * direction),
+                    egui::pos2(x + 8.0, y + 2.0 * direction),
+                ],
+                Stroke::new(1.2, colors.muted),
+            ));
+        }
+    }
+}
+
+fn list_notice(ui: &mut egui::Ui, tab: &Tab, empty: bool, compact: bool) {
+    let colors = Palette::from_ctx(ui.ctx());
+    if let Some(error) = &tab.error {
+        ui.colored_label(colors.error, error);
+    }
+    if tab.blocking_load() {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(crate::i18n::text("Чтение папки…"));
+        });
+    }
+    if empty && !tab.blocking_load() && tab.error.is_none() {
+        if !compact {
+            ui.add_space(50.0);
+        }
+        ui.vertical_centered(|ui| {
+            ui.label(
+                RichText::new(if tab.filter.is_empty() {
+                    crate::i18n::text("Папка пуста")
+                } else {
+                    crate::i18n::text("Ничего не найдено")
+                })
+                .size(if compact { 13.0 } else { 20.0 })
+                .color(colors.muted),
+            );
+            if !compact {
+                ui.label(
+                    RichText::new(if tab.filter.is_empty() {
+                        crate::i18n::text("Создайте папку или вставьте файлы")
+                    } else {
+                        crate::i18n::text("Попробуйте другое имя")
+                    })
+                    .size(12.0)
+                    .color(colors.muted),
+                );
+            }
+        });
+    }
+}
+
 fn render_pane(
     ui: &mut egui::Ui,
     pane: &mut Pane,
@@ -5446,31 +5616,16 @@ fn render_pane(
                         );
                     }
                     if compact {
-                        let sort_menu = ui.menu_button(sort_label, |ui| {
-                            for (sort, label) in [
-                                (Sort::Name, "Имя"),
-                                (Sort::Size, "Размер"),
-                                (Sort::Modified, "Изменён"),
-                            ] {
-                                let label = crate::i18n::text(label);
-                                let selected = order.key == sort;
-                                let title = if selected {
-                                    format!("{label} {}", if order.descending { "↓" } else { "↑" })
-                                } else {
-                                    label.to_owned()
-                                };
-                                let response = ui.selectable_label(selected, title);
-                                paint_focus(ui, &response, 4);
-                                if response.clicked() {
+                        let menu =
+                            ui.menu_button(sort_label, |ui| {
+                                sort_controls(ui, order, |sort| {
                                     actions.push(tab.folder_view_action(
                                         pane_index,
                                         FolderViewChange::Sort(sort),
                                     ));
-                                    ui.close_menu();
-                                }
-                            }
-                        });
-                        paint_focus(ui, &sort_menu.response, 4);
+                                });
+                            });
+                        paint_focus(ui, &menu.response, 4);
                     }
                     response
                 })
@@ -5494,154 +5649,13 @@ fn render_pane(
                     .collect();
                 tab.selected.retain(|p| visible_paths.contains(p));
             }
-            if !compact {
-                ui.add_space(4.0);
-                let (header, _) =
-                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 36.0), Sense::hover());
-                let band = header.expand2(Vec2::new(f32::from(PANE_PADDING), 0.0));
-                ui.painter().rect_filled(band, 0, colors.raised);
-                for y in [band.top(), band.bottom()] {
-                    ui.painter()
-                        .hline(band.x_range(), y, Stroke::new(1.0, border));
-                }
-                let wide = header.width() > 380.0;
-                let show_size = header.width() >= 200.0;
-                let name_end = header.right()
-                    - if wide {
-                        182.0
-                    } else if show_size {
-                        72.0
-                    } else {
-                        0.0
-                    };
-                for (label, sort, left, right) in [
-                    (
-                        crate::i18n::text("Имя"),
-                        Sort::Name,
-                        header.left() + 8.0,
-                        name_end,
-                    ),
-                    (
-                        crate::i18n::text("Размер"),
-                        Sort::Size,
-                        name_end,
-                        if wide {
-                            header.right() - 113.0
-                        } else {
-                            header.right()
-                        },
-                    ),
-                    (
-                        crate::i18n::text("Изменён"),
-                        Sort::Modified,
-                        header.right() - 108.0,
-                        header.right(),
-                    ),
-                ] {
-                    if (sort == Sort::Modified && !wide) || (sort == Sort::Size && !show_size) {
-                        continue;
-                    }
-                    let r = egui::Rect::from_min_max(
-                        egui::pos2(left, header.top()),
-                        egui::pos2(right, header.bottom()),
-                    );
-                    let response = ui.interact(r, ui.id().with(label), Sense::click());
-                    response.widget_info(|| {
-                        egui::WidgetInfo::labeled(
-                            egui::WidgetType::Button,
-                            ui.is_enabled(),
-                            crate::tr_format!("Сортировка: {label}", "Sort: {label}"),
-                        )
-                    });
-                    let painter = ui.painter().with_clip_rect(r);
-                    let text = painter.text(
-                        r.left_center(),
-                        egui::Align2::LEFT_CENTER,
-                        label,
-                        FontId::proportional(13.0),
-                        if response.hovered() {
-                            colors.ink
-                        } else {
-                            colors.muted
-                        },
-                    );
-                    if order.key == sort {
-                        let x = text.right() + 6.0;
-                        let y = r.center().y;
-                        let direction = if order.descending { -1.0 } else { 1.0 };
-                        painter.add(egui::Shape::line(
-                            vec![
-                                egui::pos2(x, y + 2.0 * direction),
-                                egui::pos2(x + 4.0, y - 2.0 * direction),
-                                egui::pos2(x + 8.0, y + 2.0 * direction),
-                            ],
-                            Stroke::new(1.2, colors.muted),
-                        ));
-                    }
-                    paint_focus(ui, &response, 4);
-                    if response.clicked() {
-                        actions
-                            .push(tab.folder_view_action(pane_index, FolderViewChange::Sort(sort)));
-                    }
-                }
-            }
-            drop_targets.add(
-                ui,
-                ui.available_rect_before_wrap(),
-                pane_index,
-                &tab.path,
-                !tab.blocking_load() && tab.error.is_none(),
-            );
-            if let Some(error) = &tab.error {
-                ui.colored_label(colors.error, error);
-            }
-            if tab.blocking_load() {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(crate::i18n::text("Чтение папки…"));
-                });
-            }
-            let visible = tab.visible(view);
-            if visible.is_empty() && !tab.blocking_load() && tab.error.is_none() {
-                if !compact {
-                    ui.add_space(50.0);
-                }
-                ui.vertical_centered(|ui| {
-                    ui.label(
-                        RichText::new(if tab.filter.is_empty() {
-                            crate::i18n::text("Папка пуста")
-                        } else {
-                            crate::i18n::text("Ничего не найдено")
-                        })
-                        .size(if compact { 13.0 } else { 20.0 })
-                        .color(colors.muted),
-                    );
-                    if !compact {
-                        ui.label(
-                            RichText::new(if tab.filter.is_empty() {
-                                crate::i18n::text("Создайте папку или вставьте файлы")
-                            } else {
-                                crate::i18n::text("Попробуйте другое имя")
-                            })
-                            .size(12.0)
-                            .color(colors.muted),
-                        );
-                    }
-                });
-            }
-            let row_height = if compact_rows {
-                COMPACT_FILE_ROW_HEIGHT
-            } else if grid {
-                104.0
+            let viewport_x = ui.available_rect_before_wrap().x_range();
+            let available_width = viewport_x.span();
+            let layout = if grid {
+                ColumnLayout::responsive(available_width)
             } else {
-                36.0
+                settings.list_columns.layout(available_width)
             };
-            let columns = if grid {
-                (ui.available_width() / 108.0).floor().max(1.0) as usize
-            } else {
-                1
-            };
-            let rows = visible.len().div_ceil(columns);
             const STATUS_HEIGHT: f32 = 22.0;
             const STATUS_RULE_HEIGHT: f32 = 1.0;
             let spacing = ui.spacing().item_spacing.y;
@@ -5650,131 +5664,206 @@ fn render_pane(
             } else {
                 0.0
             };
-            let files_height = (ui.available_height() - status_height).max(0.0);
-            let mut scroll = egui::ScrollArea::vertical();
-            let scope = ui.id();
-            let previous_scope = tab.file_scroll_scope;
-            let row_pitch = row_height + spacing;
-            if !ui.is_sizing_pass() {
-                let previous_geometry = tab.file_scroll_geometry.replace((columns, row_pitch));
-                if previous_scope.is_some_and(|previous| previous != scope) {
-                    tab.scroll_restore.get_or_insert(tab.scroll_offset);
+            let scrolling_columns = layout.width > available_width;
+            let tab_id = tab.id;
+            let mut render_files = |ui: &mut egui::Ui| {
+                if !compact || (!grid && settings.list_columns.is_custom()) {
+                    list_header(
+                        ui,
+                        &layout,
+                        order,
+                        f32::from(PANE_PADDING),
+                        compact,
+                        |sort| {
+                            actions.push(
+                                tab.folder_view_action(pane_index, FolderViewChange::Sort(sort)),
+                            );
+                        },
+                    );
                 }
-                tab.file_scroll_scope = Some(scope);
-                if let Some(position) = tab
-                    .scroll_to
-                    .take()
-                    .and_then(|path| visible.iter().position(|i| tab.entries[*i].path == path))
-                {
-                    tab.scroll_restore = None;
-                    scroll = scroll.vertical_scroll_offset((position / columns) as f32 * row_pitch);
-                } else if tab.has_complete_listing {
-                    // Progressive batches can initially be too short to hold
-                    // the offset or may still change which rows are at that offset.
-                    let offset = tab.scroll_restore.take().or_else(|| {
-                        let (old_columns, old_pitch) = previous_geometry?;
-                        if (old_columns, old_pitch) == (columns, row_pitch) {
-                            return None;
-                        }
-                        // Keep the first visible item in view when the grid reflows.
-                        let old_row = tab.scroll_offset / old_pitch;
-                        let item = old_row as usize * old_columns;
-                        let row = item / columns;
-                        Some((row as f32 + old_row.fract()) * row_pitch)
+                drop_targets.add(
+                    ui,
+                    ui.available_rect_before_wrap(),
+                    pane_index,
+                    &tab.path,
+                    !tab.blocking_load() && tab.error.is_none(),
+                );
+                let visible = tab.visible(view);
+                if tab.error.is_some() || tab.blocking_load() || visible.is_empty() {
+                    let notice_rect = egui::Rect::from_x_y_ranges(
+                        viewport_x,
+                        ui.available_rect_before_wrap().y_range(),
+                    );
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(notice_rect), |ui| {
+                        list_notice(ui, tab, visible.is_empty(), compact);
                     });
-                    if let Some(offset) = offset {
-                        let max_offset =
-                            (rows as f32 * row_pitch - spacing - files_height).max(0.0);
-                        scroll = scroll.vertical_scroll_offset(offset.min(max_offset));
+                }
+                let row_height = if compact_rows {
+                    COMPACT_FILE_ROW_HEIGHT
+                } else if grid {
+                    104.0
+                } else {
+                    36.0
+                };
+                let columns = if grid {
+                    (ui.available_width() / 108.0).floor().max(1.0) as usize
+                } else {
+                    1
+                };
+                let rows = visible.len().div_ceil(columns);
+                let reserved_status_height = if scrolling_columns {
+                    0.0
+                } else {
+                    status_height
+                };
+                let files_height = (ui.available_height() - reserved_status_height).max(0.0);
+                let mut scroll = egui::ScrollArea::vertical();
+                let scope = ui.id();
+                let previous_scope = tab.file_scroll_scope;
+                let row_pitch = row_height + spacing;
+                if !ui.is_sizing_pass() {
+                    let previous_geometry = tab.file_scroll_geometry.replace((columns, row_pitch));
+                    if previous_scope.is_some_and(|previous| previous != scope) {
+                        tab.scroll_restore.get_or_insert(tab.scroll_offset);
+                    }
+                    tab.file_scroll_scope = Some(scope);
+                    if let Some(position) = tab
+                        .scroll_to
+                        .take()
+                        .and_then(|path| visible.iter().position(|i| tab.entries[*i].path == path))
+                    {
+                        tab.scroll_restore = None;
+                        scroll =
+                            scroll.vertical_scroll_offset((position / columns) as f32 * row_pitch);
+                    } else if tab.has_complete_listing {
+                        // Progressive batches can initially be too short to hold
+                        // the offset or may still change which rows are at that offset.
+                        let offset = tab.scroll_restore.take().or_else(|| {
+                            let (old_columns, old_pitch) = previous_geometry?;
+                            if (old_columns, old_pitch) == (columns, row_pitch) {
+                                return None;
+                            }
+                            // Keep the first visible item in view when the grid reflows.
+                            let old_row = tab.scroll_offset / old_pitch;
+                            let item = old_row as usize * old_columns;
+                            let row = item / columns;
+                            Some((row as f32 + old_row.fract()) * row_pitch)
+                        });
+                        if let Some(offset) = offset {
+                            let max_offset =
+                                (rows as f32 * row_pitch - spacing - files_height).max(0.0);
+                            scroll = scroll.vertical_scroll_offset(offset.min(max_offset));
+                        }
                     }
                 }
-            }
-            let files_id = ui.id().with(("file_list", tab.id));
-            let ctx = ui.ctx().clone();
-            ctx.accesskit_node_builder(files_id, |node| {
-                node.set_role(egui::accesskit::Role::List);
-                let pane = crate::i18n::text(
-                    match (
-                        settings.split.then_some(settings.pane_layout.orientation),
-                        pane_index,
-                    ) {
-                        (Some(PaneOrientation::Stacked), 0) => "Верхняя панель",
-                        (Some(PaneOrientation::Stacked), _) => "Нижняя панель",
-                        (_, 0) => "Левая панель",
-                        _ => "Правая панель",
-                    },
-                );
-                let view = if grid {
-                    crate::i18n::text("Сетка")
-                } else {
-                    crate::i18n::text("Список")
-                };
-                node.set_label(format!("{pane}, {view}, {}", tab.path.display()));
-            });
-            let file_scroll = ctx.with_accessibility_parent(files_id, || {
-                scroll
-                    .max_height(files_height)
-                    .min_scrolled_height(files_height)
-                    .id_salt((tab.id, &tab.path, "files"))
-                    .auto_shrink([false, false])
-                    .show_rows(ui, row_height, rows, |ui, range| {
-                        if grid && compact_rows {
-                            ui.spacing_mut().interact_size.y = row_height;
-                        }
-                        for row in range {
-                            if grid {
-                                ui.horizontal(|ui| {
-                                    for col in 0..columns {
-                                        let position = row * columns + col;
-                                        if position < visible.len() {
-                                            entry_widget(
-                                                ui,
-                                                tab,
-                                                position,
-                                                &visible,
-                                                EntryOptions {
-                                                    pane: pane_index,
-                                                    split: settings.split,
-                                                    grid: true,
-                                                    compact: compact_rows,
-                                                    idle,
-                                                    zed_available,
-                                                },
-                                                actions,
-                                                drop_targets,
-                                            );
-                                        }
-                                    }
-                                });
-                            } else if row < visible.len() {
-                                entry_widget(
-                                    ui,
-                                    tab,
-                                    row,
-                                    &visible,
-                                    EntryOptions {
-                                        pane: pane_index,
-                                        split: settings.split,
-                                        grid: false,
-                                        compact: compact_rows,
-                                        idle,
-                                        zed_available,
-                                    },
-                                    actions,
-                                    drop_targets,
-                                );
+                let files_id = ui.id().with(("file_list", tab.id));
+                let ctx = ui.ctx().clone();
+                ctx.accesskit_node_builder(files_id, |node| {
+                    node.set_role(egui::accesskit::Role::List);
+                    let pane = crate::i18n::text(
+                        match (
+                            settings.split.then_some(settings.pane_layout.orientation),
+                            pane_index,
+                        ) {
+                            (Some(PaneOrientation::Stacked), 0) => "Верхняя панель",
+                            (Some(PaneOrientation::Stacked), _) => "Нижняя панель",
+                            (_, 0) => "Левая панель",
+                            _ => "Правая панель",
+                        },
+                    );
+                    let view = if grid {
+                        crate::i18n::text("Сетка")
+                    } else {
+                        crate::i18n::text("Список")
+                    };
+                    node.set_label(format!("{pane}, {view}, {}", tab.path.display()));
+                });
+                let file_scroll = ctx.with_accessibility_parent(files_id, || {
+                    scroll
+                        .max_height(files_height)
+                        .min_scrolled_height(files_height)
+                        .id_salt((tab.id, &tab.path, "files"))
+                        .auto_shrink([false, false])
+                        .show_rows(ui, row_height, rows, |ui, range| {
+                            if grid && compact_rows {
+                                ui.spacing_mut().interact_size.y = row_height;
                             }
-                        }
-                    })
-            });
-            if !ui.is_sizing_pass() {
-                let offset = file_scroll.state.offset.y;
-                if previous_scope == Some(scope) && offset > 0.0 && offset != tab.scroll_offset {
-                    // User scrolling in a partial listing takes precedence.
-                    tab.scroll_restore = None;
+                            for row in range {
+                                if grid {
+                                    ui.horizontal(|ui| {
+                                        for col in 0..columns {
+                                            let position = row * columns + col;
+                                            if position < visible.len() {
+                                                entry_widget(
+                                                    ui,
+                                                    tab,
+                                                    position,
+                                                    &visible,
+                                                    EntryOptions {
+                                                        columns: None,
+                                                        pane: pane_index,
+                                                        split: settings.split,
+                                                        grid: true,
+                                                        compact: compact_rows,
+                                                        idle,
+                                                        zed_available,
+                                                    },
+                                                    actions,
+                                                    drop_targets,
+                                                );
+                                            }
+                                        }
+                                    });
+                                } else if row < visible.len() {
+                                    entry_widget(
+                                        ui,
+                                        tab,
+                                        row,
+                                        &visible,
+                                        EntryOptions {
+                                            columns: Some(&layout),
+                                            pane: pane_index,
+                                            split: settings.split,
+                                            grid: false,
+                                            compact: compact_rows,
+                                            idle,
+                                            zed_available,
+                                        },
+                                        actions,
+                                        drop_targets,
+                                    );
+                                }
+                            }
+                        })
+                });
+                if !ui.is_sizing_pass() {
+                    let offset = file_scroll.state.offset.y;
+                    if previous_scope == Some(scope) && offset > 0.0 && offset != tab.scroll_offset
+                    {
+                        // User scrolling in a partial listing takes precedence.
+                        tab.scroll_restore = None;
+                    }
+                    tab.scroll_offset = offset;
                 }
-                tab.scroll_offset = offset;
-            }
+                visible.len()
+            };
+            let visible_count = if scrolling_columns {
+                let height = (ui.available_height() - status_height).max(0.0);
+                egui::ScrollArea::horizontal()
+                    .id_salt(("file_columns", tab_id))
+                    .min_scrolled_width(0.0)
+                    .max_height(height)
+                    .auto_shrink([false, false])
+                    .drag_to_scroll(false)
+                    .show(ui, |ui| {
+                        ui.set_width(layout.width);
+                        ui.style_mut().always_scroll_the_only_direction = false;
+                        render_files(ui)
+                    })
+                    .inner
+            } else {
+                render_files(ui)
+            };
             if !compact {
                 ui.add(egui::Separator::default().spacing(STATUS_RULE_HEIGHT));
                 ui.allocate_ui_with_layout(
@@ -5795,7 +5884,7 @@ fn render_pane(
                                 RichText::new(crate::tr_format!(
                                     "{} объектов",
                                     "{} items",
-                                    visible.len()
+                                    visible_count
                                 ))
                                 .size(11.0)
                                 .color(colors.muted),
@@ -5824,7 +5913,8 @@ fn render_pane(
 
 const COMPACT_FILE_ROW_HEIGHT: f32 = 24.0;
 
-struct EntryOptions {
+struct EntryOptions<'a> {
+    columns: Option<&'a ColumnLayout>,
     pane: usize,
     split: bool,
     grid: bool,
@@ -5838,13 +5928,14 @@ fn entry_widget(
     tab: &mut Tab,
     position: usize,
     visible: &[usize],
-    options: EntryOptions,
+    options: EntryOptions<'_>,
     actions: &mut Vec<Action>,
     drop_targets: &mut DropTargets,
 ) {
     let index = visible[position];
     let colors = Palette::from_ctx(ui.ctx());
     let EntryOptions {
+        columns,
         pane,
         split,
         grid,
@@ -5856,13 +5947,14 @@ fn entry_widget(
     let is_dir = entry.is_dir;
     let path = entry.path.clone();
     let selected = tab.selected.contains(&path);
+    let list_width = columns.map_or_else(|| ui.available_width(), |columns| columns.width);
     let size = if compact {
-        let width = if grid { 100.0 } else { ui.available_width() };
+        let width = if grid { 100.0 } else { list_width };
         Vec2::new(width, COMPACT_FILE_ROW_HEIGHT)
     } else if grid {
         Vec2::new(100.0, 98.0)
     } else {
-        Vec2::new(ui.available_width(), 36.0)
+        Vec2::new(list_width, 36.0)
     };
     let (_, rect) = ui.allocate_space(size);
     let response = ui.interact(rect, tab.entry_id(&path), Sense::click_and_drag());
@@ -5975,60 +6067,51 @@ fn entry_widget(
             name_color,
         );
     } else {
-        let show_size = rect.width() >= 200.0;
-        let right_width = if rect.width() > 380.0 {
-            182.0
-        } else if show_size {
-            72.0
+        let fallback;
+        let columns = if let Some(columns) = columns {
+            columns
         } else {
-            0.0
+            fallback = ColumnLayout::responsive(rect.width());
+            &fallback
         };
-        let name_rect = egui::Rect::from_min_max(
-            rect.min + Vec2::new(64.0, 0.0),
-            egui::pos2(rect.right() - right_width, rect.bottom()),
-        );
-        ui.painter().with_clip_rect(name_rect).text(
-            name_rect.left_center(),
-            egui::Align2::LEFT_CENTER,
-            &entry.name,
-            FontId::proportional(14.0),
-            name_color,
-        );
-        let size = if entry.is_dir {
-            "—".into()
-        } else {
-            human_size(entry.size)
-        };
-        if rect.width() > 380.0 {
-            ui.painter().text(
-                egui::pos2(rect.right() - 119.0, rect.center().y),
-                egui::Align2::RIGHT_CENTER,
-                size,
-                FontId::proportional(11.0),
-                colors.muted,
-            );
-            let date = entry
-                .modified
-                .map(|t| {
-                    chrono::DateTime::<chrono::Local>::from(t)
-                        .format("%d.%m.%y %H:%M")
-                        .to_string()
-                })
-                .unwrap_or_default();
-            ui.painter().text(
-                rect.right_center() - Vec2::new(5.0, 0.0),
-                egui::Align2::RIGHT_CENTER,
-                date,
-                FontId::proportional(10.0),
-                colors.muted,
-            );
-        } else if show_size {
-            ui.painter().text(
-                rect.right_center() - Vec2::new(5.0, 0.0),
-                egui::Align2::RIGHT_CENTER,
-                size,
-                FontId::proportional(11.0),
-                colors.muted,
+        for (column, cell) in columns.cells(rect) {
+            if !ui.is_rect_visible(cell) {
+                continue;
+            }
+            let (padding, align, size, color, value) = match column {
+                Column::Name => (
+                    64.0,
+                    egui::Align2::LEFT_CENTER,
+                    14.0,
+                    name_color,
+                    std::borrow::Cow::Borrowed(entry.name.as_str()),
+                ),
+                Column::Size if !entry.is_dir => (
+                    5.0,
+                    egui::Align2::RIGHT_CENTER,
+                    11.0,
+                    colors.muted,
+                    human_size(entry.size).into(),
+                ),
+                _ => (
+                    5.0,
+                    egui::Align2::RIGHT_CENTER,
+                    11.0,
+                    colors.muted,
+                    column.metadata(entry).unwrap_or("—".into()),
+                ),
+            };
+            let origin = if align == egui::Align2::LEFT_CENTER {
+                cell.left_center() + Vec2::new(padding, 0.0)
+            } else {
+                cell.right_center() - Vec2::new(padding, 0.0)
+            };
+            ui.painter().with_clip_rect(cell).text(
+                origin,
+                align,
+                value,
+                FontId::proportional(size),
+                color,
             );
         }
     }
@@ -6557,6 +6640,7 @@ mod tests {
             is_symlink: false,
             size: 42,
             modified: None,
+            metadata: Default::default(),
         }]);
         tab.selected.insert(keep.clone());
         tab.next_auto_refresh = Instant::now();
@@ -8100,6 +8184,110 @@ mod tests {
     }
 
     #[test]
+    fn custom_columns_scroll_without_losing_rows_or_compact_headers() {
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let folder = tempfile::tempdir().unwrap();
+        let mut app = PawCommander::new(&cc, Some(folder.path().into()));
+        let mut frame = eframe::Frame::_new_kittest();
+        app.settings.preview = false;
+        app.settings.pane_layout.sidebar_visible = false;
+        app.settings.list_columns = serde_json::from_value(serde_json::json!({
+            "custom": true,
+            "name_width": 600,
+            "columns": [
+                {"column":"Extension", "width":100, "visible":true},
+                {"column":"Permissions", "width":100, "visible":true}
+            ]
+        }))
+        .unwrap();
+        app.settings.list_columns.validate();
+        let mut storage = MemoryStorage::default();
+        eframe::App::save(&mut app, &mut storage);
+        let restored = eframe::get_value::<Settings>(&storage, PawCommander::SETTINGS_KEY).unwrap();
+        assert_eq!(restored.list_columns, app.settings.list_columns);
+        let path = app.tab().path.clone();
+        let row = path.join("item040.txt");
+        let entries = (0..100)
+            .map(|index| {
+                let name = format!("item{index:03}.txt");
+                FileEntry {
+                    path: path.join(&name),
+                    name,
+                    is_dir: false,
+                    is_symlink: false,
+                    size: 1,
+                    modified: None,
+                    metadata: Default::default(),
+                }
+            })
+            .collect();
+        let tab = app.tab_mut();
+        tab.loading = None;
+        tab.has_complete_listing = true;
+        tab.entries.replace(entries);
+        tab.scroll_to = Some(row.clone());
+        let row_id = tab.entry_id(&row);
+        let mut time = 0.0;
+        let mut draw = |app: &mut PawCommander, events| {
+            let mut response = None;
+            time += 0.08;
+            let output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(720.0, 430.0),
+                    )),
+                    events,
+                    time: Some(time),
+                    ..Default::default()
+                },
+                |ctx| {
+                    eframe::App::update(app, ctx, &mut frame);
+                    response = ctx.read_response(row_id);
+                },
+            );
+            (output, response)
+        };
+        let scroll = |delta| egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let (_, initial) = draw(&mut app, vec![]);
+        let initial = initial.unwrap();
+        let y_before = app.tab().scroll_offset;
+        assert!(initial.interact_rect.is_positive());
+        assert!(app.tab().rendered_rows.len() < 20);
+        draw(
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(initial.interact_rect.center()),
+                scroll(egui::vec2(-700.0, 0.0)),
+            ],
+        );
+        let (_, scrolled) = draw(&mut app, vec![]);
+        let scrolled = scrolled.unwrap();
+        assert!(
+            scrolled.rect.left() < initial.rect.left(),
+            "{initial:?} -> {scrolled:?}"
+        );
+        assert_eq!(app.tab().scroll_offset, y_before);
+        draw(&mut app, vec![scroll(egui::vec2(0.0, -110.0))]);
+        assert!(app.tab().scroll_offset > y_before);
+
+        app.settings.pane_layout.orientation = PaneOrientation::Stacked;
+        app.tab_mut().scroll_to = Some(row);
+        let (compact, response) = draw(&mut app, vec![]);
+        assert!(response.unwrap().interact_rect.is_positive());
+        assert!(compact.shapes.iter().any(|shape| {
+            matches!(&shape.shape, egui::Shape::Text(text) if matches!(
+                text.galley.text(), "Extension" | "Расширение"
+            ) && shape.clip_rect.contains(text.pos))
+        }));
+    }
+
+    #[test]
     fn pane_layout_preserves_selection_and_scroll_at_minimum_size() {
         let root = tempfile::tempdir().unwrap();
         for index in 0..100 {
@@ -9263,6 +9451,7 @@ mod tests {
                 is_symlink: false,
                 size: 12,
                 modified: None,
+                metadata: Default::default(),
             }]);
             let mut time = 0.0;
             let mut render = |events| {
@@ -9286,6 +9475,7 @@ mod tests {
                                 0,
                                 &[0],
                                 EntryOptions {
+                                    columns: None,
                                     pane: 1,
                                     split: true,
                                     grid: false,
@@ -9405,6 +9595,7 @@ mod tests {
                                 0,
                                 &visible,
                                 EntryOptions {
+                                    columns: None,
                                     pane: 1,
                                     split: true,
                                     grid,
@@ -9491,6 +9682,7 @@ mod tests {
                 is_symlink: false,
                 size: 1,
                 modified: None,
+                metadata: Default::default(),
             })
             .collect(),
         );
@@ -9518,6 +9710,7 @@ mod tests {
             is_symlink: false,
             size,
             modified: Some(std::time::UNIX_EPOCH + Duration::from_secs(size)),
+            metadata: Default::default(),
         };
         let (tx, load) = DirectoryLoad::channel(DirectoryLoadMode::Progressive);
         tab.loading = Some(load);

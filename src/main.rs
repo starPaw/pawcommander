@@ -11,6 +11,7 @@ mod folder_jump;
 mod fs_ops;
 mod i18n;
 mod icons;
+mod list_columns;
 #[cfg(target_os = "macos")]
 mod macos_about;
 mod native_drag;

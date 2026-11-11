@@ -470,6 +470,7 @@ pub struct FileEntry {
     pub is_symlink: bool,
     pub size: u64,
     pub modified: Option<SystemTime>,
+    pub metadata: fs_ops::ListingMetadata,
 }
 
 impl From<fs_ops::FileEntry> for FileEntry {
@@ -481,6 +482,7 @@ impl From<fs_ops::FileEntry> for FileEntry {
             is_symlink: entry.is_symlink,
             size: entry.size,
             modified: entry.modified,
+            metadata: entry.metadata,
         }
     }
 }
@@ -634,6 +636,14 @@ fn visit_sftp_directory(
             modified: stat
                 .mtime
                 .and_then(|s| UNIX_EPOCH.checked_add(Duration::from_secs(s))),
+            metadata: fs_ops::ListingMetadata {
+                mode: stat.perm.map(|mode| (mode & 0o7777) as u16),
+                owner_id: stat.uid,
+                created: None,
+                accessed: stat
+                    .atime
+                    .and_then(|s| UNIX_EPOCH.checked_add(Duration::from_secs(s))),
+            },
         });
     }
     Ok(())
@@ -2735,14 +2745,37 @@ mod tests {
         fs::create_dir(remote_root.path()).unwrap();
         let refresh_file = remote_root.join("external.txt");
         fs::write(refresh_file.path(), b"external edit").unwrap();
+        let accessed = UNIX_EPOCH + Duration::from_secs(1_600_000_000);
+        let modified = UNIX_EPOCH + Duration::from_secs(1_650_000_000);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(refresh_file.path())
+            .unwrap()
+            .set_times(
+                fs::FileTimes::new()
+                    .set_accessed(accessed)
+                    .set_modified(modified),
+            )
+            .unwrap();
+        #[cfg(unix)]
+        let expected_owner = {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            fs::set_permissions(refresh_file.path(), fs::Permissions::from_mode(0o640)).unwrap();
+            fs::metadata(refresh_file.path()).unwrap().uid()
+        };
         let entries = read_automatic_directory(&remote_root, &|| false)
             .unwrap()
             .unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].path, refresh_file);
         assert_eq!(entries[0].size, 13);
+        assert_eq!(entries[0].modified, Some(modified));
+        assert_eq!(entries[0].metadata.accessed, Some(accessed));
+        assert_eq!(entries[0].metadata.created, None);
         #[cfg(unix)]
         {
+            assert_eq!(entries[0].metadata.mode, Some(0o640));
+            assert_eq!(entries[0].metadata.owner_id, Some(expected_owner));
             let alias = remote_root.with_path(root.join("remote-alias"));
             std::os::unix::fs::symlink(remote_root.path(), alias.path()).unwrap();
             let error = transfer_with_conflicts(
