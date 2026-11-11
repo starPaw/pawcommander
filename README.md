@@ -37,6 +37,8 @@ PawCommander brings a familiar two-pane workflow to a calm, colorful desktop app
 
 Visible local and connected SFTP folders refresh automatically. On macOS, you can also drag local files out to Finder and other apps.
 
+Use the arrow beside the breadcrumbs to type a path. Folder suggestions work for local paths and connected SFTP servers. Use Up or Down to select a suggestion, Tab to complete the path, Enter to open it, or Esc to return to the breadcrumbs.
+
 ## Get started
 
 **PawCommander is an early release.** macOS is the primary development platform. Linux and Windows have platform-specific implementations and CI checks; desktop integration on those systems still needs broader testing. Feedback and reproducible bug reports are welcome.

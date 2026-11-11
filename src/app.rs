@@ -653,6 +653,12 @@ impl Pane {
     fn tab_mut(&mut self) -> &mut Tab {
         &mut self.tabs[self.current]
     }
+    fn select_tab(&mut self, index: usize) {
+        if index != self.current {
+            self.tab_mut().address_completion.suspend();
+            self.current = index;
+        }
+    }
 }
 fn move_tab(panes: &mut [Pane], drop: TabDrop, ctx: &egui::Context) -> bool {
     let TabDrop {
@@ -667,6 +673,7 @@ fn move_tab(panes: &mut [Pane], drop: TabDrop, ctx: &egui::Context) -> bool {
     if source == destination && (slot == index || slot == index + 1) {
         return false;
     }
+    panes[destination].tab_mut().address_completion.suspend();
     let tab = panes[source].remove_tab(index);
     let slot = slot.saturating_sub(usize::from(source == destination && index < slot));
     let pane = &mut panes[destination];
@@ -1173,6 +1180,9 @@ impl PawCommander {
                                 });
                             self.settings.sftp_profiles.push(location.clone());
                         }
+                        for pane in &mut self.panes {
+                            pane.tab_mut().address_completion.suspend();
+                        }
                         self.panes[job.pane].tab_mut().navigate(location, ctx);
                         self.active = job.pane;
                         self.sftp_form = None;
@@ -1459,7 +1469,8 @@ impl PawCommander {
             Action::NewTab(i) => {
                 let path = self.panes[i].tab().path.clone();
                 self.panes[i].tabs.push(Tab::new(path, ctx));
-                self.panes[i].current = self.panes[i].tabs.len() - 1;
+                let index = self.panes[i].tabs.len() - 1;
+                self.panes[i].select_tab(index);
                 self.active = i;
             }
             Action::CloseTab(i, t) => {
@@ -1594,6 +1605,7 @@ impl PawCommander {
     fn toggle_split(&mut self) {
         self.settings.split = !self.settings.split;
         if !self.settings.split {
+            self.panes[1].tab_mut().address_completion.suspend();
             self.active = 0;
         }
     }
@@ -3079,6 +3091,7 @@ fn tab_strip(
     });
     let mut visible_tabs = Vec::new();
     let mut active_tab = None;
+    let mut clicked_tab = None;
     let strip = ui
         .horizontal(|ui| {
             ui.set_min_width(ui.available_width());
@@ -3210,7 +3223,7 @@ fn tab_strip(
                                     },
                                 );
                             } else if response.clicked() {
-                                pane.current = i;
+                                clicked_tab = Some(i);
                                 actions.push(Action::Focus(index));
                             }
                             if !dragging {
@@ -3316,6 +3329,9 @@ fn tab_strip(
         })
         .response
         .rect;
+    if let Some(index) = clicked_tab {
+        pane.select_tab(index);
+    }
     tab_targets.add_strip(ui, index, strip, pane.tabs.len(), visible_tabs);
     (strip, active_tab)
 }
@@ -3622,18 +3638,15 @@ fn edit_address(
         ));
         tab.focus_address = false;
     }
-    if response.has_focus() {
-        actions.push(Action::Focus(index));
-    }
     if response.changed() {
-        tab.address_completion.edited = true;
-        tab.address_completion.selected = None;
+        tab.address_completion
+            .address_changed(&tab.address, &tab.path);
         tab.address_error = None;
         suggestions = tab
             .address_completion
             .suggestions(&tab.address, &tab.path, ui.ctx());
     }
-    if let Some(step) = step.filter(|_| !suggestions.is_empty()) {
+    if let Some(step) = step.filter(|_| !response.changed() && !suggestions.is_empty()) {
         let count = suggestions.len();
         tab.address_completion.selected = Some(match tab.address_completion.selected {
             Some(selected) => (selected as isize + step).rem_euclid(count as isize) as usize,
@@ -3641,10 +3654,11 @@ fn edit_address(
             None => count - 1,
         });
     }
-    if let Some(item) = complete
+    let completed = if let Some(item) = (complete && !response.changed())
         .then(|| suggestions.get(tab.address_completion.selected.unwrap_or(0)))
         .flatten()
     {
+        tab.address_completion.remember_completion(&item.path);
         tab.address = item.path.display();
         let separator = if item.path.remote() {
             '/'
@@ -3662,7 +3676,10 @@ fn edit_address(
             .address_completion
             .suggestions(&tab.address, &tab.path, ui.ctx());
         ui.ctx().request_repaint();
-    }
+        true
+    } else {
+        false
+    };
     if let Some(range) = cursor_range {
         output.state.cursor.set_char_range(Some(range));
         output.state.store(ui.ctx(), field_id);
@@ -3725,7 +3742,7 @@ fn edit_address(
         if let (true, Some(item)) = (enter, selected) {
             destination = Some(item.path.clone());
         } else {
-            match resolve_address(&tab.address, &tab.path) {
+            match tab.address_completion.resolve(&tab.address, &tab.path) {
                 Ok(path) => destination = Some(path),
                 Err(error) => {
                     tab.address_error = Some(error);
@@ -3750,6 +3767,16 @@ fn edit_address(
     }
     if let Some(path) = destination {
         actions.push(Action::Navigate(index, path));
+    }
+    if tab.edit_address {
+        if completed {
+            // egui may already be advancing focus to the next widget on Tab.
+            // Restore focus after the buttons and popup have registered.
+            response.request_focus();
+        }
+        if response.has_focus() {
+            actions.push(Action::Focus(index));
+        }
     }
 }
 
@@ -4551,9 +4578,6 @@ fn human_size(bytes: u64) -> String {
             bytes as f64 / (1024.0 * 1024.0 * 1024.0)
         )
     }
-}
-fn resolve_address(address: &str, current: &Location) -> Result<Location, String> {
-    fs_ops::resolve(address, current)
 }
 fn place_button(ui: &mut egui::Ui, label: &str, selected: bool) -> bool {
     let colors = Palette::from_ctx(ui.ctx());
@@ -5883,10 +5907,11 @@ mod tests {
         let mut tab = Tab::new(original.clone(), &ctx);
         tab.begin_address();
         let mut time = 0.0;
+        let suggestion_position = std::cell::Cell::new(None);
         let mut render = |tab: &mut Tab, events| {
             time += 0.1;
             let mut actions = vec![];
-            let _ = ctx.run(
+            let output = ctx.run(
                 egui::RawInput {
                     time: Some(time),
                     events,
@@ -5902,6 +5927,14 @@ mod tests {
                     });
                 },
             );
+            suggestion_position.set(output.shapes.iter().find_map(|shape| {
+                if let egui::Shape::Text(text) = &shape.shape {
+                    if text.galley.text() == "Nested folder" {
+                        return Some(text.visual_bounding_rect().center());
+                    }
+                }
+                None
+            }));
             actions
         };
         let key = |key| egui::Event::Key {
@@ -5938,6 +5971,10 @@ mod tests {
         wait_for_suggestions(&mut tab, &mut render);
         render(&mut tab, vec![key(egui::Key::ArrowDown)]);
         render(&mut tab, vec![key(egui::Key::ArrowDown)]);
+        ctx.memory_mut(|memory| {
+            let field = memory.focused().expect("path field focus");
+            memory.set_focus_lock_filter(field, egui::EventFilter::default());
+        });
         let actions = render(&mut tab, vec![key(egui::Key::Tab)]);
         assert!(tab.edit_address);
         assert_eq!(
@@ -5949,9 +5986,37 @@ mod tests {
             )
         );
         assert!(!actions.iter().any(|a| matches!(a, Action::Navigate(_, _))));
+        render(&mut tab, vec![egui::Event::Text("nest".into())]);
+        assert!(
+            tab.address.ends_with("nest"),
+            "Tab keeps the path field focused"
+        );
         wait_for_suggestions(&mut tab, &mut render);
         render(&mut tab, vec![key(egui::Key::ArrowDown)]);
         let actions = render(&mut tab, vec![key(egui::Key::Enter)]);
+        assert!(actions.iter().any(|a| matches!(
+            a, Action::Navigate(1, p) if *p == original.join("Two Words").join("Nested folder")
+        )));
+        assert!(!tab.edit_address);
+
+        tab.begin_address();
+        render(&mut tab, vec![]);
+        render(&mut tab, vec![egui::Event::Paste("Two Words/nest".into())]);
+        wait_for_suggestions(&mut tab, &mut render);
+        // Run another frame so the popup has completed egui's initial sizing pass.
+        render(&mut tab, vec![]);
+        let pos = suggestion_position.get().expect("visible suggestion");
+        let pointer = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        render(
+            &mut tab,
+            vec![egui::Event::PointerMoved(pos), pointer(true)],
+        );
+        let actions = render(&mut tab, vec![pointer(false)]);
         assert!(actions.iter().any(|a| matches!(
             a, Action::Navigate(1, p) if *p == original.join("Two Words").join("Nested folder")
         )));
@@ -6075,7 +6140,9 @@ mod tests {
     #[test]
     fn relative_address_preserves_spaces() {
         assert_eq!(
-            resolve_address("two words", &PathBuf::from("/tmp").into()).unwrap(),
+            crate::address::Completion::default()
+                .resolve("two words", &PathBuf::from("/tmp").into())
+                .unwrap(),
             Location::Local(PathBuf::from("/tmp/two words"))
         );
     }

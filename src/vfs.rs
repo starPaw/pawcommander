@@ -29,6 +29,12 @@ pub struct Endpoint {
     pub key: Option<PathBuf>,
 }
 
+impl Endpoint {
+    fn same_authority(&self, other: &Self) -> bool {
+        self.host == other.host && self.port == other.port && self.user == other.user
+    }
+}
+
 // Untagged keeps persisted local paths compatible with the original settings.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -106,6 +112,9 @@ impl Location {
             _ => false,
         }
     }
+    pub(crate) fn same_sftp_authority(&self, other: &Self) -> bool {
+        matches!((self, other), (Self::Sftp { endpoint: a, .. }, Self::Sftp { endpoint: b, .. }) if a.same_authority(b))
+    }
 }
 impl fmt::Display for Location {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -178,10 +187,7 @@ pub fn resolve(address: &str, current: &Location) -> Result<Location, String> {
             endpoint: existing, ..
         } = current
         {
-            if endpoint.host == existing.host
-                && endpoint.port == existing.port
-                && endpoint.user == existing.user
-            {
+            if endpoint.same_authority(existing) {
                 endpoint.key = existing.key.clone();
             }
         }
@@ -529,15 +535,42 @@ pub fn read_automatic_directory(
 }
 
 /// Completion may browse an existing session without initiating authentication.
-pub fn read_address_directory(location: &Location) -> Result<Vec<FileEntry>, String> {
-    let Location::Sftp { endpoint, .. } = location else {
-        return read_directory(location, &|| false);
-    };
-    let session = sessions().lock().map_err(err)?.get(endpoint).cloned();
-    match session {
-        Some(session) => read_sftp_directory(location, &session.sftp().map_err(err)?, &|| false),
-        None => Ok(vec![]),
+pub fn visit_address_directory(
+    location: &Location,
+    allow_unique_session: bool,
+    cancelled: &impl Fn() -> bool,
+    visit: impl FnMut(FileEntry),
+) -> Result<(), String> {
+    if cancelled() {
+        return Ok(());
     }
+    let Location::Sftp { endpoint, path } = location else {
+        return visit_directory(location, cancelled, visit);
+    };
+    let connected = {
+        let sessions = sessions().lock().map_err(err)?;
+        let exact = sessions.get_key_value(endpoint);
+        let matched = exact.or_else(|| {
+            if !allow_unique_session {
+                return None;
+            }
+            // A URL identifies an authority, but it carries no key path.
+            let mut matching = sessions
+                .iter()
+                .filter(|(candidate, _)| candidate.same_authority(endpoint));
+            let only = matching.next()?;
+            matching.next().is_none().then_some(only)
+        });
+        matched.map(|(endpoint, session)| (endpoint.clone(), session.clone()))
+    };
+    if let Some((endpoint, session)) = connected.filter(|_| !cancelled()) {
+        let location = Location::Sftp {
+            endpoint,
+            path: path.clone(),
+        };
+        visit_sftp_directory(&location, &session.sftp().map_err(err)?, cancelled, visit)?;
+    }
+    Ok(())
 }
 
 fn read_sftp_directory(
@@ -2680,7 +2713,11 @@ mod tests {
         assert!(read_automatic_directory(&remote_root, &|| false)
             .unwrap()
             .is_none());
-        assert!(read_address_directory(&remote_root).unwrap().is_empty());
+        visit_address_directory(&remote_root, true, &|| false, |_| {
+            panic!("completion must not authenticate to browse an unknown endpoint")
+        })
+        .unwrap();
+        assert!(!sessions().lock().unwrap().contains_key(&endpoint));
         let session = connect(&endpoint, "", "test-passphrase", &known).unwrap();
         sessions().lock().unwrap().insert(endpoint.clone(), session);
         let local_root = Location::Local(root.join("local"));
@@ -2718,15 +2755,41 @@ mod tests {
             .unwrap()
             .unwrap()
             .is_empty());
-        let completion_folder = remote_root.join("Completion folder");
+        let completion_folder = remote_root.join("Žlutá папка #📂");
         fs::create_dir(completion_folder.path()).unwrap();
-        assert!(read_address_directory(&remote_root)
+        let actual = fs::read_dir(remote_root.path())
             .unwrap()
-            .iter()
-            .any(|entry| entry.is_dir && entry.path == completion_folder));
+            .next()
+            .unwrap()
+            .unwrap();
+        let completion_folder = remote_root.with_path(actual.path());
+        let mut completion = crate::address::Completion::default();
+        completion.edited = true;
+        let query = format!("{}/z\u{30c}l", remote_root.display());
+        let ctx = eframe::egui::Context::default();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let suggestions = completion.suggestions(&query, &local_root, &ctx);
+            if let Some(suggestion) = suggestions.first() {
+                assert_eq!(suggestion.path, completion_folder);
+                assert_eq!(suggestion.name, actual.file_name().to_str().unwrap());
+                completion.remember_completion(&suggestion.path);
+                let tab_address = format!("{}/", suggestion.path.display());
+                assert_eq!(
+                    completion.resolve(&tab_address, &local_root).unwrap(),
+                    completion_folder
+                );
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "expected SFTP completion"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
         fs::write(refresh_file.path(), b"another entry").unwrap();
         let visited = std::cell::Cell::new(0);
-        visit_directory(&remote_root, &|| visited.get() == 1, |entry| {
+        visit_address_directory(&remote_root, false, &|| visited.get() == 1, |entry| {
             assert!(entry.path == completion_folder || entry.path == refresh_file);
             visited.set(visited.get() + 1);
         })
