@@ -30,10 +30,11 @@ pub enum Command {
     FocusToolbar,
     #[serde(rename = "CommandPalette")]
     Palette,
+    FolderJump,
 }
 
 impl Command {
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 25] = [
         Self::EditPath,
         Self::Filter,
         Self::Search,
@@ -58,6 +59,7 @@ impl Command {
         Self::MoveToPane,
         Self::FocusToolbar,
         Self::Palette,
+        Self::FolderJump,
     ];
 
     pub fn label(self) -> &'static str {
@@ -86,6 +88,7 @@ impl Command {
             Self::MoveToPane => "Переместить в соседнюю панель",
             Self::FocusToolbar => "Фокус на панели инструментов",
             Self::Palette => "Палитра команд",
+            Self::FolderJump => "Быстрый переход к папке",
         })
     }
 
@@ -93,7 +96,12 @@ impl Command {
     pub fn works_in_text_field(self, chord: Chord) -> bool {
         matches!(
             self,
-            Self::EditPath | Self::Filter | Self::Search | Self::FocusToolbar | Self::Palette
+            Self::EditPath
+                | Self::Filter
+                | Self::Search
+                | Self::FocusToolbar
+                | Self::Palette
+                | Self::FolderJump
         ) && Profile::Default.chord(self) == Some(chord)
     }
 }
@@ -148,6 +156,7 @@ impl Profile {
             Trash => (Modifiers::NONE, Key::Delete),
             FocusToolbar => (Modifiers::NONE, Key::F10),
             Palette => (CMD_SHIFT, Key::P),
+            FolderJump => (CMD_SHIFT, Key::J),
             Preview | EditInZed | CopyToPane | MoveToPane => return None,
         };
         Some(Chord::new(modifiers, key))
@@ -211,7 +220,7 @@ impl Shortcuts {
 
     pub fn validate(&mut self) {
         // Keep explicit bindings saved before these default shortcuts existed.
-        for command in [Command::FocusToolbar, Command::Palette] {
+        for command in [Command::FocusToolbar, Command::Palette, Command::FolderJump] {
             if !self.overrides.contains_key(&command)
                 && self
                     .overrides
@@ -637,29 +646,28 @@ mod tests {
     }
 
     #[test]
-    fn palette_default_preserves_legacy_shortcut_and_can_be_reassigned() {
-        let palette_default = chord(Key::P, CMD_SHIFT);
+    fn picker_defaults_preserve_legacy_shortcuts_and_can_be_reassigned() {
         let custom = chord(Key::F9, Modifiers::NONE);
         for profile in [Profile::Default, Profile::Commander] {
-            let mut shortcuts: Shortcuts = serde_json::from_value(serde_json::json!({
-                "profile": profile,
-                "overrides": {"Refresh": palette_default}
-            }))
-            .unwrap();
-            shortcuts.validate();
-            assert_eq!(shortcuts.command(palette_default), Some(Command::Refresh));
-            assert_eq!(shortcuts.chord(Command::Palette), None);
+            for (key, picker) in [(Key::P, Command::Palette), (Key::J, Command::FolderJump)] {
+                let default = chord(key, CMD_SHIFT);
+                let mut shortcuts: Shortcuts = serde_json::from_value(serde_json::json!({
+                    "profile": profile,
+                    "overrides": {"Refresh": default}
+                }))
+                .unwrap();
+                shortcuts.validate();
+                assert_eq!(shortcuts.command(default), Some(Command::Refresh));
+                assert_eq!(shortcuts.chord(picker), None);
 
-            shortcuts.set(Command::Palette, Some(custom)).unwrap();
-            shortcuts.validate();
-            let ctx = egui::Context::default();
-            assert_eq!(shortcuts.command(custom), Some(Command::Palette));
-            let _ = ctx.run(Default::default(), |ctx| {
-                assert_eq!(
-                    shortcuts.keys(ctx, Command::Palette),
-                    ctx.format_shortcut(&custom)
-                );
-            });
+                shortcuts.set(picker, Some(custom)).unwrap();
+                shortcuts.validate();
+                let ctx = egui::Context::default();
+                assert_eq!(shortcuts.command(custom), Some(picker));
+                let _ = ctx.run(Default::default(), |ctx| {
+                    assert_eq!(shortcuts.keys(ctx, picker), ctx.format_shortcut(&custom));
+                });
+            }
         }
     }
 }

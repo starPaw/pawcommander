@@ -39,6 +39,8 @@ Visible local and connected SFTP folders refresh automatically. On macOS, you ca
 
 Use the arrow beside the breadcrumbs to type a path. Folder suggestions work for local paths and connected SFTP servers. Use Up or Down to select a suggestion, Tab to complete the path, Enter to open it, or Esc to return to the breadcrumbs.
 
+Open **Go to Folder** from the sidebar or command palette, or press `Ctrl+Shift+J` (`Cmd+Shift+J` on macOS). Type part of a folder name or path to search your last 128 distinct visited folders. Results rank by match quality, recency, and visit frequency. Select a folder to open it in the active pane.
+
 ## Get started
 
 **PawCommander is an early release.** macOS is the primary development platform. Linux and Windows have platform-specific implementations and CI checks; desktop integration on those systems still needs broader testing. Feedback and reproducible bug reports are welcome.

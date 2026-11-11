@@ -7,6 +7,7 @@ mod conflict;
 mod credentials;
 mod drag_drop;
 mod file_clipboard;
+mod folder_jump;
 mod fs_ops;
 mod i18n;
 mod icons;

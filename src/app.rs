@@ -2,6 +2,7 @@ use crate::command_palette::{CommandPalette, PaletteOutcome};
 use crate::conflict::{Answer, ConflictDialog, Decision};
 use crate::drag_drop::{DragFiles, DropRequest, DropTargets};
 use crate::file_clipboard::{FileList, SystemClipboard};
+use crate::folder_jump::{FolderHistory, FolderJump, JumpOutcome};
 use crate::fs_ops::TransferKind;
 use crate::icons::{self, Icon};
 use crate::operations::{Progress, ProgressView};
@@ -27,6 +28,7 @@ use std::time::{Duration, Instant};
 struct Settings {
     locations: Vec<Vec<Location>>,
     bookmarks: Vec<Location>,
+    folder_history: FolderHistory,
     split: bool,
     preview: bool,
     hidden: bool,
@@ -63,6 +65,7 @@ impl Default for Settings {
         Self {
             locations: vec![],
             bookmarks: vec![],
+            folder_history: FolderHistory::default(),
             split: true,
             preview: true,
             hidden: false,
@@ -94,6 +97,13 @@ enum DirectoryLoadMode {
     Progressive,
     Reload,
     Automatic,
+}
+
+#[derive(Clone, Copy)]
+enum FolderVisit {
+    Unseen,
+    CountOnOpen,
+    Recorded,
 }
 
 enum DirectoryRead {
@@ -283,6 +293,7 @@ struct Tab {
     history_index: usize,
     loading: Option<DirectoryLoad>,
     has_complete_listing: bool,
+    folder_visit: FolderVisit,
     next_auto_refresh: Instant,
     error: Option<String>,
     sort: Sort,
@@ -312,6 +323,7 @@ impl Tab {
             history_index: 0,
             loading: None,
             has_complete_listing: false,
+            folder_visit: FolderVisit::Unseen,
             next_auto_refresh: Instant::now() + AUTO_REFRESH_INTERVAL,
             error: None,
             sort: Sort::Name,
@@ -495,6 +507,7 @@ impl Tab {
     }
     fn reset_and_load(&mut self, ctx: &egui::Context) {
         self.has_complete_listing = false;
+        self.folder_visit = FolderVisit::CountOnOpen;
         self.selected.clear();
         self.anchor = None;
         self.cursor = None;
@@ -843,6 +856,7 @@ pub struct PawCommander {
     show_help: bool,
     shortcut_editor: Option<ShortcutEditor>,
     command_palette: Option<CommandPalette>,
+    folder_jump: Option<FolderJump>,
     palette_release_key: Option<egui::Key>,
     palette_focus_to_restore: Option<egui::Id>,
     keyboard_had_focus: bool,
@@ -872,6 +886,7 @@ impl PawCommander {
         settings.set_ui_scale(&cc.egui_ctx, settings.ui_scale);
         egui_extras::install_image_loaders(&cc.egui_ctx);
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+        let opened_start = start.is_some();
         if let Some(start) = start {
             let path = if start.is_absolute() {
                 start
@@ -882,7 +897,7 @@ impl PawCommander {
             };
             settings.locations = vec![vec![path.clone().into()], vec![path.into()]];
         }
-        let panes = (0..2)
+        let mut panes: Vec<_> = (0..2)
             .map(|i| {
                 let locations = settings
                     .locations
@@ -899,6 +914,11 @@ impl PawCommander {
                 }
             })
             .collect();
+        if opened_start {
+            panes[0].tab_mut().folder_visit = FolderVisit::CountOnOpen;
+            // The launch argument puts the same location in both panes.
+            panes[1].tab_mut().folder_visit = FolderVisit::Recorded;
+        }
         Self {
             panes,
             active: 0,
@@ -916,6 +936,7 @@ impl PawCommander {
             show_help: false,
             shortcut_editor: None,
             command_palette: None,
+            folder_jump: None,
             palette_release_key: None,
             palette_focus_to_restore: None,
             keyboard_had_focus: false,
@@ -1006,6 +1027,7 @@ impl PawCommander {
             && !self.show_help
             && self.shortcut_editor.is_none()
             && self.command_palette.is_none()
+            && self.folder_jump.is_none()
             && !self.search.visible
     }
 
@@ -1206,10 +1228,24 @@ impl PawCommander {
         for (pane_index, pane) in self.panes.iter_mut().enumerate() {
             let displayed = self.settings.split || pane_index == 0;
             for (tab_index, tab) in pane.tabs.iter_mut().enumerate() {
+                let current = displayed && tab_index == pane.current;
                 if can_reorder && (!tab.automatic_loading() || automatic_allowed) && tab.poll() {
                     ctx.request_repaint();
                 }
-                if displayed && tab_index == pane.current {
+                if tab.has_complete_listing {
+                    match tab.folder_visit {
+                        FolderVisit::CountOnOpen => {
+                            self.settings.folder_history.record(&tab.path);
+                            tab.folder_visit = FolderVisit::Recorded;
+                        }
+                        FolderVisit::Unseen if current => {
+                            self.settings.folder_history.record_if_new(&tab.path);
+                            tab.folder_visit = FolderVisit::Recorded;
+                        }
+                        FolderVisit::Unseen | FolderVisit::Recorded => {}
+                    }
+                }
+                if current {
                     if automatic_allowed {
                         tab.auto_refresh(ctx, now);
                     } else {
@@ -1622,6 +1658,12 @@ impl PawCommander {
                 let previous_focus = ctx.memory(|memory| memory.focused());
                 return self.open_command_palette(ctx, previous_focus);
             }
+            Command::FolderJump => {
+                let previous_focus = ctx.memory(|memory| memory.focused());
+                self.folder_jump = Some(FolderJump::new(previous_focus));
+                Self::restore_focus(ctx, None);
+                return;
+            }
             Command::FocusToolbar => {
                 self.focus_toolbar = true;
                 return;
@@ -1725,6 +1767,7 @@ impl PawCommander {
             || self.show_help
             || self.shortcut_editor.is_some()
             || self.command_palette.is_some()
+            || self.folder_jump.is_some()
             || self.show_accessibility
             || self.native_drag.active()
             || self.search.visible
@@ -1873,11 +1916,24 @@ impl PawCommander {
             .filter(|(pane, file)| Some(self.panes[*pane].tab().entry_id(file)) == previous_focus)
             .map(|(_, file)| file.clone());
         self.command_palette = Some(CommandPalette::new(previous_focus, focused_file));
+        Self::restore_focus(ctx, None);
+    }
+
+    fn restore_focus(ctx: &egui::Context, previous_focus: Option<egui::Id>) {
         ctx.memory_mut(|memory| {
             if let Some(id) = memory.focused() {
                 memory.surrender_focus(id);
             }
+            if let Some(id) = previous_focus {
+                memory.request_focus(id);
+            }
         });
+    }
+
+    fn guard_picker_close_key(&mut self, ctx: &egui::Context, keys: &[egui::Key], key: egui::Key) {
+        if keys.contains(&key) && ctx.input(|input| input.key_down(key)) {
+            self.palette_release_key = Some(key);
+        }
     }
 
     fn show_command_palette(&mut self, ctx: &egui::Context, keys: &[egui::Key]) {
@@ -1946,17 +2002,8 @@ impl PawCommander {
         } else {
             egui::Key::Enter
         };
-        if keys.contains(&close_key) && ctx.input(|input| input.key_down(close_key)) {
-            self.palette_release_key = Some(close_key);
-        }
-        ctx.memory_mut(|memory| {
-            if let Some(id) = memory.focused() {
-                memory.surrender_focus(id);
-            }
-            if let Some(id) = palette.previous_focus {
-                memory.request_focus(id);
-            }
-        });
+        self.guard_picker_close_key(ctx, keys, close_key);
+        Self::restore_focus(ctx, palette.previous_focus);
         if let PaletteOutcome::Run(command) = outcome {
             if restore_file_cursor {
                 self.tab_mut().cursor = palette.focused_file;
@@ -1966,6 +2013,34 @@ impl PawCommander {
         // egui keeps the old modal layer active through the next render and
         // can clear the workspace's focus when drawing the underlying widget.
         self.palette_focus_to_restore = ctx.memory(|memory| memory.focused());
+        ctx.request_repaint();
+    }
+
+    fn show_folder_jump(&mut self, ctx: &egui::Context, keys: &[egui::Key]) {
+        let Some(mut jump) = self.folder_jump.take() else {
+            return;
+        };
+        match jump.show(ctx, &self.settings.folder_history, keys) {
+            JumpOutcome::Open => {
+                self.folder_jump = Some(jump);
+                return;
+            }
+            JumpOutcome::Dismissed => {
+                self.guard_picker_close_key(ctx, keys, egui::Key::Escape);
+                Self::restore_focus(ctx, jump.previous_focus);
+                self.palette_focus_to_restore = jump.previous_focus;
+            }
+            JumpOutcome::Navigate(location) => {
+                self.guard_picker_close_key(ctx, keys, egui::Key::Enter);
+                if self.tab().path == location {
+                    Self::restore_focus(ctx, jump.previous_focus);
+                    self.palette_focus_to_restore = jump.previous_focus;
+                } else {
+                    Self::restore_focus(ctx, None);
+                    self.action(Action::Navigate(self.active, location), ctx);
+                }
+            }
+        }
         ctx.request_repaint();
     }
 
@@ -2259,6 +2334,22 @@ impl PawCommander {
                     .max_height(places_height)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
+                        let jump = ui.add_enabled(
+                            !self.keyboard_blocked(ctx),
+                            egui::Button::new(crate::i18n::text("К папке…")),
+                        );
+                        paint_focus(ui, &jump, 5);
+                        if jump
+                            .on_hover_text(self.settings.shortcuts.hint(
+                                ctx,
+                                Command::FolderJump,
+                                Command::FolderJump.label(),
+                            ))
+                            .clicked()
+                        {
+                            actions.push(Action::Shortcut(Command::FolderJump));
+                        }
+                        ui.add_space(6.0);
                         let current = self.tab().path.clone();
                         egui::CollapsingHeader::new(crate::i18n::text("Ваши файлы"))
                             .id_salt("places_group")
@@ -2869,7 +2960,9 @@ impl eframe::App for PawCommander {
         if self.shortcut_editor.is_none() {
             self.scale_shortcuts(ctx);
         }
-        let palette_keys = if self.command_palette.is_some() && !self.conflict_open() {
+        let picker_keys = if (self.command_palette.is_some() || self.folder_jump.is_some())
+            && !self.conflict_open()
+        {
             CommandPalette::take_keys(ctx)
         } else {
             Vec::new()
@@ -2963,6 +3056,7 @@ impl eframe::App for PawCommander {
             && !self.show_help
             && self.shortcut_editor.is_none()
             && self.command_palette.is_none()
+            && self.folder_jump.is_none()
             && !self.show_accessibility
             && !self.search.visible
         {
@@ -2993,6 +3087,9 @@ impl eframe::App for PawCommander {
                     if let Some(palette) = &mut self.command_palette {
                         palette.refocus_query();
                     }
+                    if let Some(jump) = &mut self.folder_jump {
+                        jump.refocus_query();
+                    }
                     ctx.request_repaint();
                 }
                 return;
@@ -3005,7 +3102,11 @@ impl eframe::App for PawCommander {
                 ctx.request_repaint();
             }
         }
-        self.show_command_palette(ctx, &palette_keys);
+        if self.command_palette.is_some() {
+            self.show_command_palette(ctx, &picker_keys);
+        } else {
+            self.show_folder_jump(ctx, &picker_keys);
+        }
         self.accessibility_dialog(ctx);
         self.dialogs(ctx);
         if self
@@ -5143,6 +5244,143 @@ mod tests {
         run(&mut app, vec![key(Key::Enter, true, Modifiers::NONE)]);
         assert!(app.command_palette.is_none());
         assert_eq!(app.panes[0].tabs.len(), 1);
+    }
+
+    #[test]
+    fn folder_jump_uses_successful_visits_and_opens_in_the_active_pane() {
+        use egui::{Event, Key, Modifiers};
+
+        let root = tempfile::tempdir().unwrap();
+        let base: Location = root.path().to_path_buf().into();
+        let target = base.join("PawCommander");
+        let missing = base.join("Missing");
+        std::fs::create_dir(target.path()).unwrap();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        wait_for_directory(app.tab_mut());
+        app.poll(&ctx);
+        app.action(Action::Navigate(0, target.clone()), &ctx);
+        wait_for_directory(app.tab_mut());
+        app.poll(&ctx);
+        app.action(Action::Navigate(0, missing.clone()), &ctx);
+        wait_for_directory(app.tab_mut());
+        app.poll(&ctx);
+        assert!(app.settings.folder_history.ranked("missing").is_empty());
+
+        let mut storage = MemoryStorage::default();
+        eframe::App::save(&mut app, &mut storage);
+        let restored: Settings = eframe::get_value(&storage, "pawcommander.settings").unwrap();
+        assert_eq!(restored.folder_history.ranked("pwcm"), vec![&target]);
+
+        app.active = 1;
+        let mut run = |app: &mut PawCommander, events| {
+            let mut input = egui::RawInput {
+                events,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(1440.0, 860.0),
+                )),
+                ..Default::default()
+            };
+            eframe::App::raw_input_hook(app, &ctx, &mut input);
+            ctx.run(input, |ctx| eframe::App::update(app, ctx, &mut frame))
+        };
+        let press = |key, modifiers| {
+            [true, false].map(|pressed| Event::Key {
+                key,
+                physical_key: None,
+                pressed,
+                repeat: false,
+                modifiers,
+            })
+        };
+        let command_shift = Modifiers::COMMAND | Modifiers::SHIFT;
+        run(&mut app, press(Key::J, command_shift).to_vec());
+        assert!(app.folder_jump.is_some());
+        run(&mut app, press(Key::Escape, Modifiers::NONE).to_vec());
+        assert!(app.folder_jump.is_none());
+        assert_eq!(app.tab().path, base);
+
+        run(&mut app, press(Key::P, command_shift).to_vec());
+        run(&mut app, vec![]);
+        run(
+            &mut app,
+            vec![Event::Text(Command::FolderJump.label().into())],
+        );
+        run(&mut app, press(Key::Enter, Modifiers::NONE).to_vec());
+        assert!(app.command_palette.is_none());
+        assert!(app.folder_jump.is_some());
+        assert_eq!(app.tab().path, base);
+        run(&mut app, vec![]);
+        run(&mut app, vec![]);
+        run(&mut app, vec![Event::Text("pwcm".into())]);
+        run(&mut app, press(Key::Enter, Modifiers::NONE).to_vec());
+        assert!(app.folder_jump.is_none());
+        assert_eq!(app.active, 1);
+        assert_eq!(app.tab().path, target);
+        assert_eq!(app.panes[0].tab().path, missing);
+    }
+
+    #[test]
+    fn folder_jump_seeds_visible_restored_tabs_once() {
+        let root = tempfile::tempdir().unwrap();
+        let base: Location = root.path().to_path_buf().into();
+        let left = base.join("Left current");
+        let right = base.join("Right current");
+        let background = base.join("Background tab");
+        for location in [&left, &right, &background] {
+            std::fs::create_dir(location.path()).unwrap();
+        }
+        let ctx = egui::Context::default();
+        let mut storage = MemoryStorage::default();
+        let legacy = Settings {
+            locations: vec![vec![left.clone(), background.clone()], vec![right.clone()]],
+            ..Settings::default()
+        };
+        eframe::set_value(&mut storage, "pawcommander.settings", &legacy);
+        let open = |storage: &MemoryStorage| {
+            let mut cc = eframe::CreationContext::_new_kittest(ctx.clone());
+            cc.storage = Some(storage);
+            let mut app = PawCommander::new(&cc, None);
+            for pane in &mut app.panes {
+                for tab in &mut pane.tabs {
+                    wait_for_directory(tab);
+                }
+            }
+            app.poll(&ctx);
+            app
+        };
+        let mut app = open(&storage);
+        assert_eq!(
+            app.settings.folder_history.ranked("current"),
+            vec![&right, &left]
+        );
+        assert!(app.settings.folder_history.ranked("background").is_empty());
+        app.panes[0].select_tab(1);
+        app.poll(&ctx);
+        assert_eq!(
+            app.settings.folder_history.ranked("background"),
+            vec![&background]
+        );
+
+        let before = serde_json::to_string(&app.settings.folder_history).unwrap();
+        let tab = app.panes[0].tab_mut();
+        tab.auto_refresh(&ctx, tab.next_auto_refresh);
+        assert!(tab.automatic_loading());
+        wait_for_directory(tab);
+        app.poll(&ctx);
+        assert_eq!(
+            serde_json::to_string(&app.settings.folder_history).unwrap(),
+            before
+        );
+        eframe::App::save(&mut app, &mut storage);
+        let reopened = open(&storage);
+        assert_eq!(
+            serde_json::to_string(&reopened.settings.folder_history).unwrap(),
+            before
+        );
     }
 
     #[test]
