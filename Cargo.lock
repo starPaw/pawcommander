@@ -2914,6 +2914,7 @@ dependencies = [
  "open",
  "percent-encoding",
  "raw-window-handle",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "ssh2",

@@ -15,6 +15,7 @@ mod icons;
 mod list_columns;
 #[cfg(target_os = "macos")]
 mod macos_about;
+mod name_match;
 mod native_drag;
 mod operations;
 mod preview;

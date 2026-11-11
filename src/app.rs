@@ -1102,8 +1102,10 @@ impl Tab {
                         self.select_revealed(path);
                     } else {
                         self.error = Some(
-                            crate::i18n::text("Результат locate уже отсутствует в папке. Возможно, индекс устарел.")
-                                .into(),
+                            crate::i18n::text(
+                                "Результат поиска уже отсутствует в папке. Выполните поиск снова.",
+                            )
+                            .into(),
                         );
                     }
                 }
@@ -2956,8 +2958,7 @@ impl PawCommander {
     }
 
     fn open_search(&mut self) {
-        self.tools = crate::tools::Tools::detect();
-        self.search.open();
+        self.search.open(self.panes[self.active].tab().path.local());
     }
 
     fn reveal_search_result(&mut self, path: PathBuf, ctx: &egui::Context) {
@@ -3649,7 +3650,7 @@ impl PawCommander {
                     };
                     let search_enabled = !self.keyboard_blocked(ctx);
                     if ui.add_enabled_ui(search_enabled, |ui| icons::button_width(ui, Icon::Search, search_label, false, search_width)).inner
-                        .on_hover_text(self.settings.shortcuts.hint(ctx, Command::Search, crate::i18n::text("Суперпоиск по индексу locate"))).clicked() {
+                        .on_hover_text(self.settings.shortcuts.hint(ctx, Command::Search, Command::Search.label())).clicked() {
                         self.open_search();
                     }
                     if ui.add_enabled_ui(self.job.is_none(), |ui| icons::button(ui, Icon::Server, "SFTP", self.tab().path.remote())).inner
@@ -10479,7 +10480,7 @@ mod tests {
         assert_eq!(duplicate.address, remote.display());
     }
     #[test]
-    fn locate_result_is_selected_after_loading_and_stale_result_is_reported() {
+    fn search_result_is_selected_after_loading_and_stale_result_is_reported() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join(".hidden файл");
         std::fs::write(&path, "test").unwrap();
@@ -10512,7 +10513,10 @@ mod tests {
         .unwrap();
         tab.poll();
         assert!(tab.selected.is_empty());
-        assert!(tab.error.unwrap().contains("index may be outdated"));
+        assert!(tab
+            .error
+            .unwrap()
+            .contains("search result no longer exists"));
     }
 
     #[test]

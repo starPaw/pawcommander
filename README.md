@@ -31,7 +31,7 @@ PawCommander brings a familiar two-pane workflow to a calm, colorful desktop app
 | A comfortable workspace | Useful tools, close at hand |
 | --- | --- |
 | **One pane or two.** Independent tabs, list and grid views, breadcrumbs, bookmarks, and folder history. | **Local files + SFTP.** Browse servers in either pane and copy files and folders between locations. |
-| **See before you open.** Text and image previews, plus background size calculations for local files and folders. | **Find your way.** Filter the current folder or search local paths through `locate` / `plocate`. |
+| **See before you open.** Text and image previews, plus background size calculations for local files and folders. | **Find your way.** Filter the current folder, search its subtree, or query a local `locate` / `plocate` index. |
 | **Move naturally.** Multiple selection, file clipboard, drag and drop, and keyboard shortcuts. | **Keep track of transfers.** Background operations, copy progress, conflict choices, and free-space checks. |
 | **Choose your mood.** All four Catppuccin palettes, system appearance, and English / Russian UI. | **Open in Zed.** Send local files or remote text files to your editor over SSH. |
 
@@ -153,7 +153,7 @@ See the [user guide](docs/USER_GUIDE.md) for SFTP setup, clipboard behavior, dra
 
 - **Transfers are not backups.** Local copying does not preserve every OS-specific attribute, ACL, Finder tag, or hard-link relationship. SFTP copying supports regular files and folders, with more limited metadata preservation.
 - **Remote deletion is permanent.** Local deletion uses the system trash; SFTP deletion requires a separate permanent-delete confirmation.
-- **Search uses an external index.** `locate` results can be stale. This is path search, not file-content search or SFTP search.
+- **Name search is local.** Folder search reads the filesystem directly. The optional `locate` mode uses an external index whose results can be stale.
 - **SFTP is deliberately explicit.** Verify server keys with OpenSSH first. ProxyJump, interactive MFA, and SSH-config-based connection setup are not supported. Transfers require server free-space reporting.
 - **Some features are still ahead.** No built-in terminal, archive browsing, transfer resume, or network protocols beyond SFTP.
 

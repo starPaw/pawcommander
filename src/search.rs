@@ -1,4 +1,8 @@
-//! Bounded, cancellable local index search. Paths are never passed to a shell.
+//! Live folder and indexed path search. Both run on a cancellable worker.
+mod directory;
+
+use crate::name_match::{normalize, Mask};
+use directory::Directory;
 use eframe::egui;
 use std::{
     io::{self, Read},
@@ -13,6 +17,9 @@ use std::{
 };
 
 const MAX_RESULTS: usize = 1000;
+// Keep directory handles and the traversal stack bounded for deeply nested trees.
+const MAX_OPEN_DIRECTORIES: usize = 64;
+const MAX_PATTERN_BYTES: usize = 1024;
 const TIMEOUT: Duration = Duration::from_secs(15);
 
 struct Results {
@@ -26,56 +33,125 @@ struct Job {
     result: Receiver<Result<Results, String>>,
 }
 
-impl Drop for Job {
-    fn drop(&mut self) {
+impl Job {
+    fn cancel(&self) {
         self.cancel.store(true, Ordering::Relaxed);
     }
+
+    fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for Job {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum Mode {
+    #[default]
+    Folder,
+    Index,
 }
 
 #[derive(Default)]
 pub struct Search {
     pub visible: bool,
     focus: bool,
+    mode: Mode,
+    folder: Option<PathBuf>,
     query: String,
-    job: Option<Job>,
+    exclusions: String,
+    jobs: [Option<Job>; 2],
     results: Option<Results>,
     selected: Option<PathBuf>,
     error: Option<String>,
 }
 
 impl Search {
-    pub fn open(&mut self) {
+    pub fn open(&mut self, folder: Option<&Path>) {
+        if self.folder.as_deref() != folder {
+            if self.mode == Mode::Folder {
+                self.clear();
+            }
+            self.folder = folder.map(Path::to_path_buf);
+        }
         self.visible = true;
         self.focus = true;
     }
 
-    fn start(&mut self, cli: &Path, ctx: &egui::Context) {
-        if self.query.trim().is_empty() {
-            return;
+    fn clear(&mut self) {
+        for job in self.jobs.iter().flatten() {
+            job.cancel();
         }
-        let (tx, rx) = mpsc::channel();
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.job = Some(Job {
-            cancel: cancel.clone(),
-            result: rx,
-        });
         self.results = None;
         self.selected = None;
         self.error = None;
-        let cli = cli.to_path_buf();
-        let query = self.query.clone();
-        let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(run(&cli, &query, &cancel, TIMEOUT));
-            ctx.request_repaint();
-        });
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, cli: Option<&Path>) -> Option<PathBuf> {
-        if !self.visible {
-            return None;
+    fn job(&self) -> Option<&Job> {
+        self.jobs[self.mode as usize].as_ref()
+    }
+
+    fn can_start(&self, cli: Option<&Path>) -> bool {
+        self.job().is_none()
+            && !self.query.trim().is_empty()
+            && match self.mode {
+                Mode::Folder => self.folder.is_some(),
+                Mode::Index => cli.is_some(),
+            }
+    }
+
+    fn start(&mut self, cli: Option<&Path>, ctx: &egui::Context) {
+        if !self.can_start(cli) {
+            return;
         }
-        if let Some(job) = &self.job {
+        self.clear();
+        let (tx, rx) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
+        let mode = self.mode;
+        let folder = self.folder.clone();
+        let cli = cli.map(Path::to_path_buf);
+        let query = self.query.clone();
+        let exclusions = self.exclusions.clone();
+        let ctx = ctx.clone();
+        let worker = std::thread::Builder::new().spawn(move || {
+            let result = match mode {
+                Mode::Folder => run_folder(
+                    folder.as_deref().expect("validated folder"),
+                    &query,
+                    &exclusions,
+                    &|| worker_cancel.load(Ordering::Relaxed),
+                ),
+                Mode::Index => run(
+                    cli.as_deref().expect("validated locate tool"),
+                    &query,
+                    &worker_cancel,
+                    TIMEOUT,
+                ),
+            };
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        });
+        match worker {
+            Ok(_) => self.jobs[mode as usize] = Some(Job { cancel, result: rx }),
+            Err(error) => {
+                self.error = Some(crate::tr_format!(
+                    "Не удалось запустить поиск: {error}",
+                    "Could not start search: {error}"
+                ));
+            }
+        }
+    }
+
+    fn poll(&mut self) {
+        for slot in &mut self.jobs {
+            let Some(job) = slot else {
+                continue;
+            };
             let result = match job.result.try_recv() {
                 Ok(result) => Some(result),
                 Err(mpsc::TryRecvError::Disconnected) => Some(Err(crate::i18n::text(
@@ -85,31 +161,78 @@ impl Search {
                 Err(mpsc::TryRecvError::Empty) => None,
             };
             if let Some(result) = result {
-                match result {
-                    Ok(results) => self.results = Some(results),
-                    Err(error) => self.error = Some(error),
+                if !job.cancelled() {
+                    match result {
+                        Ok(results) => self.results = Some(results),
+                        Err(error) => self.error = Some(error),
+                    }
                 }
-                self.job = None;
+                *slot = None;
             }
+        }
+    }
+
+    pub fn show(&mut self, ctx: &egui::Context, cli: Option<&Path>) -> Option<PathBuf> {
+        self.poll();
+        if !self.visible {
+            return None;
         }
         let mut visible = true;
         let mut reveal = None;
-        egui::Window::new(crate::i18n::text("Суперпоиск · locate"))
+        egui::Window::new(crate::i18n::text("Поиск файлов"))
+            .id(egui::Id::new("file_search"))
             .open(&mut visible)
             .default_width(720.0)
             .show(ctx, |ui| {
-                ui.label(crate::i18n::text("Поиск по полному пути в локальном индексе, без учёта регистра."));
-                ui.label(crate::i18n::text("База может отставать от файловой системы; SFTP не индексируется."));
-                if let Some(cli) = cli {
-                    ui.small(format!("locate: {}", cli.display()));
-                } else {
-                    ui.colored_label(ui.visuals().error_fg_color, crate::i18n::text("locate не найден"));
-                    ui.label(crate::i18n::text("На Linux установите locate/plocate; на macOS используется /usr/bin/locate. Затем: Настройки → Инструменты → Проверить снова."));
+                let previous_mode = self.mode;
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.mode, Mode::Folder, crate::i18n::text("В папке и подпапках"));
+                    ui.selectable_value(&mut self.mode, Mode::Index, crate::i18n::text("Индекс locate"));
+                });
+                if self.mode != previous_mode {
+                    self.clear();
+                    self.focus = true;
                 }
+                let mut submit = false;
+                let hint = match self.mode {
+                    Mode::Folder => {
+                        if let Some(folder) = &self.folder {
+                            let path = folder.display();
+                            let label = crate::tr_format!("Папка поиска: {path}", "Search folder: {path}");
+                            ui.add(egui::Label::new(&label).truncate()).on_hover_text(label);
+                            let exclusions = ui.add(
+                                egui::TextEdit::singleline(&mut self.exclusions)
+                                    .hint_text(crate::i18n::text("Исключить имена через запятую, например .git, target, *.tmp"))
+                                    .desired_width(ui.available_width()),
+                            );
+                            ctx.accesskit_node_builder(exclusions.id, |node| {
+                                node.set_label(crate::i18n::text("Исключения поиска"));
+                            });
+                            if exclusions.changed() {
+                                self.clear();
+                            }
+                            submit = exclusions.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        } else {
+                            ui.label(crate::i18n::text("Для поиска в папке откройте локальную папку в панели."));
+                        }
+                        crate::i18n::text("Часть имени или маска: отчёт, *.rs, фото?.jpg")
+                    }
+                    Mode::Index => {
+                        ui.label(crate::i18n::text("Поиск по полному пути в локальном индексе, без учёта регистра."));
+                        ui.label(crate::i18n::text("База может отставать от файловой системы; SFTP не индексируется."));
+                        if let Some(cli) = cli {
+                            ui.small(format!("locate: {}", cli.display()));
+                        } else {
+                            ui.colored_label(ui.visuals().error_fg_color, crate::i18n::text("locate не найден"));
+                            ui.label(crate::i18n::text("На Linux установите locate/plocate; на macOS используется /usr/bin/locate. Затем: Настройки → Инструменты → Проверить снова."));
+                        }
+                        crate::i18n::text("Часть пути или маска: Cargo, *.rs, */Documents/*")
+                    }
+                };
                 ui.horizontal(|ui| {
                     let response = ui.add(
                         egui::TextEdit::singleline(&mut self.query)
-                            .hint_text(crate::i18n::text("Часть пути или маска: Cargo, *.rs, */Documents/*"))
+                            .hint_text(hint)
                             .desired_width((ui.available_width() - 175.0).max(120.0)),
                     );
                     ctx.accesskit_node_builder(response.id, |node| {
@@ -119,20 +242,23 @@ impl Search {
                         response.request_focus();
                         self.focus = false;
                     }
-                    let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    let search = ui.add_enabled(
-                        cli.is_some() && !self.query.trim().is_empty() && self.job.is_none(),
+                    if response.changed() {
+                        self.clear();
+                    }
+                    submit |= response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    submit |= ui.add_enabled(
+                        self.can_start(cli),
                         egui::Button::new(crate::i18n::text("Найти")),
                     ).clicked();
-                    if (search || enter) && self.job.is_none() {
-                        if let Some(cli) = cli {
-                            self.start(cli, ctx);
-                        }
+                    if submit {
+                        self.start(cli, ctx);
                     }
-                    if self.job.is_some() {
+                    if let Some(job) = self.job() {
                         ui.spinner();
-                        if ui.button(crate::i18n::text("Отмена")).clicked() {
-                            self.job = None;
+                        if job.cancelled() {
+                            ui.label(crate::i18n::text("Остановка поиска…"));
+                        } else if ui.button(crate::i18n::text("Отмена")).clicked() {
+                            job.cancel();
                             self.error = Some(crate::i18n::text("Поиск отменён").into());
                         }
                     }
@@ -140,7 +266,9 @@ impl Search {
                 if let Some(error) = &self.error {
                     ui.colored_label(ui.visuals().error_fg_color, error);
                 }
-                ui.small(crate::i18n::text("Если база отсутствует или устарела, обновите её средствами ОС (locate.updatedb / updatedb)."));
+                if self.mode == Mode::Index {
+                    ui.small(crate::i18n::text("Если база отсутствует или устарела, обновите её средствами ОС (locate.updatedb / updatedb)."));
+                }
                 if let Some(results) = &self.results {
                     ui.separator();
                     ui.label(crate::tr_format!("Найдено: {}{}", "Found: {}{}", results.paths.len(), if results.limited { crate::i18n::text("+ · Уточните запрос, показаны первые 1000") } else { "" }));
@@ -148,10 +276,13 @@ impl Search {
                         ui.colored_label(ui.visuals().warn_fg_color, &results.warning);
                     }
                     if results.paths.is_empty() {
-                        ui.label(crate::i18n::text("Совпадений в индексе нет. Проверьте запрос и актуальность базы locate."));
+                        ui.label(match self.mode {
+                            Mode::Folder => crate::i18n::text("В просмотренных папках совпадений нет."),
+                            Mode::Index => crate::i18n::text("Совпадений в индексе нет. Проверьте запрос и актуальность базы locate."),
+                        });
                     }
                     egui::ScrollArea::vertical()
-                        .id_salt("locate_results")
+                        .id_salt("search_results")
                         .max_height(340.0)
                         .show_rows(ui, 28.0, results.paths.len(), |ui, rows| {
                             for index in rows {
@@ -181,12 +312,118 @@ impl Search {
         }
         self.visible = visible && reveal.is_none();
         if !self.visible {
-            self.job = None;
-        } else if self.job.is_some() {
+            for job in self.jobs.iter().flatten() {
+                job.cancel();
+            }
+        } else if self.job().is_some() {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
         reveal
     }
+}
+
+fn run_folder(
+    folder: &Path,
+    query: &str,
+    exclusions: &str,
+    cancelled: &impl Fn() -> bool,
+) -> Result<Results, String> {
+    let cancellation = || crate::i18n::text("Поиск отменён").into();
+    if cancelled() {
+        return Err(cancellation());
+    }
+    if query.trim().is_empty() || query.contains('\0') {
+        return Err(crate::i18n::text("Введите непустой запрос без NUL").into());
+    }
+    if query.len() > MAX_PATTERN_BYTES
+        || exclusions.len() > MAX_PATTERN_BYTES
+        || exclusions.contains('\0')
+    {
+        return Err(crate::i18n::text("Укоротите запрос или список исключений.").into());
+    }
+    let query = normalize(query);
+    let mask = query.contains(['*', '?']).then(|| Mask::new(&query));
+    let exclusions = exclusions
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| Mask::new(&normalize(name)))
+        .collect::<Vec<_>>();
+
+    let directory = Directory::open(folder.to_path_buf()).map_err(|error| {
+        crate::tr_format!(
+            "Не удалось прочитать папку: {error}",
+            "Could not read folder: {error}"
+        )
+    })?;
+    let mut directories = vec![directory];
+    let mut paths = Vec::new();
+    let mut limited = false;
+    let mut depth_limited = false;
+    let mut unreadable = 0;
+    loop {
+        if cancelled() {
+            return Err(cancellation());
+        }
+        let at_depth_limit = directories.len() == MAX_OPEN_DIRECTORIES;
+        let Some(directory) = directories.last_mut() else {
+            break;
+        };
+        let entry = match directory.next_entry() {
+            Ok(Some(entry)) => entry,
+            Err(_) => {
+                unreadable += 1;
+                directories.pop();
+                continue;
+            }
+            Ok(None) => {
+                directories.pop();
+                continue;
+            }
+        };
+        let name = entry.name.to_string_lossy();
+        let normalized = normalize(&name);
+        if exclusions.iter().any(|mask| mask.matches(&normalized)) {
+            continue;
+        }
+        let matches = match &mask {
+            Some(mask) => mask.matches(&normalized),
+            None => normalized.contains(query.as_ref()),
+        };
+        if matches {
+            if paths.len() == MAX_RESULTS {
+                limited = true;
+                break;
+            }
+            paths.push(directory.path.join(&entry.name));
+        }
+        match entry.descendable {
+            Ok(false) => {}
+            Ok(_) if at_depth_limit => depth_limited = true,
+            Ok(_) => match directory.open_child(&entry.name) {
+                Ok(Some(directory)) => directories.push(directory),
+                Ok(None) => {}
+                Err(_) => unreadable += 1,
+            },
+            Err(_) => unreadable += 1,
+        }
+    }
+    paths.sort_unstable();
+    let mut warnings = Vec::new();
+    if unreadable > 0 {
+        warnings.push(crate::tr_format!(
+            "Не удалось прочитать некоторые файлы или папки ({unreadable}).",
+            "Some files or folders could not be read ({unreadable})."
+        ));
+    }
+    if depth_limited {
+        warnings.push(crate::i18n::text("Поиск пропустил слишком глубоко вложенные папки.").into());
+    }
+    Ok(Results {
+        paths,
+        limited,
+        warning: warnings.join("\n"),
+    })
 }
 
 fn command(cli: &Path, query: &str) -> Command {
@@ -303,23 +540,25 @@ fn path_from_bytes(bytes: &[u8]) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{cell::Cell, fs};
 
     #[test]
     fn closing_search_cancels_work_and_missing_tool_does_not_start_it() {
         let ctx = egui::Context::default();
         let mut search = Search {
             query: "Cargo".into(),
+            mode: Mode::Index,
             ..Default::default()
         };
-        search.open();
+        search.open(None);
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             search.show(ctx, None);
         });
         assert!(search.visible);
-        assert!(search.job.is_none());
+        assert!(!search.can_start(None));
         let cancel = Arc::new(AtomicBool::new(false));
-        let (_tx, rx) = mpsc::channel();
-        search.job = Some(Job {
+        let (tx, rx) = mpsc::channel();
+        search.jobs[Mode::Index as usize] = Some(Job {
             cancel: cancel.clone(),
             result: rx,
         });
@@ -338,7 +577,139 @@ mod tests {
         });
         assert!(!search.visible);
         assert!(cancel.load(Ordering::Relaxed));
-        assert!(search.job.is_none());
+        tx.send(Ok(Results {
+            paths: vec![PathBuf::from("/stale")],
+            limited: false,
+            warning: String::new(),
+        }))
+        .unwrap();
+        search.poll();
+        assert!(search.job().is_none());
+        assert!(search.results.is_none());
+    }
+
+    #[test]
+    fn folder_search_starts_without_locate_or_a_retiring_index_worker() {
+        let ctx = egui::Context::default();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("Fresh.txt");
+        fs::write(&path, "").unwrap();
+        let (_tx, rx) = mpsc::channel();
+        let mut search = Search {
+            query: "fresh".into(),
+            ..Default::default()
+        };
+        search.jobs[Mode::Index as usize] = Some(Job {
+            cancel: Arc::new(AtomicBool::new(true)),
+            result: rx,
+        });
+        search.open(None);
+        assert!(!search.can_start(None));
+        search.open(Some(root.path()));
+        search.start(None, &ctx);
+        let results = search
+            .job()
+            .expect("folder search worker")
+            .result
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(results.paths, [path]);
+    }
+
+    #[test]
+    fn folder_search_finds_fresh_unicode_names_and_prunes_exclusions() {
+        let root = tempfile::tempdir().unwrap();
+        for subdir in ["nested", "target", "cache-one"] {
+            let folder = root.path().join(subdir);
+            fs::create_dir(&folder).unwrap();
+            fs::write(folder.join("CAFÉ ФАЙЛ.RS"), "").unwrap();
+        }
+        let folder = root.path().join("nested");
+        fs::write(folder.join("CAFÉ ФАЙЛ.tmp"), "").unwrap();
+        fs::write(folder.join("café файл.ignore.rs"), "").unwrap();
+        let excluded = " TARGET , cache-*, *.TMP, *.ignore.rs";
+        for query in ["cafe\u{301} файл", "caf? ф*.RS"] {
+            let results = run_folder(root.path(), query, excluded, &|| false).unwrap();
+            assert_eq!(results.paths, [folder.join("CAFÉ ФАЙЛ.RS")]);
+            assert!(results.warning.is_empty());
+        }
+        assert!(run_folder(root.path(), "target", "target", &|| false)
+            .unwrap()
+            .paths
+            .is_empty());
+    }
+
+    #[test]
+    fn folder_search_can_be_cancelled_during_a_scan() {
+        let root = tempfile::tempdir().unwrap();
+        for index in 0..8 {
+            fs::write(root.path().join(format!("file{index}")), "").unwrap();
+        }
+        let checks = Cell::new(0);
+        let cancelled = || {
+            checks.set(checks.get() + 1);
+            checks.get() == 5
+        };
+        assert_eq!(
+            run_folder(root.path(), "file", "", &cancelled)
+                .err()
+                .unwrap(),
+            crate::i18n::text("Поиск отменён")
+        );
+    }
+
+    #[test]
+    fn folder_search_bounds_matches_and_reports_depth_limit() {
+        let root = tempfile::tempdir().unwrap();
+        for index in 0..=MAX_RESULTS {
+            fs::write(root.path().join(format!("file{index}")), "").unwrap();
+        }
+        let results = run_folder(root.path(), "file", "", &|| false).unwrap();
+        assert_eq!(results.paths.len(), MAX_RESULTS);
+        assert!(results.limited);
+        fs::remove_file(root.path().join("file0")).unwrap();
+        assert!(
+            !run_folder(root.path(), "file", "", &|| false)
+                .unwrap()
+                .limited
+        );
+
+        let nested = "d/".repeat(MAX_OPEN_DIRECTORIES);
+        let deepest = root.path().join(nested);
+        fs::create_dir_all(&deepest).unwrap();
+        fs::write(deepest.join("match"), "").unwrap();
+        let results = run_folder(root.path(), "match", "", &|| false).unwrap();
+        assert!(results.paths.is_empty());
+        assert!(!results.warning.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn folder_search_preserves_native_paths_without_following_directory_links() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("test-outside.txt"), "").unwrap();
+        symlink(outside.path(), root.path().join("outside")).unwrap();
+        symlink(root.path(), root.path().join("loop")).unwrap();
+        let native = root.path().join("test-два слова\n.txt");
+        fs::write(&native, "").unwrap();
+        let results = run_folder(root.path(), "test-", "", &|| false).unwrap();
+        assert_eq!(results.paths, [native]);
+        assert!(results.warning.is_empty());
+
+        // Simulate a directory swapped for a link between listing and descent.
+        let child = root.path().join("child");
+        fs::create_dir(&child).unwrap();
+        let mut directory = Directory::open(root.path().to_path_buf()).unwrap();
+        let entry = std::iter::from_fn(|| directory.next_entry().unwrap())
+            .find(|entry| entry.name == "child")
+            .unwrap();
+        assert!(entry.descendable.unwrap());
+        fs::remove_dir(&child).unwrap();
+        symlink(outside.path(), &child).unwrap();
+        assert!(directory.open_child(&entry.name).is_err());
     }
 
     #[test]

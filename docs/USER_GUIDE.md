@@ -95,9 +95,9 @@ Properties show available dates and permissions for selected roots. Unix permiss
 
 ## Search and Zed
 
-`Cmd/Ctrl+F` filters names in the current folder. `Cmd/Ctrl+Shift+F` searches local indexed paths using `locate` or `plocate`. Enter a substring or wildcard such as `*.rs`; open a result to reveal it in its parent folder. Search is case-insensitive, limited to 1,000 results and a 15-second wait, and can be cancelled.
+`Cmd/Ctrl+F` filters names in the current folder. `Cmd/Ctrl+Shift+F` opens search. **Folder and subfolders** walks the local folder open when you start Search. Enter a name fragment or a wildcard such as `*.rs`. Comma-separated exclusion masks skip matching names and prune matching directories. Folder search skips symlink branches and returns up to 1,000 results. It reports incomplete coverage if it cannot read a branch or reaches its depth limit. You can cancel the search and reveal a result in its parent folder.
 
-An index can omit restricted folders and contain stale paths. Search does not read file contents or index SFTP servers. The app does not install tools or enable indexing services. Check **Settings → Tools** to see detected tools, and recheck after installing them. On Windows, compatible command-line tools must be available in `PATH`.
+**Locate index** uses `locate` or `plocate`, with a 15-second wait limit. An index can omit restricted folders and contain stale paths. Check **Settings → Tools** to see detected tools. On Windows, compatible command-line tools must be available in `PATH`.
 
 **Open in Zed** sends a local path or an SSH URL to Zed. Normal opening of a remote file uses a bounded content check to recognize text (UTF-8 or BOM-marked UTF-16); explicitly choosing Zed bypasses that check. Other remote files must be copied locally before opening in external apps.
 
@@ -133,7 +133,7 @@ Choosing another profile replaces custom bindings in the editor. **Reset to defa
 | Parent folder | `Alt+Up` |
 | Enter a path | `Cmd/Ctrl+L` |
 | Filter current folder | `Cmd/Ctrl+F` |
-| Search indexed local paths | `Cmd/Ctrl+Shift+F` |
+| Search local folders or indexed paths | `Cmd/Ctrl+Shift+F` |
 | Open the command palette | `Cmd/Ctrl+Shift+P` |
 | Show / hide hidden files | `Cmd/Ctrl+H` |
 | Refresh | `F5` |
