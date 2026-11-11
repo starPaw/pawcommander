@@ -1,5 +1,6 @@
 use crate::command_palette::{CommandPalette, PaletteOutcome};
 use crate::conflict::{Answer, ConflictDialog, Decision};
+use crate::directory_tree::DirectoryTree;
 use crate::drag_drop::{DragFiles, DropRequest, DropTargets};
 use crate::file_clipboard::{FileList, SystemClipboard};
 use crate::folder_jump::{FolderHistory, FolderJump, JumpOutcome};
@@ -1597,6 +1598,7 @@ pub struct PawCommander {
     active: usize,
     settings: Settings,
     folder_views: FolderViews,
+    directory_tree: DirectoryTree,
     bookmarks: Vec<Bookmark>,
     bookmark_menu_open: Option<u64>,
     bookmark_editor: Option<BookmarkEditor>,
@@ -1744,6 +1746,7 @@ impl PawCommander {
             active,
             settings,
             folder_views,
+            directory_tree: DirectoryTree::default(),
             bookmarks,
             bookmark_menu_open: None,
             bookmark_editor: None,
@@ -1836,6 +1839,7 @@ impl PawCommander {
     }
     fn refresh(&mut self, ctx: &egui::Context) {
         self.preview.refresh();
+        self.directory_tree.refresh();
         for pane in &mut self.panes {
             for tab in &mut pane.tabs {
                 tab.reload(ctx);
@@ -2061,6 +2065,7 @@ impl PawCommander {
             if let Some(result) = result {
                 match result {
                     Ok(location) => {
+                        self.directory_tree.refresh();
                         if job.save_profile {
                             self.settings
                                 .sftp_profiles
@@ -3383,6 +3388,7 @@ impl PawCommander {
         // guard checks the row ID too, so a removed bookmark cannot leave it set.
         self.bookmark_menu_open = None;
         if !self.settings.pane_layout.sidebar_visible {
+            self.directory_tree.inactive();
             return;
         }
         let colors = Palette::from_ctx(ctx);
@@ -3429,9 +3435,25 @@ impl PawCommander {
                         {
                             actions.push(Action::Shortcut(Command::FolderJump));
                         }
+                        let tab = self.tab();
+                        let current = tab.path.clone();
+                        let tab_id = tab.id;
+                        let waiting_for_sftp = current.remote() && tab.blocking_load();
+                        let show_hidden = self.folder_view(self.active).hidden;
+                        let tree = ui.add_enabled_ui(!self.keyboard_blocked(ctx), |ui| {
+                            self.directory_tree.show(
+                                ui,
+                                tab_id,
+                                &current,
+                                show_hidden,
+                                waiting_for_sftp,
+                            )
+                        });
+                        if let Some(location) = tree.inner {
+                            actions.push(Action::Navigate(self.active, location));
+                        }
                         self.workspace_places(ui, actions);
                         ui.add_space(6.0);
-                        let current = self.tab().path.clone();
                         egui::CollapsingHeader::new(crate::i18n::text("Ваши файлы"))
                             .id_salt("places_group")
                             .default_open(true)
@@ -6883,6 +6905,87 @@ mod tests {
         run(&mut app, vec![key(Key::Enter, true, Modifiers::NONE)]);
         assert!(app.command_palette.is_none());
         assert_eq!(app.panes[0].tabs.len(), 1);
+    }
+
+    #[test]
+    fn directory_tree_targets_the_active_pane_and_preserves_current_selection() {
+        use egui::accesskit::{Action as AxAction, ActionRequest, Role, Toggled};
+
+        let fixture = tempfile::tempdir().unwrap();
+        let parent = Location::Local(fixture.path().join("Tree parent"));
+        let folder = parent.join("Current folder");
+        let file = folder.join("selection.txt");
+        std::fs::create_dir_all(folder.path()).unwrap();
+        std::fs::write(file.path(), b"example").unwrap();
+
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut app = PawCommander::new(&cc, Some(fixture.path().into()));
+        app.settings.split = true;
+        app.action(Action::Navigate(1, folder.clone()), &ctx);
+        wait_for_directory(app.tab_mut());
+        app.tab_mut().selected.insert(file.clone());
+
+        let mut time = 0.0;
+        let mut run = |app: &mut PawCommander, events| {
+            time += 0.2;
+            ctx.run(
+                egui::RawInput {
+                    events,
+                    time: Some(time),
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(1440.0, 860.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| eframe::App::update(app, ctx, &mut frame),
+            )
+            .platform_output
+            .accesskit_update
+            .unwrap()
+        };
+        let click = |target| {
+            vec![egui::Event::AccessKitActionRequest(ActionRequest {
+                action: AxAction::Click,
+                target,
+                data: None,
+            })]
+        };
+        let sidebar = run(&mut app, vec![]);
+        let (tree_title, _) = sidebar
+            .nodes
+            .iter()
+            .find(|(_, node)| matches!(node.label(), Some("Folder tree" | "Дерево папок")))
+            .unwrap();
+        run(&mut app, click(*tree_title));
+        let visible = run(&mut app, vec![]);
+        let tree_row = |label, selected| {
+            *visible
+                .nodes
+                .iter()
+                .find(|(_, node)| {
+                    node.role() == Role::Button
+                        && node.label() == Some(label)
+                        && node.toggled() == Some(selected)
+                })
+                .map(|(id, _)| id)
+                .unwrap()
+        };
+        let current_row = tree_row("Current folder", Toggled::True);
+        let parent_row = tree_row("Tree parent", Toggled::False);
+        let history_length = app.tab().history.len();
+        run(&mut app, click(current_row));
+        assert_eq!(app.tab().selected, BTreeSet::from([file]));
+        assert_eq!(app.tab().history.len(), history_length);
+
+        run(&mut app, click(parent_row));
+        assert_eq!(app.active, 1);
+        assert_eq!(app.tab().path, parent);
+        assert_eq!(app.tab().history.len(), history_length + 1);
+        assert_eq!(app.panes[0].tab().path.local(), Some(fixture.path()));
     }
 
     #[test]

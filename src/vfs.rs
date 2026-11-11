@@ -546,6 +546,28 @@ pub fn read_automatic_directory(
     read_sftp_directory(location, &session.sftp().map_err(err)?, cancelled).map(Some)
 }
 
+/// Browse an exact existing session without initiating authentication.
+pub fn visit_connected_directory(
+    location: &Location,
+    cancelled: &impl Fn() -> bool,
+    visit: impl FnMut(FileEntry),
+) -> Result<(), String> {
+    if cancelled() {
+        return Ok(());
+    }
+    let Location::Sftp { endpoint, .. } = location else {
+        return visit_directory(location, cancelled, visit);
+    };
+    let session = sessions().lock().map_err(err)?.get(endpoint).cloned();
+    if cancelled() {
+        return Ok(());
+    }
+    let session = session.ok_or_else(|| {
+        crate::i18n::text("Для просмотра дерева подключитесь по SFTP.").to_owned()
+    })?;
+    visit_sftp_directory(location, &session.sftp().map_err(err)?, cancelled, visit)
+}
+
 /// Completion may browse an existing session without initiating authentication.
 pub fn visit_address_directory(
     location: &Location,
@@ -2831,6 +2853,22 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         fs::write(refresh_file.path(), b"another entry").unwrap();
+        let mut tree_children = Vec::new();
+        visit_connected_directory(&remote_root, &|| false, |entry| {
+            if entry.is_dir {
+                tree_children.push(entry.path);
+            }
+        })
+        .unwrap();
+        assert_eq!(tree_children, std::slice::from_ref(&completion_folder));
+        let other_profile = Location::Sftp {
+            endpoint: absent_key,
+            path: remote_root.path().into(),
+        };
+        assert!(visit_connected_directory(&other_profile, &|| false, |_| {
+            panic!("the tree must use the exact SFTP profile")
+        })
+        .is_err());
         let visited = std::cell::Cell::new(0);
         visit_address_directory(&remote_root, false, &|| visited.get() == 1, |entry| {
             assert!(entry.path == completion_folder || entry.path == refresh_file);

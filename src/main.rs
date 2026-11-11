@@ -5,6 +5,7 @@ mod app;
 mod command_palette;
 mod conflict;
 mod credentials;
+mod directory_tree;
 mod drag_drop;
 mod file_clipboard;
 mod folder_jump;

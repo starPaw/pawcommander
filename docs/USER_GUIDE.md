@@ -12,6 +12,8 @@ PawCommander remembers view changes for each folder. Use the pane controls to ch
 
 Open **Settings → List columns** to show or hide columns, set widths, and reorder optional columns. Name stays first. The list scrolls horizontally when the configured columns exceed the pane width. Permissions and numeric owner IDs are available for Unix and SFTP entries that supply them. Windows local entries show a dash for those fields. SFTP creation dates also appear as a dash.
 
+Open **Folder tree** in the sidebar to browse the active pane's filesystem or connected SFTP server. The tree highlights the current folder and reads subfolders as branches expand. Select a folder name to open it in the active pane. Use **Refresh** on the toolbar to reload expanded branches.
+
 Click a breadcrumb to navigate, or press `Cmd/Ctrl+L` to enter a path. The address editor offers folder completion. `Enter` opens the entered path; `Esc` returns to breadcrumbs. Use the sidebar for common folders and bookmarks.
 
 Choose a language under **Settings → Language**. English is the default; Russian is also available. File names and contents are unchanged. Choose Latte, Frappé, Macchiato, or Mocha under **Settings → Catppuccin**. System appearance switches between Latte and Frappé.
