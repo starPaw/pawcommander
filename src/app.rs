@@ -23,6 +23,8 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+static NEXT_BOOKMARK_ID: AtomicU64 = AtomicU64::new(1);
+
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
 struct Settings {
@@ -41,6 +43,220 @@ struct Settings {
     language: crate::i18n::Language,
     sftp_profiles: Vec<Location>,
     shortcuts: Shortcuts,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Bookmark {
+    id: u64,
+    location: Location,
+    name: String,
+    group: String,
+    shortcut: Option<u8>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct SavedBookmark {
+    #[serde(default)]
+    id: u64,
+    location: SavedLocation,
+    name: String,
+    group: String,
+    shortcut: Option<u8>,
+}
+
+impl From<&Bookmark> for SavedBookmark {
+    fn from(bookmark: &Bookmark) -> Self {
+        Self {
+            id: bookmark.id,
+            location: SavedLocation::from(&bookmark.location),
+            name: bookmark.name.clone(),
+            group: bookmark.group.clone(),
+            shortcut: bookmark.shortcut,
+        }
+    }
+}
+
+impl SavedBookmark {
+    fn into_bookmark(self) -> Option<Bookmark> {
+        let location = self.location.into_location()?;
+        Some(Bookmark {
+            id: if self.id == 0 {
+                next_bookmark_id()
+            } else {
+                self.id
+            },
+            name: if self.name.trim().is_empty() {
+                file_name(&location)
+            } else {
+                self.name
+            },
+            location,
+            group: self.group,
+            shortcut: self.shortcut.filter(|slot| (1..=9).contains(slot)),
+        })
+    }
+}
+
+impl Bookmark {
+    fn new(location: Location) -> Self {
+        Self {
+            id: next_bookmark_id(),
+            name: file_name(&location),
+            location,
+            group: String::new(),
+            shortcut: None,
+        }
+    }
+}
+
+fn next_bookmark_id() -> u64 {
+    NEXT_BOOKMARK_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn reserve_bookmark_ids(bookmarks: &[Bookmark]) {
+    let next = bookmarks
+        .iter()
+        .map(|bookmark| bookmark.id)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    NEXT_BOOKMARK_ID.fetch_max(next, Ordering::Relaxed);
+}
+
+struct BookmarkEditor {
+    id: u64,
+    name: String,
+    group: String,
+    focus_name: bool,
+}
+
+fn apply_bookmark_edit(bookmarks: &mut [Bookmark], id: u64, name: &str, group: &str) -> bool {
+    let Some(bookmark) = bookmarks.iter_mut().find(|bookmark| bookmark.id == id) else {
+        return false;
+    };
+    bookmark.name = if name.trim().is_empty() {
+        file_name(&bookmark.location)
+    } else {
+        name.trim().to_owned()
+    };
+    bookmark.group = group.trim().to_owned();
+    true
+}
+
+impl BookmarkEditor {
+    fn new(bookmark: &Bookmark) -> Self {
+        Self {
+            id: bookmark.id,
+            name: bookmark.name.clone(),
+            group: bookmark.group.clone(),
+            focus_name: true,
+        }
+    }
+
+    fn show(&mut self, ctx: &egui::Context, bookmarks: &mut [Bookmark]) -> bool {
+        let response = egui::Modal::new(egui::Id::new("bookmark_editor")).show(ctx, |ui| {
+            ui.heading(crate::i18n::text("Изменить избранное"));
+            ui.label(crate::i18n::text("Название"));
+            let name = ui.text_edit_singleline(&mut self.name);
+            if self.focus_name && !ui.is_sizing_pass() {
+                name.request_focus();
+                self.focus_name = false;
+            }
+            ui.label(crate::i18n::text("Группа"));
+            ui.text_edit_singleline(&mut self.group);
+            let mut done = false;
+            ui.horizontal(|ui| {
+                if ui.button(crate::i18n::text("Сохранить")).clicked() {
+                    apply_bookmark_edit(bookmarks, self.id, &self.name, &self.group);
+                    done = true;
+                }
+                if ui.button(crate::i18n::text("Отмена")).clicked() {
+                    done = true;
+                }
+            });
+            done
+        });
+        response.inner || response.should_close()
+    }
+}
+
+fn bookmark_slot_key(slot: u8) -> Option<egui::Key> {
+    match slot {
+        1 => Some(egui::Key::Num1),
+        2 => Some(egui::Key::Num2),
+        3 => Some(egui::Key::Num3),
+        4 => Some(egui::Key::Num4),
+        5 => Some(egui::Key::Num5),
+        6 => Some(egui::Key::Num6),
+        7 => Some(egui::Key::Num7),
+        8 => Some(egui::Key::Num8),
+        9 => Some(egui::Key::Num9),
+        _ => None,
+    }
+}
+
+fn assign_bookmark_shortcut(
+    bookmarks: &mut [Bookmark],
+    index: usize,
+    slot: Option<u8>,
+    shortcuts: &Shortcuts,
+) -> bool {
+    if index >= bookmarks.len() {
+        return false;
+    }
+    if let Some(slot) = slot {
+        let Some(key) = bookmark_slot_key(slot) else {
+            return false;
+        };
+        let chord = shortcuts::chord(key, egui::Modifiers::ALT);
+        if shortcuts.command(chord).is_some()
+            || bookmarks
+                .iter()
+                .enumerate()
+                .any(|(other, item)| other != index && item.shortcut == Some(slot))
+        {
+            return false;
+        }
+    }
+    bookmarks[index].shortcut = slot;
+    true
+}
+
+fn move_bookmark(bookmarks: &mut [Bookmark], from: usize, to: usize) -> bool {
+    if from >= bookmarks.len() || to >= bookmarks.len() || from == to {
+        return false;
+    }
+    bookmarks.swap(from, to);
+    true
+}
+
+fn bookmark_peer(bookmarks: &[Bookmark], index: usize, direction: isize) -> Option<usize> {
+    let bookmark = bookmarks.get(index)?;
+    let mut next = index as isize + direction;
+    while (0..bookmarks.len() as isize).contains(&next) {
+        let candidate = &bookmarks[next as usize];
+        if candidate.group.trim() == bookmark.group.trim() {
+            return Some(next as usize);
+        }
+        next += direction;
+    }
+    None
+}
+
+fn validate_bookmark_shortcuts(bookmarks: &mut [Bookmark], shortcuts: &Shortcuts) -> bool {
+    let mut changed = false;
+    let mut used = HashSet::new();
+    for bookmark in bookmarks {
+        let Some(slot) = bookmark.shortcut else {
+            continue;
+        };
+        let chord = bookmark_slot_key(slot).map(|key| shortcuts::chord(key, egui::Modifiers::ALT));
+        if chord.is_none_or(|chord| shortcuts.command(chord).is_some()) || !used.insert(slot) {
+            bookmark.shortcut = None;
+            changed = true;
+        }
+    }
+    changed
 }
 impl Settings {
     const UI_SCALES: [u16; 5] = [90, 100, 110, 125, 150];
@@ -976,6 +1192,7 @@ enum Action {
     Focus(usize),
     SetGrid(usize, bool),
     Navigate(usize, Location),
+    BookmarkSlot(u8),
     Open(usize, Location),
     OpenInZed(usize, Location),
     Back,
@@ -1129,6 +1346,9 @@ pub struct PawCommander {
     panes: Vec<Pane>,
     active: usize,
     settings: Settings,
+    bookmarks: Vec<Bookmark>,
+    bookmark_menu_open: Option<u64>,
+    bookmark_editor: Option<BookmarkEditor>,
     workspaces: Vec<NamedWorkspace>,
     preview: Preview,
     properties: Option<crate::properties::Properties>,
@@ -1163,6 +1383,7 @@ impl PawCommander {
     const SETTINGS_KEY: &str = "pawcommander.settings";
     const SESSION_KEY: &str = "pawcommander.session";
     const WORKSPACES_KEY: &str = "pawcommander.workspaces";
+    const BOOKMARKS_KEY: &str = "pawcommander.bookmarks";
 
     pub fn new(cc: &eframe::CreationContext<'_>, start: Option<PathBuf>) -> Self {
         let mut settings: Settings = cc
@@ -1173,7 +1394,29 @@ impl PawCommander {
             .storage
             .and_then(|storage| eframe::get_value(storage, Self::WORKSPACES_KEY))
             .unwrap_or_default();
+        let saved_bookmarks = cc.storage.and_then(|storage| {
+            eframe::get_value::<Vec<SavedBookmark>>(storage, Self::BOOKMARKS_KEY)
+        });
+        let mut bookmarks: Vec<Bookmark> = saved_bookmarks.map_or_else(
+            || {
+                settings
+                    .bookmarks
+                    .iter()
+                    .cloned()
+                    .map(Bookmark::new)
+                    .collect()
+            },
+            |saved| {
+                saved
+                    .into_iter()
+                    .filter_map(SavedBookmark::into_bookmark)
+                    .collect()
+            },
+        );
+        reserve_bookmark_ids(&bookmarks);
         settings.shortcuts.validate();
+        let bookmark_shortcut_conflict =
+            validate_bookmark_shortcuts(&mut bookmarks, &settings.shortcuts);
         crate::i18n::set_language(settings.language);
         settings.theme.apply(&cc.egui_ctx, settings.high_contrast);
         cc.egui_ctx
@@ -1236,6 +1479,9 @@ impl PawCommander {
             panes,
             active,
             settings,
+            bookmarks,
+            bookmark_menu_open: None,
+            bookmark_editor: None,
             workspaces,
             preview: Preview::new(),
             properties: None,
@@ -1246,7 +1492,15 @@ impl PawCommander {
             dialog_file_focus: None,
             job: None,
             transfer: None,
-            notice: None,
+            notice: bookmark_shortcut_conflict.then(|| {
+                (
+                    crate::i18n::text(
+                        "Сочетание избранного очищено: клавиша занята другой командой",
+                    )
+                    .into(),
+                    false,
+                )
+            }),
             show_help: false,
             shortcut_editor: None,
             command_palette: None,
@@ -1764,6 +2018,16 @@ impl PawCommander {
                 self.active = i;
                 self.panes[i].tab_mut().navigate(p, ctx);
             }
+            Action::BookmarkSlot(slot) => {
+                if let Some(location) = self
+                    .bookmarks
+                    .iter()
+                    .find(|bookmark| bookmark.shortcut == Some(slot))
+                    .map(|bookmark| bookmark.location.clone())
+                {
+                    self.action(Action::Navigate(self.active, location), ctx);
+                }
+            }
             Action::SaveWorkspace => {
                 self.dialog = Some(Dialog::WorkspaceName {
                     editing: None,
@@ -1908,8 +2172,12 @@ impl PawCommander {
             }
             Action::Bookmark => {
                 let path = self.tab().path.clone();
-                if !self.settings.bookmarks.contains(&path) {
-                    self.settings.bookmarks.push(path);
+                if !self
+                    .bookmarks
+                    .iter()
+                    .any(|bookmark| bookmark.location == path)
+                {
+                    self.bookmarks.push(Bookmark::new(path));
                 }
             }
             Action::Reveal => {
@@ -2169,6 +2437,10 @@ impl PawCommander {
             || self.sftp_form.is_some()
             || self.show_help
             || self.shortcut_editor.is_some()
+            || self.bookmark_editor.is_some()
+            || self.bookmark_menu_open.is_some_and(|id| {
+                self.bookmarks.iter().any(|bookmark| bookmark.id == id)
+            })
             || self.command_palette.is_some()
             || self.folder_jump.is_some()
             || self.show_accessibility
@@ -2212,6 +2484,7 @@ impl PawCommander {
             input.events.retain(|event| {
                 let action = if let egui::Event::Key {
                     key,
+                    physical_key,
                     modifiers,
                     pressed: true,
                     repeat,
@@ -2219,6 +2492,7 @@ impl PawCommander {
                 } = *event
                 {
                     let chord = shortcuts::chord(key, modifiers);
+                    let physical_key = physical_key.unwrap_or(key);
                     let modifiers = chord.modifiers;
                     if !focused
                         && matches!(modifiers, egui::Modifiers::NONE | egui::Modifiers::SHIFT)
@@ -2235,16 +2509,40 @@ impl PawCommander {
                     {
                         Some(Action::ClearSelection)
                     } else {
-                        let Some(command) = self
-                            .bound_pane_command(chord)
-                            .filter(|command| !focused || command.works_in_text_field(chord))
-                        else {
-                            return true;
+                        let bookmark_slot = if !focused
+                            && !repeat
+                            && modifiers == egui::Modifiers::ALT
+                            && self.settings.shortcuts.command(chord).is_none()
+                            && self
+                                .settings
+                                .shortcuts
+                                .command(shortcuts::chord(physical_key, modifiers))
+                                .is_none()
+                        {
+                            (1..=9).find(|slot| {
+                                bookmark_slot_key(*slot) == Some(physical_key)
+                                    && self
+                                        .bookmarks
+                                        .iter()
+                                        .any(|bookmark| bookmark.shortcut == Some(*slot))
+                            })
+                        } else {
+                            None
                         };
-                        if repeat {
-                            return false;
+                        if let Some(slot) = bookmark_slot {
+                            Some(Action::BookmarkSlot(slot))
+                        } else {
+                            let Some(command) = self
+                                .bound_pane_command(chord)
+                                .filter(|command| !focused || command.works_in_text_field(chord))
+                            else {
+                                return true;
+                            };
+                            if repeat {
+                                return false;
+                            }
+                            Some(Action::Shortcut(command))
                         }
-                        Some(Action::Shortcut(command))
                     }
                 } else if !focused {
                     file_clipboard_action(event)
@@ -2712,6 +3010,9 @@ impl PawCommander {
             });
     }
     fn sidebar(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        // Rebuild this from visible menu responses every frame. The keyboard
+        // guard checks the row ID too, so a removed bookmark cannot leave it set.
+        self.bookmark_menu_open = None;
         let colors = Palette::from_ctx(ctx);
         egui::SidePanel::left("places")
             .exact_width(if ctx.screen_rect().width() < 900.0 {
@@ -2809,39 +3110,185 @@ impl PawCommander {
                             .id_salt("bookmarks_group")
                             .default_open(true)
                             .show_unindented(ui, |ui| {
-                                let mut remove = None;
-                                for (i, path) in self.settings.bookmarks.iter().enumerate() {
-                                    let response = ui
-                                        .add_sized(
-                                            [ui.available_width(), 29.0],
-                                            egui::Button::new(format!("      {}", file_name(path)))
-                                                .selected(current == *path),
-                                        )
-                                        .on_hover_text(path.display().to_string());
-                                    icons::paint(
-                                        ui,
-                                        egui::Rect::from_center_size(
-                                            response.rect.left_center() + Vec2::new(16.0, 0.0),
-                                            Vec2::splat(18.0),
-                                        ),
-                                        Icon::Star,
-                                        colors.yellow,
-                                    );
-                                    if response.clicked() {
-                                        actions.push(Action::Navigate(self.active, path.clone()));
-                                    }
-                                    response.context_menu(|ui| {
-                                        if ui
-                                            .button(crate::i18n::text("Убрать из избранного"))
-                                            .clicked()
+                                let groups: Vec<(String, Vec<usize>)> = {
+                                    let mut groups = Vec::<(String, Vec<usize>)>::new();
+                                    for (index, bookmark) in self.bookmarks.iter().enumerate() {
+                                        let label = bookmark.group.trim().to_owned();
+                                        if let Some((_, indices)) =
+                                            groups.iter_mut().find(|(name, _)| *name == label)
                                         {
-                                            remove = Some(i);
-                                            ui.close_menu();
+                                            indices.push(index);
+                                        } else {
+                                            groups.push((label, vec![index]));
                                         }
-                                    });
+                                    }
+                                    groups
+                                };
+                                let mut remove = None;
+                                let mut pending_move = None;
+                                for (group, indices) in groups {
+                                    if !group.is_empty() {
+                                        ui.small(RichText::new(&group).color(colors.muted));
+                                    }
+                                    for i in indices {
+                                        let (id, name, location, shortcut) = {
+                                            let bookmark = &self.bookmarks[i];
+                                            (
+                                                bookmark.id,
+                                                bookmark.name.clone(),
+                                                bookmark.location.clone(),
+                                                bookmark.shortcut,
+                                            )
+                                        };
+                                        let label = shortcut.map_or_else(
+                                            || name.clone(),
+                                            |slot| format!("{}  ·  Alt+{slot}", name),
+                                        );
+                                        ui.horizontal(|ui| {
+                                            let response = ui
+                                                .add_sized(
+                                                    [ui.available_width() - 32.0, 29.0],
+                                                    egui::Button::new(format!("      {label}"))
+                                                        .selected(current == location),
+                                                )
+                                                .on_hover_text(location.display().to_string());
+                                            icons::paint(
+                                                ui,
+                                                egui::Rect::from_center_size(
+                                                    response.rect.left_center()
+                                                        + Vec2::new(16.0, 0.0),
+                                                    Vec2::splat(18.0),
+                                                ),
+                                                Icon::Star,
+                                                colors.yellow,
+                                            );
+                                            if response.clicked() {
+                                                actions.push(Action::Navigate(
+                                                    self.active,
+                                                    location.clone(),
+                                                ));
+                                            }
+                                            ui.menu_button("⋯", |ui| {
+                                                self.bookmark_menu_open = Some(id);
+                                                if ui
+                                                    .button(crate::i18n::text("Изменить избранное"))
+                                                    .clicked()
+                                                {
+                                                    self.bookmark_editor = Some(
+                                                        BookmarkEditor::new(&self.bookmarks[i]),
+                                                    );
+                                                    ui.close_menu();
+                                                }
+                                                ui.separator();
+                                                ui.menu_button(
+                                                    crate::i18n::text("Сочетание"),
+                                                    |ui| {
+                                                        if ui
+                                                            .selectable_label(
+                                                                self.bookmarks[i]
+                                                                    .shortcut
+                                                                    .is_none(),
+                                                                crate::i18n::text("Не назначено"),
+                                                            )
+                                                            .clicked()
+                                                        {
+                                                            assign_bookmark_shortcut(
+                                                                &mut self.bookmarks,
+                                                                i,
+                                                                None,
+                                                                &self.settings.shortcuts,
+                                                            );
+                                                            ui.close_menu();
+                                                        }
+                                                        for slot in 1..=9 {
+                                                            let occupied_by_command = self
+                                                                .settings
+                                                                .shortcuts
+                                                                .command(shortcuts::chord(
+                                                                    bookmark_slot_key(slot)
+                                                                        .unwrap(),
+                                                                    egui::Modifiers::ALT,
+                                                                ))
+                                                                .is_some();
+                                                            let occupied_by_bookmark = self
+                                                                .bookmarks
+                                                                .iter()
+                                                                .enumerate()
+                                                                .any(|(other, item)| {
+                                                                    other != i
+                                                                        && item.shortcut
+                                                                            == Some(slot)
+                                                                });
+                                                            let response = ui.add_enabled(
+                                                                !occupied_by_command
+                                                                    && !occupied_by_bookmark,
+                                                                egui::SelectableLabel::new(
+                                                                    self.bookmarks[i].shortcut
+                                                                        == Some(slot),
+                                                                    format!("Alt+{slot}"),
+                                                                ),
+                                                            );
+                                                            if response.clicked() {
+                                                                assign_bookmark_shortcut(
+                                                                    &mut self.bookmarks,
+                                                                    i,
+                                                                    Some(slot),
+                                                                    &self.settings.shortcuts,
+                                                                );
+                                                                ui.close_menu();
+                                                            }
+                                                        }
+                                                    },
+                                                );
+                                                ui.separator();
+                                                ui.horizontal(|ui| {
+                                                    let previous =
+                                                        bookmark_peer(&self.bookmarks, i, -1);
+                                                    if ui
+                                                        .add_enabled(
+                                                            previous.is_some(),
+                                                            egui::Button::new(crate::i18n::text(
+                                                                "Вверх",
+                                                            )),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        pending_move =
+                                                            previous.map(|previous| (i, previous));
+                                                        ui.close_menu();
+                                                    }
+                                                    let next = bookmark_peer(&self.bookmarks, i, 1);
+                                                    if ui
+                                                        .add_enabled(
+                                                            next.is_some(),
+                                                            egui::Button::new(crate::i18n::text(
+                                                                "Вниз",
+                                                            )),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        pending_move = next.map(|next| (i, next));
+                                                        ui.close_menu();
+                                                    }
+                                                });
+                                                if ui
+                                                    .button(crate::i18n::text(
+                                                        "Убрать из избранного",
+                                                    ))
+                                                    .clicked()
+                                                {
+                                                    remove = Some(i);
+                                                    ui.close_menu();
+                                                }
+                                            });
+                                        });
+                                    }
+                                }
+                                if let Some((from, to)) = pending_move {
+                                    move_bookmark(&mut self.bookmarks, from, to);
                                 }
                                 if let Some(i) = remove {
-                                    self.settings.bookmarks.remove(i);
+                                    self.bookmarks.remove(i);
                                 }
                                 if ui
                                     .add(
@@ -3631,6 +4078,20 @@ impl eframe::App for PawCommander {
         {
             self.shortcut_editor = None;
         }
+        if self
+            .bookmark_editor
+            .as_mut()
+            .is_some_and(|editor| editor.show(ctx, &mut self.bookmarks))
+        {
+            self.bookmark_editor = None;
+        }
+        if validate_bookmark_shortcuts(&mut self.bookmarks, &self.settings.shortcuts) {
+            self.notice = Some((
+                crate::i18n::text("Сочетание избранного очищено: клавиша занята другой командой")
+                    .into(),
+                false,
+            ));
+        }
         if let Some(path) = self.search.show(ctx, self.tools.locate.as_deref()) {
             self.reveal_search_result(path, ctx);
         }
@@ -3665,11 +4126,20 @@ impl eframe::App for PawCommander {
             })
             .collect();
         self.settings.pinned_tab_counts = pinned_tab_counts;
+        self.settings.bookmarks = self
+            .bookmarks
+            .iter()
+            .filter(|bookmark| bookmark.location.has_utf8_paths())
+            .map(|bookmark| bookmark.location.clone())
+            .collect();
+        let saved_bookmarks: Vec<SavedBookmark> =
+            self.bookmarks.iter().map(SavedBookmark::from).collect();
         let session = WorkspaceSession {
             panes: std::array::from_fn(|i| self.panes[i].session()),
             active: self.active,
         };
         eframe::set_value(storage, Self::SETTINGS_KEY, &self.settings);
+        eframe::set_value(storage, Self::BOOKMARKS_KEY, &saved_bookmarks);
         eframe::set_value(storage, Self::SESSION_KEY, &session);
         eframe::set_value(storage, Self::WORKSPACES_KEY, &self.workspaces);
     }
@@ -6879,6 +7349,117 @@ mod tests {
     }
 
     #[test]
+    fn favorites_menu_blocks_alt_digit_and_releases_after_escape() {
+        use egui::{Event, Key, Modifiers, PointerButton};
+
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        let mut bookmark = Bookmark::new(target.clone().into());
+        bookmark.shortcut = Some(1);
+        app.bookmarks.push(bookmark);
+
+        let mut run = |app: &mut PawCommander, events| {
+            let mut input = egui::RawInput {
+                events,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(1440.0, 860.0),
+                )),
+                ..Default::default()
+            };
+            eframe::App::raw_input_hook(app, &ctx, &mut input);
+            ctx.run(input, |ctx| eframe::App::update(app, ctx, &mut frame))
+        };
+        let output = run(&mut app, vec![]);
+        let menu_position = output
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) if text.galley.text() == "⋯" => {
+                    Some(text.pos + text.galley.size() * 0.5)
+                }
+                _ => None,
+            })
+            .expect("favorite menu button");
+        for pressed in [true, false] {
+            run(
+                &mut app,
+                vec![
+                    Event::PointerMoved(menu_position),
+                    Event::PointerButton {
+                        pos: menu_position,
+                        button: PointerButton::Primary,
+                        pressed,
+                        modifiers: Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        run(&mut app, vec![]);
+        let current = app.tab().path.clone();
+        assert!(app.bookmark_menu_open.is_some());
+        assert!(app.keyboard_blocked(&ctx));
+        for pressed in [true, false] {
+            run(
+                &mut app,
+                vec![Event::Key {
+                    key: Key::Num1,
+                    physical_key: Some(Key::Num1),
+                    pressed,
+                    repeat: false,
+                    modifiers: Modifiers::ALT,
+                }],
+            );
+        }
+        assert_eq!(app.tab().path, current, "Alt+1 stays inside the open menu");
+        for pressed in [true, false] {
+            run(
+                &mut app,
+                vec![Event::Key {
+                    key: Key::Escape,
+                    physical_key: Some(Key::Escape),
+                    pressed,
+                    repeat: false,
+                    modifiers: Modifiers::NONE,
+                }],
+            );
+        }
+        assert!(app.bookmark_menu_open.is_none());
+        for pressed in [true, false] {
+            run(
+                &mut app,
+                vec![Event::Key {
+                    key: Key::Num1,
+                    physical_key: Some(Key::Num1),
+                    pressed,
+                    repeat: false,
+                    modifiers: Modifiers::ALT,
+                }],
+            );
+        }
+        assert_eq!(app.tab().path, target.into());
+    }
+
+    #[test]
+    fn removed_favorite_does_not_leave_keyboard_blocked_by_menu_state() {
+        let ctx = egui::Context::default();
+        let root = tempfile::tempdir().unwrap();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        let bookmark = Bookmark::new(root.path().join("favorite").into());
+        app.bookmark_menu_open = Some(bookmark.id);
+        app.bookmarks.push(bookmark);
+        assert!(app.keyboard_blocked(&ctx));
+        app.bookmarks.clear();
+        assert!(!app.keyboard_blocked(&ctx));
+    }
+
+    #[test]
     fn tab_actions_duplicate_and_reopen_exact_locations_and_persist_pins() {
         let ctx = egui::Context::default();
         let root = tempfile::tempdir().unwrap();
@@ -7133,7 +7714,7 @@ mod tests {
     }
 
     #[test]
-    fn named_workspace_saves_when_legacy_bookmark_cannot_be_serialized() {
+    fn bookmark_and_workspace_settings_round_trip_native_paths() {
         #[cfg(unix)]
         let native = {
             use std::os::unix::ffi::OsStringExt;
@@ -7151,16 +7732,17 @@ mod tests {
         let mut app = PawCommander::new(&cc, Some(root.path().into()));
         let mut storage = MemoryStorage::default();
         eframe::App::save(&mut app, &mut storage);
-        let previous_settings = storage.0[PawCommander::SETTINGS_KEY].clone();
-
-        app.settings.bookmarks.push(native_folder.clone());
+        app.bookmarks.push(Bookmark::new(native_folder.clone()));
+        app.settings.ui_scale = 125;
         app.action(Action::Navigate(1, native_folder.clone()), &ctx);
         app.save_workspace_name(None, "Native folders".into());
         eframe::App::save(&mut app, &mut storage);
-        assert_eq!(storage.0[PawCommander::SETTINGS_KEY], previous_settings);
+        assert_ne!(storage.0[PawCommander::SETTINGS_KEY], "{}");
 
         cc.storage = Some(&storage);
         let reopened = PawCommander::new(&cc, Some(root.path().into()));
+        assert_eq!(reopened.bookmarks[0].location, native_folder);
+        assert_eq!(reopened.settings.ui_scale, 125);
         assert_eq!(reopened.workspaces[0].name, "Native folders");
         assert_eq!(
             reopened.workspaces[0].folders[1].clone().into_location(),
@@ -7474,6 +8056,121 @@ mod tests {
         assert_eq!(restored.bookmarks[0], remote);
         assert_eq!(restored.theme, Theme::Dark);
         assert_eq!(restored.sftp_profiles, vec![remote]);
+    }
+
+    #[test]
+    fn bookmark_store_migrates_legacy_and_round_trips_named_sftp() {
+        let ctx = egui::Context::default();
+        let root = tempfile::tempdir().unwrap();
+        let mut cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut storage = MemoryStorage::default();
+        #[derive(Serialize)]
+        struct Legacy {
+            bookmarks: Vec<Location>,
+        }
+        let legacy_remote = fs_ops::resolve(
+            "sftp://alice@example.com:2222/legacy",
+            &Location::Local(PathBuf::from("/")),
+        )
+        .unwrap();
+        eframe::set_value(
+            &mut storage,
+            PawCommander::SETTINGS_KEY,
+            &Legacy {
+                bookmarks: vec![
+                    PathBuf::from("/tmp/legacy-folder").into(),
+                    legacy_remote.clone(),
+                ],
+            },
+        );
+        cc.storage = Some(&storage);
+        let legacy = PawCommander::new(&cc, Some(root.path().into()));
+        assert_eq!(legacy.bookmarks.len(), 2);
+        assert_eq!(legacy.bookmarks[0].name, "legacy-folder");
+        assert_eq!(
+            legacy.bookmarks[0].location,
+            PathBuf::from("/tmp/legacy-folder").into()
+        );
+        assert_eq!(legacy.bookmarks[1].location, legacy_remote);
+        drop(cc);
+
+        let remote = fs_ops::resolve(
+            "sftp://alice@example.com:2222/папка",
+            &Location::Local(PathBuf::from("/")),
+        )
+        .unwrap();
+        let mut bookmark = Bookmark::new(remote.clone());
+        bookmark.name = "Remote work".into();
+        bookmark.group = "Servers".into();
+        bookmark.shortcut = Some(4);
+        eframe::set_value(
+            &mut storage,
+            PawCommander::BOOKMARKS_KEY,
+            &vec![SavedBookmark::from(&bookmark)],
+        );
+        let mut cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        cc.storage = Some(&storage);
+        let restored = PawCommander::new(&cc, Some(root.path().into()));
+        assert_eq!(restored.bookmarks.len(), 1);
+        assert_eq!(restored.bookmarks[0].location, remote);
+        assert_eq!(restored.bookmarks[0].name, "Remote work");
+        assert_eq!(restored.bookmarks[0].group, "Servers");
+        assert_eq!(restored.bookmarks[0].shortcut, Some(4));
+    }
+
+    #[test]
+    fn bookmark_shortcuts_reject_conflicts_and_stay_with_bookmark_on_reorder() {
+        let mut bookmarks = vec![
+            Bookmark::new(PathBuf::from("/a").into()),
+            Bookmark::new(PathBuf::from("/b").into()),
+            Bookmark::new(PathBuf::from("/c").into()),
+        ];
+        bookmarks[0].group = "Work".into();
+        bookmarks[1].group = "Other".into();
+        bookmarks[2].group = "Work".into();
+        let edit_id = bookmarks[0].id;
+        let chord = shortcuts::chord(egui::Key::Num1, egui::Modifiers::ALT);
+        let shortcuts: Shortcuts = serde_json::from_value(serde_json::json!({
+            "overrides": {"NewTab": chord}
+        }))
+        .expect("custom shortcut");
+        assert!(!assign_bookmark_shortcut(
+            &mut bookmarks,
+            0,
+            Some(1),
+            &shortcuts
+        ));
+        assert!(assign_bookmark_shortcut(
+            &mut bookmarks,
+            0,
+            Some(2),
+            &Shortcuts::default()
+        ));
+        assert!(!assign_bookmark_shortcut(
+            &mut bookmarks,
+            1,
+            Some(2),
+            &Shortcuts::default()
+        ));
+        let peer = bookmark_peer(&bookmarks, 0, 1).expect("next bookmark in group");
+        assert_eq!(peer, 2);
+        assert!(move_bookmark(&mut bookmarks, 0, peer));
+        assert_eq!(bookmarks[2].location, PathBuf::from("/a").into());
+        assert_eq!(bookmarks[2].shortcut, Some(2));
+        assert!(apply_bookmark_edit(
+            &mut bookmarks,
+            edit_id,
+            "  Project files ",
+            "  Projects  "
+        ));
+        assert_eq!(bookmarks[2].name, "Project files");
+        assert_eq!(bookmarks[2].group, "Projects");
+        let later_command: Shortcuts = serde_json::from_value(serde_json::json!({
+            "overrides": {"NewTab": shortcuts::chord(egui::Key::Num2, egui::Modifiers::ALT)}
+        }))
+        .expect("later custom shortcut");
+        assert!(validate_bookmark_shortcuts(&mut bookmarks, &later_command));
+        assert!(bookmarks.iter().all(|bookmark| bookmark.shortcut.is_none()));
     }
     #[test]
     fn remote_tab_history_and_new_tab_keep_backend() {

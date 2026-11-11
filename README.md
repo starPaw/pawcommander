@@ -47,6 +47,8 @@ On startup, PawCommander restores both panes, the active tabs, sorting, navigati
 
 In the sidebar, use **Save folder pair…** to give the two current folders a workspace name. Select the name to open the pair in both panes, or use its **…** menu to rename or remove it. SFTP workspaces remember the server and folder, including the key-file reference when used. Manage credentials through the SFTP connection dialog.
 
+In **Favorites**, choose a bookmark’s **…** menu to change its name or group, reorder it within its group, or assign an available `Alt+1` through `Alt+9` shortcut. The shortcut opens the bookmark in the active pane.
+
 ## Get started
 
 **PawCommander is an early release.** macOS is the primary development platform. Linux and Windows have platform-specific implementations and CI checks; desktop integration on those systems still needs broader testing. Feedback and reproducible bug reports are welcome.
