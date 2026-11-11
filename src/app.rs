@@ -83,11 +83,133 @@ impl Default for Settings {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 enum Sort {
+    #[default]
     Name,
     Size,
     Modified,
+}
+
+#[derive(Serialize, Deserialize)]
+struct WorkspaceSession {
+    panes: [PaneSession; 2],
+    active: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PaneSession {
+    tabs: Vec<TabSession>,
+    current: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+struct TabSession {
+    path: SavedLocation,
+    pinned: bool,
+    history: Vec<SavedLocation>,
+    history_index: usize,
+    sort: Sort,
+    descending: bool,
+    scroll_offset: f32,
+}
+
+#[derive(Serialize, Deserialize)]
+enum SavedLocation {
+    Local(SavedPath),
+    Sftp {
+        host: String,
+        port: u16,
+        user: String,
+        key: Option<SavedPath>,
+        path: SavedPath,
+    },
+}
+
+// Preserve native names that PathBuf's serializer cannot handle.
+#[derive(Serialize, Deserialize)]
+enum SavedPath {
+    Utf8(String),
+    Unix(Vec<u8>),
+    Windows(Vec<u16>),
+}
+
+impl From<&Location> for SavedLocation {
+    fn from(location: &Location) -> Self {
+        match location {
+            Location::Local(path) => Self::Local(path.as_path().into()),
+            Location::Sftp { endpoint, path } => Self::Sftp {
+                host: endpoint.host.clone(),
+                port: endpoint.port,
+                user: endpoint.user.clone(),
+                key: endpoint.key.as_deref().map(SavedPath::from),
+                path: path.as_path().into(),
+            },
+        }
+    }
+}
+
+impl SavedLocation {
+    fn into_location(self) -> Option<Location> {
+        Some(match self {
+            Self::Local(path) => Location::Local(path.into_path()?),
+            Self::Sftp {
+                host,
+                port,
+                user,
+                key,
+                path,
+            } => Location::Sftp {
+                endpoint: Endpoint {
+                    host,
+                    port,
+                    user,
+                    key: match key {
+                        Some(key) => Some(key.into_path()?),
+                        None => None,
+                    },
+                },
+                path: path.into_path()?,
+            },
+        })
+    }
+}
+
+impl From<&Path> for SavedPath {
+    fn from(path: &Path) -> Self {
+        if let Some(path) = path.to_str() {
+            return Self::Utf8(path.to_owned());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            Self::Unix(path.as_os_str().as_bytes().to_vec())
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            Self::Windows(path.as_os_str().encode_wide().collect())
+        }
+    }
+}
+
+impl SavedPath {
+    fn into_path(self) -> Option<PathBuf> {
+        match self {
+            Self::Utf8(path) => Some(path.into()),
+            #[cfg(unix)]
+            Self::Unix(bytes) => {
+                use std::os::unix::ffi::OsStringExt;
+                Some(std::ffi::OsString::from_vec(bytes).into())
+            }
+            #[cfg(windows)]
+            Self::Windows(wide) => {
+                use std::os::windows::ffi::OsStringExt;
+                Some(std::ffi::OsString::from_wide(&wide).into())
+            }
+            _ => None,
+        }
+    }
 }
 // Poll only displayed directories. Wait from completion to bound work on slow
 // filesystems, and poll SFTP less frequently to limit network traffic.
@@ -291,6 +413,9 @@ struct Tab {
     cursor: Option<Location>,
     rendered_rows: HashMap<egui::Id, Location>,
     scroll_to: Option<Location>,
+    scroll_offset: f32,
+    scroll_restore: Option<f32>,
+    file_scroll_scope: Option<egui::Id>,
     reveal_after_load: Option<Location>,
     history: Vec<Location>,
     history_index: usize,
@@ -322,6 +447,9 @@ impl Tab {
             cursor: None,
             rendered_rows: HashMap::new(),
             scroll_to: None,
+            scroll_offset: 0.0,
+            scroll_restore: None,
+            file_scroll_scope: None,
             reveal_after_load: None,
             history: vec![path],
             history_index: 0,
@@ -330,11 +458,48 @@ impl Tab {
             folder_visit: FolderVisit::Unseen,
             next_auto_refresh: Instant::now() + AUTO_REFRESH_INTERVAL,
             error: None,
-            sort: Sort::Name,
+            sort: Sort::default(),
             descending: false,
         };
         tab.reload(ctx);
         tab
+    }
+
+    fn from_session(saved: TabSession, home: &Path, ctx: &egui::Context) -> Self {
+        let path = saved
+            .path
+            .into_location()
+            .unwrap_or_else(|| home.to_path_buf().into());
+        let mut tab = Self::new(path, ctx);
+        tab.pinned = saved.pinned;
+        tab.sort = saved.sort;
+        tab.descending = saved.descending;
+        if saved.scroll_offset.is_finite() && saved.scroll_offset >= 0.0 {
+            tab.scroll_restore = Some(saved.scroll_offset);
+        }
+        if let Some(history) = saved
+            .history
+            .into_iter()
+            .map(SavedLocation::into_location)
+            .collect::<Option<Vec<_>>>()
+            .filter(|history| history.get(saved.history_index) == Some(&tab.path))
+        {
+            tab.history = history;
+            tab.history_index = saved.history_index;
+        }
+        tab
+    }
+
+    fn session(&self) -> TabSession {
+        TabSession {
+            path: (&self.path).into(),
+            pinned: self.pinned,
+            history: self.history.iter().map(SavedLocation::from).collect(),
+            history_index: self.history_index,
+            sort: self.sort,
+            descending: self.descending,
+            scroll_offset: self.scroll_restore.unwrap_or(self.scroll_offset),
+        }
     }
     fn begin_address(&mut self) {
         self.address = self.path.display();
@@ -516,6 +681,9 @@ impl Tab {
         self.anchor = None;
         self.cursor = None;
         self.scroll_to = None;
+        self.scroll_offset = 0.0;
+        self.scroll_restore = None;
+        self.file_scroll_scope = None;
         self.reveal_after_load = None;
         self.filter.clear();
         self.edit_address = false;
@@ -666,6 +834,27 @@ impl Pane {
             current: 0,
             closed_tabs: VecDeque::new(),
             tab_context_menu: None,
+        }
+    }
+
+    fn from_session(saved: PaneSession, home: &Path, ctx: &egui::Context) -> Self {
+        let mut tabs: Vec<_> = saved
+            .tabs
+            .into_iter()
+            .map(|tab| Tab::from_session(tab, home, ctx))
+            .collect();
+        if tabs.is_empty() {
+            tabs.push(Tab::new(home.to_path_buf().into(), ctx));
+        }
+        let mut pane = Self::new(tabs);
+        pane.current = saved.current.min(pane.tabs.len() - 1);
+        pane
+    }
+
+    fn session(&self) -> PaneSession {
+        PaneSession {
+            tabs: self.tabs.iter().map(Tab::session).collect(),
+            current: self.current,
         }
     }
 
@@ -946,10 +1135,13 @@ pub struct PawCommander {
     search: crate::search::Search,
 }
 impl PawCommander {
+    const SETTINGS_KEY: &str = "pawcommander.settings";
+    const SESSION_KEY: &str = "pawcommander.session";
+
     pub fn new(cc: &eframe::CreationContext<'_>, start: Option<PathBuf>) -> Self {
         let mut settings: Settings = cc
             .storage
-            .and_then(|s| eframe::get_value(s, "pawcommander.settings"))
+            .and_then(|storage| eframe::get_value(storage, Self::SETTINGS_KEY))
             .unwrap_or_default();
         settings.shortcuts.validate();
         crate::i18n::set_language(settings.language);
@@ -959,8 +1151,7 @@ impl PawCommander {
         settings.set_ui_scale(&cc.egui_ctx, settings.ui_scale);
         egui_extras::install_image_loaders(&cc.egui_ctx);
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
-        let opened_start = start.is_some();
-        if let Some(start) = start {
+        let (panes, active) = if let Some(start) = start {
             let path = if start.is_absolute() {
                 start
             } else {
@@ -968,35 +1159,52 @@ impl PawCommander {
                     .unwrap_or_else(|_| home.clone())
                     .join(start)
             };
-            settings.locations = vec![vec![path.clone().into()], vec![path.into()]];
-            settings.pinned_tab_counts = [0; 2];
-        }
-        let mut panes: Vec<_> = (0..2)
-            .map(|i| {
-                let Some(locations) = settings.locations.get(i).filter(|v| !v.is_empty()) else {
-                    return Pane::new(vec![Tab::new(home.clone().into(), &cc.egui_ctx)]);
-                };
-                Pane::new(
-                    locations
-                        .iter()
-                        .enumerate()
-                        .map(|(index, path)| {
-                            let mut tab = Tab::new(path.clone(), &cc.egui_ctx);
-                            tab.pinned = index < settings.pinned_tab_counts[i];
-                            tab
-                        })
-                        .collect(),
-                )
-            })
-            .collect();
-        if opened_start {
-            panes[0].tab_mut().folder_visit = FolderVisit::CountOnOpen;
+            let mut left = Tab::new(path.clone().into(), &cc.egui_ctx);
+            left.folder_visit = FolderVisit::CountOnOpen;
             // The launch argument puts the same location in both panes.
-            panes[1].tab_mut().folder_visit = FolderVisit::Recorded;
-        }
+            let mut right = Tab::new(path.into(), &cc.egui_ctx);
+            right.folder_visit = FolderVisit::Recorded;
+            (vec![Pane::new(vec![left]), Pane::new(vec![right])], 0)
+        } else if let Some(session) = cc
+            .storage
+            .and_then(|storage| eframe::get_value::<WorkspaceSession>(storage, Self::SESSION_KEY))
+        {
+            let panes = session
+                .panes
+                .into_iter()
+                .map(|pane| Pane::from_session(pane, &home, &cc.egui_ctx))
+                .collect();
+            let active = if settings.split {
+                session.active.min(1)
+            } else {
+                0
+            };
+            (panes, active)
+        } else {
+            let panes = (0..2)
+                .map(|i| {
+                    let Some(locations) = settings.locations.get(i).filter(|v| !v.is_empty())
+                    else {
+                        return Pane::new(vec![Tab::new(home.clone().into(), &cc.egui_ctx)]);
+                    };
+                    Pane::new(
+                        locations
+                            .iter()
+                            .enumerate()
+                            .map(|(index, path)| {
+                                let mut tab = Tab::new(path.clone(), &cc.egui_ctx);
+                                tab.pinned = index < settings.pinned_tab_counts[i];
+                                tab
+                            })
+                            .collect(),
+                    )
+                })
+                .collect();
+            (panes, 0)
+        };
         Self {
             panes,
-            active: 0,
+            active,
             settings,
             preview: Preview::new(),
             properties: None,
@@ -3243,14 +3451,30 @@ impl eframe::App for PawCommander {
         self.keyboard_had_focus = ctx.wants_keyboard_input() && self.file_row_focus(ctx).is_none();
     }
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        // Leave readable paths for older builds and if the session cannot be decoded.
+        let mut pinned_tab_counts = [0; 2];
         self.settings.locations = self
             .panes
             .iter()
-            .map(|p| p.tabs.iter().map(|t| t.path.clone()).collect())
+            .enumerate()
+            .map(|(i, pane)| {
+                pane.tabs
+                    .iter()
+                    .filter(|tab| tab.path.has_utf8_paths())
+                    .map(|tab| {
+                        pinned_tab_counts[i] += usize::from(tab.pinned);
+                        tab.path.clone()
+                    })
+                    .collect()
+            })
             .collect();
-        self.settings.pinned_tab_counts =
-            [self.panes[0].pinned_count(), self.panes[1].pinned_count()];
-        eframe::set_value(storage, "pawcommander.settings", &self.settings);
+        self.settings.pinned_tab_counts = pinned_tab_counts;
+        let session = WorkspaceSession {
+            panes: std::array::from_fn(|i| self.panes[i].session()),
+            active: self.active,
+        };
+        eframe::set_value(storage, Self::SETTINGS_KEY, &self.settings);
+        eframe::set_value(storage, Self::SESSION_KEY, &session);
     }
 }
 
@@ -4328,19 +4552,39 @@ fn render_pane(
                 1
             };
             let rows = visible.len().div_ceil(columns);
-            let mut scroll = egui::ScrollArea::vertical();
-            if let Some(path) = tab.scroll_to.take() {
-                if let Some(position) = visible.iter().position(|i| tab.entries[*i].path == path) {
-                    scroll = scroll.vertical_scroll_offset(
-                        (position / columns) as f32 * (row_height + ui.spacing().item_spacing.y),
-                    );
-                }
-            }
             const STATUS_HEIGHT: f32 = 22.0;
             const STATUS_RULE_HEIGHT: f32 = 1.0;
-            let status_height =
-                STATUS_HEIGHT + STATUS_RULE_HEIGHT + 2.0 * ui.spacing().item_spacing.y;
+            let spacing = ui.spacing().item_spacing.y;
+            let status_height = STATUS_HEIGHT + STATUS_RULE_HEIGHT + 2.0 * spacing;
             let files_height = (ui.available_height() - status_height).max(40.0);
+            let mut scroll = egui::ScrollArea::vertical();
+            let scope = ui.id();
+            let previous_scope = tab.file_scroll_scope;
+            if !ui.is_sizing_pass() {
+                if previous_scope.is_some_and(|previous| previous != scope) {
+                    tab.scroll_restore.get_or_insert(tab.scroll_offset);
+                }
+                tab.file_scroll_scope = Some(scope);
+                if let Some(position) = tab
+                    .scroll_to
+                    .take()
+                    .and_then(|path| visible.iter().position(|i| tab.entries[*i].path == path))
+                {
+                    tab.scroll_restore = None;
+                    scroll = scroll.vertical_scroll_offset(
+                        (position / columns) as f32 * (row_height + spacing),
+                    );
+                } else if tab.has_complete_listing {
+                    // Progressive batches can initially be too short to hold
+                    // the offset or may still change which rows are at that offset.
+                    if let Some(offset) = tab.scroll_restore.take() {
+                        let max_offset =
+                            (rows as f32 * (row_height + spacing) - spacing - files_height)
+                                .max(0.0);
+                        scroll = scroll.vertical_scroll_offset(offset.min(max_offset));
+                    }
+                }
+            }
             let files_id = ui.id().with(("file_list", tab.id));
             let ctx = ui.ctx().clone();
             ctx.accesskit_node_builder(files_id, |node| {
@@ -4357,11 +4601,11 @@ fn render_pane(
                 };
                 node.set_label(format!("{pane}, {view}, {}", tab.path.display()));
             });
-            ctx.with_accessibility_parent(files_id, || {
+            let file_scroll = ctx.with_accessibility_parent(files_id, || {
                 scroll
                     .max_height(files_height)
                     .min_scrolled_height(files_height)
-                    .id_salt((&tab.path, "files"))
+                    .id_salt((tab.id, &tab.path, "files"))
                     .auto_shrink([false, false])
                     .show_rows(ui, row_height, rows, |ui, range| {
                         for row in range {
@@ -4408,6 +4652,14 @@ fn render_pane(
                         }
                     })
             });
+            if !ui.is_sizing_pass() {
+                let offset = file_scroll.state.offset.y;
+                if previous_scope == Some(scope) && offset > 0.0 && offset != tab.scroll_offset {
+                    // User scrolling in a partial listing takes precedence.
+                    tab.scroll_restore = None;
+                }
+                tab.scroll_offset = offset;
+            }
             ui.add(egui::Separator::default().spacing(STATUS_RULE_HEIGHT));
             ui.allocate_ui_with_layout(
                 Vec2::new(ui.available_width(), STATUS_HEIGHT),
@@ -5869,11 +6121,12 @@ mod tests {
     }
 
     #[test]
-    fn automatic_refresh_preserves_egui_scroll_in_list_and_grid() {
+    fn automatic_refresh_and_session_restore_preserve_scroll_in_list_and_grid() {
         fn draw(
             ctx: &egui::Context,
             pane: &mut Pane,
             settings: &Settings,
+            index: usize,
         ) -> Vec<(String, egui::Pos2)> {
             let output = ctx.run(
                 egui::RawInput {
@@ -5889,7 +6142,7 @@ mod tests {
                             ui,
                             pane,
                             PaneOptions {
-                                index: 0,
+                                index,
                                 active: true,
                                 settings,
                                 idle: true,
@@ -5928,10 +6181,10 @@ mod tests {
                 grid,
                 ..Default::default()
             };
-            draw(&ctx, &mut pane, &settings);
+            draw(&ctx, &mut pane, &settings, 0);
             pane.tab_mut().scroll_to = Some(selected.clone());
-            draw(&ctx, &mut pane, &settings);
-            let before = draw(&ctx, &mut pane, &settings);
+            draw(&ctx, &mut pane, &settings, 0);
+            let before = draw(&ctx, &mut pane, &settings, 0);
             assert!(
                 before.iter().any(|(name, _)| name == "file035"),
                 "scrolled middle row is rendered"
@@ -5944,18 +6197,45 @@ mod tests {
             pane.tab_mut()
                 .auto_refresh(&ctx, Instant::now() + AUTO_REFRESH_INTERVAL);
             assert_eq!(
-                draw(&ctx, &mut pane, &settings),
+                draw(&ctx, &mut pane, &settings, 0),
                 before,
                 "no layout shift while reading"
             );
             wait_for_directory(pane.tab_mut());
             assert_eq!(
-                draw(&ctx, &mut pane, &settings),
+                draw(&ctx, &mut pane, &settings, 0),
                 before,
                 "refresh retains pixel offset and rows"
             );
             assert!(pane.tab().selected.contains(&selected));
             assert!(pane.tab().scroll_to.is_none());
+
+            let saved = pane.session();
+            let offset = saved.tabs[0].scroll_offset;
+            assert!(offset > 0.0);
+            let reopened_ctx = egui::Context::default();
+            let mut reopened = Pane::from_session(saved, root.path(), &reopened_ctx);
+            let (_tx, load) = DirectoryLoad::channel(DirectoryLoadMode::Progressive);
+            reopened.tab_mut().loading = Some(load);
+            reopened
+                .tab_mut()
+                .entries
+                .extend(vec![pane.tab().entries[0].clone()]);
+            draw(&reopened_ctx, &mut reopened, &settings, 0);
+            assert_eq!(reopened.tab().scroll_restore, Some(offset));
+            assert_eq!(reopened.session().tabs[0].scroll_offset, offset);
+
+            reopened
+                .tab_mut()
+                .finish_load(Ok(Some(pane.tab().entries.to_vec())));
+            draw(&reopened_ctx, &mut reopened, &settings, 0);
+            assert_eq!(draw(&reopened_ctx, &mut reopened, &settings, 0), before);
+            assert_eq!(reopened.tab().scroll_restore, None);
+            assert_eq!(reopened.tab().scroll_offset, offset);
+            let previous_scope = reopened.tab().file_scroll_scope;
+            draw(&reopened_ctx, &mut reopened, &settings, 1);
+            assert_ne!(reopened.tab().file_scroll_scope, previous_scope);
+            assert_eq!(reopened.tab().scroll_offset, offset);
         }
     }
 
@@ -6483,6 +6763,130 @@ mod tests {
         let restored: Settings = eframe::get_value(&storage, "views").unwrap();
         assert!(!restored.grid_for(0));
         assert!(restored.grid_for(1));
+    }
+
+    #[test]
+    fn workspace_session_restores_selection_sort_and_back_forward_with_missing_path() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        let base: Location = root.path().to_path_buf().into();
+        let left = base.join("left");
+        let forward = base.join("forward");
+        let missing = base.join("missing");
+        for directory in [&left, &forward, &missing] {
+            std::fs::create_dir(directory.path()).unwrap();
+        }
+        std::fs::write(left.join("present").path(), "data").unwrap();
+
+        app.action(Action::TogglePinTab(0, 0), &ctx);
+        app.action(Action::NewTab(0), &ctx);
+        app.action(Action::Navigate(0, left.clone()), &ctx);
+        app.action(Action::Navigate(0, forward.clone()), &ctx);
+        app.action(Action::Back, &ctx);
+        app.panes[0].tab_mut().sort = Sort::Size;
+        app.panes[0].tab_mut().descending = true;
+        app.action(Action::SetGrid(0, true), &ctx);
+        app.action(Action::NewTab(1), &ctx);
+        app.action(Action::Navigate(1, missing.clone()), &ctx);
+        app.panes[1].tab_mut().sort = Sort::Modified;
+
+        let mut storage = MemoryStorage::default();
+        eframe::App::save(&mut app, &mut storage);
+        std::fs::remove_dir(missing.path()).unwrap();
+        cc.storage = Some(&storage);
+        let mut reopened = PawCommander::new(&cc, None);
+        assert_eq!(reopened.active, 1);
+        assert_eq!(reopened.panes[0].pinned_count(), 1);
+        assert_eq!(reopened.panes[0].current, 1);
+        assert_eq!(reopened.panes[1].current, 1);
+        assert_eq!(reopened.panes[0].tab().path, left);
+        assert_eq!(reopened.tab().path, missing);
+        assert!(reopened.panes[0].tab().sort == Sort::Size);
+        assert!(reopened.panes[0].tab().descending);
+        assert!(reopened.tab().sort == Sort::Modified);
+        assert!(!reopened.tab().descending);
+        assert!(reopened.settings.grid_for(0));
+        assert!(!reopened.settings.grid_for(1));
+        wait_for_directory(reopened.panes[0].tab_mut());
+        wait_for_directory(reopened.tab_mut());
+        assert_eq!(reopened.panes[0].tab().entries[0].name, "present");
+        assert!(reopened.tab().error.is_some());
+        reopened.action(Action::History(0, -1), &ctx);
+        assert_eq!(reopened.tab().path, base);
+        reopened.action(Action::Forward, &ctx);
+        assert_eq!(reopened.tab().path, left);
+        reopened.action(Action::Forward, &ctx);
+        assert_eq!(reopened.tab().path, forward);
+        reopened.action(Action::History(1, -1), &ctx);
+        assert_eq!(reopened.tab().path, base);
+
+        let explicit = PawCommander::new(&cc, Some(forward.path().to_path_buf()));
+        assert_eq!(explicit.active, 0);
+        for pane in &explicit.panes {
+            assert_eq!(pane.tabs.len(), 1);
+            assert_eq!(pane.tab().path, forward);
+            assert_eq!(pane.tab().history, vec![forward.clone()]);
+            assert!(!pane.tab().pinned);
+            assert!(pane.tab().sort == Sort::Name);
+        }
+
+        eframe::Storage::set_string(
+            &mut storage,
+            PawCommander::SESSION_KEY,
+            "invalid session".into(),
+        );
+        let mut fallback_cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        fallback_cc.storage = Some(&storage);
+        let legacy_fallback = PawCommander::new(&fallback_cc, None);
+        assert_eq!(legacy_fallback.panes[0].pinned_count(), 1);
+        assert_eq!(legacy_fallback.panes[0].tabs[1].path, left);
+        assert_eq!(legacy_fallback.panes[1].tabs[1].path, missing);
+        assert!(legacy_fallback.settings.grid_for(0));
+    }
+
+    #[test]
+    fn session_preserves_native_local_paths_and_remote_coordinates() {
+        #[cfg(unix)]
+        let native = {
+            use std::os::unix::ffi::OsStringExt;
+            std::ffi::OsString::from_vec(vec![b'x', 0xff])
+        };
+        #[cfg(windows)]
+        let native = {
+            use std::os::windows::ffi::OsStringExt;
+            std::ffi::OsString::from_wide(&[u16::from(b'x'), 0xd800])
+        };
+        let root = tempfile::tempdir().unwrap();
+        let local: Location = root.path().join(&native).into();
+        let remote = Location::Sftp {
+            endpoint: Endpoint {
+                host: "example.invalid".into(),
+                port: 2022,
+                user: "user".into(),
+                key: Some(root.path().join(&native)),
+            },
+            path: PathBuf::from("/folder").join(native),
+        };
+        let ctx = egui::Context::default();
+        let mut cc = eframe::CreationContext::_new_kittest(ctx);
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        app.tab_mut().navigate(local.clone(), &cc.egui_ctx);
+        app.tab_mut().history.push(remote.clone());
+        app.tab_mut().pinned = true;
+        app.settings.hidden = true;
+        let mut storage = MemoryStorage::default();
+        eframe::App::save(&mut app, &mut storage);
+        let legacy: Settings = eframe::get_value(&storage, PawCommander::SETTINGS_KEY).unwrap();
+        assert!(legacy.locations[0].is_empty());
+        assert_eq!(legacy.pinned_tab_counts, [0, 0]);
+        cc.storage = Some(&storage);
+        let reopened = PawCommander::new(&cc, None);
+        assert!(reopened.settings.hidden);
+        assert_eq!(reopened.tab().path, local);
+        assert_eq!(reopened.tab().history[2], remote);
+        assert!(reopened.tab().pinned);
     }
 
     #[test]

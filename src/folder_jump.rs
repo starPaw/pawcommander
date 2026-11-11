@@ -219,17 +219,12 @@ fn serialize_visits<S>(visits: &[FolderVisit], serializer: S) -> Result<S::Ok, S
 where
     S: Serializer,
 {
-    serializer.collect_seq(visits.iter().take(HISTORY_LIMIT).filter(|visit| {
-        let location = &visit.location;
-        location.path().to_str().is_some()
-            && match location {
-                Location::Local(_) => true,
-                Location::Sftp { endpoint, .. } => endpoint
-                    .key
-                    .as_ref()
-                    .is_none_or(|key| key.to_str().is_some()),
-            }
-    }))
+    serializer.collect_seq(
+        visits
+            .iter()
+            .take(HISTORY_LIMIT)
+            .filter(|visit| visit.location.has_utf8_paths()),
+    )
 }
 
 fn folded(text: &str) -> String {

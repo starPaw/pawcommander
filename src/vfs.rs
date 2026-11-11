@@ -62,6 +62,16 @@ impl Location {
     pub fn remote(&self) -> bool {
         matches!(self, Self::Sftp { .. })
     }
+    pub(crate) fn has_utf8_paths(&self) -> bool {
+        self.path().to_str().is_some()
+            && match self {
+                Self::Local(_) => true,
+                Self::Sftp { endpoint, .. } => endpoint
+                    .key
+                    .as_deref()
+                    .is_none_or(|key| key.to_str().is_some()),
+            }
+    }
     pub fn with_path(&self, path: PathBuf) -> Self {
         match self {
             Self::Local(_) => Self::Local(path),
