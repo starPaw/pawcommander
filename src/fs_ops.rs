@@ -144,6 +144,7 @@ pub(crate) struct LocalTransfer {
     pub source: PathBuf,
     pub target: PathBuf,
     pub covered: Vec<PathBuf>,
+    pub source_metadata: fs::Metadata,
 }
 
 pub(crate) fn plan_transfer(
@@ -160,17 +161,18 @@ pub(crate) fn plan_transfer(
         original,
         source,
         covered,
+        metadata,
     } in sources
     {
         progress.item(&original);
-        let metadata = fs::symlink_metadata(&source).map_err(|e| {
+        let current = fs::symlink_metadata(&source).map_err(|e| {
             at(
                 crate::i18n::text("Не удалось получить сведения об элементе"),
                 &source,
                 e,
             )
         })?;
-        if metadata.is_dir() && destination.starts_with(&source) {
+        if current.is_dir() && destination.starts_with(&source) {
             return Err(crate::tr_format!(
                 "Нельзя скопировать или переместить «{}» в себя или во вложенную папку",
                 "Cannot copy or move “{}” into itself or a subfolder",
@@ -193,6 +195,7 @@ pub(crate) fn plan_transfer(
             source,
             target,
             covered,
+            source_metadata: metadata,
         });
     }
     Ok(plan)
@@ -275,6 +278,7 @@ struct LocalSelection {
     original: PathBuf,
     source: PathBuf,
     covered: Vec<PathBuf>,
+    metadata: fs::Metadata,
 }
 
 fn normalize_selection(
@@ -287,7 +291,7 @@ fn normalize_selection(
         let path = entry_path(original)?;
         let metadata = fs::symlink_metadata(&path)
             .map_err(|e| at("Не удалось получить сведения об элементе", &path, e))?;
-        entries.push((path, metadata.is_dir()));
+        entries.push((path, metadata));
     }
     let mut first = HashMap::with_capacity(entries.len());
     for (index, (path, _)) in entries.iter().enumerate() {
@@ -302,7 +306,7 @@ fn normalize_selection(
             .ancestors()
             .skip(1)
             .filter_map(|ancestor| first.get(ancestor).copied())
-            .filter(|&ancestor| entries[ancestor].1)
+            .filter(|&ancestor| entries[ancestor].1.is_dir())
             .last()
             .unwrap_or(first[path.as_path()]);
         if index == representative {
@@ -315,10 +319,11 @@ fn normalize_selection(
         .into_iter()
         .enumerate()
         .filter(|(index, _)| retained[*index])
-        .map(|(index, (source, _))| LocalSelection {
+        .map(|(index, (source, metadata))| LocalSelection {
             original: paths[index].clone(),
             source,
             covered: std::mem::take(&mut covered[index]),
+            metadata,
         })
         .collect())
 }

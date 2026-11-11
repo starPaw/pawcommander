@@ -656,6 +656,18 @@ impl EntryMetadata {
         false
     }
 
+    fn matches_local_move(&self, current: &Self) -> bool {
+        match (self, current) {
+            (Self::Local(expected), Self::Local(actual)) => {
+                // Renaming one hard-link path changes ctime for all its aliases.
+                self.same_object(current)
+                    && expected.file_type() == actual.file_type()
+                    && expected.created().ok() == actual.created().ok()
+            }
+            _ => false,
+        }
+    }
+
     // Access time can change just by opening a file. Compare the fields
     // relevant to replacement, including the local inode where available.
     fn matches_file(&self, current: &Self) -> bool {
@@ -739,6 +751,7 @@ struct TransferItem {
     source: Location,
     target: Location,
     covered: Vec<PathBuf>,
+    local_move_source: Option<EntryMetadata>,
     replacement: Option<(EntryMetadata, EntryMetadata)>,
 }
 
@@ -749,6 +762,7 @@ impl TransferItem {
             source,
             target,
             covered: Vec::new(),
+            local_move_source: None,
             replacement: None,
         }
     }
@@ -770,6 +784,7 @@ fn transfer_plan(
     if let Some(dest) = destination.local() {
         if sources.iter().all(|p| !p.remote()) {
             let paths = sources.iter().map(|p| p.path().into()).collect::<Vec<_>>();
+            let guard_source = cfg!(target_os = "macos") && kind == TransferKind::Move;
             return fs_ops::plan_transfer(&paths, dest, progress).map(|plan| {
                 plan.into_iter()
                     .map(|item| TransferItem {
@@ -777,6 +792,8 @@ fn transfer_plan(
                         source: item.source.into(),
                         target: item.target.into(),
                         covered: item.covered,
+                        local_move_source: guard_source
+                            .then_some(EntryMetadata::Local(item.source_metadata)),
                         replacement: None,
                     })
                     .collect()
@@ -948,7 +965,7 @@ pub fn transfer_with_conflicts(
         }
         let result = match kind {
             TransferKind::Copy => copy_item(&item, expected, progress),
-            TransferKind::Move => publish_item(&item.source, &item.target, expected, || {
+            TransferKind::Move => move_item(&item, expected, count != 0, || {
                 moved(&item.original, &item.covered);
             }),
         };
@@ -1004,6 +1021,28 @@ fn copy_item(
         });
     }
     copy_transfer_checked(item, expected, progress, &mut |_, _| Ok(()))
+}
+
+fn move_item(
+    item: &TransferItem,
+    expected: Option<&EntryMetadata>,
+    had_conflicts: bool,
+    moved: impl FnOnce(),
+) -> Result<(), String> {
+    // The batch waits for every conflict before moving anything. Use the same
+    // metadata as selection grouping, including for items with no conflict.
+    if let (true, Some(planned)) = (had_conflicts, &item.local_move_source) {
+        if !entry_metadata(&item.source)?
+            .is_some_and(|current| planned.matches_local_move(&current))
+        {
+            let source = &item.original;
+            return Err(crate::tr_format!(
+                "Исходный объект {source} изменился во время ожидания решения о конфликте",
+                "Source item {source} changed while waiting for a conflict decision"
+            ));
+        }
+    }
+    publish_item(&item.source, &item.target, expected, moved)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2136,6 +2175,179 @@ mod tests {
             assert_eq!(fs::read(source.path()).unwrap(), b"source");
             assert_eq!(fs::read(target.join(name).path()).unwrap(), b"destination");
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn conflict_move_rejects_replaced_directory_and_keeps_its_selection_pending() {
+        use std::os::unix::fs::symlink;
+
+        for conflict_on_source in [true, false] {
+            for replace_with_link in [true, false] {
+                let fixture = tempfile::tempdir().unwrap();
+                let root: Location = fixture.path().to_path_buf().into();
+                let source = create_directory(&root, "project").unwrap();
+                let child = source.join("child.txt");
+                let original = root.join("original");
+                let target = create_directory(&root, "target").unwrap();
+                let mut sources = vec![source.clone(), child.clone()];
+                let conflicting_source = if conflict_on_source {
+                    source.clone()
+                } else {
+                    let other = root.join("other.txt");
+                    fs::write(other.path(), b"other source").unwrap();
+                    sources.push(other.clone());
+                    other
+                };
+                let existing = target.join(conflicting_source.path().file_name().unwrap());
+                fs::write(child.path(), b"original child").unwrap();
+                fs::write(existing.path(), b"existing target").unwrap();
+
+                let error = transfer_with_conflicts(
+                    &sources,
+                    &target,
+                    TransferKind::Move,
+                    &mut Progress::default(),
+                    |conflict| {
+                        assert_eq!(conflict.source.location, conflicting_source);
+                        fs::rename(source.path(), original.path()).unwrap();
+                        if replace_with_link {
+                            symlink(original.path(), source.path()).unwrap();
+                        } else {
+                            fs::create_dir(source.path()).unwrap();
+                            fs::write(child.path(), b"substitute").unwrap();
+                        }
+                        Ok(Answer {
+                            decision: Decision::KeepBoth,
+                            apply_to_group: false,
+                        })
+                    },
+                    |_, _| panic!("the changed source must not retire any clipboard entries"),
+                )
+                .unwrap_err();
+                assert!(error.contains(&source.display().to_string()));
+                assert_eq!(
+                    fs::read(original.join("child.txt").path()).unwrap(),
+                    b"original child"
+                );
+                if replace_with_link {
+                    assert_eq!(fs::read_link(source.path()).unwrap(), original.path());
+                } else {
+                    assert_eq!(fs::read(child.path()).unwrap(), b"substitute");
+                }
+                assert_eq!(fs::read(existing.path()).unwrap(), b"existing target");
+                assert_eq!(fs::read_dir(target.path()).unwrap().count(), 1);
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn conflict_move_keeps_both_for_unchanged_directory_and_dangling_link() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = tempfile::tempdir().unwrap();
+        let root: Location = fixture.path().to_path_buf().into();
+        let source = create_directory(&root, "project").unwrap();
+        let child = source.join("child.txt");
+        let link = root.join("link");
+        let target = create_directory(&root, "target").unwrap();
+        fs::write(child.path(), b"child").unwrap();
+        symlink("missing", link.path()).unwrap();
+        fs::write(target.join("project").path(), b"existing project").unwrap();
+        fs::write(target.join("link").path(), b"existing link").unwrap();
+
+        let mut moved = Vec::new();
+        let report = transfer_with_conflicts(
+            &[source.clone(), child.clone(), link.clone()],
+            &target,
+            TransferKind::Move,
+            &mut Progress::default(),
+            |conflict| {
+                assert_eq!(conflict.source.location, source);
+                Ok(Answer {
+                    decision: Decision::KeepBoth,
+                    apply_to_group: true,
+                })
+            },
+            |source, covered| moved.push((source.clone(), covered.to_vec())),
+        )
+        .unwrap();
+        assert_eq!(report.completed, 2);
+        assert_eq!(
+            moved,
+            vec![
+                (source.clone(), vec![child.path().into()]),
+                (link.clone(), vec![])
+            ]
+        );
+        assert!(!source.path().exists());
+        assert!(fs::symlink_metadata(link.path()).is_err());
+        assert_eq!(
+            fs::read(target.join("project (2)").join("child.txt").path()).unwrap(),
+            b"child"
+        );
+        assert_eq!(
+            fs::read_link(target.join("link (2)").path()).unwrap(),
+            Path::new("missing")
+        );
+        assert_eq!(
+            fs::read(target.join("project").path()).unwrap(),
+            b"existing project"
+        );
+        assert_eq!(
+            fs::read(target.join("link").path()).unwrap(),
+            b"existing link"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn conflict_move_moves_both_selected_hard_link_aliases() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root: Location = fixture.path().to_path_buf().into();
+        let first = root.join("first.txt");
+        let second = root.join("second.txt");
+        let target = create_directory(&root, "target").unwrap();
+        fs::write(first.path(), b"hard-linked content").unwrap();
+        fs::hard_link(first.path(), second.path()).unwrap();
+        fs::write(target.join("first.txt").path(), b"existing").unwrap();
+
+        let mut moved = Vec::new();
+        let report = transfer_with_conflicts(
+            &[first.clone(), second.clone()],
+            &target,
+            TransferKind::Move,
+            &mut Progress::default(),
+            |_| {
+                Ok(Answer {
+                    decision: Decision::KeepBoth,
+                    apply_to_group: false,
+                })
+            },
+            |source, covered| {
+                assert!(covered.is_empty());
+                moved.push(source.clone());
+            },
+        )
+        .unwrap();
+        assert_eq!(report.completed, 2);
+        assert!(!first.path().exists());
+        assert!(!second.path().exists());
+        assert_eq!(moved, [first, second]);
+        let moved_first = target.join("first (2).txt");
+        let moved_second = target.join("second.txt");
+        let first_metadata = entry_metadata(&moved_first).unwrap().unwrap();
+        let second_metadata = entry_metadata(&moved_second).unwrap().unwrap();
+        assert!(first_metadata.same_object(&second_metadata));
+        assert_eq!(
+            fs::read(moved_first.path()).unwrap(),
+            b"hard-linked content"
+        );
+        assert_eq!(
+            fs::read(target.join("first.txt").path()).unwrap(),
+            b"existing"
+        );
     }
 
     #[test]
