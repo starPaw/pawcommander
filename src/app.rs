@@ -98,6 +98,12 @@ struct WorkspaceSession {
 }
 
 #[derive(Serialize, Deserialize)]
+struct NamedWorkspace {
+    name: String,
+    folders: [SavedLocation; 2],
+}
+
+#[derive(Serialize, Deserialize)]
 struct PaneSession {
     tabs: Vec<TabSession>,
     current: usize,
@@ -114,7 +120,9 @@ struct TabSession {
     scroll_offset: f32,
 }
 
-#[derive(Serialize, Deserialize)]
+// Local paths or SFTP connection coordinates and a key-file reference. Secrets
+// belong to SFTP sessions and the credential store, never to saved locations.
+#[derive(Clone, Serialize, Deserialize)]
 enum SavedLocation {
     Local(SavedPath),
     Sftp {
@@ -127,7 +135,7 @@ enum SavedLocation {
 }
 
 // Preserve native names that PathBuf's serializer cannot handle.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 enum SavedPath {
     Utf8(String),
     Unix(Vec<u8>),
@@ -987,6 +995,10 @@ enum Action {
     Trash,
     Transfer(TransferKind),
     Bookmark,
+    SaveWorkspace,
+    OpenWorkspace(usize),
+    RenameWorkspace(usize),
+    RemoveWorkspace(usize),
     Reveal,
     CopyPath,
     ConnectSftp,
@@ -1046,9 +1058,21 @@ fn file_clipboard_action(event: &egui::Event) -> Option<Action> {
     }
 }
 enum Dialog {
-    NewFolder { parent: Location, name: String },
-    Rename { source: Location, name: String },
-    Trash { paths: Vec<Location> },
+    NewFolder {
+        parent: Location,
+        name: String,
+    },
+    Rename {
+        source: Location,
+        name: String,
+    },
+    Trash {
+        paths: Vec<Location>,
+    },
+    WorkspaceName {
+        editing: Option<usize>,
+        name: String,
+    },
 }
 enum TransferEvent {
     Conflict(Box<ConflictDialog>),
@@ -1105,6 +1129,7 @@ pub struct PawCommander {
     panes: Vec<Pane>,
     active: usize,
     settings: Settings,
+    workspaces: Vec<NamedWorkspace>,
     preview: Preview,
     properties: Option<crate::properties::Properties>,
     clipboard: Option<Clipboard>,
@@ -1137,11 +1162,16 @@ pub struct PawCommander {
 impl PawCommander {
     const SETTINGS_KEY: &str = "pawcommander.settings";
     const SESSION_KEY: &str = "pawcommander.session";
+    const WORKSPACES_KEY: &str = "pawcommander.workspaces";
 
     pub fn new(cc: &eframe::CreationContext<'_>, start: Option<PathBuf>) -> Self {
         let mut settings: Settings = cc
             .storage
             .and_then(|storage| eframe::get_value(storage, Self::SETTINGS_KEY))
+            .unwrap_or_default();
+        let workspaces = cc
+            .storage
+            .and_then(|storage| eframe::get_value(storage, Self::WORKSPACES_KEY))
             .unwrap_or_default();
         settings.shortcuts.validate();
         crate::i18n::set_language(settings.language);
@@ -1206,6 +1236,7 @@ impl PawCommander {
             panes,
             active,
             settings,
+            workspaces,
             preview: Preview::new(),
             properties: None,
             clipboard: None,
@@ -1733,6 +1764,30 @@ impl PawCommander {
                 self.active = i;
                 self.panes[i].tab_mut().navigate(p, ctx);
             }
+            Action::SaveWorkspace => {
+                self.dialog = Some(Dialog::WorkspaceName {
+                    editing: None,
+                    name: String::new(),
+                });
+                self.dialog_focus = true;
+            }
+            Action::OpenWorkspace(index) => {
+                self.open_workspace(index, ctx);
+            }
+            Action::RenameWorkspace(index) => {
+                if let Some(workspace) = self.workspaces.get(index) {
+                    self.dialog = Some(Dialog::WorkspaceName {
+                        editing: Some(index),
+                        name: workspace.name.clone(),
+                    });
+                    self.dialog_focus = true;
+                }
+            }
+            Action::RemoveWorkspace(index) => {
+                if index < self.workspaces.len() {
+                    self.workspaces.remove(index);
+                }
+            }
             Action::OpenInZed(i, path) => {
                 self.active = i;
                 self.open_in_zed(path, false, ctx);
@@ -1908,6 +1963,47 @@ impl PawCommander {
             _ => {}
         }
     }
+    fn open_workspace(&mut self, index: usize, ctx: &egui::Context) {
+        let Some(workspace) = self.workspaces.get(index) else {
+            return;
+        };
+        let [Some(left), Some(right)] = workspace.folders.clone().map(SavedLocation::into_location)
+        else {
+            self.notice = Some((
+                crate::i18n::text("Пути этого рабочего пространства несовместимы с системой.")
+                    .into(),
+                true,
+            ));
+            return;
+        };
+        self.settings.split = true;
+        for (pane, path) in self.panes.iter_mut().zip([left, right]) {
+            pane.tab_mut().navigate(path, ctx);
+        }
+    }
+
+    fn save_workspace_name(&mut self, editing: Option<usize>, name: String) {
+        let name = name.trim().to_owned();
+        if let Some(index) = editing {
+            if let Some(workspace) = self.workspaces.get_mut(index) {
+                workspace.name = name;
+            }
+        } else {
+            self.workspaces.push(NamedWorkspace {
+                name,
+                folders: std::array::from_fn(|index| (&self.panes[index].tab().path).into()),
+            });
+        }
+    }
+
+    fn workspace_name_taken(&self, name: &str, editing: Option<usize>) -> bool {
+        let name = name.trim();
+        self.workspaces
+            .iter()
+            .enumerate()
+            .any(|(index, workspace)| Some(index) != editing && workspace.name == name)
+    }
+
     fn open_search(&mut self) {
         self.tools = crate::tools::Tools::detect();
         self.search.open();
@@ -2660,6 +2756,7 @@ impl PawCommander {
                         {
                             actions.push(Action::Shortcut(Command::FolderJump));
                         }
+                        self.workspace_places(ui, actions);
                         ui.add_space(6.0);
                         let current = self.tab().path.clone();
                         egui::CollapsingHeader::new(crate::i18n::text("Ваши файлы"))
@@ -2893,6 +2990,63 @@ impl PawCommander {
                 }
             });
     }
+    fn workspace_places(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        egui::CollapsingHeader::new(crate::i18n::text("Пространства"))
+            .id_salt("workspaces_group")
+            .default_open(true)
+            .show_unindented(ui, |ui| {
+                ui.add_enabled_ui(self.drop_enabled(), |ui| {
+                    let save = ui.button(crate::i18n::text("Сохранить пару папок…"));
+                    paint_focus(ui, &save, 5);
+                    if save.clicked() {
+                        actions.push(Action::SaveWorkspace);
+                    }
+                    for (index, workspace) in self.workspaces.iter().enumerate() {
+                        ui.push_id(index, |ui| {
+                            ui.horizontal(|ui| {
+                                let open = ui
+                                    .add_sized(
+                                        [(ui.available_width() - 34.0).max(0.0), 29.0],
+                                        egui::Button::new(&workspace.name).truncate(),
+                                    )
+                                    .on_hover_text(&workspace.name);
+                                paint_focus(ui, &open, 5);
+                                if open.gained_focus() {
+                                    open.scroll_to_me(Some(egui::Align::Center));
+                                }
+                                if open.clicked() {
+                                    actions.push(Action::OpenWorkspace(index));
+                                }
+                                let menu = ui.menu_button("…", |ui| {
+                                    if ui.button(crate::i18n::text("Переименовать…")).clicked()
+                                    {
+                                        actions.push(Action::RenameWorkspace(index));
+                                        ui.close_menu();
+                                    }
+                                    if ui
+                                        .button(crate::i18n::text("Удалить пространство"))
+                                        .clicked()
+                                    {
+                                        actions.push(Action::RemoveWorkspace(index));
+                                        ui.close_menu();
+                                    }
+                                });
+                                let label = crate::tr_format!(
+                                    "Действия для «{}»",
+                                    "Actions for {}",
+                                    workspace.name
+                                );
+                                ui.ctx().accesskit_node_builder(menu.response.id, |node| {
+                                    node.set_label(label.clone());
+                                });
+                                paint_focus(ui, &menu.response.on_hover_text(label), 5);
+                            });
+                        });
+                    }
+                });
+            });
+    }
+
     fn sftp_dialog(&mut self, ctx: &egui::Context) {
         let colors = Palette::from_ctx(ctx);
         let Some(form) = &mut self.sftp_form else {
@@ -3043,6 +3197,13 @@ impl PawCommander {
         let title = match &dialog {
             Dialog::NewFolder { .. } => crate::i18n::text("Новая папка"),
             Dialog::Rename { .. } => crate::i18n::text("Переименовать"),
+            Dialog::WorkspaceName { editing, .. } => {
+                if editing.is_some() {
+                    crate::i18n::text("Переименовать рабочее пространство")
+                } else {
+                    crate::i18n::text("Сохранить пару папок")
+                }
+            }
             Dialog::Trash { paths } => {
                 if paths.iter().any(Location::remote) {
                     crate::i18n::text("Удалить с сервера навсегда?")
@@ -3078,6 +3239,33 @@ impl PawCommander {
                         response.request_focus();
                     }
                 }
+                Dialog::WorkspaceName { editing, name } => {
+                    if editing.is_none() {
+                        for (label, pane) in [
+                            (crate::i18n::text("Левая папка"), &self.panes[0]),
+                            (crate::i18n::text("Правая папка"), &self.panes[1]),
+                        ] {
+                            ui.label(crate::tr_format!(
+                                "{label}: {}",
+                                "{label}: {}",
+                                pane.tab().path.display()
+                            ));
+                        }
+                    }
+                    let label = ui.label(crate::i18n::text("Имя рабочего пространства"));
+                    let response = ui
+                        .add(egui::TextEdit::singleline(name).desired_width(f32::INFINITY))
+                        .labelled_by(label.id);
+                    if self.dialog_focus {
+                        response.request_focus();
+                    }
+                    if self.workspace_name_taken(name, *editing) {
+                        ui.colored_label(
+                            colors.error,
+                            crate::i18n::text("Это имя уже используется."),
+                        );
+                    }
+                }
                 Dialog::Trash { paths } => {
                     ui.label(crate::tr_format!("Выбрано объектов: {}", "Selected items: {}", paths.len()));
                     for p in paths.iter().take(6) {
@@ -3094,6 +3282,9 @@ impl PawCommander {
             let valid = match &dialog {
                 Dialog::NewFolder { name, .. } | Dialog::Rename { name, .. } => {
                     !name.trim().is_empty()
+                }
+                Dialog::WorkspaceName { editing, name } => {
+                    !name.trim().is_empty() && !self.workspace_name_taken(name, *editing)
                 }
                 Dialog::Trash { .. } => true,
             };
@@ -3116,14 +3307,16 @@ impl PawCommander {
                 };
                 confirm = ui.add_enabled(valid, button).clicked();
             });
-            self.dialog_focus = false;
-            // Enter is only an editing shortcut; trash always requires its explicit button.
-            if !matches!(dialog, Dialog::Trash { .. })
-                && valid
-                && ctx.input(|i| i.key_pressed(egui::Key::Enter))
-            {
+            let submit_on_enter = match dialog {
+                Dialog::Trash { .. } => false,
+                // The Enter that opens the dialog belongs to its sidebar control.
+                Dialog::WorkspaceName { .. } => !self.dialog_focus,
+                _ => true,
+            };
+            if submit_on_enter && valid && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
                 confirm = true;
             }
+            self.dialog_focus = false;
             if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                 cancel = true;
             }
@@ -3154,6 +3347,9 @@ impl PawCommander {
                         })
                     },
                 ),
+                Dialog::WorkspaceName { editing, name } => {
+                    self.save_workspace_name(editing, name);
+                }
                 Dialog::Trash { paths } => self.start_progress_job(
                     ctx,
                     crate::i18n::text("Удаление файлов"),
@@ -3475,6 +3671,7 @@ impl eframe::App for PawCommander {
         };
         eframe::set_value(storage, Self::SETTINGS_KEY, &self.settings);
         eframe::set_value(storage, Self::SESSION_KEY, &session);
+        eframe::set_value(storage, Self::WORKSPACES_KEY, &self.workspaces);
     }
 }
 
@@ -6887,6 +7084,216 @@ mod tests {
         assert_eq!(reopened.tab().path, local);
         assert_eq!(reopened.tab().history[2], remote);
         assert!(reopened.tab().pinned);
+    }
+
+    #[test]
+    fn named_workspace_opens_both_folders_in_existing_tabs_after_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let base: Location = root.path().to_path_buf().into();
+        let left = base.join("left");
+        let right = base.join("right");
+        for folder in [&left, &right] {
+            std::fs::create_dir(folder.path()).unwrap();
+        }
+        let ctx = egui::Context::default();
+        let mut cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        app.action(Action::Navigate(0, left.clone()), &ctx);
+        app.action(Action::Navigate(1, right.clone()), &ctx);
+        app.save_workspace_name(None, "  Daily work  ".into());
+
+        app.action(Action::NewTab(0), &ctx);
+        app.action(Action::TogglePinTab(0, 1), &ctx);
+        app.action(Action::Navigate(0, base.clone()), &ctx);
+        app.action(Action::Navigate(1, base.clone()), &ctx);
+        app.toggle_split();
+        let mut storage = MemoryStorage::default();
+        eframe::App::save(&mut app, &mut storage);
+        cc.storage = Some(&storage);
+        let mut reopened = PawCommander::new(&cc, None);
+        assert!(!reopened.settings.split);
+        assert_eq!(reopened.workspaces[0].name, "Daily work");
+        let tab_ids: Vec<_> = reopened.panes.iter().map(|pane| pane.tab().id).collect();
+
+        reopened.action(Action::OpenWorkspace(0), &ctx);
+        assert!(reopened.settings.split);
+        assert_eq!(reopened.active, 0);
+        assert_eq!(reopened.panes[0].tabs.len(), 2);
+        assert_eq!(reopened.panes[1].tabs.len(), 1);
+        assert!(reopened.tab().pinned);
+        assert_eq!(reopened.tab().path, left);
+        assert_eq!(reopened.panes[1].tab().path, right);
+        for (pane, previous_id) in reopened.panes.iter().zip(tab_ids) {
+            assert_eq!(pane.tab().id, previous_id);
+        }
+        reopened.action(Action::Back, &ctx);
+        assert_eq!(reopened.tab().path, base);
+        reopened.action(Action::History(1, -1), &ctx);
+        assert_eq!(reopened.tab().path, base);
+    }
+
+    #[test]
+    fn named_workspace_saves_when_legacy_bookmark_cannot_be_serialized() {
+        #[cfg(unix)]
+        let native = {
+            use std::os::unix::ffi::OsStringExt;
+            std::ffi::OsString::from_vec(vec![b'x', 0xff])
+        };
+        #[cfg(windows)]
+        let native = {
+            use std::os::windows::ffi::OsStringExt;
+            std::ffi::OsString::from_wide(&[u16::from(b'x'), 0xd800])
+        };
+        let root = tempfile::tempdir().unwrap();
+        let native_folder: Location = root.path().join(native).into();
+        let ctx = egui::Context::default();
+        let mut cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        let mut storage = MemoryStorage::default();
+        eframe::App::save(&mut app, &mut storage);
+        let previous_settings = storage.0[PawCommander::SETTINGS_KEY].clone();
+
+        app.settings.bookmarks.push(native_folder.clone());
+        app.action(Action::Navigate(1, native_folder.clone()), &ctx);
+        app.save_workspace_name(None, "Native folders".into());
+        eframe::App::save(&mut app, &mut storage);
+        assert_eq!(storage.0[PawCommander::SETTINGS_KEY], previous_settings);
+
+        cc.storage = Some(&storage);
+        let reopened = PawCommander::new(&cc, Some(root.path().into()));
+        assert_eq!(reopened.workspaces[0].name, "Native folders");
+        assert_eq!(
+            reopened.workspaces[0].folders[1].clone().into_location(),
+            Some(native_folder)
+        );
+    }
+
+    #[test]
+    fn named_workspace_dialog_rejects_duplicates_and_supports_rename_and_remove() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        let enter = || egui::RawInput {
+            events: [true, false]
+                .map(|pressed| egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                })
+                .to_vec(),
+            ..Default::default()
+        };
+        let submit = |app: &mut PawCommander, name: &str| {
+            let Some(Dialog::WorkspaceName { name: field, .. }) = &mut app.dialog else {
+                panic!("expected workspace dialog");
+            };
+            *field = name.into();
+            let _ = ctx.run(enter(), |ctx| app.dialogs(ctx));
+        };
+
+        app.action(Action::SaveWorkspace, &ctx);
+        submit(&mut app, "   ");
+        assert!(app.dialog.is_some());
+        assert!(app.workspaces.is_empty());
+        submit(&mut app, " Daily ");
+        assert!(app.dialog.is_none());
+        app.action(Action::SaveWorkspace, &ctx);
+        submit(&mut app, "Daily");
+        assert!(app.dialog.is_some());
+        assert_eq!(app.workspaces.len(), 1);
+        submit(&mut app, "Archive");
+        assert!(app.dialog.is_none());
+
+        let _ = ctx.run(enter(), |ctx| {
+            app.action(Action::RenameWorkspace(0), ctx);
+            app.dialogs(ctx);
+        });
+        assert!(matches!(
+            &app.dialog,
+            Some(Dialog::WorkspaceName { editing: Some(0), name }) if name == "Daily"
+        ));
+        submit(&mut app, "Archive");
+        assert!(app.dialog.is_some());
+        submit(&mut app, " Daily ");
+        assert!(app.dialog.is_none());
+        app.action(Action::RenameWorkspace(0), &ctx);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| app.dialogs(ctx));
+        submit(&mut app, "Regular");
+        assert_eq!(app.workspaces[0].name, "Regular");
+        assert_eq!(app.workspaces[1].name, "Archive");
+        app.action(Action::RemoveWorkspace(0), &ctx);
+        assert_eq!(app.workspaces.len(), 1);
+        assert_eq!(app.workspaces[0].name, "Archive");
+    }
+
+    #[test]
+    fn named_workspace_persists_sftp_coordinates_without_credentials() {
+        let root = tempfile::tempdir().unwrap();
+        let local: Location = root.path().to_path_buf().into();
+        let key = root.path().join("disposable-key");
+        std::fs::write(&key, "synthetic-private-key-material").unwrap();
+        let remote = Location::Sftp {
+            endpoint: Endpoint {
+                host: "workspace-test.invalid".into(),
+                port: 2022,
+                user: "workspace-test".into(),
+                key: Some(key),
+            },
+            path: PathBuf::from("/folder/папка"),
+        };
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        // Supply the location without starting a network or keyring request.
+        app.panes[1].tab_mut().path = remote.clone();
+        app.settings.sftp_profiles = vec![remote.clone()];
+        app.sftp_form = Some(SftpForm {
+            password: "synthetic-account-password".into(),
+            passphrase: "synthetic-key-passphrase".into(),
+            save_key: true,
+            ..Default::default()
+        });
+        app.save_workspace_name(None, "With SFTP".into());
+        let mut storage = MemoryStorage::default();
+        eframe::App::save(&mut app, &mut storage);
+        let stored: Settings = eframe::get_value(&storage, PawCommander::SETTINGS_KEY).unwrap();
+        let workspaces: Vec<NamedWorkspace> =
+            eframe::get_value(&storage, PawCommander::WORKSPACES_KEY).unwrap();
+        let folders = workspaces[0]
+            .folders
+            .clone()
+            .map(SavedLocation::into_location);
+        assert_eq!(folders, [Some(local), Some(remote.clone())]);
+        assert_eq!(stored.sftp_profiles, vec![remote.clone()]);
+        for payload in storage.0.values() {
+            for secret in [
+                "synthetic-private-key-material",
+                "synthetic-account-password",
+                "synthetic-key-passphrase",
+            ] {
+                assert!(!payload.contains(secret));
+            }
+        }
+
+        let loopback = Location::Sftp {
+            endpoint: Endpoint {
+                host: "127.0.0.1".into(),
+                port: 0,
+                user: "test".into(),
+                key: None,
+            },
+            path: PathBuf::from("/workspace"),
+        };
+        app.sftp_form = None;
+        app.panes[1].tab_mut().path = loopback.clone();
+        app.save_workspace_name(None, "Loopback".into());
+        app.action(Action::Navigate(1, root.path().to_path_buf().into()), &ctx);
+        app.action(Action::OpenWorkspace(1), &ctx);
+        assert_eq!(app.panes[1].tab().path, loopback);
+        assert_eq!(app.settings.sftp_profiles, vec![remote]);
     }
 
     #[test]

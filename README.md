@@ -45,6 +45,8 @@ Right-click a tab to pin, unpin, or duplicate it. Drag tabs to rearrange them or
 
 On startup, PawCommander restores both panes, the active tabs, sorting, navigation history, and scroll positions. An unavailable folder stays in its tab so you can retry or navigate elsewhere while using the other pane.
 
+In the sidebar, use **Save folder pair…** to give the two current folders a workspace name. Select the name to open the pair in both panes, or use its **…** menu to rename or remove it. SFTP workspaces remember the server and folder, including the key-file reference when used. Manage credentials through the SFTP connection dialog.
+
 ## Get started
 
 **PawCommander is an early release.** macOS is the primary development platform. Linux and Windows have platform-specific implementations and CI checks; desktop integration on those systems still needs broader testing. Feedback and reproducible bug reports are welcome.
