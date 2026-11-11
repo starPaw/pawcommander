@@ -63,6 +63,7 @@ fn translate(english: bool, russian: &'static str) -> &'static str {
         "Копировать" => "Copy",
         "Вставить" => "Paste",
         "Сетка" => "Grid",
+        "Колоночный режим" => "Column view",
         "Список" => "List",
         "Две панели" => "Dual pane",
         "Расположение панелей" => "Pane layout",

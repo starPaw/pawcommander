@@ -14,6 +14,8 @@ Open **Settings → List columns** to show or hide columns, set widths, and reor
 
 Open **Folder tree** in the sidebar to browse the active pane's filesystem or connected SFTP server. The tree highlights the current folder and reads subfolders as branches expand. Select a folder name to open it in the active pane. Use **Refresh** on the toolbar to reload expanded branches.
 
+Choose **Column view** in the pane controls to browse the current folder alongside up to two of its ancestors. Use Up and Down to select a row, Right to enter a selected folder, and Left to go to its parent. Select a sibling folder in an ancestor column to jump to it. Scroll horizontally when the columns exceed the pane width.
+
 Click a breadcrumb to navigate, or press `Cmd/Ctrl+L` to enter a path. The address editor offers folder completion. `Enter` opens the entered path; `Esc` returns to breadcrumbs. Use the sidebar for common folders and bookmarks.
 
 Choose a language under **Settings → Language**. English is the default; Russian is also available. File names and contents are unchanged. Choose Latte, Frappé, Macchiato, or Mocha under **Settings → Catppuccin**. System appearance switches between Latte and Frappé.

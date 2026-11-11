@@ -27,6 +27,7 @@ pub enum Icon {
     Star,
     Grid,
     List,
+    FolderColumns,
     Split,
     SplitStacked,
     Sidebar,
@@ -64,7 +65,7 @@ pub fn tint(icon: Icon, p: Palette) -> Color32 {
     match icon {
         Icon::Archive | Icon::Star => p.yellow,
         Icon::Folder | Icon::NewFolder => p.blue,
-        Icon::Image | Icon::Server | Icon::List => p.teal,
+        Icon::Image | Icon::Server | Icon::List | Icon::FolderColumns => p.teal,
         Icon::Music => p.mauve,
         Icon::Video | Icon::Paste => p.peach,
         Icon::Document | Icon::Code | Icon::Download | Icon::Grid => p.blue,
@@ -397,6 +398,12 @@ pub fn paint(ui: &egui::Ui, rect: Rect, icon: Icon, color: Color32) {
                 line(&[(9.0, y), (22.0, y)]);
             }
         }
+        Icon::FolderColumns => {
+            outline(rr(2.0, 3.0, 20.0, 18.0), 2);
+            for x in [9.0, 15.0] {
+                line(&[(x, 3.0), (x, 21.0)]);
+            }
+        }
         Icon::Split => {
             outline(rr(2.0, 3.0, 20.0, 18.0), 2);
             line(&[(12.0, 3.0), (12.0, 21.0)]);
@@ -530,7 +537,13 @@ fn button_info(ui: &egui::Ui, response: &Response, icon: Icon, label: &str, sele
     response.widget_info(|| {
         if matches!(
             icon,
-            Icon::Split | Icon::SplitStacked | Icon::Sidebar | Icon::Info | Icon::Grid | Icon::List
+            Icon::Split
+                | Icon::SplitStacked
+                | Icon::Sidebar
+                | Icon::Info
+                | Icon::Grid
+                | Icon::List
+                | Icon::FolderColumns
         ) {
             egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, label)
         } else {

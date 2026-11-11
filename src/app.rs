@@ -1,3 +1,5 @@
+mod column_view;
+
 use crate::command_palette::{CommandPalette, PaletteOutcome};
 use crate::conflict::{Answer, ConflictDialog, Decision};
 use crate::directory_tree::DirectoryTree;
@@ -453,15 +455,52 @@ impl Density {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct FolderView {
-    grid: bool,
+    mode: FolderMode,
     hidden: bool,
     density: Density,
     order: FileOrder,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+enum FolderMode {
+    #[default]
+    List,
+    Grid,
+    Columns,
+}
+
+impl FolderMode {
+    fn from_grid(grid: bool) -> Self {
+        if grid {
+            Self::Grid
+        } else {
+            Self::List
+        }
+    }
+
+    fn label(self) -> &'static str {
+        crate::i18n::text(match self {
+            Self::List => "Список",
+            Self::Grid => "Сетка",
+            Self::Columns => "Колоночный режим",
+        })
+    }
+
+    fn icon(self) -> Icon {
+        match self {
+            Self::List => Icon::List,
+            Self::Grid => Icon::Grid,
+            Self::Columns => Icon::FolderColumns,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(default)]
 struct FolderViewOverrides {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode: Option<FolderMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     grid: Option<bool>,
     hidden: Option<bool>,
     density: Option<Density>,
@@ -471,7 +510,10 @@ struct FolderViewOverrides {
 impl FolderViewOverrides {
     fn resolve(&self, defaults: FolderView) -> FolderView {
         FolderView {
-            grid: self.grid.unwrap_or(defaults.grid),
+            mode: self
+                .mode
+                .or_else(|| self.grid.map(FolderMode::from_grid))
+                .unwrap_or(defaults.mode),
             hidden: self.hidden.unwrap_or(defaults.hidden),
             density: self.density.unwrap_or(defaults.density),
             order: self.order.unwrap_or(defaults.order),
@@ -494,7 +536,7 @@ struct SavedFolderView {
 
 #[derive(Clone, Copy)]
 enum FolderViewChange {
-    Grid(bool),
+    Mode(FolderMode),
     Hidden(bool),
     Density(Density),
     Sort(Sort),
@@ -527,6 +569,8 @@ struct TabSession {
     sort: Sort,
     descending: bool,
     scroll_offset: f32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    browse_columns: bool,
 }
 
 // Local paths or SFTP connection coordinates and a key-file reference. Secrets
@@ -835,6 +879,8 @@ struct Tab {
     file_scroll_scope: Option<egui::Id>,
     file_scroll_geometry: Option<(usize, f32)>,
     reveal_after_load: Option<Location>,
+    column_reveal: Option<Location>,
+    browse_columns: bool,
     history: Vec<Location>,
     history_index: usize,
     loading: Option<DirectoryLoad>,
@@ -870,6 +916,8 @@ impl Tab {
             file_scroll_scope: None,
             file_scroll_geometry: None,
             reveal_after_load: None,
+            column_reveal: None,
+            browse_columns: false,
             history: vec![path],
             history_index: 0,
             loading: None,
@@ -893,6 +941,7 @@ impl Tab {
         tab.pinned = saved.pinned;
         tab.sort = saved.sort;
         tab.descending = saved.descending;
+        tab.browse_columns = saved.browse_columns;
         if saved.scroll_offset.is_finite() && saved.scroll_offset >= 0.0 {
             tab.scroll_restore = Some(saved.scroll_offset);
         }
@@ -918,6 +967,7 @@ impl Tab {
             sort: self.sort,
             descending: self.descending,
             scroll_offset: self.scroll_restore.unwrap_or(self.scroll_offset),
+            browse_columns: self.browse_columns,
         }
     }
     fn begin_address(&mut self) {
@@ -1037,12 +1087,14 @@ impl Tab {
                     }
                 }
                 self.error = None;
+                if let Some(path) = self.column_reveal.take() {
+                    if self.entries.iter().any(|entry| entry.path == path) {
+                        self.select_revealed(path);
+                    }
+                }
                 if let Some(path) = self.reveal_after_load.take() {
                     if self.entries.iter().any(|entry| entry.path == path) {
-                        self.selected = BTreeSet::from([path.clone()]);
-                        self.anchor = Some(path.clone());
-                        self.cursor = Some(path.clone());
-                        self.scroll_to = Some(path);
+                        self.select_revealed(path);
                     } else {
                         self.error = Some(
                             crate::i18n::text("Результат locate уже отсутствует в папке. Возможно, индекс устарел.")
@@ -1053,6 +1105,7 @@ impl Tab {
             }
             Err(error) => {
                 self.reveal_after_load = None;
+                self.column_reveal = None;
                 if !self.has_complete_listing && !self.entries.is_empty() {
                     self.error = Some(crate::tr_format!(
                         "Показана часть содержимого папки. {error}",
@@ -1081,6 +1134,19 @@ impl Tab {
         };
         self.next_auto_refresh = Instant::now() + interval;
     }
+    fn select_revealed(&mut self, path: Location) {
+        self.selected = BTreeSet::from([path.clone()]);
+        self.anchor = Some(path.clone());
+        self.cursor = Some(path.clone());
+        self.scroll_to = Some(path);
+    }
+
+    fn navigate_column(&mut self, path: Location, reveal: Option<Location>, ctx: &egui::Context) {
+        self.navigate(path, ctx);
+        self.browse_columns = true;
+        self.column_reveal = reveal;
+    }
+
     fn navigate(&mut self, path: Location, ctx: &egui::Context) {
         if path == self.path {
             self.reload(ctx);
@@ -1105,6 +1171,9 @@ impl Tab {
         self.file_scroll_scope = None;
         self.file_scroll_geometry = None;
         self.reveal_after_load = None;
+        self.column_reveal = None;
+        self.browse_columns = false;
+        self.rendered_rows.clear();
         self.filter.clear();
         self.edit_address = false;
         self.address_completion.reset();
@@ -1143,7 +1212,11 @@ impl Tab {
     }
     fn folder_view(&self, settings: &Settings, pane: usize, views: &FolderViews) -> FolderView {
         let defaults = FolderView {
-            grid: settings.grid_for(pane),
+            mode: if self.browse_columns {
+                FolderMode::Columns
+            } else {
+                FolderMode::from_grid(settings.grid_for(pane))
+            },
             hidden: settings.hidden,
             density: Density::default(),
             order: self.legacy_order(),
@@ -1159,6 +1232,15 @@ impl Tab {
             tab: self.id,
             location: self.path.clone(),
             change,
+        }
+    }
+
+    fn column_action(&self, pane: usize, navigation: ColumnNavigation) -> Action {
+        Action::ColumnNavigation {
+            pane,
+            tab: self.id,
+            location: self.path.clone(),
+            navigation,
         }
     }
 
@@ -1186,6 +1268,7 @@ impl Tab {
             &mut self.anchor,
             &mut self.scroll_to,
             &mut self.reveal_after_load,
+            &mut self.column_reveal,
         ] {
             if target.as_ref().is_some_and(|path| is_dot_file(path.path())) {
                 *target = None;
@@ -1193,6 +1276,7 @@ impl Tab {
         }
     }
     fn choose(&mut self, index: usize, visible: &[usize], modifiers: egui::Modifiers) {
+        self.column_reveal = None;
         let path = self.entries[index].path.clone();
         self.cursor = Some(path.clone());
         if modifiers.shift {
@@ -1260,6 +1344,7 @@ impl Tab {
     }
 
     fn move_selection(&mut self, delta: isize, view: FolderView, shift: bool) {
+        self.column_reveal = None;
         let visible = self.visible(view);
         if visible.is_empty() {
             return;
@@ -1291,6 +1376,7 @@ struct Pane {
     current: usize,
     closed_tabs: VecDeque<(usize, Location)>,
     tab_context_menu: Option<egui::Id>,
+    columns: column_view::Columns,
 }
 impl Pane {
     const MAX_CLOSED_TABS: usize = 16;
@@ -1301,6 +1387,7 @@ impl Pane {
             current: 0,
             closed_tabs: VecDeque::new(),
             tab_context_menu: None,
+            columns: column_view::Columns::default(),
         }
     }
 
@@ -1428,6 +1515,15 @@ fn move_tab(panes: &mut [Pane], drop: TabDrop, ctx: &egui::Context) -> bool {
 }
 
 #[derive(Clone)]
+enum ColumnNavigation {
+    Left,
+    Right,
+    Open(Location),
+    Browse(Location),
+    Reveal(Location),
+}
+
+#[derive(Clone)]
 enum Action {
     Shortcut(Command),
     MoveSelection {
@@ -1435,12 +1531,21 @@ enum Action {
         extend: bool,
     },
     ClearSelection,
+    ColumnStep {
+        right: bool,
+    },
     Focus(usize),
     FolderView {
         pane: usize,
         tab: u64,
         location: Location,
         change: FolderViewChange,
+    },
+    ColumnNavigation {
+        pane: usize,
+        tab: u64,
+        location: Location,
+        navigation: ColumnNavigation,
     },
     Navigate(usize, Location),
     BookmarkSlot(u8),
@@ -1813,7 +1918,10 @@ impl PawCommander {
         let location = self.panes[index].tab().path.clone();
         let view = self.folder_views.entry(location.clone()).or_default();
         match change {
-            FolderViewChange::Grid(grid) => view.grid = Some(grid),
+            FolderViewChange::Mode(mode) => {
+                view.mode = Some(mode);
+                view.grid = None;
+            }
             FolderViewChange::Hidden(hidden) => {
                 view.hidden = Some(hidden);
                 if !hidden {
@@ -1841,6 +1949,7 @@ impl PawCommander {
         self.preview.refresh();
         self.directory_tree.refresh();
         for pane in &mut self.panes {
+            pane.columns.refresh();
             for tab in &mut pane.tabs {
                 tab.reload(ctx);
             }
@@ -2129,6 +2238,16 @@ impl PawCommander {
                     }
                 }
             }
+            let tab = &pane.tabs[pane.current];
+            let columns = displayed
+                && tab
+                    .folder_view(&self.settings, pane_index, &self.folder_views)
+                    .mode
+                    == FolderMode::Columns;
+            let can_read = can_reorder
+                && (!tab.path.remote() || (tab.has_complete_listing && self.connection.is_none()));
+            pane.columns
+                .update(ctx, columns.then_some(tab), can_read, now);
         }
         if let Some(job) = &self.job {
             let result = match job.result.try_recv() {
@@ -2300,7 +2419,18 @@ impl PawCommander {
                 tab.selected.clear();
                 tab.cursor = None;
                 tab.anchor = None;
+                tab.column_reveal = None;
                 tab.filter.clear();
+            }
+            Action::ColumnStep { right } => {
+                if self.folder_view(self.active).mode == FolderMode::Columns {
+                    let navigation = if right {
+                        ColumnNavigation::Right
+                    } else {
+                        ColumnNavigation::Left
+                    };
+                    self.navigate_columns(self.active, navigation, ctx);
+                }
             }
             Action::FolderView {
                 pane,
@@ -2313,6 +2443,21 @@ impl PawCommander {
                     self.change_folder_view(pane, change);
                     self.active = pane;
                     ctx.request_repaint();
+                }
+            }
+            Action::ColumnNavigation {
+                pane,
+                tab,
+                location,
+                navigation,
+            } => {
+                let current = self.panes[pane].tab();
+                if current.id == tab
+                    && current.path == location
+                    && self.folder_view(pane).mode == FolderMode::Columns
+                    && (self.settings.split || pane == 0)
+                {
+                    self.navigate_columns(pane, navigation, ctx);
                 }
             }
             Action::ConnectSftp => {
@@ -2381,7 +2526,11 @@ impl PawCommander {
                     .iter()
                     .any(|e| e.path == p && e.is_dir)
                 {
-                    self.panes[i].tab_mut().navigate(p, ctx);
+                    if self.folder_view(i).mode == FolderMode::Columns {
+                        self.navigate_columns(i, ColumnNavigation::Browse(p), ctx);
+                    } else {
+                        self.panes[i].tab_mut().navigate(p, ctx);
+                    }
                 } else if p.remote() {
                     self.open_in_zed(p, true, ctx);
                 } else if let Err(e) = open::that_detached(p.path()) {
@@ -2396,12 +2545,14 @@ impl PawCommander {
             }
             Action::History(index, delta) => {
                 self.active = index;
-                self.panes[index].tab_mut().history_go(delta, ctx);
+                self.navigate_history(index, delta, ctx);
             }
-            Action::Back => self.tab_mut().history_go(-1, ctx),
-            Action::Forward => self.tab_mut().history_go(1, ctx),
+            Action::Back => self.navigate_history(self.active, -1, ctx),
+            Action::Forward => self.navigate_history(self.active, 1, ctx),
             Action::Up => {
-                if let Some(parent) = self.tab().path.parent() {
+                if self.folder_view(self.active).mode == FolderMode::Columns {
+                    self.navigate_columns(self.active, ColumnNavigation::Left, ctx);
+                } else if let Some(parent) = self.tab().path.parent() {
                     self.tab_mut().navigate(parent, ctx);
                 }
             }
@@ -2548,6 +2699,67 @@ impl PawCommander {
             _ => {}
         }
     }
+    fn navigate_columns(&mut self, pane: usize, navigation: ColumnNavigation, ctx: &egui::Context) {
+        let tab = self.panes[pane].tab();
+        let (directory, selection) = match navigation {
+            ColumnNavigation::Left => {
+                let Some(parent) = tab.path.parent() else {
+                    return;
+                };
+                (parent, Some(tab.path.clone()))
+            }
+            ColumnNavigation::Right => {
+                let visible = tab.visible(self.folder_view(pane));
+                let Some(entry) = visible
+                    .iter()
+                    .map(|&index| &tab.entries[index])
+                    .find(|entry| entry.is_dir && tab.cursor.as_ref() == Some(&entry.path))
+                else {
+                    return;
+                };
+                (entry.path.clone(), None)
+            }
+            ColumnNavigation::Open(path) => {
+                if tab.entries.iter().any(|entry| entry.path == path) {
+                    self.action(Action::Open(pane, path), ctx);
+                }
+                return;
+            }
+            ColumnNavigation::Browse(directory) => (directory, None),
+            ColumnNavigation::Reveal(path) => {
+                let Some(parent) = path.parent() else {
+                    return;
+                };
+                (parent, Some(path))
+            }
+        };
+        Self::restore_focus(ctx, None);
+        self.active = pane;
+        if directory == tab.path {
+            return;
+        }
+        let show_hidden = self
+            .folder_views
+            .get(&directory)
+            .and_then(|view| view.hidden)
+            .unwrap_or(self.settings.hidden);
+        let selection = selection.filter(|path| show_hidden || !is_dot_file(path.path()));
+        self.panes[pane]
+            .tab_mut()
+            .navigate_column(directory, selection, ctx);
+    }
+
+    fn navigate_history(&mut self, pane: usize, delta: isize, ctx: &egui::Context) {
+        let in_columns = self.folder_view(pane).mode == FolderMode::Columns;
+        let tab = self.panes[pane].tab_mut();
+        let previous = tab.path.clone();
+        let browsing_columns = in_columns || tab.browse_columns;
+        tab.history_go(delta, ctx);
+        if browsing_columns && previous != tab.path && previous.same_backend(&tab.path) {
+            tab.browse_columns = true;
+        }
+    }
+
     fn open_workspace(&mut self, index: usize, ctx: &egui::Context) {
         let Some(workspace) = self.workspaces.get(index) else {
             return;
@@ -2660,6 +2872,7 @@ impl PawCommander {
             Command::SelectAll => {
                 let view = self.folder_view(self.active);
                 let tab = self.tab_mut();
+                tab.column_reveal = None;
                 tab.selected = tab
                     .visible(view)
                     .iter()
@@ -2794,6 +3007,7 @@ impl PawCommander {
                 || (self.keyboard_had_focus
                     && ctx.input(|input| input.key_pressed(egui::Key::Escape))));
         let mut actions = Vec::new();
+        let mut pane = self.active;
         ctx.input_mut(|input| {
             if !focused {
                 for (index, event) in pane_key_presses {
@@ -2820,6 +3034,18 @@ impl PawCommander {
                         Some(Action::MoveSelection {
                             delta: if key == egui::Key::ArrowUp { -1 } else { 1 },
                             extend: modifiers.shift,
+                        })
+                    } else if !focused
+                        && self.folder_view(pane).mode == FolderMode::Columns
+                        && modifiers == egui::Modifiers::NONE
+                        && matches!(key, egui::Key::ArrowLeft | egui::Key::ArrowRight)
+                        && self.bound_pane_command(chord).is_none()
+                    {
+                        if repeat {
+                            return false;
+                        }
+                        Some(Action::ColumnStep {
+                            right: key == egui::Key::ArrowRight,
                         })
                     } else if !focused
                         && !repeat
@@ -2869,6 +3095,10 @@ impl PawCommander {
                     None
                 };
                 if let Some(action) = action {
+                    if self.settings.split && matches!(action, Action::Shortcut(Command::OtherPane))
+                    {
+                        pane = 1 - pane;
+                    }
                     actions.push(action);
                     false
                 } else {
@@ -4243,6 +4473,9 @@ impl eframe::App for PawCommander {
         });
         let pane_keys = (!ctx.wants_keyboard_input() || self.file_row_focus(ctx).is_some())
             && !self.keyboard_blocked(ctx);
+        let mut pane = self
+            .file_row_focus(ctx)
+            .map_or(self.active, |(pane, _)| pane);
         let mut index = 0;
         input.events.retain_mut(|event| {
             let event_index = index;
@@ -4266,26 +4499,67 @@ impl eframe::App for PawCommander {
                         // egui uses raw Tab presses for focus traversal before update.
                         // Dispatch this press in order without letting it move widget focus.
                         *repeat |= was_held;
+                        if !*repeat
+                            && self.settings.split
+                            && self.bound_pane_command(shortcuts::chord(egui::Key::Tab, *modifiers))
+                                == Some(Command::OtherPane)
+                        {
+                            pane = 1 - pane;
+                        }
                         self.pane_key_presses.push((event_index, event.clone()));
                         return false;
                     }
                 }
                 egui::Event::Key {
-                    key: key @ (egui::Key::ArrowUp | egui::Key::ArrowDown),
+                    key:
+                        key @ (egui::Key::ArrowUp
+                        | egui::Key::ArrowDown
+                        | egui::Key::ArrowLeft
+                        | egui::Key::ArrowRight),
                     modifiers,
                     pressed: true,
+                    repeat,
                     ..
                 } if pane_keys => {
                     let chord = shortcuts::chord(*key, *modifiers);
-                    if matches!(
-                        chord.modifiers,
-                        egui::Modifiers::NONE | egui::Modifiers::SHIFT
-                    ) || self.bound_pane_command(chord).is_some()
-                    {
+                    let file_navigation = match key {
+                        egui::Key::ArrowUp | egui::Key::ArrowDown => matches!(
+                            chord.modifiers,
+                            egui::Modifiers::NONE | egui::Modifiers::SHIFT
+                        ),
+                        _ => {
+                            self.folder_view(pane).mode == FolderMode::Columns
+                                && chord.modifiers == egui::Modifiers::NONE
+                        }
+                    };
+                    let command = self.bound_pane_command(chord);
+                    if file_navigation || command.is_some() {
+                        let vertical_navigation = file_navigation
+                            && matches!(key, egui::Key::ArrowUp | egui::Key::ArrowDown);
+                        if !vertical_navigation
+                            && !*repeat
+                            && self.settings.split
+                            && command == Some(Command::OtherPane)
+                        {
+                            pane = 1 - pane;
+                        }
                         // Arrow navigation moves file selection rather than geometric widget focus.
                         self.pane_key_presses.push((event_index, event.clone()));
                         return false;
                     }
+                }
+                egui::Event::Key {
+                    key,
+                    modifiers,
+                    pressed: true,
+                    repeat: false,
+                    ..
+                } if pane_keys
+                    && self.settings.split
+                    && self.bound_pane_command(shortcuts::chord(*key, *modifiers))
+                        == Some(Command::OtherPane) =>
+                {
+                    pane = 1 - pane;
                 }
                 egui::Event::WindowFocused(false) => self.tab_held = false,
                 _ => {}
@@ -4561,6 +4835,7 @@ impl eframe::App for PawCommander {
     }
 }
 
+#[derive(Clone, Copy)]
 struct PaneOptions<'a> {
     index: usize,
     active: bool,
@@ -5590,56 +5865,45 @@ fn render_pane(
                 .inner_margin(egui::Margin::symmetric(PANE_PADDING, 0))
                 .begin(pane_ui);
             let ui = &mut content.content_ui;
-            let tab = pane.tab_mut();
+            let tab = &mut pane.tabs[pane.current];
             let view = tab.folder_view(settings, pane_index, folder_views);
             let FolderView {
-                grid,
+                mode,
                 order,
                 density,
                 ..
             } = view;
+            let grid = mode == FolderMode::Grid;
+            let columns_mode = mode == FolderMode::Columns;
             let compact_rows = compact || density == Density::Compact;
             tab.rendered_rows.clear();
             address_bar(ui, tab, pane_index, actions, drop_targets);
             let response = ui
                 .horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    let mut controls = 2.0 * (icons::COMPACT_SIZE + ui.spacing().item_spacing.x);
-                    if compact {
-                        let font = egui::TextStyle::Button.resolve(ui.style());
-                        let label_width = ui
-                            .painter()
-                            .layout_no_wrap(sort_label.into(), font, Color32::WHITE)
-                            .size()
-                            .x;
-                        controls += label_width
-                            + 2.0 * ui.spacing().button_padding.x
-                            + ui.spacing().item_spacing.x;
-                    }
-                    let filter_width = (ui.available_width() - controls).max(24.0);
+                    let show_sort = compact || columns_mode;
+                    let controls = (3.0 + if show_sort { 1.0 } else { 0.0 })
+                        * (icons::COMPACT_SIZE + ui.spacing().item_spacing.x);
+                    let filter_width = (ui.available_width() - controls).max(12.0);
                     let response = ui.add_sized(
                         [filter_width, icons::COMPACT_SIZE],
                         egui::TextEdit::singleline(&mut tab.filter)
                             .vertical_align(egui::Align::Center)
-                            .margin(egui::Margin::symmetric(8, 0))
+                            .margin(egui::Margin::symmetric(5, 0))
                             .hint_text(crate::i18n::text("Фильтр по имени…")),
                     );
-                    if icons::compact_button(ui, Icon::Grid, crate::i18n::text("Сетка"), grid)
-                        .clicked()
-                    {
-                        actions
-                            .push(tab.folder_view_action(pane_index, FolderViewChange::Grid(true)));
+                    for choice in [FolderMode::Grid, FolderMode::List, FolderMode::Columns] {
+                        if icons::compact_button(ui, choice.icon(), choice.label(), mode == choice)
+                            .clicked()
+                        {
+                            actions.push(
+                                tab.folder_view_action(pane_index, FolderViewChange::Mode(choice)),
+                            );
+                        }
                     }
-                    if icons::compact_button(ui, Icon::List, crate::i18n::text("Список"), !grid)
-                        .clicked()
-                    {
-                        actions.push(
-                            tab.folder_view_action(pane_index, FolderViewChange::Grid(false)),
-                        );
-                    }
-                    if compact {
+                    if show_sort {
                         let menu =
-                            ui.menu_button(sort_label, |ui| {
+                            ui.menu_button("↕", |ui| {
                                 sort_controls(ui, order, |sort| {
                                     actions.push(tab.folder_view_action(
                                         pane_index,
@@ -5647,7 +5911,11 @@ fn render_pane(
                                     ));
                                 });
                             });
+                        ui.ctx().accesskit_node_builder(menu.response.id, |node| {
+                            node.set_label(sort_label);
+                        });
                         paint_focus(ui, &menu.response, 4);
+                        menu.response.on_hover_text(sort_label);
                     }
                     response
                 })
@@ -5661,6 +5929,9 @@ fn render_pane(
             }
             if response.has_focus() {
                 actions.push(Action::Focus(pane_index));
+            }
+            if response.changed() {
+                tab.column_reveal = None;
             }
             if response.changed() && !tab.selected.is_empty() {
                 let visible_paths: BTreeSet<_> = tab
@@ -5826,6 +6097,7 @@ fn render_pane(
                                                         pane: pane_index,
                                                         split: settings.split,
                                                         grid: true,
+                                                        folder_columns: false,
                                                         compact: compact_rows,
                                                         idle,
                                                         zed_available,
@@ -5847,6 +6119,7 @@ fn render_pane(
                                             pane: pane_index,
                                             split: settings.split,
                                             grid: false,
+                                            folder_columns: false,
                                             compact: compact_rows,
                                             idle,
                                             zed_available,
@@ -5869,7 +6142,17 @@ fn render_pane(
                 }
                 visible.len()
             };
-            let visible_count = if scrolling_columns {
+            let visible_count = if columns_mode {
+                column_view::show(
+                    ui,
+                    tab,
+                    &mut pane.columns,
+                    options,
+                    (ui.available_height() - status_height).max(0.0),
+                    actions,
+                    drop_targets,
+                )
+            } else if scrolling_columns {
                 let height = (ui.available_height() - status_height).max(0.0);
                 egui::ScrollArea::horizontal()
                     .id_salt(("file_columns", tab_id))
@@ -5940,6 +6223,7 @@ struct EntryOptions<'a> {
     pane: usize,
     split: bool,
     grid: bool,
+    folder_columns: bool,
     compact: bool,
     idle: bool,
     zed_available: bool,
@@ -5961,6 +6245,7 @@ fn entry_widget(
         pane,
         split,
         grid,
+        folder_columns,
         compact,
         idle,
         zed_available,
@@ -6088,6 +6373,30 @@ fn entry_widget(
             galley,
             name_color,
         );
+    } else if folder_columns {
+        let end_padding = if is_dir { 19.0 } else { 4.0 };
+        let clip = egui::Rect::from_min_max(
+            rect.left_top() + Vec2::new(57.0, 0.0),
+            rect.right_bottom() - Vec2::new(end_padding, 0.0),
+        );
+        if clip.is_positive() {
+            ui.painter().with_clip_rect(clip).text(
+                clip.left_center(),
+                egui::Align2::LEFT_CENTER,
+                &entry.name,
+                FontId::proportional(13.0),
+                name_color,
+            );
+        }
+        if is_dir && rect.width() >= 78.0 {
+            ui.painter().text(
+                rect.right_center() - Vec2::new(5.0, 0.0),
+                egui::Align2::RIGHT_CENTER,
+                "›",
+                FontId::proportional(15.0),
+                colors.muted,
+            );
+        }
     } else {
         let fallback;
         let columns = if let Some(columns) = columns {
@@ -6162,16 +6471,24 @@ fn entry_widget(
         }
         actions.push(Action::Focus(pane));
     }
-    if response.double_clicked() && !on_checkbox {
-        actions.push(Action::Open(pane, path.clone()));
-    }
     if response.secondary_clicked() {
+        tab.column_reveal = None;
         if !selected {
             tab.selected.clear();
             tab.selected.insert(path.clone());
             tab.anchor = Some(path.clone());
         }
         actions.push(Action::Focus(pane));
+    }
+    let open = || {
+        if folder_columns {
+            tab.column_action(pane, ColumnNavigation::Open(path.clone()))
+        } else {
+            Action::Open(pane, path.clone())
+        }
+    };
+    if response.double_clicked() && !on_checkbox {
+        actions.push(open());
     }
     response.widget_info(|| {
         let entry = &tab.entries[index];
@@ -6193,7 +6510,7 @@ fn entry_widget(
         .on_hover_text(path.display().to_string())
         .context_menu(|ui| {
             if ui.button(crate::i18n::text("Открыть")).clicked() {
-                actions.push(Action::Open(pane, path.clone()));
+                actions.push(open());
                 ui.close_menu();
             }
             if !is_dir && ui.add_enabled(zed_available, egui::Button::new(crate::i18n::text("Открыть в Zed")))
@@ -8583,6 +8900,213 @@ mod tests {
     }
 
     #[test]
+    fn folder_columns_keyboard_dispatches_in_pane_order_and_preserves_folder_overrides() {
+        let root = tempfile::tempdir().unwrap();
+        let left = root.path().join("left");
+        let right = root.path().join("right");
+        let child = right.join("child");
+        let leaf = child.join("leaf");
+        std::fs::create_dir(&left).unwrap();
+        std::fs::create_dir_all(&leaf).unwrap();
+        let ctx = egui::Context::default();
+        let mut cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(left.clone()));
+        app.action(Action::Navigate(1, right.clone().into()), &ctx);
+        wait_for_directory(app.panes[1].tab_mut());
+        app.action(
+            app.folder_view_action(1, FolderViewChange::Mode(FolderMode::Columns)),
+            &ctx,
+        );
+        app.active = 0;
+
+        let key = |key| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let run = |app: &mut PawCommander, events| {
+            let mut input = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            eframe::App::raw_input_hook(app, &ctx, &mut input);
+            let _ = ctx.run(input, |ctx| app.keyboard(ctx));
+        };
+        let stale = app.panes[1].tab().column_action(1, ColumnNavigation::Left);
+        run(
+            &mut app,
+            vec![
+                key(egui::Key::Tab),
+                key(egui::Key::ArrowDown),
+                key(egui::Key::ArrowRight),
+            ],
+        );
+        assert_eq!(app.active, 1);
+        assert_eq!(app.panes[0].tab().path.path(), left);
+        assert_eq!(app.tab().path.path(), child);
+        assert_eq!(app.folder_view(1).mode, FolderMode::Columns);
+        app.action(stale, &ctx);
+        assert_eq!(
+            app.tab().path.path(),
+            child,
+            "stale rendered actions cannot navigate"
+        );
+        wait_for_directory(app.tab_mut());
+        let mut storage = MemoryStorage::default();
+        eframe::App::save(&mut app, &mut storage);
+        cc.storage = Some(&storage);
+        let reopened = PawCommander::new(&cc, None);
+        assert_eq!(reopened.panes[1].tab().path.path(), child);
+        assert_eq!(reopened.folder_view(1).mode, FolderMode::Columns);
+
+        run(&mut app, vec![key(egui::Key::ArrowLeft)]);
+        wait_for_directory(app.tab_mut());
+        assert_eq!(app.tab().path.path(), right);
+        assert_eq!(app.selected(), vec![Location::Local(child.clone())]);
+        let legacy: FolderViewOverrides = serde_json::from_value(serde_json::json!({
+            "grid": true,
+        }))
+        .unwrap();
+        app.folder_views.insert(leaf.clone().into(), legacy);
+        run(&mut app, vec![key(egui::Key::ArrowRight)]);
+        assert_eq!(app.tab().path.path(), child);
+        assert_eq!(app.folder_view(1).mode, FolderMode::Columns);
+        wait_for_directory(app.tab_mut());
+        run(
+            &mut app,
+            vec![key(egui::Key::ArrowDown), key(egui::Key::ArrowRight)],
+        );
+        assert_eq!(app.tab().path.path(), leaf);
+        assert_eq!(app.folder_view(1).mode, FolderMode::Grid);
+        app.action(Action::Back, &ctx);
+        assert_eq!(app.tab().path.path(), child);
+        assert_eq!(app.folder_view(1).mode, FolderMode::Columns);
+        app.action(Action::Forward, &ctx);
+        assert_eq!(app.tab().path.path(), leaf);
+        assert_eq!(app.folder_view(1).mode, FolderMode::Grid);
+    }
+
+    #[test]
+    fn folder_columns_pending_reveal_yields_to_progressive_user_selection() {
+        let root = tempfile::tempdir().unwrap();
+        let leave = root.path().join("left");
+        let other = root.path().join("other");
+        std::fs::create_dir(&leave).unwrap();
+        std::fs::write(&other, b"file").unwrap();
+        let ctx = egui::Context::default();
+        let mut tab = Tab::new(leave.clone().into(), &ctx);
+        tab.navigate_column(
+            root.path().to_path_buf().into(),
+            Some(leave.clone().into()),
+            &ctx,
+        );
+        let (sender, load) = DirectoryLoad::channel(DirectoryLoadMode::Progressive);
+        tab.loading = Some(load);
+        let mut entries = fs_ops::read_directory(&tab.path, &|| false).unwrap();
+        let file = entries.swap_remove(
+            entries
+                .iter()
+                .position(|entry| entry.path.path() == other)
+                .unwrap(),
+        );
+        sender.send(DirectoryRead::Batch(vec![file])).unwrap();
+        assert!(tab.poll());
+        tab.choose(0, &[0], egui::Modifiers::NONE);
+        sender.send(DirectoryRead::Batch(entries)).unwrap();
+        assert!(tab.poll());
+        sender.send(DirectoryRead::Finished(Ok(None))).unwrap();
+        wait_for_directory(&mut tab);
+        assert_eq!(tab.selected, BTreeSet::from([other.into()]));
+    }
+
+    #[test]
+    fn folder_columns_current_rows_remain_visible_and_virtual_in_narrow_and_stacked_panes() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("first").join("second");
+        std::fs::create_dir_all(&folder).unwrap();
+        for index in 0..100 {
+            std::fs::write(folder.join(format!("item{index:03}.txt")), b"test").unwrap();
+        }
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(folder.clone()));
+        let mut frame = eframe::Frame::_new_kittest();
+        app.settings.preview = false;
+        app.settings.pane_layout.sidebar_visible = false;
+        app.action(
+            app.folder_view_action(0, FolderViewChange::Mode(FolderMode::Columns)),
+            &ctx,
+        );
+        wait_for_directory(app.tab_mut());
+        let row: Location = folder.join("item040.txt").into();
+        let row_id = app.tab().entry_id(&row);
+        let mut time = 0.0;
+        let mut draw = |app: &mut PawCommander, events| {
+            time += 0.08;
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(390.0, 430.0),
+                )),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            eframe::App::raw_input_hook(app, &ctx, &mut input);
+            let _ = ctx.run(input, |ctx| eframe::App::update(app, ctx, &mut frame));
+            ctx.read_response(row_id)
+        };
+        for orientation in [PaneOrientation::SideBySide, PaneOrientation::Stacked] {
+            app.settings.pane_layout.orientation = orientation;
+            app.tab_mut().scroll_to = Some(row.clone());
+            let response = draw(&mut app, vec![]).expect("revealed row");
+            assert!(response.interact_rect.width() >= 100.0, "{response:?}");
+            assert!(response.rect.width() <= 240.0, "{response:?}");
+            assert!(response.interact_rect.height() > 0.0, "{response:?}");
+            assert!(app.tab().rendered_rows.len() < 20);
+
+            if orientation == PaneOrientation::SideBySide {
+                app.tab_mut().cursor = Some(row.clone());
+                app.tab().focus_cursor(&ctx);
+                draw(
+                    &mut app,
+                    vec![
+                        egui::Event::PointerMoved(response.interact_rect.center()),
+                        egui::Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            delta: egui::vec2(1600.0, 0.0),
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+                draw(&mut app, vec![]);
+                assert!(
+                    app.tab().rendered_rows.is_empty(),
+                    "offscreen rows must leave focus order"
+                );
+                draw(
+                    &mut app,
+                    vec![egui::Event::Key {
+                        key: egui::Key::ArrowDown,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    }],
+                );
+                let next: Location = folder.join("item041.txt").into();
+                assert_eq!(app.selected(), vec![next.clone()]);
+                let response = ctx
+                    .read_response(app.tab().entry_id(&next))
+                    .expect("keyboard reveal");
+                assert!(response.interact_rect.is_positive(), "{response:?}");
+            }
+        }
+    }
+
+    #[test]
     fn folder_view_follows_location_across_panes_refresh_and_restart() {
         let root = tempfile::tempdir().unwrap();
         let first = root.path().join("first");
@@ -8602,7 +9126,7 @@ mod tests {
         let mut app = PawCommander::new(&cc, Some(first.clone()));
 
         app.action(
-            app.folder_view_action(0, FolderViewChange::Grid(true)),
+            app.folder_view_action(0, FolderViewChange::Mode(FolderMode::Grid)),
             &ctx,
         );
         app.action(
@@ -8620,7 +9144,7 @@ mod tests {
         );
         app.run_shortcut(Command::Hidden, &ctx);
         let expected = FolderView {
-            grid: true,
+            mode: FolderMode::Grid,
             hidden: true,
             density: Density::Compact,
             order: FileOrder {
@@ -8704,7 +9228,7 @@ mod tests {
         let mut app = PawCommander::new(&cc, Some(root.path().into()));
         app.action(Action::Navigate(0, local.clone()), &ctx);
         app.action(
-            app.folder_view_action(0, FolderViewChange::Grid(true)),
+            app.folder_view_action(0, FolderViewChange::Mode(FolderMode::Grid)),
             &ctx,
         );
         app.action(Action::Navigate(0, remote.clone()), &ctx);
@@ -8725,7 +9249,7 @@ mod tests {
             (
                 local,
                 FolderView {
-                    grid: true,
+                    mode: FolderMode::Grid,
                     ..Default::default()
                 },
             ),
@@ -8832,7 +9356,7 @@ mod tests {
         app.panes[0].tab_mut().sort = Sort::Size;
         app.panes[0].tab_mut().descending = true;
         app.action(
-            app.folder_view_action(0, FolderViewChange::Grid(true)),
+            app.folder_view_action(0, FolderViewChange::Mode(FolderMode::Grid)),
             &ctx,
         );
         app.action(Action::NewTab(1), &ctx);
@@ -8854,8 +9378,8 @@ mod tests {
         assert!(reopened.panes[0].tab().descending);
         assert!(reopened.tab().sort == Sort::Modified);
         assert!(!reopened.tab().descending);
-        assert!(reopened.folder_view(0).grid);
-        assert!(!reopened.folder_view(1).grid);
+        assert_eq!(reopened.folder_view(0).mode, FolderMode::Grid);
+        assert_eq!(reopened.folder_view(1).mode, FolderMode::List);
         wait_for_directory(reopened.panes[0].tab_mut());
         wait_for_directory(reopened.tab_mut());
         assert_eq!(reopened.panes[0].tab().entries[0].name, "present");
@@ -8890,10 +9414,11 @@ mod tests {
         assert_eq!(legacy_fallback.panes[0].pinned_count(), 1);
         assert_eq!(legacy_fallback.panes[0].tabs[1].path, left);
         assert_eq!(legacy_fallback.panes[1].tabs[1].path, missing);
-        assert!(
+        assert_eq!(
             legacy_fallback.panes[0].tabs[1]
                 .folder_view(&legacy_fallback.settings, 0, &legacy_fallback.folder_views)
-                .grid
+                .mode,
+            FolderMode::Grid,
         );
     }
 
@@ -9582,6 +10107,7 @@ mod tests {
                                     pane: 1,
                                     split: true,
                                     grid: false,
+                                    folder_columns: false,
                                     compact: false,
                                     idle: true,
                                     zed_available,
@@ -9702,6 +10228,7 @@ mod tests {
                                     pane: 1,
                                     split: true,
                                     grid,
+                                    folder_columns: false,
                                     compact: false,
                                     idle: true,
                                     zed_available: true,
