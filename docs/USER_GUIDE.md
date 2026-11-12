@@ -24,6 +24,12 @@ Opening a local or SFTP folder shows entries progressively while **Reading folde
 
 Visible folders refresh in the background after the previous read finishes: approximately every two seconds locally and every ten seconds for SFTP. Selection is retained by path; filters, sorting, and scroll offsets are preserved. Hidden panes and inactive tabs are not polled. SFTP polling uses an existing authenticated session and skips a busy refresh or unavailable session without clearing the listing or prompting for credentials. Automatic refresh pauses during file operations and dragging. Large or slow folders may take longer. Use `F5` to refresh manually. The selected local file's preview reloads when observed metadata changes; this is not a content watcher.
 
+## Browse ZIP and TAR archives
+
+Double-click a local `.zip` or uncompressed `.tar` file, or select it and press `Enter`. PawCommander opens the archive in the current pane and reads its directory structure and metadata. **Open** in the search results pane also opens the archive in the active pane. Browse nested folders from the file list. From the archive root, use **Parent folder** to return to the folder containing the archive. Use **Back** and **Forward** to revisit locations, and **Refresh** to reread an archive after it changes.
+
+Archive browsing is read-only. Entries stay inside the archive while you browse. PawCommander reports unreadable archives and invalid member paths in the pane. The browser indexes up to 50,000 items, including implied folders, and supports up to 64 path levels.
+
 ## Selection, clipboard, and drag and drop
 
 Click a row or tile to select it, use `Cmd/Ctrl` for individual additions and `Shift` for a range, or use the selection checkboxes. File commands apply to the active pane.

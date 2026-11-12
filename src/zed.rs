@@ -40,7 +40,7 @@ pub fn open(location: &Location, text_only: bool) -> Result<String, String> {
 
 fn argument(location: &Location) -> Result<std::ffi::OsString, String> {
     let Location::Sftp { endpoint, path } = location else {
-        let path = location.path();
+        let path = location.local().ok_or_else(crate::archive::readonly)?;
         return Ok(if path.is_absolute() {
             path.to_path_buf()
         } else {

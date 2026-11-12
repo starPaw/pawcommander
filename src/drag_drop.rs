@@ -114,6 +114,7 @@ impl DropTargets {
             None => {
                 Some(crate::i18n::text("Перетащите на папку или в область файлов панели").into())
             }
+            Some(t) if t.destination.is_archive() => Some(crate::archive::readonly().into()),
             Some(t) if !t.ready => {
                 Some(crate::i18n::text("Дождитесь окончания чтения папки").into())
             }
@@ -214,6 +215,9 @@ fn validate(
     destination: &Location,
     kind: TransferKind,
 ) -> Result<(), String> {
+    if destination.is_archive() || sources.iter().any(Location::is_archive) {
+        return Err(crate::archive::readonly().into());
+    }
     for source in sources {
         if kind == TransferKind::Move && !source.same_backend(destination) {
             return Err(crate::i18n::text(

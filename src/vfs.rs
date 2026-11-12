@@ -1,5 +1,6 @@
-//! Local/SFTP locations. Remote credentials live only in authenticated sessions;
+//! Local, SFTP and read-only archive locations. Remote credentials live only in authenticated sessions;
 //! saved tabs/bookmarks contain connection coordinates and key paths, never secrets.
+use crate::archive;
 use crate::conflict::{Answer, Conflict, Decision, EntryDetails};
 use crate::fs_ops::{self, TransferKind};
 use crate::operations::Progress;
@@ -16,7 +17,7 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Mutex, OnceLock, TryLockError};
+use std::sync::{Arc, Mutex, OnceLock, TryLockError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const MAX_TREE_DEPTH: usize = 128;
@@ -40,7 +41,14 @@ impl Endpoint {
 #[serde(untagged)]
 pub enum Location {
     Local(PathBuf),
-    Sftp { endpoint: Endpoint, path: PathBuf },
+    Sftp {
+        endpoint: Endpoint,
+        path: PathBuf,
+    },
+    Archive {
+        archive: Arc<PathBuf>,
+        path: PathBuf,
+    },
 }
 impl From<PathBuf> for Location {
     fn from(path: PathBuf) -> Self {
@@ -50,7 +58,7 @@ impl From<PathBuf> for Location {
 impl Location {
     pub fn path(&self) -> &Path {
         match self {
-            Self::Local(p) | Self::Sftp { path: p, .. } => p,
+            Self::Local(p) | Self::Sftp { path: p, .. } | Self::Archive { path: p, .. } => p,
         }
     }
     pub fn local(&self) -> Option<&Path> {
@@ -62,10 +70,28 @@ impl Location {
     pub fn remote(&self) -> bool {
         matches!(self, Self::Sftp { .. })
     }
+    pub(crate) fn archive_source(&self) -> Option<&Path> {
+        match self {
+            Self::Archive { archive, .. } => Some(archive),
+            _ => None,
+        }
+    }
+    pub(crate) fn is_archive(&self) -> bool {
+        self.archive_source().is_some()
+    }
+    pub(crate) fn browse_archive(&self) -> Option<Self> {
+        let path = self.local()?;
+        archive::Format::from_path(path)?;
+        Some(Self::Archive {
+            archive: Arc::new(path.to_owned()),
+            path: PathBuf::new(),
+        })
+    }
     pub(crate) fn has_utf8_paths(&self) -> bool {
         self.path().to_str().is_some()
             && match self {
                 Self::Local(_) => true,
+                Self::Archive { archive, .. } => archive.to_str().is_some(),
                 Self::Sftp { endpoint, .. } => endpoint
                     .key
                     .as_deref()
@@ -75,6 +101,10 @@ impl Location {
     pub fn with_path(&self, path: PathBuf) -> Self {
         match self {
             Self::Local(_) => Self::Local(path),
+            Self::Archive { archive, .. } => Self::Archive {
+                archive: Arc::clone(archive),
+                path,
+            },
             Self::Sftp { endpoint, .. } => Self::Sftp {
                 endpoint: endpoint.clone(),
                 path,
@@ -101,24 +131,34 @@ impl Location {
         self.with_path(path.into())
     }
     pub fn parent(&self) -> Option<Self> {
+        if let Self::Archive { archive, path } = self {
+            if path.as_os_str().is_empty() {
+                return archive
+                    .parent()
+                    .map(|parent| Self::Local(parent.to_owned()));
+            }
+        }
         self.path().parent().map(|p| self.with_path(p.into()))
     }
     pub fn ancestors(&self) -> impl Iterator<Item = Self> + '_ {
-        self.path().ancestors().map(|p| self.with_path(p.into()))
+        std::iter::successors(Some(self.clone()), Self::parent)
     }
     pub fn display(&self) -> String {
         self.to_string()
     }
     pub fn name(&self) -> String {
-        self.path()
+        let name = self
+            .path()
             .file_name()
-            .map(|p| p.to_string_lossy().into_owned())
+            .or_else(|| self.archive_source()?.file_name());
+        name.map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|| self.to_string())
     }
     pub(crate) fn same_backend(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Local(_), Self::Local(_)) => true,
             (Self::Sftp { endpoint: a, .. }, Self::Sftp { endpoint: b, .. }) => a == b,
+            (Self::Archive { archive: a, .. }, Self::Archive { archive: b, .. }) => a == b,
             _ => false,
         }
     }
@@ -130,6 +170,22 @@ impl fmt::Display for Location {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Local(p) => write!(f, "{}", p.display()),
+            Self::Archive { archive, path } => {
+                let archive = percent_encoding::percent_encode(
+                    archive.as_os_str().as_encoded_bytes(),
+                    ARCHIVE_ADDRESS_ESCAPE,
+                );
+                let member = if cfg!(windows) {
+                    path.to_string_lossy()
+                        .replace('\\', "/")
+                        .into_bytes()
+                        .into()
+                } else {
+                    std::borrow::Cow::Borrowed(path.as_os_str().as_encoded_bytes())
+                };
+                let member = percent_encoding::percent_encode(&member, ARCHIVE_ADDRESS_ESCAPE);
+                write!(f, "archive:{archive}!/{member}")
+            }
             Self::Sftp { endpoint, path } => {
                 let mut url = url::Url::parse("sftp://localhost/").map_err(|_| fmt::Error)?;
                 let host = endpoint.host.trim_matches(['[', ']']);
@@ -159,7 +215,34 @@ impl fmt::Display for Location {
     }
 }
 
+const ARCHIVE_ADDRESS_ESCAPE: &percent_encoding::AsciiSet =
+    &percent_encoding::CONTROLS.add(b'%').add(b'!');
+
 pub fn resolve(address: &str, current: &Location) -> Result<Location, String> {
+    if let Some(address) = address.strip_prefix("archive:") {
+        let invalid = || crate::i18n::text("Недопустимый адрес архива").to_owned();
+        let (file, member) = address.split_once("!/").ok_or_else(invalid)?;
+        let file = percent_decode_str(file).collect::<Vec<_>>();
+        if file.contains(&0) {
+            return Err(invalid());
+        }
+        #[cfg(unix)]
+        let file = {
+            use std::os::unix::ffi::OsStringExt;
+            PathBuf::from(OsString::from_vec(file))
+        };
+        #[cfg(not(unix))]
+        let file = PathBuf::from(String::from_utf8(file).map_err(|_| invalid())?);
+        if !file.is_absolute() || archive::Format::from_path(&file).is_none() {
+            return Err(invalid());
+        }
+        let path =
+            archive::member_path(&percent_decode_str(member).collect::<Vec<_>>()).map_err(err)?;
+        return Ok(Location::Archive {
+            archive: Arc::new(file),
+            path,
+        });
+    }
     if address.starts_with("sftp:") {
         let url = url::Url::parse(address).map_err(|e| {
             crate::tr_format!("Некорректный адрес SFTP: {e}", "Invalid SFTP address: {e}")
@@ -225,6 +308,9 @@ pub fn resolve(address: &str, current: &Location) -> Result<Location, String> {
             current.join(address).path().to_owned()
         };
         return Ok(current.with_path(normalize_remote(&path)?));
+    }
+    if let Some(parent) = current.archive_source().and_then(Path::parent) {
+        return resolve(address, &Location::Local(parent.to_owned()));
     }
     let path = if address == "~" {
         dirs::home_dir().unwrap_or_else(|| current.path().into())
@@ -423,6 +509,9 @@ pub fn connect_location(
 }
 fn remote(location: &Location) -> Result<Sftp, String> {
     let Location::Sftp { endpoint, .. } = location else {
+        if location.is_archive() {
+            return Err(archive::readonly().into());
+        }
         return Err("Ожидалось подключение SFTP".into());
     };
     let existing = sessions().lock().map_err(err)?.get(endpoint).cloned();
@@ -498,6 +587,12 @@ pub fn visit_directory(
     if let Some(path) = location.local() {
         return fs_ops::visit_directory(path, cancelled, |entry| visit(entry.into()));
     }
+    if let Some(path) = location.archive_source() {
+        for entry in archive::Index::load(path, cancelled)?.list(location, cancelled)? {
+            visit(entry);
+        }
+        return Ok(());
+    }
     visit_sftp_directory(location, &remote(location)?, cancelled, visit)
 }
 
@@ -511,6 +606,9 @@ pub fn read_directory(
     if let Some(path) = location.local() {
         return fs_ops::read_directory(path, cancelled)
             .map(|entries| entries.into_iter().map(FileEntry::from).collect());
+    }
+    if let Some(path) = location.archive_source() {
+        return archive::Index::load(path, cancelled)?.list(location, cancelled);
     }
     read_sftp_directory(location, &remote(location)?, cancelled)
 }
@@ -856,6 +954,9 @@ fn transfer_plan(
     kind: TransferKind,
     progress: &mut Progress,
 ) -> Result<Vec<TransferItem>, String> {
+    if destination.is_archive() || sources.iter().any(Location::is_archive) {
+        return Err(archive::readonly().into());
+    }
     if let Some(dest) = destination.local() {
         if sources.iter().all(|p| !p.remote()) {
             let paths = sources.iter().map(|p| p.path().into()).collect::<Vec<_>>();
@@ -1670,6 +1771,9 @@ pub fn trash_entries_with_progress(
     paths: &[Location],
     progress: &mut Progress,
 ) -> Result<usize, String> {
+    if paths.iter().any(Location::is_archive) {
+        return Err(archive::readonly().into());
+    }
     if paths.iter().any(Location::remote) {
         if paths.iter().any(|p| {
             !p.remote()

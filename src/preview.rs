@@ -117,7 +117,9 @@ impl Preview {
             self.result = None;
             self.texture = None;
             if let Some(path) = path {
-                if self
+                if path.is_archive() {
+                    self.result = Some(Err(crate::archive::readonly().into()));
+                } else if self
                     .requests
                     .send(Request {
                         generation: self.generation,

@@ -588,6 +588,10 @@ enum SavedLocation {
         key: Option<SavedPath>,
         path: SavedPath,
     },
+    Archive {
+        archive: SavedPath,
+        path: SavedPath,
+    },
 }
 
 // Preserve native names that PathBuf's serializer cannot handle.
@@ -602,6 +606,10 @@ impl From<&Location> for SavedLocation {
     fn from(location: &Location) -> Self {
         match location {
             Location::Local(path) => Self::Local(path.as_path().into()),
+            Location::Archive { archive, path } => Self::Archive {
+                archive: archive.as_path().into(),
+                path: path.as_path().into(),
+            },
             Location::Sftp { endpoint, path } => Self::Sftp {
                 host: endpoint.host.clone(),
                 port: endpoint.port,
@@ -617,6 +625,10 @@ impl SavedLocation {
     fn into_location(self) -> Option<Location> {
         Some(match self {
             Self::Local(path) => Location::Local(path.into_path()?),
+            Self::Archive { archive, path } => Location::Archive {
+                archive: Arc::new(archive.into_path()?),
+                path: path.into_path()?,
+            },
             Self::Sftp {
                 host,
                 port,
@@ -697,6 +709,7 @@ enum FolderVisit {
 enum DirectoryRead {
     Batch(Vec<FileEntry>),
     Finished(Result<Option<Vec<FileEntry>>, String>),
+    Archive(Result<(Arc<crate::archive::Index>, Vec<FileEntry>), String>),
 }
 
 struct DirectoryLoad {
@@ -890,6 +903,7 @@ struct Tab {
     loading: Option<DirectoryLoad>,
     has_complete_listing: bool,
     folder_visit: FolderVisit,
+    archive_index: Option<Arc<crate::archive::Index>>,
     next_auto_refresh: Instant,
     error: Option<String>,
     sort: Sort,
@@ -928,6 +942,7 @@ impl Tab {
             loading: None,
             has_complete_listing: false,
             folder_visit: FolderVisit::Unseen,
+            archive_index: None,
             next_auto_refresh: Instant::now() + AUTO_REFRESH_INTERVAL,
             error: None,
             sort: Sort::default(),
@@ -983,6 +998,7 @@ impl Tab {
         self.address_completion.reset();
     }
     fn reload(&mut self, ctx: &egui::Context) {
+        self.archive_index = None;
         self.start_load(ctx, false);
     }
     fn start_load(&mut self, ctx: &egui::Context, automatic: bool) {
@@ -996,6 +1012,7 @@ impl Tab {
         let (tx, load) = DirectoryLoad::channel(mode);
         let cancelled = load.cancelled.clone();
         let path = self.path.clone();
+        let archive_index = self.archive_index.clone();
         let ctx = ctx.clone();
         if !automatic {
             self.error = None;
@@ -1015,6 +1032,15 @@ impl Tab {
                     ctx.request_repaint();
                     true
                 };
+                if let Some(archive) = path.archive_source() {
+                    let result = match archive_index {
+                        Some(index) => Ok(index),
+                        None => crate::archive::Index::load(archive, &cancelled).map(Arc::new),
+                    }
+                    .and_then(|index| Ok((Arc::clone(&index), index.list(&path, &cancelled)?)));
+                    send(DirectoryRead::Archive(result));
+                    return;
+                }
                 let result = match mode {
                     DirectoryLoadMode::Progressive => {
                         send_progressive_listing(
@@ -1040,6 +1066,9 @@ impl Tab {
         }
     }
     fn auto_refresh(&mut self, ctx: &egui::Context, now: Instant) {
+        if self.path.is_archive() {
+            return;
+        }
         if self.loading.is_none() && now >= self.next_auto_refresh {
             self.start_load(ctx, true);
         }
@@ -1161,6 +1190,9 @@ impl Tab {
             self.reload(ctx);
             return;
         }
+        if path.archive_source() != self.path.archive_source() {
+            self.archive_index = None;
+        }
         self.path = path.clone();
         self.address = path.display().to_string();
         self.history.truncate(self.history_index + 1);
@@ -1187,12 +1219,15 @@ impl Tab {
         self.filter.clear();
         self.edit_address = false;
         self.address_completion.reset();
-        self.reload(ctx);
+        self.start_load(ctx, false);
     }
     fn history_go(&mut self, delta: isize, ctx: &egui::Context) {
         let index = self.history_index as isize + delta;
         if index >= 0 && (index as usize) < self.history.len() {
             self.history_index = index as usize;
+            if self.history[self.history_index].archive_source() != self.path.archive_source() {
+                self.archive_index = None;
+            }
             self.path = self.history[self.history_index].clone();
             self.address = self.path.display().to_string();
             self.reset_and_load(ctx);
@@ -1207,6 +1242,13 @@ impl Tab {
                     return true;
                 }
                 Ok(DirectoryRead::Finished(result)) => {
+                    self.finish_load(result);
+                }
+                Ok(DirectoryRead::Archive(result)) => {
+                    let result = result.map(|(index, entries)| {
+                        self.archive_index = Some(index);
+                        Some(entries)
+                    });
                     self.finish_load(result);
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
@@ -1318,6 +1360,11 @@ impl Tab {
 
     fn entry_id(&self, path: &Location) -> egui::Id {
         egui::Id::new(("file_entry", self.id, path))
+    }
+
+    fn file_list_id(&self) -> egui::Id {
+        // Stable row IDs need the same accessibility parent in every view.
+        egui::Id::new(("file_list", self.id))
     }
 
     fn focus_cursor(&self, ctx: &egui::Context) {
@@ -2172,6 +2219,10 @@ impl PawCommander {
         if sources.is_empty() || self.job.is_some() || self.transfer.is_some() {
             return;
         }
+        if destination.is_archive() || sources.iter().any(Location::is_archive) {
+            self.notice = Some((crate::archive::readonly().into(), true));
+            return;
+        }
         let cut_generation = if from_cut_clipboard {
             self.clipboard
                 .as_ref()
@@ -2273,6 +2324,10 @@ impl PawCommander {
     }
     fn open_in_zed(&mut self, path: Location, text_only: bool, ctx: &egui::Context) {
         if self.editor_job.is_some() {
+            return;
+        }
+        if path.is_archive() {
+            self.notice = Some((crate::archive::readonly().into(), true));
             return;
         }
         let (tx, rx) = mpsc::channel();
@@ -2398,6 +2453,7 @@ impl PawCommander {
                     .mode
                     == FolderMode::Columns;
             let can_read = can_reorder
+                && (!tab.path.is_archive() || tab.has_complete_listing)
                 && (!tab.path.remote() || (tab.has_complete_listing && self.connection.is_none()));
             pane.columns
                 .update(ctx, columns.then_some(tab), can_read, now);
@@ -2560,6 +2616,22 @@ impl PawCommander {
     }
 
     fn action(&mut self, action: Action, ctx: &egui::Context) {
+        if self.tab().path.is_archive()
+            && matches!(
+                action,
+                Action::Copy(_)
+                    | Action::Paste(_)
+                    | Action::NewFolder
+                    | Action::Rename
+                    | Action::Trash
+                    | Action::Transfer(_)
+                    | Action::Properties
+                    | Action::Reveal
+            )
+        {
+            self.notice = Some((crate::archive::readonly().into(), true));
+            return;
+        }
         match action {
             Action::Shortcut(command) => self.run_shortcut(command, ctx),
             Action::MoveSelection { delta, extend } => {
@@ -2677,27 +2749,39 @@ impl PawCommander {
             }
             Action::Open(i, p) => {
                 self.active = i;
-                if self.panes[i]
+                let directory = self.panes[i]
                     .tab()
                     .entries
                     .iter()
-                    .any(|e| e.path == p && e.is_dir)
-                {
-                    if self.folder_view(i).mode == FolderMode::Columns {
-                        self.navigate_columns(i, ColumnNavigation::Browse(p), ctx);
-                    } else {
-                        self.panes[i].tab_mut().navigate(p, ctx);
+                    .any(|e| e.path == p && e.is_dir);
+                let browse = if directory {
+                    Some(p.clone())
+                } else {
+                    p.browse_archive()
+                };
+                if let Some(browse) = browse {
+                    if browse.is_archive() {
+                        self.notice = None;
                     }
+                    if self.folder_view(i).mode == FolderMode::Columns {
+                        self.navigate_columns(i, ColumnNavigation::Browse(browse), ctx);
+                    } else {
+                        self.panes[i].tab_mut().navigate(browse, ctx);
+                    }
+                } else if p.is_archive() {
+                    self.notice = Some((crate::archive::readonly().into(), true));
                 } else if p.remote() {
                     self.open_in_zed(p, true, ctx);
-                } else if let Err(e) = open::that_detached(p.path()) {
-                    self.notice = Some((
-                        crate::tr_format!(
-                            "Не удалось открыть файл: {e}",
-                            "Could not open file: {e}"
-                        ),
-                        true,
-                    ));
+                } else if let Some(path) = p.local() {
+                    if let Err(e) = open::that_detached(path) {
+                        self.notice = Some((
+                            crate::tr_format!(
+                                "Не удалось открыть файл: {e}",
+                                "Could not open file: {e}"
+                            ),
+                            true,
+                        ));
+                    }
                 }
             }
             Action::History(index, delta) => {
@@ -2717,7 +2801,7 @@ impl PawCommander {
                 let selected = self.selected();
                 if self.properties.is_none()
                     && !selected.is_empty()
-                    && selected.iter().all(|path| !path.remote())
+                    && selected.iter().all(|path| path.local().is_some())
                 {
                     self.properties = Some(crate::properties::Properties::start(
                         selected
@@ -2863,18 +2947,32 @@ impl PawCommander {
                 let Some(parent) = tab.path.parent() else {
                     return;
                 };
-                (parent, Some(tab.path.clone()))
+                let reveal = if !parent.is_archive() {
+                    tab.path
+                        .archive_source()
+                        .map(|file| Location::Local(file.to_owned()))
+                } else {
+                    None
+                };
+                (parent, Some(reveal.unwrap_or_else(|| tab.path.clone())))
             }
             ColumnNavigation::Right => {
                 let visible = tab.visible(self.folder_view(pane));
                 let Some(entry) = visible
                     .iter()
                     .map(|&index| &tab.entries[index])
-                    .find(|entry| entry.is_dir && tab.cursor.as_ref() == Some(&entry.path))
+                    .find(|entry| tab.cursor.as_ref() == Some(&entry.path))
                 else {
                     return;
                 };
-                (entry.path.clone(), None)
+                let directory = if entry.is_dir {
+                    entry.path.clone()
+                } else if let Some(archive) = entry.path.browse_archive() {
+                    archive
+                } else {
+                    return;
+                };
+                (directory, None)
             }
             ColumnNavigation::Open(path) => {
                 if tab.entries.iter().any(|entry| entry.path == path) {
@@ -2912,7 +3010,17 @@ impl PawCommander {
         let previous = tab.path.clone();
         let browsing_columns = in_columns || tab.browse_columns;
         tab.history_go(delta, ctx);
-        if browsing_columns && previous != tab.path && previous.same_backend(&tab.path) {
+        let archive_boundary = |child: &Location, parent: &Location| {
+            child.is_archive()
+                && parent.local().is_some()
+                && child.parent().as_ref() == Some(parent)
+        };
+        if browsing_columns
+            && previous != tab.path
+            && (previous.same_backend(&tab.path)
+                || archive_boundary(&previous, &tab.path)
+                || archive_boundary(&tab.path, &previous))
+        {
             tab.browse_columns = true;
         }
     }
@@ -2989,7 +3097,8 @@ impl PawCommander {
         let destination = self
             .settings
             .split
-            .then(|| self.panes[1 - self.active].tab().path.clone());
+            .then(|| self.panes[1 - self.active].tab().path.clone())
+            .filter(|path| !path.is_archive());
         let enabled = !self.keyboard_blocked(ctx);
         let can_copy = self.job.is_none() && self.transfer.is_none();
         self.search
@@ -3023,8 +3132,17 @@ impl PawCommander {
             ReadyAction::Open {
                 path,
                 directory: false,
-                ..
-            } => self.search.panel.open_file(path, ctx),
+                target,
+            } => {
+                if crate::archive::Format::from_path(&path).is_some() {
+                    if self.search_target_is_current(&target, ctx) {
+                        Self::restore_focus(ctx, None);
+                        self.action(Action::Open(target.pane, Location::Local(path)), ctx);
+                    }
+                } else {
+                    self.search.panel.open_file(path, ctx);
+                }
+            }
             ReadyAction::Open {
                 path,
                 directory: true,
@@ -3507,6 +3625,7 @@ impl PawCommander {
         };
         let restore_file_cursor = focused_file.is_some() && open_target.is_some();
         let idle = self.job.is_none();
+        let writable = !tab.path.is_archive();
         let outcome = palette.show(
             ctx,
             &self.settings.shortcuts,
@@ -3521,24 +3640,31 @@ impl PawCommander {
                 }
                 Command::ReopenTab => !self.panes[self.active].closed_tabs.is_empty(),
                 Command::Open => open_target.is_some_and(|path| {
-                    !path.remote()
+                    path.local().is_some()
                         || tab
                             .entries
                             .iter()
                             .any(|entry| entry.path == *path && entry.is_dir)
-                        || (self.tools.zed.is_some() && self.editor_job.is_none())
+                        || (path.remote() && self.tools.zed.is_some() && self.editor_job.is_none())
                 }),
                 Command::OtherPane => self.settings.split,
                 Command::RestoreSelection => tab.previous_selection.is_some(),
-                Command::NewFolder => idle,
-                Command::Rename => idle && has_selection && selected.len() == 1,
-                Command::Trash => idle && has_selection,
-                Command::Properties => has_selection && selected.iter().all(|path| !path.remote()),
+                Command::NewFolder => idle && writable,
+                Command::Rename => idle && writable && has_selection && selected.len() == 1,
+                Command::Trash => idle && writable && has_selection,
+                Command::Properties => {
+                    has_selection && selected.iter().all(|path| path.local().is_some())
+                }
                 Command::CopyToPane | Command::MoveToPane => {
-                    idle && self.transfer.is_none() && self.settings.split && has_selection
+                    idle && writable
+                        && self.transfer.is_none()
+                        && self.settings.split
+                        && has_selection
+                        && !self.panes[1 - self.active].tab().path.is_archive()
                 }
                 Command::EditInZed => {
-                    has_selection
+                    writable
+                        && has_selection
                         && selected.len() == 1
                         && self.tools.zed.is_some()
                         && self.editor_job.is_none()
@@ -3718,6 +3844,7 @@ impl PawCommander {
                         ui.add_space((88.0 / ctx.zoom_factor() - 12.0).max(0.0));
                     }
                     let tab = self.tab();
+                    let writable = !tab.path.is_archive();
                     for (icon, tip, enabled, action) in [
                         (Icon::Back, Command::Back, tab.history_index > 0, Action::Back),
                         (Icon::Forward, Command::Forward, tab.history_index + 1 < tab.history.len(), Action::Forward),
@@ -3748,9 +3875,9 @@ impl PawCommander {
                         actions.push(Action::ConnectSftp);
                     }
                     for (icon, tip, enabled, action) in [
-                        (Icon::NewFolder, self.settings.shortcuts.hint(ctx, Command::NewFolder, Command::NewFolder.label()), self.job.is_none(), Action::NewFolder),
-                        (Icon::Copy, crate::i18n::text("Копировать · ⌘/Ctrl+C").into(), !self.tab().selected.is_empty(), Action::Copy(false)),
-                        (Icon::Paste, crate::i18n::text("Вставить · ⌘/Ctrl+V").into(), self.job.is_none(), Action::Paste(false)),
+                        (Icon::NewFolder, self.settings.shortcuts.hint(ctx, Command::NewFolder, Command::NewFolder.label()), writable && self.job.is_none(), Action::NewFolder),
+                        (Icon::Copy, crate::i18n::text("Копировать · ⌘/Ctrl+C").into(), writable && !self.tab().selected.is_empty(), Action::Copy(false)),
+                        (Icon::Paste, crate::i18n::text("Вставить · ⌘/Ctrl+V").into(), writable && self.job.is_none(), Action::Paste(false)),
                     ] {
                         if ui.add_enabled_ui(enabled, |ui| icons::button(ui, icon, "", false)).inner.on_hover_text(tip).clicked() {
                             actions.push(action);
@@ -3977,12 +4104,16 @@ impl PawCommander {
                         let current = tab.path.clone();
                         let tab_id = tab.id;
                         let waiting_for_sftp = current.remote() && tab.blocking_load();
+                        let tree_location = current
+                            .archive_source()
+                            .and_then(Path::parent)
+                            .map(|parent| Location::Local(parent.to_owned()));
                         let show_hidden = self.folder_view(self.active).hidden;
                         let tree = ui.add_enabled_ui(!self.keyboard_blocked(ctx), |ui| {
                             self.directory_tree.show(
                                 ui,
                                 tab_id,
-                                &current,
+                                tree_location.as_ref().unwrap_or(&current),
                                 show_hidden,
                                 waiting_for_sftp,
                             )
@@ -4365,9 +4496,13 @@ impl PawCommander {
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.label(
-                                RichText::new(crate::i18n::text("Двойной щелчок — открыть"))
-                                    .size(11.0)
-                                    .color(colors.muted),
+                                RichText::new(if self.tab().path.is_archive() {
+                                    crate::archive::readonly()
+                                } else {
+                                    crate::i18n::text("Двойной щелчок — открыть")
+                                })
+                                .size(11.0)
+                                .color(colors.muted),
                             );
                         });
                     });
@@ -6193,7 +6328,11 @@ fn list_notice(ui: &mut egui::Ui, tab: &Tab, empty: bool, compact: bool) {
     if tab.blocking_load() {
         ui.horizontal(|ui| {
             ui.spinner();
-            ui.label(crate::i18n::text("Чтение папки…"));
+            ui.label(if tab.path.is_archive() {
+                crate::i18n::text("Чтение архива…")
+            } else {
+                crate::i18n::text("Чтение папки…")
+            });
         });
     }
     if empty && !tab.blocking_load() && tab.error.is_none() {
@@ -6210,7 +6349,7 @@ fn list_notice(ui: &mut egui::Ui, tab: &Tab, empty: bool, compact: bool) {
                 .size(if compact { 13.0 } else { 20.0 })
                 .color(colors.muted),
             );
-            if !compact {
+            if !compact && (!tab.path.is_archive() || !tab.filter.is_empty()) {
                 ui.label(
                     RichText::new(if tab.filter.is_empty() {
                         crate::i18n::text("Создайте папку или вставьте файлы")
@@ -6462,7 +6601,7 @@ fn render_pane(
                         }
                     }
                 }
-                let files_id = ui.id().with(("file_list", tab.id));
+                let files_id = tab.file_list_id();
                 let ctx = ui.ctx().clone();
                 ctx.accesskit_node_builder(files_id, |node| {
                     node.set_role(egui::accesskit::Role::List);
@@ -6666,6 +6805,7 @@ fn entry_widget(
     let entry = &tab.entries[index];
     let is_dir = entry.is_dir;
     let path = entry.path.clone();
+    let archive_member = path.is_archive();
     let selected = tab.selected.contains(&path);
     let list_width = columns.map_or_else(|| ui.available_width(), |columns| columns.width);
     let size = if compact {
@@ -6677,7 +6817,12 @@ fn entry_widget(
         Vec2::new(list_width, 36.0)
     };
     let (_, rect) = ui.allocate_space(size);
-    let response = ui.interact(rect, tab.entry_id(&path), Sense::click_and_drag());
+    let sense = if archive_member {
+        Sense::click()
+    } else {
+        Sense::click_and_drag()
+    };
+    let response = ui.interact(rect, tab.entry_id(&path), sense);
     tab.rendered_rows.insert(response.id, path.clone());
     if entry.is_dir {
         drop_targets.add(
@@ -6860,7 +7005,7 @@ fn entry_widget(
         }
     }
     paint_focus(ui, &response, 5);
-    if idle && response.drag_started_by(egui::PointerButton::Primary) {
+    if idle && !archive_member && response.drag_started_by(egui::PointerButton::Primary) {
         egui::DragAndDrop::set_payload(ui.ctx(), DragFiles(tab.drag_paths(index, visible)));
         actions.push(Action::Focus(pane));
     }
@@ -6922,9 +7067,17 @@ fn entry_widget(
     response
         .on_hover_text(path.display().to_string())
         .context_menu(|ui| {
-            if ui.button(crate::i18n::text("Открыть")).clicked() {
+            if (!archive_member || is_dir) && ui.button(crate::i18n::text("Открыть")).clicked() {
                 actions.push(open());
                 ui.close_menu();
+            }
+            if archive_member {
+                if ui.button(crate::i18n::text("Копировать путь")).clicked() {
+                    actions.push(Action::Focus(pane));
+                    actions.push(Action::CopyPath);
+                    ui.close_menu();
+                }
+                return;
             }
             if !is_dir && ui.add_enabled(zed_available, egui::Button::new(crate::i18n::text("Открыть в Zed")))
                 .on_disabled_hover_text(crate::i18n::text("Zed не найден. Установите редактор и выберите Настройки → Инструменты → Проверить снова."))
@@ -7182,6 +7335,110 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert!(tab.loading.is_none(), "directory read did not finish");
+    }
+
+    #[test]
+    fn archive_open_navigation_session_refresh_and_search_use_the_pane() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("fixture.tar");
+        let mut archive = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(0o644);
+        header.set_size(4);
+        archive
+            .append_data(&mut header, "outer/inner/note.txt", &b"note"[..])
+            .unwrap();
+        let bytes = archive.into_inner().unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        std::fs::create_dir(root.path().join("directory.zip")).unwrap();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        let local = Location::Local(root.path().into());
+        let file = Location::Local(path.clone());
+        let archive = file.browse_archive().unwrap();
+        wait_for_directory(app.tab_mut());
+        app.tab_mut().select_revealed(file.clone());
+        app.run_shortcut(Command::Open, &ctx);
+        wait_for_directory(app.tab_mut());
+        assert_eq!(app.tab().path, archive);
+        let outer = archive.join("outer");
+        app.action(Action::Open(0, outer.clone()), &ctx);
+        wait_for_directory(app.tab_mut());
+        let inner = outer.join("inner");
+        assert_eq!(app.tab().entries[0].path, inner);
+        app.action(Action::Open(0, inner.clone()), &ctx);
+        wait_for_directory(app.tab_mut());
+        let note = inner.join("note.txt");
+        assert_eq!(app.tab().entries[0].path, note);
+        app.tab_mut().select_revealed(note.clone());
+        app.action(Action::Trash, &ctx);
+        app.action(Action::Open(0, note), &ctx);
+        assert!(app.dialog.is_none());
+        assert!(app.notice.as_ref().is_some_and(|(_, error)| *error));
+        assert_eq!(app.tab().path, inner);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert!(!root.path().join("outer").exists());
+
+        let mut restored = Tab::from_session(app.tab().session(), root.path(), &ctx);
+        wait_for_directory(&mut restored);
+        assert_eq!(restored.path, inner);
+        assert_eq!(restored.entries[0].name, "note.txt");
+
+        app.action(Action::Back, &ctx);
+        wait_for_directory(app.tab_mut());
+        assert_eq!(app.tab().path, outer);
+        app.action(Action::Forward, &ctx);
+        wait_for_directory(app.tab_mut());
+        assert_eq!(app.tab().path, inner);
+        std::fs::write(&path, b"corrupt").unwrap();
+        app.action(Action::Refresh, &ctx);
+        wait_for_directory(app.tab_mut());
+        assert!(app.tab().error.is_some());
+        assert!(app.tab().entries.is_empty());
+        std::fs::write(&path, &bytes).unwrap();
+        for _ in 0..3 {
+            app.action(Action::Up, &ctx);
+        }
+        wait_for_directory(app.tab_mut());
+        assert_eq!(app.tab().path, local);
+        let target = TabTarget {
+            pane: 0,
+            tab: app.tab().id,
+            location: local.clone(),
+        };
+        app.action(Action::Open(0, local.join("directory.zip")), &ctx);
+        wait_for_directory(app.tab_mut());
+        assert!(app.tab().path.local().is_some());
+        app.dispatch_search_result(
+            ReadyAction::Open {
+                path: path.clone(),
+                directory: false,
+                target: target.clone(),
+            },
+            &ctx,
+        );
+        assert_eq!(app.tab().path, local.join("directory.zip"));
+        app.action(Action::Up, &ctx);
+        wait_for_directory(app.tab_mut());
+        app.dispatch_search_result(
+            ReadyAction::Open {
+                path,
+                directory: false,
+                target,
+            },
+            &ctx,
+        );
+        wait_for_directory(app.tab_mut());
+        assert_eq!(app.tab().path, archive);
+        assert_eq!(app.tab().entries[0].path, outer);
+        app.tab_mut().browse_columns = true;
+        app.action(Action::Back, &ctx);
+        assert_eq!(app.tab().path, local);
+        assert!(app.tab().browse_columns);
+        app.action(Action::Forward, &ctx);
+        assert_eq!(app.tab().path, archive);
+        assert!(app.tab().browse_columns);
     }
 
     #[test]
@@ -8021,7 +8278,7 @@ mod tests {
     }
 
     #[test]
-    fn accessibility_tree_keeps_file_focus_and_selection_distinct_in_list_and_grid() {
+    fn accessibility_tree_keeps_file_parent_focus_and_selection_across_views() {
         use egui::accesskit::{Action as AxAction, ActionRequest, Role, Toggled};
 
         let root = tempfile::tempdir().unwrap();
@@ -8041,7 +8298,9 @@ mod tests {
         let ax_id = |id: egui::Id| egui::accesskit::NodeId(id.value());
         let folder_id = ax_id(app.tab().entry_id(&folder));
         let file_id = ax_id(app.tab().entry_id(&file));
+        let file_list_id = ax_id(app.tab().file_list_id());
         assert_ne!(file_id, ax_id(app.panes[1].tab().entry_id(&file)));
+        assert_ne!(file_list_id, ax_id(app.panes[1].tab().file_list_id()));
 
         let mut run = |app: &mut PawCommander, events| {
             let mut input = egui::RawInput {
@@ -8082,6 +8341,23 @@ mod tests {
         assert_eq!(row.1.role(), Role::CheckBox);
         assert!(row.1.label().unwrap().starts_with("Note.txt, "));
         assert_eq!(row.1.toggled(), Some(Toggled::True));
+        let assert_file_parent = |tree: &egui::accesskit::TreeUpdate| {
+            let parents = tree
+                .nodes
+                .iter()
+                .filter(|(_, node)| node.children().contains(&file_id))
+                .collect::<Vec<_>>();
+            assert_eq!(parents.len(), 1);
+            assert_eq!(parents[0].0, file_list_id);
+            assert_eq!(parents[0].1.role(), Role::List);
+        };
+        assert_file_parent(&list);
+        app.tab_mut().browse_columns = true;
+        assert_eq!(app.folder_view(0).mode, FolderMode::Columns);
+        assert_file_parent(&run(&mut app, vec![]));
+        app.tab_mut().browse_columns = false;
+        assert_eq!(app.folder_view(0).mode, FolderMode::List);
+        assert_file_parent(&run(&mut app, vec![]));
 
         let focused = run(&mut app, request(AxAction::Focus));
         assert_eq!(focused.focus, folder_id);
@@ -8105,6 +8381,7 @@ mod tests {
 
         app.settings.pane_grid = Some([true, false]);
         let grid = run(&mut app, request(AxAction::Click));
+        assert_file_parent(&grid);
         assert_eq!(grid.focus, folder_id);
         assert_eq!(app.selected(), vec![folder.clone(), file]);
         let row = grid.nodes.iter().find(|(id, _)| *id == folder_id).unwrap();

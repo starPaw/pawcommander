@@ -226,6 +226,9 @@ impl Completion {
     }
 
     fn query(&self, address: &str, current: &Location) -> Option<(Location, String)> {
+        if address.starts_with("archive:") {
+            return None;
+        }
         let url = address.starts_with("sftp:");
         if url && !address.strip_prefix("sftp://")?.contains('/') {
             return None;

@@ -2,6 +2,7 @@
 
 mod address;
 mod app;
+mod archive;
 mod command_palette;
 mod conflict;
 mod credentials;

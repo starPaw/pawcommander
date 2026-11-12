@@ -21,6 +21,7 @@ type Listing = Result<Option<Vec<FileEntry>>, String>;
 #[derive(Default)]
 pub(super) struct Columns {
     tab: Option<u64>,
+    archive_index: Option<Arc<crate::archive::Index>>,
     ancestors: Vec<Location>,
     listings: BTreeMap<Location, Result<DirectoryEntries, String>>,
     worker: Option<Read>,
@@ -55,6 +56,23 @@ impl Columns {
             self.refresh();
             self.scroll_geometry = None;
             self.tab = tab;
+        }
+        let archive_index = current.and_then(|tab| tab.archive_index.as_ref());
+        let changed_index = match (&self.archive_index, archive_index) {
+            (None, None) => false,
+            (Some(old), Some(new)) => !Arc::ptr_eq(old, new),
+            _ => true,
+        };
+        if changed_index {
+            self.archive_index = archive_index.cloned();
+            self.listings.retain(|location, _| !location.is_archive());
+            if let Some(read) = self
+                .worker
+                .as_ref()
+                .filter(|read| read.location.is_archive())
+            {
+                read.cancelled.store(true, Ordering::Relaxed);
+            }
         }
         let mut ancestors = Vec::new();
         if let Some(tab) = current {
@@ -123,7 +141,10 @@ impl Columns {
             .ancestors
             .iter()
             .rev()
-            .find(|location| !self.listings.contains_key(*location))
+            .find(|location| {
+                (!location.is_archive() || self.archive_index.is_some())
+                    && !self.listings.contains_key(*location)
+            })
             .cloned()
         else {
             return;
@@ -132,13 +153,21 @@ impl Columns {
         let cancelled = Arc::new(AtomicBool::new(false));
         let worker_cancelled = Arc::clone(&cancelled);
         let source = location.clone();
+        let archive_index = self
+            .archive_index
+            .as_ref()
+            .filter(|_| source.is_archive())
+            .cloned();
         let worker_ctx = ctx.clone();
         match std::thread::Builder::new()
             .name("pawcommander-column-read".into())
             .spawn(move || {
-                let listing = fs_ops::read_automatic_directory(&source, &|| {
-                    worker_cancelled.load(Ordering::Relaxed)
-                });
+                let cancelled = || worker_cancelled.load(Ordering::Relaxed);
+                let listing = if let Some(index) = archive_index {
+                    index.list(&source, &cancelled).map(Some)
+                } else {
+                    fs_ops::read_automatic_directory(&source, &cancelled)
+                };
                 let _ = sender.send(listing);
                 worker_ctx.request_repaint();
             }) {
@@ -269,6 +298,11 @@ fn show_ancestor(
     let pane = options.index;
     let ready = listing.is_some_and(Result::is_ok);
     drop_targets.add(ui, ui.max_rect(), pane, location, ready);
+    let archive_child = child
+        .archive_source()
+        .filter(|_| location.local().is_some())
+        .map(|file| Location::Local(file.to_owned()));
+    let child = archive_child.as_ref().unwrap_or(child);
     let header = ui.add_sized(
         [ui.available_width(), HEADING_HEIGHT],
         egui::Button::new(RichText::new(location.name()).strong()).truncate(),
@@ -459,7 +493,7 @@ fn show_current(
             scroll = scroll.vertical_scroll_offset(offset.min(maximum));
         }
     }
-    let files_id = ui.id().with("folder_column_files");
+    let files_id = tab.file_list_id();
     let ctx = ui.ctx().clone();
     ctx.accesskit_node_builder(files_id, |node| {
         node.set_role(egui::accesskit::Role::List);
@@ -545,5 +579,38 @@ mod tests {
         assert!(columns.worker.is_none());
         assert!(columns.listings.is_empty());
         assert!(columns.ancestors.is_empty());
+    }
+
+    #[test]
+    fn archive_columns_discard_ancestor_rows_when_the_tab_reloads() {
+        let directory = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut tab = Tab::new(directory.path().to_path_buf().into(), &ctx);
+        let archive = tab.path.join("sample.zip").browse_archive().unwrap();
+        let parent = archive.join("outer");
+        tab.path = parent.join("inner");
+        tab.archive_index = Some(Arc::new(crate::archive::Index::default()));
+        let mut columns = Columns::default();
+        columns.sync(Some(&tab));
+        columns
+            .listings
+            .insert(parent.clone(), Ok(DirectoryEntries::default()));
+
+        let (sender, receiver) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        columns.worker = Some(Read {
+            location: parent,
+            cancelled: Arc::clone(&cancelled),
+            result: receiver,
+        });
+        tab.archive_index = None;
+        sender.send(Ok(Some(Vec::new()))).unwrap();
+        columns.update(&ctx, Some(&tab), true, Instant::now());
+        assert!(cancelled.load(Ordering::Relaxed));
+        assert!(columns.listings.is_empty());
+        assert!(
+            columns.worker.is_none(),
+            "ancestor reads wait for the tab index"
+        );
     }
 }
