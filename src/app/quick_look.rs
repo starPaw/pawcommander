@@ -46,7 +46,7 @@ impl QuickLook {
         focused
     }
 
-    fn take_keys(&mut self, ctx: &egui::Context) -> Option<Action> {
+    fn take_keys(&mut self, ctx: &egui::Context, typing: bool) -> Option<Action> {
         let mut action = None;
         let viewport = ctx.viewport_id();
         ctx.input_mut(|input| {
@@ -78,6 +78,9 @@ impl QuickLook {
                     return true;
                 }
                 if shortcuts::chord(key, modifiers).modifiers != Modifiers::NONE {
+                    return true;
+                }
+                if typing {
                     return true;
                 }
                 match key {
@@ -112,7 +115,7 @@ impl QuickLook {
         let viewport = Self::viewport_id();
         let (action, native) =
             ctx.show_viewport_immediate(viewport, Self::window_builder(), |ctx, class| {
-                let keys = self.take_keys(ctx);
+                let keys = self.take_keys(ctx, preview.text_input(ctx));
                 if class == egui::ViewportClass::Embedded {
                     let modal = egui::Modal::new(egui::Id::new("quick-look")).show(ctx, |ui| {
                         let size = ctx.screen_rect().size() * 0.8;
@@ -143,7 +146,7 @@ impl QuickLook {
         let mut action = action;
         if native {
             // The OS may activate the main window while Quick Look remains open.
-            action = action.or(self.take_keys(ctx));
+            action = action.or(self.take_keys(ctx, preview.text_input(ctx)));
             if action != Some(Action::Close) {
                 let backdrop = egui::Modal::new(egui::Id::new("quick-look-backdrop"))
                     .frame(egui::Frame::new())
@@ -409,6 +412,51 @@ mod tests {
         };
         app.raw_input_hook(ctx, &mut input);
         let _ = ctx.run(input, |ctx| app.update(ctx, frame));
+    }
+
+    #[test]
+    fn quick_look_preserves_preview_text_field_keys() {
+        let directory = tempfile::tempdir().unwrap();
+        let location = Location::from(directory.path().to_path_buf());
+        let mut quick_look = QuickLook {
+            origin: TabTarget {
+                pane: 0,
+                tab: 0,
+                location: location.clone(),
+            },
+            original_file: location.clone(),
+            file: location,
+            position: 0,
+            wait_for_opening_space: false,
+            closing_key: None,
+        };
+        let ctx = egui::Context::default();
+        let mut query = String::from("a");
+        let id = egui::Id::new("preview-search-test");
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.add(egui::TextEdit::singleline(&mut query).id(id))
+                    .request_focus();
+            });
+        });
+        for key_code in [Key::Space, Key::ArrowLeft, Key::ArrowRight, Key::Escape] {
+            let events = tap(key_code);
+            let _ = ctx.run(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    assert_eq!(quick_look.take_keys(ctx, true), None);
+                    assert_eq!(ctx.input(|i| i.events.len()), 2);
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        ui.add(egui::TextEdit::singleline(&mut query).id(id))
+                            .request_focus();
+                    });
+                },
+            );
+            assert!(quick_look.closing_key.is_none());
+        }
     }
 
     #[test]

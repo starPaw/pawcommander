@@ -1,3 +1,5 @@
+mod code;
+
 use crate::vfs::{self, Location};
 use std::{
     fs::{self, File},
@@ -43,6 +45,7 @@ enum Content {
     Text {
         body: String,
         truncated: bool,
+        code: code::Code,
     },
     Image {
         size: [usize; 2],
@@ -60,6 +63,7 @@ pub struct Preview {
     generation: u64,
     result: Option<Result<Loaded, String>>,
     texture: Option<egui::TextureHandle>,
+    find: code::Find,
     dirty: bool,
     fingerprint: Option<(u64, Option<std::time::SystemTime>)>,
 }
@@ -94,6 +98,7 @@ impl Preview {
             generation: 0,
             result: None,
             texture: None,
+            find: code::Find::default(),
             dirty: false,
             fingerprint: None,
         }
@@ -170,7 +175,8 @@ impl Preview {
         ui.add(egui::Label::new(RichText::new(path.name()).heading()).truncate());
         ui.add_space(8.0);
         let image_height = ui.available_height().max(1.0);
-        let mut scroll = egui::ScrollArea::vertical().id_salt("quick-look-content");
+        let mut scroll =
+            egui::ScrollArea::vertical().id_salt(("quick-look-content", self.generation));
         if changed_path {
             scroll = scroll.vertical_scroll_offset(0.0);
         }
@@ -182,7 +188,15 @@ impl Preview {
                     ui.colored_label(ui.visuals().error_fg_color, error);
                 }
                 Some(Ok(loaded)) => match &loaded.content {
-                    Content::Text { body, truncated } => draw_text(ui, body, *truncated, 14.0),
+                    Content::Text {
+                        body,
+                        truncated,
+                        code,
+                    } => {
+                        ui.push_id(self.generation, |ui| {
+                            draw_text(ui, body, *truncated, code, &mut self.find, 14.0)
+                        });
+                    }
                     Content::Image { .. } => {
                         if let Some(texture) = &self.texture {
                             draw_image(ui, texture, image_height);
@@ -196,6 +210,10 @@ impl Preview {
                     }
                 },
             });
+    }
+
+    pub fn text_input(&self, ctx: &egui::Context) -> bool {
+        self.find.text_input(ctx)
     }
 
     pub fn clear(&mut self, ctx: &egui::Context) {
@@ -214,6 +232,7 @@ impl Preview {
             self.path = path.cloned();
             self.generation = self.generation.wrapping_add(1);
             self.result = None;
+            self.find = code::Find::default();
             self.texture = None;
             if let Some(path) = path {
                 if path.is_archive() {
@@ -264,10 +283,10 @@ impl Preview {
         }
     }
 
-    fn show_details(&self, ui: &mut egui::Ui, path: &Location) {
+    fn show_details(&mut self, ui: &mut egui::Ui, path: &Location) {
         let muted = Palette::from_ctx(ui.ctx()).muted;
         egui::ScrollArea::vertical()
-            .id_salt("file-preview-details")
+            .id_salt(("file-preview-details", self.generation))
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 match (&self.result, &self.texture) {
@@ -307,7 +326,11 @@ impl Preview {
 
                 if let Some(Ok(loaded)) = &self.result {
                     match &loaded.content {
-                        Content::Text { body, truncated } => {
+                        Content::Text {
+                            body,
+                            truncated,
+                            code,
+                        } => {
                             ui.add_space(10.0);
                             ui.separator();
                             ui.add_space(12.0);
@@ -318,7 +341,9 @@ impl Preview {
                                     .color(muted),
                             );
                             ui.add_space(8.0);
-                            draw_text(ui, body, *truncated, 11.0);
+                            ui.push_id(self.generation, |ui| {
+                                draw_text(ui, body, *truncated, code, &mut self.find, 11.0)
+                            });
                         }
                         Content::Message(message) => {
                             ui.add_space(12.0);
@@ -357,30 +382,21 @@ fn draw_image(ui: &mut egui::Ui, texture: &egui::TextureHandle, max_height: f32)
     });
 }
 
-fn draw_text(ui: &mut egui::Ui, body: &str, truncated: bool, font_size: f32) {
-    let muted = Palette::from_ctx(ui.ctx()).muted;
-    egui::Frame::new()
-        .fill(ui.visuals().faint_bg_color)
-        .corner_radius(8)
-        .inner_margin(10)
-        .show(ui, |ui| {
-            if body.is_empty() {
-                ui.colored_label(muted, crate::i18n::text("Пустой файл"));
-            } else {
-                ui.add(
-                    egui::Label::new(RichText::new(body).monospace().size(font_size))
-                        .wrap()
-                        .selectable(true),
-                );
-            }
-        });
+fn draw_text(
+    ui: &mut egui::Ui,
+    body: &str,
+    truncated: bool,
+    code: &code::Code,
+    find: &mut code::Find,
+    font_size: f32,
+) {
     if truncated {
-        ui.add_space(6.0);
         ui.colored_label(
-            muted,
-            crate::i18n::text("Показано начало файла (до 32 КиБ)."),
+            Palette::from_ctx(ui.ctx()).muted,
+            crate::i18n::text("Показано начало файла: до 32 КиБ, 1000 строк и 8 КиБ на строку."),
         );
     }
+    find.show(ui, body, code, font_size);
 }
 
 fn detail(ui: &mut egui::Ui, label: &str, value: &str) {
@@ -567,8 +583,14 @@ fn load_content(path: &Path, length: u64) -> Result<Content, String> {
     let mut bytes = read_bounded(path, TEXT_LIMIT)?;
     let truncated = bytes.len() > TEXT_LIMIT;
     bytes.truncate(TEXT_LIMIT);
-    let body = utf8_prefix(&bytes, truncated)?;
-    Ok(Content::Text { body, truncated })
+    let mut body = utf8_prefix(&bytes, truncated)?;
+    let truncated = code::bound(&mut body) || truncated;
+    let code = code::Code::new(path, &body);
+    Ok(Content::Text {
+        body,
+        truncated,
+        code,
+    })
 }
 
 fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
@@ -680,10 +702,12 @@ mod tests {
         fs::write(&path, "я".repeat(TEXT_LIMIT)).unwrap();
         let loaded = load(&path).unwrap();
         match loaded.content {
-            Content::Text { body, truncated } => {
+            Content::Text {
+                body, truncated, ..
+            } => {
                 assert!(truncated);
-                assert_eq!(body.len(), TEXT_LIMIT);
-                assert_eq!(body.chars().count(), TEXT_LIMIT / 2);
+                assert_eq!(body.len(), code::LINE_BYTES);
+                assert_eq!(body.chars().count(), code::LINE_BYTES / 2);
             }
             _ => panic!("Expected a text preview"),
         }
