@@ -27,6 +27,7 @@ pub struct ListingMetadata {
     pub owner_id: Option<u32>,
     pub created: Option<SystemTime>,
     pub accessed: Option<SystemTime>,
+    pub(crate) local_file: Option<LocalFileIdentity>,
 }
 
 impl ListingMetadata {
@@ -46,7 +47,42 @@ impl ListingMetadata {
             owner_id,
             created: metadata.created().ok(),
             accessed: metadata.accessed().ok(),
+            local_file: LocalFileIdentity::from_metadata(metadata),
         }
+    }
+}
+
+/// Additional version information for regular local files, captured by the listing's lstat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct LocalFileIdentity {
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(unix)]
+    changed: (i64, i64),
+    #[cfg(not(unix))]
+    created: Option<SystemTime>,
+}
+
+impl LocalFileIdentity {
+    pub(crate) fn from_metadata(metadata: &fs::Metadata) -> Option<Self> {
+        if !metadata.is_file() {
+            return None;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Some(Self {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+                changed: (metadata.ctime(), metadata.ctime_nsec()),
+            })
+        }
+        #[cfg(not(unix))]
+        Some(Self {
+            created: metadata.created().ok(),
+        })
     }
 }
 

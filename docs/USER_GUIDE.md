@@ -93,6 +93,8 @@ Remote deletion recursively removes directories without a trash. Symlinks are re
 
 ## Previews and properties
 
+Grid shows thumbnails for visible PNG, JPEG, and GIF files in local folders. Animated files show a still image. Thumbnails load in the background and update when a folder refresh detects a file change. Use `F5` to rebuild thumbnails in both panes, including after edits that preserve filesystem metadata. Images above 20 MiB, 8,192 pixels on either edge, or 16 megapixels keep their file icons. Icons also remain for links, unsupported or unreadable images, SFTP files, and archive contents.
+
 Press `Space` on a file to open **Quick Look** in a separate window. Use `←` and `→` or **Previous File** and **Next File** to browse the visible files in their current sort order. Navigation skips folders and keeps the pane's selection. Press `Esc` or `Space`, or close the window, to return to the original file.
 
 Quick Look and the details pane preview UTF-8 text and PNG, JPEG, GIF, and WebP images. Text previews show the beginning of a file (up to 32 KiB), and images are limited to 20 MiB with additional dimension limits. Remote symlinks and special files are not read for preview.

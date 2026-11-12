@@ -17,6 +17,7 @@ use crate::search::panel::{ReadyAction, TabTarget};
 use crate::shortcuts::{self, Command, ShortcutEditor, Shortcuts};
 use crate::tab_drag::{clamp_tab_slot, DragTab, TabDrop, TabDropTargets};
 use crate::theme::{appearance_menu, paint_focus, Palette, Theme};
+use crate::thumbnails::Thumbnails;
 use crate::vfs::{self as fs_ops, Endpoint, FileEntry, Location};
 use eframe::egui::{self, Color32, FontId, RichText, Sense, Stroke, Vec2};
 use quick_look::QuickLook;
@@ -1904,6 +1905,7 @@ pub struct PawCommander {
     bookmark_editor: Option<BookmarkEditor>,
     workspaces: Vec<NamedWorkspace>,
     preview: Preview,
+    thumbnails: Thumbnails,
     quick_look: Option<QuickLook>,
     quick_look_preview: Option<Preview>,
     properties: Option<crate::properties::Properties>,
@@ -2054,6 +2056,7 @@ impl PawCommander {
             bookmark_editor: None,
             workspaces,
             preview: Preview::new(),
+            thumbnails: Thumbnails::new(&cc.egui_ctx),
             quick_look: None,
             quick_look_preview: None,
             properties: None,
@@ -2833,7 +2836,10 @@ impl PawCommander {
                     ));
                 }
             }
-            Action::Refresh => self.refresh(ctx),
+            Action::Refresh => {
+                self.thumbnails.refresh();
+                self.refresh(ctx);
+            }
             Action::NewTab(i) => {
                 let pane = &mut self.panes[i];
                 let path = pane.tab().path.clone();
@@ -5216,6 +5222,7 @@ impl eframe::App for PawCommander {
                     card.end(panel_ui);
                 });
         }
+        self.thumbnails.begin_frame();
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(colors.surface).inner_margin(8))
             .show(ctx, |ui| {
@@ -5248,10 +5255,12 @@ impl eframe::App for PawCommander {
                         &mut actions,
                         &mut drop_targets,
                         &mut tab_targets,
+                        Some(&mut self.thumbnails),
                     );
                 }
                 ui.advance_cursor_after_rect(workspace);
             });
+        self.thumbnails.finish_frame(ctx);
         if self.dialog.is_none()
             && !self.conflict_open()
             && self.sftp_form.is_none()
@@ -6412,6 +6421,7 @@ fn render_pane(
     actions: &mut Vec<Action>,
     drop_targets: &mut DropTargets,
     tab_targets: &mut TabDropTargets,
+    mut thumbnails: Option<&mut Thumbnails>,
 ) {
     let PaneOptions {
         index: pane_index,
@@ -6687,6 +6697,7 @@ fn render_pane(
                                                     &visible,
                                                     EntryOptions {
                                                         columns: None,
+                                                        thumbnails: thumbnails.as_deref_mut(),
                                                         pane: pane_index,
                                                         split: settings.split,
                                                         grid: true,
@@ -6709,6 +6720,7 @@ fn render_pane(
                                         &visible,
                                         EntryOptions {
                                             columns: Some(&layout),
+                                            thumbnails: None,
                                             pane: pane_index,
                                             split: settings.split,
                                             grid: false,
@@ -6813,6 +6825,7 @@ const COMPACT_FILE_ROW_HEIGHT: f32 = 24.0;
 
 struct EntryOptions<'a> {
     columns: Option<&'a ColumnLayout>,
+    thumbnails: Option<&'a mut Thumbnails>,
     pane: usize,
     split: bool,
     grid: bool,
@@ -6835,6 +6848,7 @@ fn entry_widget(
     let colors = Palette::from_ctx(ui.ctx());
     let EntryOptions {
         columns,
+        thumbnails,
         pane,
         split,
         grid,
@@ -6934,8 +6948,20 @@ fn entry_widget(
     } else {
         egui::Rect::from_min_size(rect.min + Vec2::new(32.0, 6.0), Vec2::splat(24.0))
     };
-    let icon = icons::file_icon(&entry.name, entry.is_dir);
-    icons::paint(ui, icon_rect, icon, icons::tint(icon, colors));
+    let has_thumbnail = thumbnails.is_some_and(|thumbnails| {
+        let thumbnail_rect = if compact {
+            icon_rect
+        } else {
+            egui::Rect::from_center_size(icon_rect.center(), Vec2::new(74.0, 46.0))
+        };
+        !ui.is_sizing_pass()
+            && ui.is_rect_visible(thumbnail_rect)
+            && thumbnails.paint(ui, entry, thumbnail_rect)
+    });
+    if !has_thumbnail {
+        let icon = icons::file_icon(&entry.name, entry.is_dir);
+        icons::paint(ui, icon_rect, icon, icons::tint(icon, colors));
+    }
     if entry.is_symlink {
         ui.painter().text(
             icon_rect.right_bottom(),
@@ -8691,6 +8717,7 @@ mod tests {
                             &mut vec![],
                             &mut DropTargets::default(),
                             &mut TabDropTargets::default(),
+                            None,
                         );
                     });
                 },
@@ -11059,6 +11086,7 @@ mod tests {
                                 &[0],
                                 EntryOptions {
                                     columns: None,
+                                    thumbnails: None,
                                     pane: 1,
                                     split: true,
                                     grid: false,
@@ -11180,6 +11208,7 @@ mod tests {
                                 &visible,
                                 EntryOptions {
                                     columns: None,
+                                    thumbnails: None,
                                     pane: 1,
                                     split: true,
                                     grid,

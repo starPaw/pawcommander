@@ -509,6 +509,7 @@ fn show_current(
                     &visible,
                     EntryOptions {
                         columns: None,
+                        thumbnails: None,
                         pane: options.index,
                         split: options.settings.split,
                         grid: false,

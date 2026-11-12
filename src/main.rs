@@ -25,6 +25,7 @@ mod search;
 mod shortcuts;
 mod tab_drag;
 mod theme;
+mod thumbnails;
 mod tools;
 mod vfs;
 mod zed;

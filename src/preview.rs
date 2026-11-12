@@ -424,17 +424,7 @@ fn load_location(location: &Location) -> Result<Loaded, String> {
     if let Some(path) = location.local() {
         return load(path);
     }
-    let image = matches!(
-        location
-            .path()
-            .extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase()
-            .as_str(),
-        "png" | "jpg" | "jpeg" | "gif" | "webp"
-    );
-    let limit = if image {
+    let limit = if image_path_format(location.path()).is_some() {
         IMAGE_LIMIT as usize
     } else {
         TEXT_LIMIT
@@ -521,13 +511,22 @@ fn load(path: &Path) -> Result<Loaded, String> {
     })
 }
 
+pub(crate) fn image_path_format(path: &Path) -> Option<image::ImageFormat> {
+    use image::ImageFormat;
+    let extension = path.extension()?;
+    [
+        ("png", ImageFormat::Png),
+        ("jpg", ImageFormat::Jpeg),
+        ("jpeg", ImageFormat::Jpeg),
+        ("gif", ImageFormat::Gif),
+        ("webp", ImageFormat::WebP),
+    ]
+    .into_iter()
+    .find_map(|(name, format)| extension.eq_ignore_ascii_case(name).then_some(format))
+}
+
 fn load_content(path: &Path, length: u64) -> Result<Content, String> {
-    let extension = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp") {
+    if image_path_format(path).is_some() {
         if length > IMAGE_LIMIT {
             return Err(crate::i18n::text(
                 "Изображение больше 20 МиБ. Откройте его во внешнем приложении.",
