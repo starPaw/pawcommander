@@ -1,11 +1,13 @@
 //! Live name and content search in folders, plus indexed path search.
 mod content;
 mod directory;
+mod filters;
 
 use crate::name_match::{normalize, Mask};
 use content::{LineMatch, Scan, Scanner};
-use directory::{Directory, EntryKind};
+use directory::{Directory, Entry, EntryKind, EntryMetadata};
 use eframe::egui;
+use filters::{FilterInput, Filters};
 use std::{
     io::{self, Read},
     path::{Path, PathBuf},
@@ -89,6 +91,7 @@ pub struct Search {
     folder: Option<PathBuf>,
     query: String,
     exclusions: String,
+    filters: FilterInput,
     jobs: [Option<Job>; 2],
     results: Option<Results>,
     selected: Option<usize>,
@@ -127,10 +130,14 @@ impl Search {
             !self.query.trim().is_empty()
         };
         self.job().is_none()
-            && has_query
             && match self.mode {
-                Mode::Folder => self.folder.is_some(),
-                Mode::Index => cli.is_some(),
+                Mode::Folder => {
+                    self.folder.is_some()
+                        && (has_query
+                            || (self.folder_target == FolderTarget::Name
+                                && self.filters.active(self.folder_target)))
+                }
+                Mode::Index => cli.is_some() && has_query,
             }
     }
 
@@ -139,6 +146,17 @@ impl Search {
             return;
         }
         self.clear();
+        let filters = if self.mode == Mode::Folder {
+            match self.filters.parse(self.folder_target) {
+                Ok(filters) => Some(filters),
+                Err(error) => {
+                    self.error = Some(error);
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         let (tx, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = cancel.clone();
@@ -150,15 +168,16 @@ impl Search {
         let exclusions = self.exclusions.clone();
         let ctx = ctx.clone();
         let worker = std::thread::Builder::new().spawn(move || {
-            let result = match mode {
-                Mode::Folder => run_folder(
-                    folder.as_deref().expect("validated folder"),
-                    folder_target,
-                    &query,
-                    &exclusions,
-                    &|| worker_cancel.load(Ordering::Relaxed),
-                ),
-                Mode::Index => run(
+            let result = match filters {
+                Some(filters) => FolderSearch::new(folder_target, &query, &exclusions, filters)
+                    .and_then(|search| {
+                        run_folder(
+                            folder.as_deref().expect("validated folder"),
+                            search,
+                            &|| worker_cancel.load(Ordering::Relaxed),
+                        )
+                    }),
+                None => run(
                     cli.as_deref().expect("validated locate tool"),
                     &query,
                     &worker_cancel,
@@ -211,10 +230,14 @@ impl Search {
         }
         let mut visible = true;
         let mut reveal = None;
+        // egui closes an open popup while drawing it, leaving Escape unconsumed.
+        let popup_was_open = ctx.memory(egui::Memory::any_popup_open);
         egui::Window::new(crate::i18n::text("Поиск файлов"))
             .id(egui::Id::new("file_search"))
             .open(&mut visible)
             .default_width(720.0)
+            .vscroll(true)
+            .drag_to_scroll(false)
             .show(ctx, |ui| {
                 let previous_mode = self.mode;
                 ui.horizontal(|ui| {
@@ -264,6 +287,9 @@ impl Search {
                             ui.small(crate::i18n::text("При поиске по выражению строки больше 64 КиБ пропускаются."));
                         }
                         crate::i18n::text(match self.folder_target {
+                            FolderTarget::Name if self.filters.active(self.folder_target) => {
+                                "Имя необязательно при заданных фильтрах"
+                            }
                             FolderTarget::Name => "Часть имени или маска: отчёт, *.rs, фото?.jpg",
                             FolderTarget::Text => "Текст для поиска, например TODO",
                             FolderTarget::Regex => "Регулярное выражение, например TODO\\s*:",
@@ -302,9 +328,6 @@ impl Search {
                         self.can_start(cli),
                         egui::Button::new(crate::i18n::text("Найти")),
                     ).clicked();
-                    if submit {
-                        self.start(cli, ctx);
-                    }
                     if let Some(job) = self.job() {
                         ui.spinner();
                         if job.cancelled() {
@@ -315,6 +338,16 @@ impl Search {
                         }
                     }
                 });
+                if self.mode == Mode::Folder && self.folder.is_some() {
+                    let (changed, filter_submit) = self.filters.show(ui, self.folder_target);
+                    if changed {
+                        self.clear();
+                    }
+                    submit |= filter_submit;
+                }
+                if submit {
+                    self.start(cli, ctx);
+                }
                 if let Some(error) = &self.error {
                     ui.colored_label(ui.visuals().error_fg_color, error);
                 }
@@ -350,7 +383,7 @@ impl Search {
                     };
                     egui::ScrollArea::vertical()
                         .id_salt("search_results")
-                        .max_height(340.0)
+                        .max_height((ctx.screen_rect().height() * 0.45).min(340.0))
                         .show_rows(ui, row_height, results.matches.len(), |ui, rows| {
                             for index in rows {
                                 let hit = &results.matches[index];
@@ -392,7 +425,11 @@ impl Search {
                 }
             });
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
-            visible = false;
+            if popup_was_open {
+                ctx.memory_mut(egui::Memory::close_popup);
+            } else {
+                visible = false;
+            }
         }
         self.visible = visible && reveal.is_none();
         if !self.visible {
@@ -411,19 +448,81 @@ enum FolderMatcher<'a> {
     Content(Scanner<'a>),
 }
 
-impl<'a> FolderMatcher<'a> {
-    fn new(target: FolderTarget, query: &'a str) -> Result<Self, String> {
-        match target {
+struct FolderSearch<'a> {
+    matcher: FolderMatcher<'a>,
+    exclusions: Vec<Mask>,
+    filters: Filters,
+}
+
+impl<'a> FolderSearch<'a> {
+    fn new(
+        target: FolderTarget,
+        query: &'a str,
+        exclusions: &str,
+        filters: Filters,
+    ) -> Result<Self, String> {
+        let missing_query = match target {
+            FolderTarget::Name => query.trim().is_empty() && !filters.active(),
+            FolderTarget::Text | FolderTarget::Regex => query.is_empty(),
+        };
+        if missing_query || query.contains('\0') {
+            return Err(crate::i18n::text("Введите непустой запрос без NUL").into());
+        }
+        if query.len() > MAX_PATTERN_BYTES
+            || exclusions.len() > MAX_PATTERN_BYTES
+            || exclusions.contains('\0')
+        {
+            return Err(crate::i18n::text("Укоротите запрос или список исключений.").into());
+        }
+        let matcher = match target {
             FolderTarget::Name => {
+                let query = if query.trim().is_empty() { "" } else { query };
                 let query = normalize(query).into_owned();
                 let mask = query.contains(['*', '?']).then(|| Mask::new(&query));
-                Ok(Self::Name { query, mask })
+                FolderMatcher::Name { query, mask }
             }
-            FolderTarget::Text | FolderTarget::Regex => Ok(Self::Content(Scanner::new(
-                query,
-                target == FolderTarget::Regex,
-            )?)),
+            FolderTarget::Text | FolderTarget::Regex => {
+                FolderMatcher::Content(Scanner::new(query, target == FolderTarget::Regex)?)
+            }
+        };
+        let exclusions = exclusions
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(|name| Mask::new(&normalize(name)))
+            .collect();
+        Ok(Self {
+            matcher,
+            exclusions,
+            filters,
+        })
+    }
+
+    fn matches_candidate(&self, directory: &Directory, entry: &Entry) -> io::Result<bool> {
+        if !self.filters.matches_kind(entry.kind.as_ref().ok().copied())
+            || !self.filters.matches_extension(&entry.name)
+        {
+            return Ok(false);
         }
+        if let FolderMatcher::Name { query, mask } = &self.matcher {
+            if !query.is_empty() {
+                let name = entry.name.to_string_lossy();
+                let normalized = normalize(&name);
+                let found = match mask {
+                    Some(mask) => mask.matches(&normalized),
+                    None => normalized.contains(query.as_str()),
+                };
+                if !found {
+                    return Ok(false);
+                }
+            }
+        }
+        if self.filters.needs_metadata() {
+            return self
+                .filters
+                .matches_metadata(directory.entry_metadata(&entry.name)?);
+        }
+        Ok(true)
     }
 }
 
@@ -437,31 +536,10 @@ fn check_cancelled(cancelled: &impl Fn() -> bool) -> Result<(), String> {
 
 fn run_folder(
     folder: &Path,
-    target: FolderTarget,
-    query: &str,
-    exclusions: &str,
+    mut search: FolderSearch<'_>,
     cancelled: &impl Fn() -> bool,
 ) -> Result<Results, String> {
     check_cancelled(cancelled)?;
-    if query.is_empty()
-        || (target == FolderTarget::Name && query.trim().is_empty())
-        || query.contains('\0')
-    {
-        return Err(crate::i18n::text("Введите непустой запрос без NUL").into());
-    }
-    if query.len() > MAX_PATTERN_BYTES
-        || exclusions.len() > MAX_PATTERN_BYTES
-        || exclusions.contains('\0')
-    {
-        return Err(crate::i18n::text("Укоротите запрос или список исключений.").into());
-    }
-    let mut matcher = FolderMatcher::new(target, query)?;
-    let exclusions = exclusions
-        .split(',')
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(|name| Mask::new(&normalize(name)))
-        .collect::<Vec<_>>();
 
     let directory = Directory::open(folder.to_path_buf()).map_err(|error| {
         crate::tr_format!(
@@ -478,7 +556,8 @@ fn run_folder(
     let mut long_lines = 0;
     loop {
         check_cancelled(cancelled)?;
-        let at_depth_limit = directories.len() == MAX_OPEN_DIRECTORIES;
+        let at_depth_limit =
+            directories.len() == search.filters.depth.unwrap_or(MAX_OPEN_DIRECTORIES);
         let Some(directory) = directories.last_mut() else {
             break;
         };
@@ -494,28 +573,45 @@ fn run_folder(
                 continue;
             }
         };
-        if !exclusions.is_empty() {
+        if !search.exclusions.is_empty() {
             let name = entry.name.to_string_lossy();
             let normalized = normalize(&name);
-            if exclusions.iter().any(|mask| mask.matches(&normalized)) {
+            if search
+                .exclusions
+                .iter()
+                .any(|mask| mask.matches(&normalized))
+            {
                 continue;
             }
         }
-        match &mut matcher {
-            FolderMatcher::Name { query, mask } => {
-                let name = entry.name.to_string_lossy();
-                let normalized = normalize(&name);
-                let found = match mask {
-                    Some(mask) => mask.matches(&normalized),
-                    None => normalized.contains(query.as_str()),
-                };
-                if found {
-                    matches.push(directory.path.join(&entry.name).into());
-                }
+        let candidate = match search.matches_candidate(directory, &entry) {
+            Ok(candidate) => candidate,
+            Err(_) => {
+                unreadable += 1;
+                false
             }
-            FolderMatcher::Content(scanner) if matches!(entry.kind, Ok(EntryKind::File)) => {
+        };
+        match &mut search.matcher {
+            FolderMatcher::Name { .. } if candidate => {
+                matches.push(directory.path.join(&entry.name).into());
+            }
+            FolderMatcher::Content(scanner) if candidate => {
                 match directory.open_file(&entry.name) {
                     Ok(Some((file, metadata))) => {
+                        if search.filters.needs_metadata() {
+                            // The file may have changed since the preliminary no-follow stat.
+                            match search
+                                .filters
+                                .matches_metadata(EntryMetadata::for_open_file(&metadata))
+                            {
+                                Ok(true) => {}
+                                Ok(false) => continue,
+                                Err(_) => {
+                                    unreadable += 1;
+                                    continue;
+                                }
+                            }
+                        }
                         let remaining = MAX_RESULTS + 1 - matches.len();
                         match scanner.scan(file, metadata, remaining, cancelled)? {
                             Scan::Text {
@@ -540,14 +636,16 @@ fn run_folder(
                     Err(_) => unreadable += 1,
                 }
             }
-            FolderMatcher::Content(_) => {}
+            _ => {}
         }
         if matches.len() > MAX_RESULTS {
             break;
         }
         match entry.kind {
             Ok(EntryKind::File | EntryKind::Other) => {}
-            Ok(EntryKind::Directory) if at_depth_limit => depth_limited = true,
+            Ok(EntryKind::Directory) if at_depth_limit => {
+                depth_limited |= search.filters.depth.is_none();
+            }
             Ok(EntryKind::Directory) => match directory.open_child(&entry.name) {
                 Ok(Some(directory)) => directories.push(directory),
                 Ok(None) => {}
@@ -717,8 +815,88 @@ mod tests {
     use super::*;
     use std::{cell::Cell, fs};
 
+    fn run_folder(
+        folder: &Path,
+        target: FolderTarget,
+        query: &str,
+        exclusions: &str,
+        cancelled: &impl Fn() -> bool,
+    ) -> Result<Results, String> {
+        let search = FolderSearch::new(
+            target,
+            query,
+            exclusions,
+            FilterInput::default().parse(target)?,
+        )?;
+        super::run_folder(folder, search, cancelled)
+    }
+
     fn paths(results: &Results) -> Vec<PathBuf> {
         results.matches.iter().map(|hit| hit.path.clone()).collect()
+    }
+
+    #[test]
+    fn escape_dismisses_the_filter_dropdown_before_closing_search() {
+        use egui::accesskit::{Action, ActionRequest};
+
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        ctx.style_mut(|style| style.animation_time = 0.0);
+        let root = tempfile::tempdir().unwrap();
+        let mut search = Search::default();
+        search.open(Some(root.path()));
+
+        let mut draw = |events| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(640.0, 400.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            ctx.run(input, |ctx| {
+                search.show(ctx, None);
+            })
+        };
+        let click = |output: egui::FullOutput, label| {
+            let nodes = output.platform_output.accesskit_update.unwrap().nodes;
+            let (target, _) = nodes
+                .into_iter()
+                .find(|(_, node)| {
+                    node.label() == Some(label) && node.supports_action(Action::Click)
+                })
+                .expect("accessible search control");
+            vec![egui::Event::AccessKitActionRequest(ActionRequest {
+                action: Action::Click,
+                target,
+                data: None,
+            })]
+        };
+        let _ = draw(vec![]);
+        let open_filters = click(draw(vec![]), crate::i18n::text("Фильтры"));
+        let filters = draw(open_filters);
+        let open_type_menu = click(filters, crate::i18n::text("Тип объекта"));
+        let _ = draw(open_type_menu);
+        assert!(ctx.memory(egui::Memory::any_popup_open));
+
+        let escape = |pressed| egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let after_popup = draw(vec![escape(true), escape(false)]);
+        assert!(!ctx.memory(egui::Memory::any_popup_open));
+        let _ = click(after_popup, crate::i18n::text("Тип объекта"));
+        // Changing the search target can remove a combo box before it processes Escape.
+        ctx.memory_mut(|memory| memory.open_popup(egui::Id::new("removed_filter_popup")));
+        let after_removed_popup = draw(vec![escape(true), escape(false)]);
+        assert!(!ctx.memory(egui::Memory::any_popup_open));
+        let _ = click(after_removed_popup, crate::i18n::text("Тип объекта"));
+        let _ = draw(vec![escape(true)]);
+        assert!(!search.visible);
     }
 
     #[test]

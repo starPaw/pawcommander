@@ -95,11 +95,13 @@ Properties show available dates and permissions for selected roots. Unix permiss
 
 ## Search and Zed
 
-`Cmd/Ctrl+F` filters names in the current folder. `Cmd/Ctrl+Shift+F` opens search. **Folder and subfolders** walks the local folder open when you start Search. Enter a name fragment or a wildcard such as `*.rs`. Comma-separated exclusion masks skip matching names and prune matching directories. Folder search skips symlink branches and returns up to 1,000 results. It reports incomplete coverage if it cannot read a branch or reaches its depth limit. You can cancel the search and reveal a result in its parent folder.
+`Cmd/Ctrl+F` filters names in the current folder. `Cmd/Ctrl+Shift+F` opens search. **Folder and subfolders** walks the local folder open when you start Search. Enter a name fragment or a wildcard such as `*.rs`. Comma-separated exclusion masks skip matching names and prune matching directories. Folder search skips symlink branches and returns up to 1,000 results. It reports incomplete coverage if it cannot read a branch or reaches the built-in traversal limit. You can cancel the search and reveal a result in its parent folder.
 
 **Locate index** uses `locate` or `plocate`, with a 15-second wait limit. An index can omit restricted folders and contain stale paths. Check **Settings → Tools** to see detected tools. On Windows, compatible command-line tools must be available in `PATH`.
 
 In **Folder and subfolders**, choose **File text** for a literal query or **Regular expression** for a regex. Matching runs line by line and is case-sensitive by default. Results show the path, line number, and a text excerpt. Search skips files over 1 MiB, files containing a NUL byte, and files with invalid UTF-8. Regex search also skips lines over 64 KiB. The result list holds up to 1,000 matching lines.
+
+Open **Filters** to combine entry type, extension, size, modification date, and depth with your query and exclusions. Size and extension apply to regular files. Size bounds are inclusive and share the selected unit. Enter dates as `YYYY-MM-DD` in local time. The **Modified through** date includes the whole day. Set a maximum depth from `1` to `64`, where `1` searches the starting folder's immediate children. You can leave the **File name** query empty when a filter is set.
 
 **Open in Zed** sends a local path or an SSH URL to Zed. Normal opening of a remote file uses a bounded content check to recognize text (UTF-8 or BOM-marked UTF-16); explicitly choosing Zed bypasses that check. Other remote files must be copied locally before opening in external apps.
 

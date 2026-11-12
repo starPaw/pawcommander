@@ -1,3 +1,4 @@
+use chrono::{DateTime, TimeDelta, Utc};
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, Metadata};
 use std::io;
@@ -26,6 +27,38 @@ pub(super) enum EntryKind {
     Directory,
     File,
     Other,
+}
+
+pub(super) struct EntryMetadata {
+    pub kind: EntryKind,
+    pub size: u64,
+    pub modified: Option<DateTime<Utc>>,
+}
+
+impl EntryMetadata {
+    pub fn for_open_file(metadata: &Metadata) -> Self {
+        Self {
+            kind: EntryKind::File,
+            size: metadata.len(),
+            modified: modified_time(metadata),
+        }
+    }
+}
+
+fn modified_time(metadata: &Metadata) -> Option<DateTime<Utc>> {
+    use std::time::SystemTime;
+    match metadata
+        .modified()
+        .ok()?
+        .duration_since(SystemTime::UNIX_EPOCH)
+    {
+        Ok(duration) => {
+            DateTime::UNIX_EPOCH.checked_add_signed(TimeDelta::from_std(duration).ok()?)
+        }
+        Err(error) => {
+            DateTime::UNIX_EPOCH.checked_sub_signed(TimeDelta::from_std(error.duration()).ok()?)
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -80,6 +113,18 @@ impl Directory {
         }))
     }
 
+    pub fn entry_metadata(&self, name: &OsStr) -> io::Result<EntryMetadata> {
+        let stat = fs::statat(self.entries.fd()?, name, AtFlags::SYMLINK_NOFOLLOW)?;
+        // The width of time_t varies between targets. Day precision only needs seconds.
+        #[allow(clippy::unnecessary_cast)]
+        let modified = DateTime::from_timestamp(stat.st_mtime as i64, 0);
+        Ok(EntryMetadata {
+            kind: entry_kind(FileType::from_raw_mode(stat.st_mode)),
+            size: u64::try_from(stat.st_size).map_err(|_| io::ErrorKind::InvalidData)?,
+            modified,
+        })
+    }
+
     pub fn open_file(&self, name: &OsStr) -> io::Result<Option<(File, Metadata)>> {
         let parent = self.entries.fd()?;
         let stat = fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)?;
@@ -132,6 +177,15 @@ impl Directory {
             return Ok(None);
         }
         Self::open(path).map(Some)
+    }
+
+    pub fn entry_metadata(&self, name: &OsStr) -> io::Result<EntryMetadata> {
+        let metadata = fs::symlink_metadata(self.path.join(name))?;
+        Ok(EntryMetadata {
+            kind: entry_kind(&metadata),
+            size: metadata.len(),
+            modified: modified_time(&metadata),
+        })
     }
 
     pub fn open_file(&self, name: &OsStr) -> io::Result<Option<(File, Metadata)>> {
