@@ -591,7 +591,7 @@ enum SavedLocation {
 
 // Preserve native names that PathBuf's serializer cannot handle.
 #[derive(Clone, Serialize, Deserialize)]
-enum SavedPath {
+pub(crate) enum SavedPath {
     Utf8(String),
     Unix(Vec<u8>),
     Windows(Vec<u16>),
@@ -657,7 +657,7 @@ impl From<&Path> for SavedPath {
 }
 
 impl SavedPath {
-    fn into_path(self) -> Option<PathBuf> {
+    pub(crate) fn into_path(self) -> Option<PathBuf> {
         match self {
             Self::Utf8(path) => Some(path.into()),
             #[cfg(unix)]
@@ -2037,7 +2037,7 @@ impl PawCommander {
             native_drag: Default::default(),
             editor_job: None,
             tools: crate::tools::Tools::detect(),
-            search: Default::default(),
+            search: crate::search::Search::load(cc.storage),
         }
     }
     fn tab(&self) -> &Tab {
@@ -5150,6 +5150,7 @@ impl eframe::App for PawCommander {
         eframe::set_value(storage, Self::SESSION_KEY, &session);
         eframe::set_value(storage, Self::WORKSPACES_KEY, &self.workspaces);
         eframe::set_value(storage, Self::FOLDER_VIEWS_KEY, &saved_views);
+        self.search.save(storage);
     }
 }
 

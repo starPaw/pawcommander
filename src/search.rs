@@ -3,6 +3,7 @@ mod content;
 mod directory;
 mod filters;
 mod index;
+mod saved;
 
 use crate::name_match::{normalize, Mask};
 use content::{LineMatch, Scan, Scanner};
@@ -85,7 +86,7 @@ enum Mode {
     Index,
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum FolderTarget {
     #[default]
     Name,
@@ -103,6 +104,9 @@ pub struct Search {
     query: String,
     exclusions: String,
     filters: FilterInput,
+    saved: Vec<saved::SavedSearch>,
+    saved_edit: Option<saved::Editor>,
+    saved_popup: Option<egui::Id>,
     jobs: [Option<Job>; 2],
     results: Option<Results>,
     selected: Option<usize>,
@@ -396,6 +400,7 @@ impl Search {
         self.poll();
         self.poll_index_inspection(ctx);
         if !self.visible {
+            self.close_saved_popup(ctx);
             self.poll_index_reveal(ctx);
             return None;
         }
@@ -403,7 +408,7 @@ impl Search {
         let mut reveal = None;
         // egui closes an open popup while drawing it, leaving Escape unconsumed.
         let popup_was_open = ctx.memory(egui::Memory::any_popup_open);
-        egui::Window::new(crate::i18n::text("Поиск файлов"))
+        let window = egui::Window::new(crate::i18n::text("Поиск файлов"))
             .id(egui::Id::new("file_search"))
             .open(&mut visible)
             .default_width(720.0)
@@ -519,6 +524,7 @@ impl Search {
                 if submit {
                     self.start(cli, ctx);
                 }
+                self.show_saved(ui, cli);
                 if let Some(error) = &self.error {
                     ui.colored_label(ui.visuals().error_fg_color, error);
                 }
@@ -609,7 +615,7 @@ impl Search {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
             if popup_was_open {
                 ctx.memory_mut(egui::Memory::close_popup);
-            } else {
+            } else if self.saved_edit.take().is_none() {
                 visible = false;
             }
         }
@@ -625,7 +631,11 @@ impl Search {
             reveal = checked;
         }
         self.visible = visible && reveal.is_none();
+        if !self.visible || window.and_then(|response| response.inner).is_none() {
+            self.close_saved_popup(ctx);
+        }
         if !self.visible {
+            self.saved_edit = None;
             self.cancel_work();
         } else if self.job().is_some() || self.checking_index_reveal() {
             ctx.request_repaint_after(Duration::from_millis(100));
@@ -645,6 +655,28 @@ struct FolderSearch<'a> {
     filters: Filters,
 }
 
+fn validate_folder_query(
+    target: FolderTarget,
+    query: &str,
+    exclusions: &str,
+    filters: &Filters,
+) -> Result<(), String> {
+    let missing_query = match target {
+        FolderTarget::Name => query.trim().is_empty() && !filters.active(),
+        FolderTarget::Text | FolderTarget::Regex => query.is_empty(),
+    };
+    if missing_query || query.contains('\0') {
+        return Err(crate::i18n::text("Введите непустой запрос без NUL").into());
+    }
+    if query.len() > MAX_PATTERN_BYTES
+        || exclusions.len() > MAX_PATTERN_BYTES
+        || exclusions.contains('\0')
+    {
+        return Err(crate::i18n::text("Укоротите запрос или список исключений.").into());
+    }
+    Ok(())
+}
+
 impl<'a> FolderSearch<'a> {
     fn new(
         target: FolderTarget,
@@ -652,19 +684,7 @@ impl<'a> FolderSearch<'a> {
         exclusions: &str,
         filters: Filters,
     ) -> Result<Self, String> {
-        let missing_query = match target {
-            FolderTarget::Name => query.trim().is_empty() && !filters.active(),
-            FolderTarget::Text | FolderTarget::Regex => query.is_empty(),
-        };
-        if missing_query || query.contains('\0') {
-            return Err(crate::i18n::text("Введите непустой запрос без NUL").into());
-        }
-        if query.len() > MAX_PATTERN_BYTES
-            || exclusions.len() > MAX_PATTERN_BYTES
-            || exclusions.contains('\0')
-        {
-            return Err(crate::i18n::text("Укоротите запрос или список исключений.").into());
-        }
+        validate_folder_query(target, query, exclusions, &filters)?;
         let matcher = match target {
             FolderTarget::Name => {
                 let query = if query.trim().is_empty() { "" } else { query };
@@ -912,10 +932,15 @@ fn read_capped(reader: impl Read, limit: usize) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn run(cli: &Path, query: &str, cancel: &AtomicBool, timeout: Duration) -> Result<Results, String> {
+fn validate_index_query(query: &str) -> Result<(), String> {
     if query.trim().is_empty() || query.contains('\0') {
         return Err(crate::i18n::text("Введите непустой запрос без NUL").into());
     }
+    Ok(())
+}
+
+fn run(cli: &Path, query: &str, cancel: &AtomicBool, timeout: Duration) -> Result<Results, String> {
+    validate_index_query(query)?;
     let mut child = command(cli, query).spawn().map_err(|e| {
         crate::tr_format!(
             "Не удалось запустить locate: {e}",

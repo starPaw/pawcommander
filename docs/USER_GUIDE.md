@@ -103,6 +103,8 @@ In **Folder and subfolders**, choose **File text** for a literal query or **Regu
 
 Open **Filters** to combine entry type, extension, size, modification date, and depth with your query and exclusions. Size and extension apply to regular files. Size bounds are inclusive and share the selected unit. Enter dates as `YYYY-MM-DD` in local time. The **Modified through** date includes the whole day. Set a maximum depth from `1` to `64`, where `1` searches the starting folder's immediate children. You can leave the **File name** query empty when a filter is set.
 
+Choose **Save search…** and enter a name to reuse the query, scope, exclusions, and filters after restarting PawCommander. Select the name under **Saved searches** to run it again. Folder searches scan the saved folder even when a pane is open elsewhere. A saved Locate search queries the currently configured index. Use the **…** menu to rename or remove a saved search.
+
 **Open in Zed** sends a local path or an SSH URL to Zed. Normal opening of a remote file uses a bounded content check to recognize text (UTF-8 or BOM-marked UTF-16); explicitly choosing Zed bypasses that check. Other remote files must be copied locally before opening in external apps.
 
 Zed establishes its own SSH connection using its SSH configuration and authentication. PawCommander's stored secrets are not passed to Zed. A server must allow full SSH access and execution of Zed's helper; SFTP-only access is insufficient. Zed may install its remote server under `~/.zed_server`. Edits are saved on the server; the visible folder updates automatically, or use `F5` to refresh immediately. See [Zed Remote Development](https://zed.dev/docs/remote-development).

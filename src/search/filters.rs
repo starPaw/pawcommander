@@ -5,9 +5,10 @@ use super::{
 use crate::{i18n::text, name_match::normalize};
 use chrono::{Datelike, Local, NaiveDate};
 use eframe::egui;
+use serde::{Deserialize, Serialize};
 use std::{ffi::OsStr, io, path::Path};
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 enum EntryType {
     #[default]
     Any,
@@ -27,7 +28,7 @@ impl EntryType {
     }
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 enum SizeUnit {
     #[default]
     Bytes,
@@ -56,7 +57,8 @@ impl SizeUnit {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub(super) struct FilterInput {
     entry_type: EntryType,
     extension: String,
