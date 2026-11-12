@@ -1325,6 +1325,24 @@ fn publish_replacement(
     expected: &EntryMetadata,
     preserve: &mut bool,
 ) -> Result<(), String> {
+    publish_replacement_with_backup_rename(
+        payload,
+        target,
+        staging,
+        expected,
+        preserve,
+        rename_without_replacing,
+    )
+}
+
+fn publish_replacement_with_backup_rename(
+    payload: &Location,
+    target: &Location,
+    staging: &Location,
+    expected: &EntryMetadata,
+    preserve: &mut bool,
+    backup_rename: impl FnOnce(&Location, &Location) -> Result<(), String>,
+) -> Result<(), String> {
     let target_changed = || format!("Назначение {target} изменилось после показа диалога");
     if !entry_metadata(target)?.is_some_and(|meta| expected.matches_file(&meta)) {
         return Err(target_changed());
@@ -1333,8 +1351,9 @@ fn publish_replacement(
     // A lost SFTP reply can hide a successful rename. Preserve the staging
     // directory until the old file is either restored or safely replaced.
     *preserve = target.remote();
-    rename_without_replacing(target, &backup)
-        .map_err(|e| format!("{e}. Проверьте прежний файл в {backup}"))?;
+    backup_rename(target, &backup).map_err(|e| {
+        crate::i18n::initial_backup_rename_failed(&e, target, &backup, target.remote())
+    })?;
     *preserve = true;
     let result = (|| {
         if !entry_metadata(&backup)?.is_some_and(|meta| expected.matches_file(&meta)) {
@@ -2658,6 +2677,60 @@ mod tests {
         );
         assert_eq!(fs::read(target.path()).unwrap(), b"changed elsewhere");
         assert_eq!(fs::read_dir(target_dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn failed_initial_backup_rename_retains_original_destination_and_cleans_staging() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root: Location = fixture.path().to_path_buf().into();
+        let source = root.join("report.txt");
+        let target_dir = create_directory(&root, "target").unwrap();
+        let target = target_dir.join("report.txt");
+        fs::write(source.path(), b"new source payload").unwrap();
+        fs::write(target.path(), b"previous destination").unwrap();
+        let expected = entry_metadata(&target).unwrap().unwrap();
+        let mut backup_path = None;
+        let mut rename_calls = 0;
+
+        let error = fs_ops::copy_atomically_with_progress(
+            source.path(),
+            target.path(),
+            &mut Progress::default(),
+            |payload, _| {
+                assert_eq!(fs::read(payload).unwrap(), b"new source payload");
+                with_staging(&target, |staging, preserve| {
+                    publish_replacement_with_backup_rename(
+                        &payload.to_path_buf().into(),
+                        &target,
+                        staging,
+                        &expected,
+                        preserve,
+                        |from, to| {
+                            rename_calls += 1;
+                            assert_eq!(from, &target);
+                            assert_eq!(to, &staging.join("previous"));
+                            backup_path = Some(to.clone());
+                            Err("injected first backup rename denial".into())
+                        },
+                    )
+                })
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(rename_calls, 1);
+        let backup_path = backup_path.unwrap();
+        assert!(!backup_path.path().exists());
+        assert!(!backup_path.parent().unwrap().path().exists());
+        assert_eq!(fs::read(source.path()).unwrap(), b"new source payload");
+        assert_eq!(fs::read(target.path()).unwrap(), b"previous destination");
+        assert_eq!(fs::read_dir(target_dir.path()).unwrap().count(), 1);
+        assert!(error.starts_with("injected first backup rename denial"));
+        assert!(error.contains(&target.display().to_string()), "{error}");
+        assert!(
+            !error.contains(&backup_path.display().to_string()),
+            "guidance must not direct the user to a removed backup: {error}"
+        );
     }
 
     #[test]

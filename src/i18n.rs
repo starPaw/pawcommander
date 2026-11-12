@@ -35,6 +35,36 @@ fn format_source_changed(english: bool, source: impl std::fmt::Display) -> Strin
     }
 }
 
+pub(crate) fn initial_backup_rename_failed(
+    error: &str,
+    target: impl std::fmt::Display,
+    backup: impl std::fmt::Display,
+    remote: bool,
+) -> String {
+    format_initial_backup_rename_failed(is_english(), error, target, backup, remote)
+}
+
+fn format_initial_backup_rename_failed(
+    english: bool,
+    error: &str,
+    target: impl std::fmt::Display,
+    backup: impl std::fmt::Display,
+    remote: bool,
+) -> String {
+    match (english, remote) {
+        (true, false) => format!("{error}. The existing destination remains at {target}"),
+        (false, false) => {
+            format!("{error}. Прежний файл сохранён по исходному пути {target}")
+        }
+        (true, true) => format!(
+            "{error}. Check the original destination {target} and the possible backup {backup} before retrying"
+        ),
+        (false, true) => format!(
+            "{error}. Перед повтором проверьте исходное назначение {target} и возможную резервную копию {backup}"
+        ),
+    }
+}
+
 fn translate(english: bool, russian: &'static str) -> &'static str {
     if !english {
         return russian;
@@ -572,6 +602,33 @@ macro_rules! tr_format {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initial_backup_rename_guidance_distinguishes_local_and_ambiguous_sftp_in_both_languages() {
+        let target = "/Документы/original {name}.txt";
+        let backup = "/Документы/.staging/previous";
+        for (english, local_guidance, remote_guidance) in [
+            (
+                true,
+                format!("denied. The existing destination remains at {target}"),
+                format!("denied. Check the original destination {target} and the possible backup {backup} before retrying"),
+            ),
+            (
+                false,
+                format!("denied. Прежний файл сохранён по исходному пути {target}"),
+                format!("denied. Перед повтором проверьте исходное назначение {target} и возможную резервную копию {backup}"),
+            ),
+        ] {
+            let local =
+                format_initial_backup_rename_failed(english, "denied", target, backup, false);
+            let remote =
+                format_initial_backup_rename_failed(english, "denied", target, backup, true);
+            assert_eq!(local, local_guidance);
+            assert_eq!(remote, remote_guidance);
+            assert!(!local.contains(backup));
+            assert!(remote.contains(target) && remote.contains(backup));
+        }
+    }
 
     #[test]
     fn source_change_error_explains_safe_retry_in_both_languages() {
