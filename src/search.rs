@@ -3,6 +3,7 @@ mod content;
 mod directory;
 mod filters;
 mod index;
+pub(crate) mod panel;
 mod saved;
 
 use crate::name_match::{normalize, Mask};
@@ -97,6 +98,7 @@ enum FolderTarget {
 #[derive(Default)]
 pub struct Search {
     pub visible: bool,
+    pub(crate) panel: panel::Panel,
     focus: bool,
     mode: Mode,
     folder_target: FolderTarget,
@@ -119,6 +121,7 @@ pub struct Search {
 
 impl Search {
     pub fn open(&mut self, folder: Option<&Path>) {
+        self.panel.cancel_pending();
         if self.folder.as_deref() != folder {
             if self.mode == Mode::Folder {
                 self.clear();
@@ -406,6 +409,7 @@ impl Search {
         }
         let mut visible = true;
         let mut reveal = None;
+        let mut dock_results = false;
         // egui closes an open popup while drawing it, leaving Escape unconsumed.
         let popup_was_open = ctx.memory(egui::Memory::any_popup_open);
         let window = egui::Window::new(crate::i18n::text("Поиск файлов"))
@@ -558,6 +562,14 @@ impl Search {
                     let excerpt_height = ui.text_style_height(&egui::TextStyle::Body);
                     let button_height = 28.0_f32.max(excerpt_height);
                     let can_reveal = !self.checking_index_reveal();
+                    let dock = ui.add_enabled(
+                        can_reveal,
+                        egui::Button::new(crate::i18n::text("Показать результаты отдельной панелью")),
+                    );
+                    if dock.clicked() {
+                        dock.surrender_focus();
+                        dock_results = true;
+                    }
                     let row_height = if has_context {
                         button_height + excerpt_height + ui.spacing().item_spacing.y
                     } else {
@@ -617,6 +629,17 @@ impl Search {
                 ctx.memory_mut(egui::Memory::close_popup);
             } else if self.saved_edit.take().is_none() {
                 visible = false;
+            }
+        }
+        if visible && dock_results {
+            if let Some(results) = self.results.take() {
+                let matching_lines =
+                    self.mode == Mode::Folder && self.folder_target != FolderTarget::Name;
+                self.panel
+                    .replace(results, matching_lines, self.query.clone());
+                self.selected = None;
+                visible = false;
+                ctx.request_repaint();
             }
         }
         if !visible {

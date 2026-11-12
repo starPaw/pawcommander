@@ -12,6 +12,7 @@ use crate::icons::{self, Icon};
 use crate::list_columns::{Column, ColumnLayout, ListColumns};
 use crate::operations::{Progress, ProgressView};
 use crate::preview::Preview;
+use crate::search::panel::{ReadyAction, TabTarget};
 use crate::shortcuts::{self, Command, ShortcutEditor, Shortcuts};
 use crate::tab_drag::{clamp_tab_slot, DragTab, TabDrop, TabDropTargets};
 use crate::theme::{appearance_menu, paint_focus, Palette, Theme};
@@ -2976,6 +2977,95 @@ impl PawCommander {
         tab.reveal_after_load = Some(path.into());
     }
 
+    fn show_search_results(&mut self, ctx: &egui::Context) {
+        if !self.search.panel.is_open() {
+            return;
+        }
+        let target = TabTarget {
+            pane: self.active,
+            tab: self.tab().id,
+            location: self.tab().path.clone(),
+        };
+        let destination = self
+            .settings
+            .split
+            .then(|| self.panes[1 - self.active].tab().path.clone());
+        let enabled = !self.keyboard_blocked(ctx);
+        let can_copy = self.job.is_none() && self.transfer.is_none();
+        self.search
+            .panel
+            .show(ctx, target, destination, enabled, can_copy);
+    }
+
+    fn search_target_is_current(&mut self, target: &TabTarget, ctx: &egui::Context) -> bool {
+        if self.active == target.pane
+            && self.tab().id == target.tab
+            && self.tab().path == target.location
+        {
+            return true;
+        }
+        self.search.panel.reject(
+            crate::i18n::text("Активная папка или вкладка изменилась. Повторите действие."),
+            ctx,
+        );
+        false
+    }
+
+    fn dispatch_search_result(&mut self, action: ReadyAction, ctx: &egui::Context) {
+        if self.keyboard_blocked(ctx) {
+            self.search.panel.reject(
+                crate::i18n::text("Закройте открытое окно или меню и повторите действие."),
+                ctx,
+            );
+            return;
+        }
+        match action {
+            ReadyAction::Open {
+                path,
+                directory: false,
+                ..
+            } => self.search.panel.open_file(path, ctx),
+            ReadyAction::Open {
+                path,
+                directory: true,
+                target,
+            } => {
+                if self.search_target_is_current(&target, ctx) {
+                    Self::restore_focus(ctx, None);
+                    let location = path.into();
+                    if self.folder_view(target.pane).mode == FolderMode::Columns {
+                        self.navigate_columns(target.pane, ColumnNavigation::Browse(location), ctx);
+                    } else {
+                        self.tab_mut().navigate(location, ctx);
+                    }
+                }
+            }
+            ReadyAction::Reveal { path, target } => {
+                if self.search_target_is_current(&target, ctx) {
+                    Self::restore_focus(ctx, None);
+                    self.reveal_search_result(path, ctx);
+                }
+            }
+            ReadyAction::Copy { paths, destination } => {
+                if self.job.is_some() || self.transfer.is_some() {
+                    self.search.panel.reject(
+                        crate::i18n::text("Дождитесь завершения текущей файловой операции и повторите копирование."),
+                        ctx,
+                    );
+                } else {
+                    self.start_transfer(
+                        ctx,
+                        crate::i18n::text("Копирование в соседнюю панель"),
+                        paths.into_iter().map(Location::from).collect(),
+                        destination,
+                        TransferKind::Copy,
+                        false,
+                    );
+                }
+            }
+        }
+    }
+
     fn toggle_split(&mut self) {
         self.settings.split = !self.settings.split;
         if !self.settings.split {
@@ -4918,6 +5008,7 @@ impl eframe::App for PawCommander {
         let mut tab_targets = TabDropTargets::default();
         self.toolbar(ctx, &mut actions);
         self.footer(ctx);
+        self.show_search_results(ctx);
         self.sidebar(ctx, &mut actions);
         let drop_enabled = self.drop_enabled() && !self.native_drag.active();
         let zed_available = self.tools.zed.is_some();
@@ -5022,6 +5113,9 @@ impl eframe::App for PawCommander {
                 Ok(request) => self.drop_files(request, ctx),
                 Err(error) => self.notice = Some((error, true)),
             }
+        }
+        if let Some(action) = self.search.panel.poll(ctx) {
+            self.dispatch_search_result(action, ctx);
         }
         if let Some(transfer) = &mut self.transfer {
             if let Some(conflict) = &mut transfer.conflict {
@@ -10518,6 +10612,62 @@ mod tests {
             .error
             .unwrap()
             .contains("search result no longer exists"));
+    }
+
+    #[test]
+    fn search_results_copy_to_captured_location_and_do_not_reveal_in_a_changed_tab() {
+        let root = tempfile::tempdir().unwrap();
+        let source_dir = root.path().join("source");
+        let destination = root.path().join("destination");
+        let other = root.path().join("other");
+        for folder in [&source_dir, &destination, &other] {
+            std::fs::create_dir(folder).unwrap();
+        }
+        let path = source_dir.join("found.txt");
+        std::fs::write(&path, "search hit").unwrap();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(source_dir.clone()));
+        app.settings.split = true;
+        let target = TabTarget {
+            pane: app.active,
+            tab: app.tab().id,
+            location: app.tab().path.clone(),
+        };
+        app.tab_mut().navigate(other.clone().into(), &ctx);
+        app.panes[1 - app.active]
+            .tab_mut()
+            .navigate(other.clone().into(), &ctx);
+        app.dispatch_search_result(
+            ReadyAction::Reveal {
+                path: path.clone(),
+                target,
+            },
+            &ctx,
+        );
+        assert_eq!(app.tab().path.local(), Some(other.as_path()));
+        assert!(app.tab().reveal_after_load.is_none());
+
+        app.dispatch_search_result(
+            ReadyAction::Copy {
+                paths: vec![path.clone()],
+                destination: destination.clone().into(),
+            },
+            &ctx,
+        );
+        assert!(app.job.is_some());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.job.is_some() && Instant::now() < deadline {
+            app.poll(&ctx);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(app.job.is_none());
+        assert_eq!(
+            std::fs::read(destination.join("found.txt")).unwrap(),
+            b"search hit"
+        );
+        assert_eq!(std::fs::read(path).unwrap(), b"search hit");
+        assert!(!other.join("found.txt").exists());
     }
 
     #[test]

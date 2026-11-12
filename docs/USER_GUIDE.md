@@ -105,6 +105,8 @@ Open **Filters** to combine entry type, extension, size, modification date, and 
 
 Choose **Save search…** and enter a name to reuse the query, scope, exclusions, and filters after restarting PawCommander. Select the name under **Saved searches** to run it again. Folder searches scan the saved folder even when a pane is open elsewhere. A saved Locate search queries the currently configured index. Use the **…** menu to rename or remove a saved search.
 
+Choose **Show in results pane** to keep the current results visible while you browse other folders. Select a result to open it or show it in the active pane. Select one or more files and choose **Copy to the other pane** to copy to the displayed destination. Multiple matching lines from a file select it once. If a selected path has disappeared, its rows are removed. Review the remaining selection before retrying a copy.
+
 **Open in Zed** sends a local path or an SSH URL to Zed. Normal opening of a remote file uses a bounded content check to recognize text (UTF-8 or BOM-marked UTF-16); explicitly choosing Zed bypasses that check. Other remote files must be copied locally before opening in external apps.
 
 Zed establishes its own SSH connection using its SSH configuration and authentication. PawCommander's stored secrets are not passed to Zed. A server must allow full SSH access and execution of Zed's helper; SFTP-only access is insufficient. Zed may install its remote server under `~/.zed_server`. Edits are saved on the server; the visible folder updates automatically, or use `F5` to refresh immediately. See [Zed Remote Development](https://zed.dev/docs/remote-development).
