@@ -1,4 +1,5 @@
 mod code;
+mod markup;
 
 use crate::vfs::{self, Location};
 use std::{
@@ -46,6 +47,7 @@ enum Content {
         body: String,
         truncated: bool,
         code: code::Code,
+        markup: Option<markup::Document>,
     },
     Image {
         size: [usize; 2],
@@ -63,9 +65,16 @@ pub struct Preview {
     generation: u64,
     result: Option<Result<Loaded, String>>,
     texture: Option<egui::TextureHandle>,
-    find: code::Find,
+    text: TextView,
     dirty: bool,
     fingerprint: Option<(u64, Option<std::time::SystemTime>)>,
+}
+
+#[derive(Default)]
+struct TextView {
+    find: code::Find,
+    source: bool,
+    revision: u64,
 }
 
 impl Preview {
@@ -98,7 +107,7 @@ impl Preview {
             generation: 0,
             result: None,
             texture: None,
-            find: code::Find::default(),
+            text: TextView::default(),
             dirty: false,
             fingerprint: None,
         }
@@ -175,8 +184,11 @@ impl Preview {
         ui.add(egui::Label::new(RichText::new(path.name()).heading()).truncate());
         ui.add_space(8.0);
         let image_height = ui.available_height().max(1.0);
-        let mut scroll =
-            egui::ScrollArea::vertical().id_salt(("quick-look-content", self.generation));
+        let mut scroll = egui::ScrollArea::vertical().id_salt((
+            "quick-look-content",
+            self.generation,
+            self.text.revision,
+        ));
         if changed_path {
             scroll = scroll.vertical_scroll_offset(0.0);
         }
@@ -192,9 +204,18 @@ impl Preview {
                         body,
                         truncated,
                         code,
+                        markup,
                     } => {
                         ui.push_id(self.generation, |ui| {
-                            draw_text(ui, body, *truncated, code, &mut self.find, 14.0)
+                            draw_text(
+                                ui,
+                                body,
+                                *truncated,
+                                code,
+                                markup.as_ref(),
+                                &mut self.text,
+                                14.0,
+                            )
                         });
                     }
                     Content::Image { .. } => {
@@ -213,7 +234,7 @@ impl Preview {
     }
 
     pub fn text_input(&self, ctx: &egui::Context) -> bool {
-        self.find.text_input(ctx)
+        self.text.find.text_input(ctx)
     }
 
     pub fn clear(&mut self, ctx: &egui::Context) {
@@ -232,7 +253,8 @@ impl Preview {
             self.path = path.cloned();
             self.generation = self.generation.wrapping_add(1);
             self.result = None;
-            self.find = code::Find::default();
+            self.text.find.clear(ctx);
+            self.text = TextView::default();
             self.texture = None;
             if let Some(path) = path {
                 if path.is_archive() {
@@ -286,7 +308,7 @@ impl Preview {
     fn show_details(&mut self, ui: &mut egui::Ui, path: &Location) {
         let muted = Palette::from_ctx(ui.ctx()).muted;
         egui::ScrollArea::vertical()
-            .id_salt(("file-preview-details", self.generation))
+            .id_salt(("file-preview-details", self.generation, self.text.revision))
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 match (&self.result, &self.texture) {
@@ -330,6 +352,7 @@ impl Preview {
                             body,
                             truncated,
                             code,
+                            markup,
                         } => {
                             ui.add_space(10.0);
                             ui.separator();
@@ -342,7 +365,15 @@ impl Preview {
                             );
                             ui.add_space(8.0);
                             ui.push_id(self.generation, |ui| {
-                                draw_text(ui, body, *truncated, code, &mut self.find, 11.0)
+                                draw_text(
+                                    ui,
+                                    body,
+                                    *truncated,
+                                    code,
+                                    markup.as_ref(),
+                                    &mut self.text,
+                                    11.0,
+                                )
                             });
                         }
                         Content::Message(message) => {
@@ -387,7 +418,8 @@ fn draw_text(
     body: &str,
     truncated: bool,
     code: &code::Code,
-    find: &mut code::Find,
+    markup: Option<&markup::Document>,
+    view: &mut TextView,
     font_size: f32,
 ) {
     if truncated {
@@ -396,7 +428,28 @@ fn draw_text(
             crate::i18n::text("Показано начало файла: до 32 КиБ, 1000 строк и 8 КиБ на строку."),
         );
     }
-    find.show(ui, body, code, font_size);
+    if let Some(document) = markup {
+        let old_source = view.source;
+        ui.horizontal_wrapped(|ui| {
+            ui.selectable_value(
+                &mut view.source,
+                false,
+                crate::i18n::text("Форматированный"),
+            );
+            ui.selectable_value(&mut view.source, true, crate::i18n::text("Исходный текст"));
+        });
+        if old_source != view.source {
+            view.find.clear(ui.ctx());
+            view.revision = view.revision.wrapping_add(1);
+        }
+        if !view.source {
+            ui.push_id(view.revision, |ui| document.show(ui, font_size));
+            return;
+        }
+    }
+    ui.push_id(view.revision, |ui| {
+        view.find.show(ui, body, code, font_size)
+    });
 }
 
 fn detail(ui: &mut egui::Ui, label: &str, value: &str) {
@@ -586,10 +639,12 @@ fn load_content(path: &Path, length: u64) -> Result<Content, String> {
     let mut body = utf8_prefix(&bytes, truncated)?;
     let truncated = code::bound(&mut body) || truncated;
     let code = code::Code::new(path, &body);
+    let markup = markup::parse(path, &body);
     Ok(Content::Text {
         body,
         truncated,
         code,
+        markup,
     })
 }
 
@@ -657,6 +712,24 @@ fn format_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn markup_load_uses_the_bounded_prefix_without_modifying_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("document.MARKDOWN");
+        let original = format!("# Заголовок\n\n{}", "я".repeat(TEXT_LIMIT));
+        fs::write(&path, &original).unwrap();
+        let loaded = load(&path).unwrap();
+        assert!(matches!(
+            loaded.content,
+            Content::Text {
+                truncated: true,
+                markup: Some(_),
+                ..
+            }
+        ));
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
 
     #[test]
     fn changed_selected_file_reloads_preview_without_changing_path() {

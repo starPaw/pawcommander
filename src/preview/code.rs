@@ -160,6 +160,17 @@ pub(super) struct Find {
 }
 
 impl Find {
+    pub(super) fn clear(&mut self, ctx: &egui::Context) {
+        if let Some((viewport, ids)) = self.editors {
+            if viewport == ctx.viewport_id() {
+                for id in ids {
+                    ctx.memory_mut(|m| m.surrender_focus(id));
+                }
+            }
+        }
+        *self = Self::default();
+    }
+
     pub(super) fn text_input(&self, ctx: &egui::Context) -> bool {
         self.editors.is_some_and(|(viewport, ids)| {
             viewport == ctx.viewport_id() && {
@@ -582,6 +593,34 @@ mod tests {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.button("Next file").request_focus();
                 assert!(!find.text_input(ctx));
+            });
+        });
+    }
+
+    #[test]
+    fn leaving_source_view_clears_search_focus_and_input_capture() {
+        let ctx = egui::Context::default();
+        let body = "target text";
+        let code = Code::new(Path::new("document.md"), body);
+        let mut find = Find {
+            query: "target".into(),
+            ..Default::default()
+        };
+        find.update(body);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let id = find.show(ui, body, &code, 14.0);
+                ui.memory_mut(|m| m.request_focus(id));
+                assert!(find.text_input(ctx));
+                find.clear(ctx);
+                assert!(!find.text_input(ctx));
+                assert!(!ctx.memory(|m| m.has_focus(id)));
+                assert!(find.query.is_empty());
+                assert!(find.matches.is_empty());
+                ui.button("Next file").request_focus();
+                let navigation = ctx.memory(|m| m.focused());
+                find.clear(ctx);
+                assert_eq!(ctx.memory(|m| m.focused()), navigation);
             });
         });
     }
