@@ -107,7 +107,7 @@ Choose **Source** for the existing line-numbered text view and Find controls; sw
 
 Select local items and use **Properties** or `Alt+Enter` to calculate their combined logical size and counts in the background. Hidden entries are included; overlapping selected trees are counted once. Symlinks are counted separately without following targets. Hard links are counted per path. Counts update as directory entries are read; cancellation keeps the partial result. The result is logical file size, not disk usage.
 
-Properties show available dates and permissions for selected roots. Unix permissions, UID, and GID do not represent ACLs or effective access; Windows shows read-only state. Properties are read-only and are not available for SFTP. Stop counting, close the window, or press `Esc` to request cancellation. Results can be partial when files disappear or access fails. Cancellation does not interrupt a blocked OS call.
+Properties show available dates and permissions for selected roots. Unix permissions, UID, and GID do not represent ACLs or effective access; Windows shows read-only state. Properties are read-only and are not available for SFTP. While counting, **Stop calculation** receives initial keyboard focus; press `Space` or `Enter` to stop. You can also close the window or press `Esc` to request cancellation. Results can be partial when files disappear or access fails. Cancellation does not interrupt a blocked OS call.
 
 ## Search and Zed
 

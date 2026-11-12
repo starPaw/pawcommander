@@ -1,6 +1,7 @@
 //! Read-only local properties. Cancellation is cooperative between filesystem calls.
 use chrono::{DateTime, Local};
 use eframe::egui;
+use std::cell::Cell;
 use std::collections::HashSet;
 #[cfg(any(not(windows), test))]
 use std::fs;
@@ -60,6 +61,7 @@ impl Summary {
 pub struct Properties {
     state: Arc<Mutex<Summary>>,
     cancel: Arc<AtomicBool>,
+    focus_stop: Cell<bool>,
 }
 impl Drop for Properties {
     fn drop(&mut self) {
@@ -92,7 +94,11 @@ impl Properties {
             summary.error(Path::new(crate::i18n::text("Подсчёт не запущен")), error);
             summary.done = true;
         }
-        Self { state, cancel }
+        Self {
+            state,
+            cancel,
+            focus_stop: Cell::new(true),
+        }
     }
 
     /// Returns false after closing; dropping the window also cancels the worker.
@@ -112,7 +118,11 @@ impl Properties {
                         } else {
                             crate::i18n::text("Подсчёт…")
                         });
-                        if ui.button(crate::i18n::text("Остановить подсчёт")).clicked() {
+                        let stop = ui.button(crate::i18n::text("Остановить подсчёт"));
+                        if !ui.is_sizing_pass() && self.focus_stop.replace(false) {
+                            stop.request_focus();
+                        }
+                        if stop.clicked() {
                             self.cancel.store(true, Ordering::Relaxed);
                         }
                     });
@@ -502,6 +512,78 @@ mod tests {
         assert!(result.done && result.cancelled);
         assert_eq!((result.files, result.directories, result.bytes), (0, 1, 0));
         assert_eq!(result.errors, 0);
+    }
+
+    #[test]
+    fn counting_window_focuses_stop_for_keyboard_cancellation() {
+        for key in [egui::Key::Space, egui::Key::Enter] {
+            let ctx = egui::Context::default();
+            // A controlled in-progress state avoids racing a filesystem worker.
+            let properties = Properties {
+                state: Arc::new(Mutex::new(Summary::default())),
+                cancel: Arc::new(AtomicBool::new(false)),
+                focus_stop: Cell::new(true),
+            };
+            let background = egui::Id::new("background");
+            ctx.memory_mut(|memory| memory.request_focus(background));
+            for _ in 0..3 {
+                let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                    assert!(properties.show(ctx));
+                });
+            }
+            assert!(!properties.focus_stop.get());
+            let focused = ctx.memory(|memory| memory.focused());
+            assert!(focused.is_some() && focused != Some(background));
+            let input = egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| assert!(properties.show(ctx)));
+            assert!(properties.cancel.load(Ordering::Relaxed));
+
+            let temp = tempfile::tempdir().unwrap();
+            fs::write(temp.path().join("unscanned"), b"data").unwrap();
+            let result = scan(&[temp.path().into()], &properties.cancel, |_| {});
+            assert!(result.done && result.cancelled);
+            assert_eq!((result.files, result.bytes), (0, 0));
+            *properties.state.lock().unwrap() = result;
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                assert!(properties.show(ctx));
+            });
+        }
+    }
+
+    #[test]
+    fn counting_progress_does_not_reclaim_keyboard_focus() {
+        let ctx = egui::Context::default();
+        let properties = Properties {
+            state: Arc::new(Mutex::new(Summary::default())),
+            cancel: Arc::new(AtomicBool::new(false)),
+            focus_stop: Cell::new(true),
+        };
+        let mut other = None;
+        for frame in 0..5 {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let response = ui.button("Other control");
+                    other = Some(response.id);
+                    if frame == 3 {
+                        response.request_focus();
+                    }
+                });
+                properties.state.lock().unwrap().files += 1;
+                assert!(properties.show(ctx));
+            });
+            if frame >= 3 {
+                assert_eq!(ctx.memory(|memory| memory.focused()), other);
+            }
+        }
     }
 
     #[test]
