@@ -117,7 +117,14 @@ impl Directory {
             // SAFETY: this stream is live and exclusively borrowed. Clear the
             // thread-local errno immediately before readdir to distinguish EOF.
             let entry = unsafe {
-                *libc::__error() = 0;
+                #[cfg(target_os = "macos")]
+                {
+                    *libc::__error() = 0;
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    *libc::__errno_location() = 0;
+                }
                 libc::readdir(self.0.as_ptr())
             };
             if entry.is_null() {
@@ -190,12 +197,11 @@ impl DirectoryEntry<'_> {
             return Err(changed_directory());
         }
         count_entry(summary, &current);
-        Directory::open(
-            self.parent.fd(),
-            self.name,
-            (current.st_dev as u64, current.st_ino),
-        )
-        .map(Some)
+        // stat field widths vary by OS and target architecture (including
+        // 32-bit Linux); normalize both fields to MetadataExt identity widths.
+        #[allow(clippy::unnecessary_cast)]
+        let identity = (current.st_dev as u64, current.st_ino as u64);
+        Directory::open(self.parent.fd(), self.name, identity).map(Some)
     }
 }
 

@@ -10,10 +10,10 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-#[cfg(target_os = "macos")]
-mod macos;
-#[cfg(target_os = "macos")]
-use macos::scan_root;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod unix;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use unix::scan_root;
 
 #[derive(Default, Clone, Debug)]
 struct Summary {
@@ -221,7 +221,7 @@ fn scan(paths: &[PathBuf], cancel: &AtomicBool, mut progress: impl FnMut(&Summar
     summary
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn scan_root(
     path: PathBuf,
     metadata: Metadata,
@@ -406,7 +406,7 @@ mod tests {
         assert_eq!(result.errors, 0);
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn replacing_an_open_ancestor_keeps_the_scan_in_the_original_directory() {
         use std::os::unix::fs::symlink;
@@ -440,7 +440,7 @@ mod tests {
         assert_eq!(result.errors, 0);
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn replaced_child_directory_reports_partial_result_without_counting_replacement() {
         let temp = tempfile::tempdir().unwrap();
@@ -464,7 +464,7 @@ mod tests {
         assert!(result.error_examples[0].contains(&child.display().to_string()));
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn cancellation_after_observing_a_subdirectory_skips_descent() {
         let temp = tempfile::tempdir().unwrap();
