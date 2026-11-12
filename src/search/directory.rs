@@ -1,4 +1,5 @@
 use std::ffi::{OsStr, OsString};
+use std::fs::{File, Metadata};
 use std::io;
 use std::path::PathBuf;
 
@@ -17,7 +18,14 @@ pub(super) struct Directory {
 
 pub(super) struct Entry {
     pub name: OsString,
-    pub descendable: io::Result<bool>,
+    pub kind: io::Result<EntryKind>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum EntryKind {
+    Directory,
+    File,
+    Other,
 }
 
 #[cfg(unix)]
@@ -40,19 +48,18 @@ impl Directory {
             if name == "." || name == ".." {
                 continue;
             }
-            let descendable = match entry.file_type() {
-                FileType::Directory => Ok(true),
+            let kind = match entry.file_type() {
                 FileType::Unknown => self
                     .entries
                     .fd()
                     .and_then(|fd| fs::statat(fd, name, AtFlags::SYMLINK_NOFOLLOW))
-                    .map(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::Directory)
+                    .map(|stat| entry_kind(FileType::from_raw_mode(stat.st_mode)))
                     .map_err(io::Error::from),
-                _ => Ok(false),
+                kind => Ok(entry_kind(kind)),
             };
             return Ok(Some(Entry {
                 name: name.to_owned(),
-                descendable,
+                kind,
             }));
         }
         Ok(None)
@@ -72,6 +79,33 @@ impl Directory {
             entries: Dir::new(fd)?,
         }))
     }
+
+    pub fn open_file(&self, name: &OsStr) -> io::Result<Option<(File, Metadata)>> {
+        let parent = self.entries.fd()?;
+        let stat = fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)?;
+        if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
+            return Ok(None);
+        }
+        // Anchor the open to the same directory even if an ancestor is moved.
+        // NOFOLLOW refuses links, and NONBLOCK avoids waiting on a swapped FIFO.
+        let file = File::from(fs::openat(
+            parent,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?);
+        let metadata = file.metadata()?;
+        Ok(metadata.is_file().then_some((file, metadata)))
+    }
+}
+
+#[cfg(unix)]
+fn entry_kind(kind: FileType) -> EntryKind {
+    match kind {
+        FileType::Directory => EntryKind::Directory,
+        FileType::RegularFile => EntryKind::File,
+        _ => EntryKind::Other,
+    }
 }
 
 #[cfg(not(unix))]
@@ -85,7 +119,7 @@ impl Directory {
         self.entries.next().transpose().map(|entry| {
             entry.map(|entry| Entry {
                 name: entry.file_name(),
-                descendable: entry.metadata().map(|metadata| descendable(&metadata)),
+                kind: entry.metadata().map(|metadata| entry_kind(&metadata)),
             })
         })
     }
@@ -94,22 +128,38 @@ impl Directory {
         let path = self.path.join(name);
         // Revalidate before opening a path. A concurrent replacement after
         // this check can still change what the operating system opens.
-        if !descendable(&fs::symlink_metadata(&path)?) {
+        if entry_kind(&fs::symlink_metadata(&path)?) != EntryKind::Directory {
             return Ok(None);
         }
         Self::open(path).map(Some)
     }
+
+    pub fn open_file(&self, name: &OsStr) -> io::Result<Option<(File, Metadata)>> {
+        let path = self.path.join(name);
+        if entry_kind(&fs::symlink_metadata(&path)?) != EntryKind::File {
+            return Ok(None);
+        }
+        let file = crate::fs_ops::open_regular_source(&path)?;
+        let metadata = file.metadata()?;
+        Ok((entry_kind(&metadata) == EntryKind::File).then_some((file, metadata)))
+    }
 }
 
 #[cfg(not(unix))]
-fn descendable(metadata: &fs::Metadata) -> bool {
+fn entry_kind(metadata: &Metadata) -> EntryKind {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
         use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
         if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            return false;
+            return EntryKind::Other;
         }
     }
-    metadata.is_dir()
+    if metadata.is_dir() {
+        EntryKind::Directory
+    } else if metadata.is_file() {
+        EntryKind::File
+    } else {
+        EntryKind::Other
+    }
 }

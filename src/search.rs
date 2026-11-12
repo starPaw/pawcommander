@@ -1,8 +1,10 @@
-//! Live folder and indexed path search. Both run on a cancellable worker.
+//! Live name and content search in folders, plus indexed path search.
+mod content;
 mod directory;
 
 use crate::name_match::{normalize, Mask};
-use directory::Directory;
+use content::{LineMatch, Scan, Scanner};
+use directory::{Directory, EntryKind};
 use eframe::egui;
 use std::{
     io::{self, Read},
@@ -23,9 +25,23 @@ const MAX_PATTERN_BYTES: usize = 1024;
 const TIMEOUT: Duration = Duration::from_secs(15);
 
 struct Results {
-    paths: Vec<PathBuf>,
+    matches: Vec<SearchMatch>,
     limited: bool,
     warning: String,
+}
+
+struct SearchMatch {
+    path: PathBuf,
+    context: Option<LineMatch>,
+}
+
+impl From<PathBuf> for SearchMatch {
+    fn from(path: PathBuf) -> Self {
+        Self {
+            path,
+            context: None,
+        }
+    }
 }
 
 struct Job {
@@ -56,17 +72,26 @@ enum Mode {
     Index,
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum FolderTarget {
+    #[default]
+    Name,
+    Text,
+    Regex,
+}
+
 #[derive(Default)]
 pub struct Search {
     pub visible: bool,
     focus: bool,
     mode: Mode,
+    folder_target: FolderTarget,
     folder: Option<PathBuf>,
     query: String,
     exclusions: String,
     jobs: [Option<Job>; 2],
     results: Option<Results>,
-    selected: Option<PathBuf>,
+    selected: Option<usize>,
     error: Option<String>,
 }
 
@@ -96,8 +121,13 @@ impl Search {
     }
 
     fn can_start(&self, cli: Option<&Path>) -> bool {
+        let has_query = if self.mode == Mode::Folder && self.folder_target != FolderTarget::Name {
+            !self.query.is_empty()
+        } else {
+            !self.query.trim().is_empty()
+        };
         self.job().is_none()
-            && !self.query.trim().is_empty()
+            && has_query
             && match self.mode {
                 Mode::Folder => self.folder.is_some(),
                 Mode::Index => cli.is_some(),
@@ -113,6 +143,7 @@ impl Search {
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = cancel.clone();
         let mode = self.mode;
+        let folder_target = self.folder_target;
         let folder = self.folder.clone();
         let cli = cli.map(Path::to_path_buf);
         let query = self.query.clone();
@@ -122,6 +153,7 @@ impl Search {
             let result = match mode {
                 Mode::Folder => run_folder(
                     folder.as_deref().expect("validated folder"),
+                    folder_target,
                     &query,
                     &exclusions,
                     &|| worker_cancel.load(Ordering::Relaxed),
@@ -215,7 +247,27 @@ impl Search {
                         } else {
                             ui.label(crate::i18n::text("Для поиска в папке откройте локальную папку в панели."));
                         }
-                        crate::i18n::text("Часть имени или маска: отчёт, *.rs, фото?.jpg")
+                        let previous_target = self.folder_target;
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(&mut self.folder_target, FolderTarget::Name, crate::i18n::text("Имя файла"));
+                            ui.selectable_value(&mut self.folder_target, FolderTarget::Text, crate::i18n::text("Текст файла"));
+                            ui.selectable_value(&mut self.folder_target, FolderTarget::Regex, crate::i18n::text("Регулярное выражение"));
+                        });
+                        if self.folder_target != previous_target {
+                            self.clear();
+                            self.focus = true;
+                        }
+                        if self.folder_target != FolderTarget::Name {
+                            ui.small(crate::i18n::text("Поиск по строкам в файлах UTF-8 до 1 МиБ, с учётом регистра по умолчанию."));
+                        }
+                        if self.folder_target == FolderTarget::Regex {
+                            ui.small(crate::i18n::text("При поиске по выражению строки больше 64 КиБ пропускаются."));
+                        }
+                        crate::i18n::text(match self.folder_target {
+                            FolderTarget::Name => "Часть имени или маска: отчёт, *.rs, фото?.jpg",
+                            FolderTarget::Text => "Текст для поиска, например TODO",
+                            FolderTarget::Regex => "Регулярное выражение, например TODO\\s*:",
+                        })
                     }
                     Mode::Index => {
                         ui.label(crate::i18n::text("Поиск по полному пути в локальном индексе, без учёта регистра."));
@@ -271,38 +323,70 @@ impl Search {
                 }
                 if let Some(results) = &self.results {
                     ui.separator();
-                    ui.label(crate::tr_format!("Найдено: {}{}", "Found: {}{}", results.paths.len(), if results.limited { crate::i18n::text("+ · Уточните запрос, показаны первые 1000") } else { "" }));
+                    let has_context = self.mode == Mode::Folder && self.folder_target != FolderTarget::Name;
+                    let count = results.matches.len();
+                    let limit = if results.limited { crate::i18n::text("+ · Уточните запрос, показаны первые 1000") } else { "" };
+                    ui.label(if has_context {
+                        crate::tr_format!("Строк с совпадениями: {count}{limit}", "Matching lines: {count}{limit}")
+                    } else {
+                        crate::tr_format!("Найдено: {count}{limit}", "Found: {count}{limit}")
+                    });
                     if !results.warning.is_empty() {
                         ui.colored_label(ui.visuals().warn_fg_color, &results.warning);
                     }
-                    if results.paths.is_empty() {
+                    if results.matches.is_empty() {
                         ui.label(match self.mode {
+                            Mode::Folder if has_context => crate::i18n::text("В просмотренных файлах совпадений нет."),
                             Mode::Folder => crate::i18n::text("В просмотренных папках совпадений нет."),
                             Mode::Index => crate::i18n::text("Совпадений в индексе нет. Проверьте запрос и актуальность базы locate."),
                         });
                     }
+                    let excerpt_height = ui.text_style_height(&egui::TextStyle::Body);
+                    let button_height = 28.0_f32.max(excerpt_height);
+                    let row_height = if has_context {
+                        button_height + excerpt_height + ui.spacing().item_spacing.y
+                    } else {
+                        button_height
+                    };
                     egui::ScrollArea::vertical()
                         .id_salt("search_results")
                         .max_height(340.0)
-                        .show_rows(ui, 28.0, results.paths.len(), |ui, rows| {
+                        .show_rows(ui, row_height, results.matches.len(), |ui, rows| {
                             for index in rows {
-                                let path = &results.paths[index];
-                                let response = ui.add(
-                                    egui::Button::new(path.display().to_string())
-                                        .selected(self.selected.as_ref() == Some(path))
-                                        .truncate()
-                                        .min_size(egui::vec2(ui.available_width(), 28.0)),
-                                ).on_hover_text(path.display().to_string());
-                                if response.clicked() {
-                                    self.selected = Some(path.clone());
-                                }
-                                if response.double_clicked() {
-                                    reveal = Some(path.clone());
-                                }
+                                let hit = &results.matches[index];
+                                let path = hit.path.display();
+                                let line = hit.context.as_ref().map(|context| context.line);
+                                let label = if let Some(line) = line {
+                                    crate::tr_format!("Строка {line} · {path}", "Line {line} · {path}")
+                                } else {
+                                    path.to_string()
+                                };
+                                ui.push_id((&hit.path, line), |ui| {
+                                    let response = ui.add(
+                                        egui::Button::new(&label)
+                                            .small()
+                                            .selected(self.selected == Some(index))
+                                            .truncate()
+                                            .min_size(egui::vec2(ui.available_width(), button_height)),
+                                    ).on_hover_text(label);
+                                    if response.clicked() {
+                                        self.selected = Some(index);
+                                    }
+                                    if response.double_clicked() {
+                                        reveal = Some(hit.path.clone());
+                                    }
+                                    if let Some(context) = &hit.context {
+                                        ui.add(
+                                            egui::Label::new(&context.excerpt)
+                                                .truncate()
+                                                .selectable(false),
+                                        ).on_hover_text(&context.excerpt);
+                                    }
+                                });
                             }
                         });
                     if ui.add_enabled(self.selected.is_some(), egui::Button::new(crate::i18n::text("Показать в панели"))).clicked() {
-                        reveal = self.selected.clone();
+                        reveal = self.selected.map(|index| results.matches[index].path.clone());
                     }
                     ui.small(crate::i18n::text("Двойной щелчок — перейти к результату в активной панели."));
                 }
@@ -322,17 +406,47 @@ impl Search {
     }
 }
 
+enum FolderMatcher<'a> {
+    Name { query: String, mask: Option<Mask> },
+    Content(Scanner<'a>),
+}
+
+impl<'a> FolderMatcher<'a> {
+    fn new(target: FolderTarget, query: &'a str) -> Result<Self, String> {
+        match target {
+            FolderTarget::Name => {
+                let query = normalize(query).into_owned();
+                let mask = query.contains(['*', '?']).then(|| Mask::new(&query));
+                Ok(Self::Name { query, mask })
+            }
+            FolderTarget::Text | FolderTarget::Regex => Ok(Self::Content(Scanner::new(
+                query,
+                target == FolderTarget::Regex,
+            )?)),
+        }
+    }
+}
+
+fn check_cancelled(cancelled: &impl Fn() -> bool) -> Result<(), String> {
+    if cancelled() {
+        Err(crate::i18n::text("Поиск отменён").into())
+    } else {
+        Ok(())
+    }
+}
+
 fn run_folder(
     folder: &Path,
+    target: FolderTarget,
     query: &str,
     exclusions: &str,
     cancelled: &impl Fn() -> bool,
 ) -> Result<Results, String> {
-    let cancellation = || crate::i18n::text("Поиск отменён").into();
-    if cancelled() {
-        return Err(cancellation());
-    }
-    if query.trim().is_empty() || query.contains('\0') {
+    check_cancelled(cancelled)?;
+    if query.is_empty()
+        || (target == FolderTarget::Name && query.trim().is_empty())
+        || query.contains('\0')
+    {
         return Err(crate::i18n::text("Введите непустой запрос без NUL").into());
     }
     if query.len() > MAX_PATTERN_BYTES
@@ -341,8 +455,7 @@ fn run_folder(
     {
         return Err(crate::i18n::text("Укоротите запрос или список исключений.").into());
     }
-    let query = normalize(query);
-    let mask = query.contains(['*', '?']).then(|| Mask::new(&query));
+    let mut matcher = FolderMatcher::new(target, query)?;
     let exclusions = exclusions
         .split(',')
         .map(str::trim)
@@ -357,14 +470,14 @@ fn run_folder(
         )
     })?;
     let mut directories = vec![directory];
-    let mut paths = Vec::new();
-    let mut limited = false;
+    let mut matches = Vec::new();
     let mut depth_limited = false;
     let mut unreadable = 0;
+    let mut too_large = 0;
+    let mut binary = 0;
+    let mut long_lines = 0;
     loop {
-        if cancelled() {
-            return Err(cancellation());
-        }
+        check_cancelled(cancelled)?;
         let at_depth_limit = directories.len() == MAX_OPEN_DIRECTORIES;
         let Some(directory) = directories.last_mut() else {
             break;
@@ -381,26 +494,61 @@ fn run_folder(
                 continue;
             }
         };
-        let name = entry.name.to_string_lossy();
-        let normalized = normalize(&name);
-        if exclusions.iter().any(|mask| mask.matches(&normalized)) {
-            continue;
-        }
-        let matches = match &mask {
-            Some(mask) => mask.matches(&normalized),
-            None => normalized.contains(query.as_ref()),
-        };
-        if matches {
-            if paths.len() == MAX_RESULTS {
-                limited = true;
-                break;
+        if !exclusions.is_empty() {
+            let name = entry.name.to_string_lossy();
+            let normalized = normalize(&name);
+            if exclusions.iter().any(|mask| mask.matches(&normalized)) {
+                continue;
             }
-            paths.push(directory.path.join(&entry.name));
         }
-        match entry.descendable {
-            Ok(false) => {}
-            Ok(_) if at_depth_limit => depth_limited = true,
-            Ok(_) => match directory.open_child(&entry.name) {
+        match &mut matcher {
+            FolderMatcher::Name { query, mask } => {
+                let name = entry.name.to_string_lossy();
+                let normalized = normalize(&name);
+                let found = match mask {
+                    Some(mask) => mask.matches(&normalized),
+                    None => normalized.contains(query.as_str()),
+                };
+                if found {
+                    matches.push(directory.path.join(&entry.name).into());
+                }
+            }
+            FolderMatcher::Content(scanner) if matches!(entry.kind, Ok(EntryKind::File)) => {
+                match directory.open_file(&entry.name) {
+                    Ok(Some((file, metadata))) => {
+                        let remaining = MAX_RESULTS + 1 - matches.len();
+                        match scanner.scan(file, metadata, remaining, cancelled)? {
+                            Scan::Text {
+                                matches: lines,
+                                long_lines: skipped,
+                            } => {
+                                long_lines += skipped;
+                                if !lines.is_empty() {
+                                    let path = directory.path.join(&entry.name);
+                                    matches.extend(lines.into_iter().map(|line| SearchMatch {
+                                        path: path.clone(),
+                                        context: Some(line),
+                                    }));
+                                }
+                            }
+                            Scan::TooLarge => too_large += 1,
+                            Scan::Binary => binary += 1,
+                            Scan::Unreadable => unreadable += 1,
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(_) => unreadable += 1,
+                }
+            }
+            FolderMatcher::Content(_) => {}
+        }
+        if matches.len() > MAX_RESULTS {
+            break;
+        }
+        match entry.kind {
+            Ok(EntryKind::File | EntryKind::Other) => {}
+            Ok(EntryKind::Directory) if at_depth_limit => depth_limited = true,
+            Ok(EntryKind::Directory) => match directory.open_child(&entry.name) {
                 Ok(Some(directory)) => directories.push(directory),
                 Ok(None) => {}
                 Err(_) => unreadable += 1,
@@ -408,7 +556,16 @@ fn run_folder(
             Err(_) => unreadable += 1,
         }
     }
-    paths.sort_unstable();
+    let limited = matches.len() > MAX_RESULTS;
+    matches.truncate(MAX_RESULTS);
+    matches.sort_unstable_by(|a, b| {
+        a.path.cmp(&b.path).then_with(|| {
+            a.context
+                .as_ref()
+                .map(|context| context.line)
+                .cmp(&b.context.as_ref().map(|context| context.line))
+        })
+    });
     let mut warnings = Vec::new();
     if unreadable > 0 {
         warnings.push(crate::tr_format!(
@@ -419,8 +576,26 @@ fn run_folder(
     if depth_limited {
         warnings.push(crate::i18n::text("Поиск пропустил слишком глубоко вложенные папки.").into());
     }
+    if too_large > 0 {
+        warnings.push(crate::tr_format!(
+            "Пропущены файлы больше 1 МиБ ({too_large}).",
+            "Skipped files larger than 1 MiB ({too_large})."
+        ));
+    }
+    if binary > 0 {
+        warnings.push(crate::tr_format!(
+            "Пропущены двоичные файлы и файлы не в UTF-8 ({binary}).",
+            "Skipped binary or non-UTF-8 files ({binary})."
+        ));
+    }
+    if long_lines > 0 {
+        warnings.push(crate::tr_format!(
+            "Пропущены строки больше 64 КиБ ({long_lines}).",
+            "Skipped lines longer than 64 KiB ({long_lines})."
+        ));
+    }
     Ok(Results {
-        paths,
+        matches,
         limited,
         warning: warnings.join("\n"),
     })
@@ -517,7 +692,7 @@ fn run(cli: &Path, query: &str, cancel: &AtomicBool, timeout: Duration) -> Resul
     paths.sort();
     paths.dedup();
     Ok(Results {
-        paths,
+        matches: paths.into_iter().map(SearchMatch::from).collect(),
         limited,
         warning,
     })
@@ -541,6 +716,10 @@ fn path_from_bytes(bytes: &[u8]) -> Result<PathBuf, String> {
 mod tests {
     use super::*;
     use std::{cell::Cell, fs};
+
+    fn paths(results: &Results) -> Vec<PathBuf> {
+        results.matches.iter().map(|hit| hit.path.clone()).collect()
+    }
 
     #[test]
     fn closing_search_cancels_work_and_missing_tool_does_not_start_it() {
@@ -578,7 +757,7 @@ mod tests {
         assert!(!search.visible);
         assert!(cancel.load(Ordering::Relaxed));
         tx.send(Ok(Results {
-            paths: vec![PathBuf::from("/stale")],
+            matches: vec![PathBuf::from("/stale").into()],
             limited: false,
             warning: String::new(),
         }))
@@ -614,7 +793,7 @@ mod tests {
             .recv_timeout(Duration::from_secs(2))
             .unwrap()
             .unwrap();
-        assert_eq!(results.paths, [path]);
+        assert_eq!(paths(&results), [path]);
     }
 
     #[test]
@@ -630,14 +809,19 @@ mod tests {
         fs::write(folder.join("café файл.ignore.rs"), "").unwrap();
         let excluded = " TARGET , cache-*, *.TMP, *.ignore.rs";
         for query in ["cafe\u{301} файл", "caf? ф*.RS"] {
-            let results = run_folder(root.path(), query, excluded, &|| false).unwrap();
-            assert_eq!(results.paths, [folder.join("CAFÉ ФАЙЛ.RS")]);
+            let results =
+                run_folder(root.path(), FolderTarget::Name, query, excluded, &|| false).unwrap();
+            assert_eq!(paths(&results), [folder.join("CAFÉ ФАЙЛ.RS")]);
             assert!(results.warning.is_empty());
         }
-        assert!(run_folder(root.path(), "target", "target", &|| false)
+        assert!(
+            run_folder(root.path(), FolderTarget::Name, "target", "target", &|| {
+                false
+            })
             .unwrap()
-            .paths
-            .is_empty());
+            .matches
+            .is_empty()
+        );
     }
 
     #[test]
@@ -652,7 +836,7 @@ mod tests {
             checks.get() == 5
         };
         assert_eq!(
-            run_folder(root.path(), "file", "", &cancelled)
+            run_folder(root.path(), FolderTarget::Name, "file", "", &cancelled)
                 .err()
                 .unwrap(),
             crate::i18n::text("Поиск отменён")
@@ -665,12 +849,12 @@ mod tests {
         for index in 0..=MAX_RESULTS {
             fs::write(root.path().join(format!("file{index}")), "").unwrap();
         }
-        let results = run_folder(root.path(), "file", "", &|| false).unwrap();
-        assert_eq!(results.paths.len(), MAX_RESULTS);
+        let results = run_folder(root.path(), FolderTarget::Name, "file", "", &|| false).unwrap();
+        assert_eq!(results.matches.len(), MAX_RESULTS);
         assert!(results.limited);
         fs::remove_file(root.path().join("file0")).unwrap();
         assert!(
-            !run_folder(root.path(), "file", "", &|| false)
+            !run_folder(root.path(), FolderTarget::Name, "file", "", &|| false)
                 .unwrap()
                 .limited
         );
@@ -679,8 +863,8 @@ mod tests {
         let deepest = root.path().join(nested);
         fs::create_dir_all(&deepest).unwrap();
         fs::write(deepest.join("match"), "").unwrap();
-        let results = run_folder(root.path(), "match", "", &|| false).unwrap();
-        assert!(results.paths.is_empty());
+        let results = run_folder(root.path(), FolderTarget::Name, "match", "", &|| false).unwrap();
+        assert!(results.matches.is_empty());
         assert!(!results.warning.is_empty());
     }
 
@@ -695,8 +879,8 @@ mod tests {
         symlink(root.path(), root.path().join("loop")).unwrap();
         let native = root.path().join("test-два слова\n.txt");
         fs::write(&native, "").unwrap();
-        let results = run_folder(root.path(), "test-", "", &|| false).unwrap();
-        assert_eq!(results.paths, [native]);
+        let results = run_folder(root.path(), FolderTarget::Name, "test-", "", &|| false).unwrap();
+        assert_eq!(paths(&results), [native]);
         assert!(results.warning.is_empty());
 
         // Simulate a directory swapped for a link between listing and descent.
@@ -706,10 +890,114 @@ mod tests {
         let entry = std::iter::from_fn(|| directory.next_entry().unwrap())
             .find(|entry| entry.name == "child")
             .unwrap();
-        assert!(entry.descendable.unwrap());
+        assert_eq!(entry.kind.unwrap(), EntryKind::Directory);
         fs::remove_dir(&child).unwrap();
         symlink(outside.path(), &child).unwrap();
         assert!(directory.open_child(&entry.name).is_err());
+    }
+
+    #[test]
+    fn content_search_finds_literal_and_regex_matches_with_line_context() {
+        let root = tempfile::tempdir().unwrap();
+        let nested = root.path().join("nested");
+        fs::create_dir(&nested).unwrap();
+        let path = nested.join("данные.txt");
+        let contents = "before\r\nРусский C++ example\r\n lowercase c++\nC++ and C++ again\n";
+        fs::write(&path, contents).unwrap();
+        fs::write(nested.join("excluded.tmp"), contents).unwrap();
+        fs::create_dir(root.path().join("ignored")).unwrap();
+        fs::write(root.path().join("ignored/test.txt"), contents).unwrap();
+
+        for (target, query, expected) in [
+            (FolderTarget::Text, "C++", &[2, 4][..]),
+            (FolderTarget::Regex, r"(?i)c\+{2}", &[2, 3, 4][..]),
+        ] {
+            let results =
+                run_folder(root.path(), target, query, "*.tmp, ignored", &|| false).unwrap();
+            assert!(results.warning.is_empty());
+            let lines: Vec<_> = results
+                .matches
+                .iter()
+                .map(|hit| {
+                    assert_eq!(hit.path, path);
+                    hit.context.as_ref().unwrap().line
+                })
+                .collect();
+            assert_eq!(lines, expected);
+            assert_eq!(
+                results.matches[0].context.as_ref().unwrap().excerpt,
+                "Русский C++ example"
+            );
+        }
+        assert!(
+            run_folder(root.path(), FolderTarget::Regex, "[", "", &|| false)
+                .err()
+                .unwrap()
+                .contains("regular expression")
+        );
+    }
+
+    #[test]
+    fn content_search_reports_skipped_files_and_bounds_matching_lines() {
+        let root = tempfile::tempdir().unwrap();
+        let binary = root.path().join("binary.txt");
+        fs::write(binary, b"hit\nend\0").unwrap();
+        fs::write(root.path().join("invalid.txt"), b"hit\n\xff").unwrap();
+        let oversized = fs::File::create(root.path().join("large.txt")).unwrap();
+        oversized.set_len(content::MAX_FILE_BYTES + 1).unwrap();
+        let results = run_folder(root.path(), FolderTarget::Text, "hit", "", &|| false).unwrap();
+        assert!(results.matches.is_empty());
+        assert!(results.warning.contains("larger than 1 MiB (1)"));
+        assert!(results.warning.contains("non-UTF-8 files (2)"));
+
+        let path = root.path().join("matches.txt");
+        fs::write(&path, "hit\n".repeat(MAX_RESULTS + 1)).unwrap();
+        let results = run_folder(root.path(), FolderTarget::Text, "hit", "", &|| false).unwrap();
+        assert_eq!(results.matches.len(), MAX_RESULTS);
+        assert_eq!(
+            results.matches[MAX_RESULTS - 1]
+                .context
+                .as_ref()
+                .unwrap()
+                .line,
+            MAX_RESULTS
+        );
+        assert!(results.limited);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn content_search_does_not_open_links_or_special_files() {
+        use std::{
+            ffi::CString,
+            os::unix::{ffi::OsStrExt, fs::symlink},
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_file = outside.path().join("external.txt");
+        fs::write(&outside_file, "secret\n").unwrap();
+        symlink(outside.path(), root.path().join("outside")).unwrap();
+        symlink(&outside_file, root.path().join("symlink.txt")).unwrap();
+        let swapped = root.path().join("swap.txt");
+        fs::write(&swapped, "placeholder").unwrap();
+        let mut directory = Directory::open(root.path().to_path_buf()).unwrap();
+        let entry = std::iter::from_fn(|| directory.next_entry().unwrap())
+            .find(|entry| entry.name == "swap.txt")
+            .unwrap();
+        assert_eq!(entry.kind.unwrap(), EntryKind::File);
+        fs::remove_file(&swapped).unwrap();
+        symlink(&outside_file, &swapped).unwrap();
+        assert!(directory.open_file(&entry.name).unwrap().is_none());
+        fs::remove_file(&swapped).unwrap();
+        let fifo_path = CString::new(swapped.as_os_str().as_bytes()).unwrap();
+        // SAFETY: fifo_path is a NUL-terminated pathname in our temporary folder.
+        assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+        assert!(directory.open_file(&entry.name).unwrap().is_none());
+
+        let results = run_folder(root.path(), FolderTarget::Text, "secret", "", &|| false).unwrap();
+        assert!(results.matches.is_empty());
+        assert!(results.warning.is_empty());
     }
 
     #[test]
@@ -739,12 +1027,12 @@ mod tests {
         );
         let results = run(&cli, "*.rs", &AtomicBool::new(false), TIMEOUT).unwrap();
         assert_eq!(
-            results.paths,
+            paths(&results),
             [PathBuf::from("/tmp/pawcommander-test/Two Words.RS")]
         );
         assert!(run(&cli, "no-such-match", &AtomicBool::new(false), TIMEOUT)
             .unwrap()
-            .paths
+            .matches
             .is_empty());
     }
 
@@ -778,10 +1066,11 @@ mod tests {
     fn results_preserve_spaces_unicode_newlines_and_non_utf8() {
         let (_root, cli) = fake("printf '/tmp/two words\\000/tmp/файл\\000/tmp/line\\nbreak\\000/tmp/\\377\\000relative\\000'");
         let result = run(&cli, "*", &AtomicBool::new(false), TIMEOUT).unwrap();
-        assert_eq!(result.paths.len(), 4);
-        assert!(result.paths.contains(&PathBuf::from("/tmp/two words")));
-        assert!(result.paths.contains(&PathBuf::from("/tmp/файл")));
-        assert!(result.paths.contains(&PathBuf::from("/tmp/line\nbreak")));
+        let paths = paths(&result);
+        assert_eq!(paths.len(), 4);
+        assert!(paths.contains(&PathBuf::from("/tmp/two words")));
+        assert!(paths.contains(&PathBuf::from("/tmp/файл")));
+        assert!(paths.contains(&PathBuf::from("/tmp/line\nbreak")));
     }
 
     #[test]
@@ -790,7 +1079,7 @@ mod tests {
         let (_root, cli) = fake("exit 1");
         assert!(run(&cli, "x", &AtomicBool::new(false), TIMEOUT)
             .unwrap()
-            .paths
+            .matches
             .is_empty());
         let (_root, cli) = fake("echo 'database missing' >&2; exit 1");
         assert!(run(&cli, "x", &AtomicBool::new(false), TIMEOUT)
@@ -833,7 +1122,7 @@ mod tests {
             "i=0; while [ \"$i\" -lt 1001 ]; do printf '/tmp/file%s\\000' \"$i\"; i=$((i+1)); done",
         );
         let result = run(&cli, "x", &AtomicBool::new(false), TIMEOUT).unwrap();
-        assert_eq!(result.paths.len(), MAX_RESULTS);
+        assert_eq!(result.matches.len(), MAX_RESULTS);
         assert!(result.limited);
     }
 }
