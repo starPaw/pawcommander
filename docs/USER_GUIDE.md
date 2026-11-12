@@ -93,7 +93,9 @@ Remote deletion recursively removes directories without a trash. Symlinks are re
 
 ## Previews and properties
 
-The details pane previews UTF-8 text and PNG, JPEG, GIF, and WebP images. Reads are bounded: text previews show the beginning of a file (up to 32 KiB), and images are limited to 20 MiB with additional dimension limits. Remote symlinks and special files are not read for preview.
+Press `Space` on a file to open **Quick Look** in a separate window. Use `←` and `→` or **Previous File** and **Next File** to browse the visible files in their current sort order. Navigation skips folders and keeps the pane's selection. Press `Esc` or `Space`, or close the window, to return to the original file.
+
+Quick Look and the details pane preview UTF-8 text and PNG, JPEG, GIF, and WebP images. Text previews show the beginning of a file (up to 32 KiB), and images are limited to 20 MiB with additional dimension limits. Remote symlinks and special files are not read for preview.
 
 Select local items and use **Properties** or `Alt+Enter` to calculate their combined logical size and counts in the background. Hidden entries are included; overlapping selected trees are counted once. Symlinks are counted separately without following targets. Hard links are counted per path. Counts update as directory entries are read; cancellation keeps the partial result. The result is logical file size, not disk usage.
 
@@ -121,7 +123,7 @@ Zed establishes its own SSH connection using its SSH configuration and authentic
 
 Open **Settings → Accessibility** to choose an interface scale from 90% to 150% or enable high contrast. Both choices are saved. `Cmd/Ctrl+=` and `Cmd/Ctrl+-` change the scale, and `Cmd/Ctrl+0` resets it to 100%.
 
-Press `F10` to focus Settings on the toolbar. `Tab` and `Shift+Tab` move between controls, and `Enter` or `Space` activates the focused button. In the file area, Up/Down selects and focuses files, and `Shift` with Up/Down extends the selection. `Space` toggles selection of the focused file, and `Enter` opens it. The default `Tab` binding switches panes from the file area when both panes are visible.
+Press `F10` to focus Settings on the toolbar. `Tab` and `Shift+Tab` move between controls, and `Enter` or `Space` activates the focused button. In the file area, Up/Down selects and focuses files, and `Shift` with Up/Down extends the selection. `Shift+Space` toggles selection of the focused row, and `Enter` opens it. The default `Tab` binding switches panes from the file area when both panes are visible.
 
 List rows and grid tiles expose their full names, types, and selection states to screen readers. Screen reader activation toggles a file's selection. Keyboard focus can move to a file without changing the selection.
 
@@ -159,3 +161,4 @@ Choosing another profile replaces custom bindings in the editor. **Reset to defa
 | Create folder | `Cmd/Ctrl+Shift+N` |
 | Delete with confirmation | `Delete` / `Cmd/Ctrl+Backspace` |
 | Open focused or selected item | `Enter` |
+| Quick Look | `Space` |

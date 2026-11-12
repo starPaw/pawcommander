@@ -22,6 +22,7 @@ struct Request {
     generation: u64,
     path: Location,
     context: egui::Context,
+    viewport: egui::ViewportId,
 }
 
 struct Response {
@@ -83,7 +84,7 @@ impl Preview {
                 {
                     break;
                 }
-                request.context.request_repaint();
+                request.context.request_repaint_of(request.viewport);
             }
         });
         Self {
@@ -109,38 +110,7 @@ impl Preview {
         path: Option<&Location>,
         fingerprint: Option<(u64, Option<std::time::SystemTime>)>,
     ) {
-        if self.path.as_ref() != path || self.fingerprint != fingerprint || self.dirty {
-            self.fingerprint = fingerprint;
-            self.dirty = false;
-            self.path = path.cloned();
-            self.generation = self.generation.wrapping_add(1);
-            self.result = None;
-            self.texture = None;
-            if let Some(path) = path {
-                if path.is_archive() {
-                    self.result = Some(Err(crate::archive::readonly().into()));
-                } else if self
-                    .requests
-                    .send(Request {
-                        generation: self.generation,
-                        path: path.clone(),
-                        context: ui.ctx().clone(),
-                    })
-                    .is_err()
-                {
-                    self.result = Some(Err(
-                        crate::i18n::text("Служба предпросмотра недоступна").into()
-                    ));
-                }
-            }
-        }
-        while let Ok(response) = self.responses.try_recv() {
-            if response.generation == self.generation {
-                self.result = Some(response.result);
-                self.texture = None;
-            }
-        }
-
+        self.update(ui.ctx(), path, fingerprint);
         let muted = Palette::from_ctx(ui.ctx()).muted;
         ui.horizontal(|ui| {
             ui.label(
@@ -168,7 +138,10 @@ impl Preview {
             });
         });
         ui.add_space(12.0);
-        let Some(path) = path else {
+        if let Some(path) = path {
+            self.upload_texture(ui.ctx());
+            self.show_details(ui, path);
+        } else {
             ui.add_space(45.0);
             draw_icon(ui, false, "");
             ui.add_space(18.0);
@@ -182,9 +155,94 @@ impl Preview {
                     .color(muted),
                 );
             });
-            return;
-        };
+        }
+    }
 
+    pub fn show_quick_look(
+        &mut self,
+        ui: &mut egui::Ui,
+        path: &Location,
+        fingerprint: (u64, Option<std::time::SystemTime>),
+    ) {
+        let changed_path = self.path.as_ref() != Some(path);
+        self.update(ui.ctx(), Some(path), Some(fingerprint));
+        self.upload_texture(ui.ctx());
+        ui.add(egui::Label::new(RichText::new(path.name()).heading()).truncate());
+        ui.add_space(8.0);
+        let image_height = ui.available_height().max(1.0);
+        let mut scroll = egui::ScrollArea::vertical().id_salt("quick-look-content");
+        if changed_path {
+            scroll = scroll.vertical_scroll_offset(0.0);
+        }
+        scroll
+            .auto_shrink([false, false])
+            .show(ui, |ui| match &self.result {
+                None => draw_loading(ui),
+                Some(Err(error)) => {
+                    ui.colored_label(ui.visuals().error_fg_color, error);
+                }
+                Some(Ok(loaded)) => match &loaded.content {
+                    Content::Text { body, truncated } => draw_text(ui, body, *truncated, 14.0),
+                    Content::Image { .. } => {
+                        if let Some(texture) = &self.texture {
+                            draw_image(ui, texture, image_height);
+                        }
+                    }
+                    Content::Message(message) => {
+                        ui.label(message);
+                    }
+                    Content::Directory => {
+                        ui.label(&loaded.kind);
+                    }
+                },
+            });
+    }
+
+    pub fn clear(&mut self, ctx: &egui::Context) {
+        self.update(ctx, None, None);
+    }
+
+    fn update(
+        &mut self,
+        ctx: &egui::Context,
+        path: Option<&Location>,
+        fingerprint: Option<(u64, Option<std::time::SystemTime>)>,
+    ) {
+        if self.path.as_ref() != path || self.fingerprint != fingerprint || self.dirty {
+            self.fingerprint = fingerprint;
+            self.dirty = false;
+            self.path = path.cloned();
+            self.generation = self.generation.wrapping_add(1);
+            self.result = None;
+            self.texture = None;
+            if let Some(path) = path {
+                if path.is_archive() {
+                    self.result = Some(Err(crate::archive::readonly().into()));
+                } else if self
+                    .requests
+                    .send(Request {
+                        generation: self.generation,
+                        path: path.clone(),
+                        context: ctx.clone(),
+                        viewport: ctx.viewport_id(),
+                    })
+                    .is_err()
+                {
+                    self.result = Some(Err(
+                        crate::i18n::text("Служба предпросмотра недоступна").into()
+                    ));
+                }
+            }
+        }
+        while let Ok(response) = self.responses.try_recv() {
+            if response.generation == self.generation {
+                self.result = Some(response.result);
+                self.texture = None;
+            }
+        }
+    }
+
+    fn upload_texture(&mut self, ctx: &egui::Context) {
         // Upload once; subsequent frames reuse the texture.
         if self.texture.is_none() {
             if let Some(Ok(Loaded {
@@ -194,7 +252,7 @@ impl Preview {
             {
                 if !rgba.is_empty() {
                     let image = egui::ColorImage::from_rgba_unmultiplied(*size, rgba);
-                    self.texture = Some(ui.ctx().load_texture(
+                    self.texture = Some(ctx.load_texture(
                         format!("file-preview-{}", self.generation),
                         image,
                         egui::TextureOptions::LINEAR,
@@ -204,23 +262,16 @@ impl Preview {
                 }
             }
         }
+    }
 
+    fn show_details(&self, ui: &mut egui::Ui, path: &Location) {
+        let muted = Palette::from_ctx(ui.ctx()).muted;
         egui::ScrollArea::vertical()
             .id_salt("file-preview-details")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 match (&self.result, &self.texture) {
-                    (Some(Ok(_)), Some(texture)) => {
-                        ui.vertical_centered(|ui| {
-                            ui.add(
-                                egui::Image::new((texture.id(), texture.size_vec2()))
-                                    .max_width(ui.available_width())
-                                    .max_height(220.0)
-                                    .shrink_to_fit()
-                                    .corner_radius(8),
-                            );
-                        });
-                    }
+                    (Some(Ok(_)), Some(texture)) => draw_image(ui, texture, 220.0),
                     (Some(Ok(loaded)), _) => draw_icon(ui, loaded.is_dir, &path.name()),
                     _ => draw_icon(ui, false, &path.name()),
                 }
@@ -230,12 +281,7 @@ impl Preview {
                 ui.add_space(4.0);
 
                 match &self.result {
-                    None => {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.colored_label(muted, crate::i18n::text("Загрузка сведений…"));
-                        });
-                    }
+                    None => draw_loading(ui),
                     Some(Err(error)) => {
                         ui.colored_label(ui.visuals().error_fg_color, error);
                     }
@@ -272,30 +318,7 @@ impl Preview {
                                     .color(muted),
                             );
                             ui.add_space(8.0);
-                            egui::Frame::new()
-                                .fill(ui.visuals().faint_bg_color)
-                                .corner_radius(8)
-                                .inner_margin(10)
-                                .show(ui, |ui| {
-                                    if body.is_empty() {
-                                        ui.colored_label(muted, crate::i18n::text("Пустой файл"));
-                                    } else {
-                                        ui.add(
-                                            egui::Label::new(
-                                                RichText::new(body).monospace().size(11.0),
-                                            )
-                                            .wrap()
-                                            .selectable(true),
-                                        );
-                                    }
-                                });
-                            if *truncated {
-                                ui.add_space(6.0);
-                                ui.colored_label(
-                                    muted,
-                                    crate::i18n::text("Показано начало файла (до 32 КиБ)."),
-                                );
-                            }
+                            draw_text(ui, body, *truncated, 11.0);
                         }
                         Content::Message(message) => {
                             ui.add_space(12.0);
@@ -311,6 +334,52 @@ impl Preview {
 impl Default for Preview {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn draw_loading(ui: &mut egui::Ui) {
+    let muted = Palette::from_ctx(ui.ctx()).muted;
+    ui.horizontal(|ui| {
+        ui.spinner();
+        ui.colored_label(muted, crate::i18n::text("Загрузка сведений…"));
+    });
+}
+
+fn draw_image(ui: &mut egui::Ui, texture: &egui::TextureHandle, max_height: f32) {
+    ui.vertical_centered(|ui| {
+        ui.add(
+            egui::Image::new((texture.id(), texture.size_vec2()))
+                .max_width(ui.available_width())
+                .max_height(max_height)
+                .shrink_to_fit()
+                .corner_radius(8),
+        );
+    });
+}
+
+fn draw_text(ui: &mut egui::Ui, body: &str, truncated: bool, font_size: f32) {
+    let muted = Palette::from_ctx(ui.ctx()).muted;
+    egui::Frame::new()
+        .fill(ui.visuals().faint_bg_color)
+        .corner_radius(8)
+        .inner_margin(10)
+        .show(ui, |ui| {
+            if body.is_empty() {
+                ui.colored_label(muted, crate::i18n::text("Пустой файл"));
+            } else {
+                ui.add(
+                    egui::Label::new(RichText::new(body).monospace().size(font_size))
+                        .wrap()
+                        .selectable(true),
+                );
+            }
+        });
+    if truncated {
+        ui.add_space(6.0);
+        ui.colored_label(
+            muted,
+            crate::i18n::text("Показано начало файла (до 32 КиБ)."),
+        );
     }
 }
 

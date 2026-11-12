@@ -26,6 +26,7 @@ pub enum Command {
     Split,
     OtherPane,
     Preview,
+    QuickLook,
     EditInZed,
     Refresh,
     Properties,
@@ -41,7 +42,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Self; 32] = [
+    pub const ALL: [Self; 33] = [
         Self::EditPath,
         Self::Filter,
         Self::Search,
@@ -63,6 +64,7 @@ impl Command {
         Self::Split,
         Self::OtherPane,
         Self::Preview,
+        Self::QuickLook,
         Self::EditInZed,
         Self::Refresh,
         Self::Properties,
@@ -99,6 +101,7 @@ impl Command {
             Self::Split => "Две панели",
             Self::OtherPane => "Переключить панель",
             Self::Preview => "Панель сведений",
+            Self::QuickLook => "Быстрый просмотр",
             Self::EditInZed => "Открыть в Zed",
             Self::Refresh => "Обновить",
             Self::Properties => "Свойства",
@@ -167,6 +170,7 @@ impl Profile {
             Forward => (Modifiers::ALT, Key::ArrowRight),
             Parent => (Modifiers::ALT, Key::ArrowUp),
             Open => (Modifiers::NONE, Key::Enter),
+            QuickLook => (Modifiers::NONE, Key::Space),
             SelectAll => (Modifiers::COMMAND, Key::A),
             Hidden => (Modifiers::COMMAND, Key::H),
             Split => (Modifiers::NONE, Key::F3),
@@ -248,6 +252,7 @@ impl Shortcuts {
             Command::Palette,
             Command::FolderJump,
             Command::ReopenTab,
+            Command::QuickLook,
         ] {
             if !self.overrides.contains_key(&command)
                 && self
@@ -336,7 +341,9 @@ fn reserved(chord: Chord) -> bool {
     }
     // Bare typing keys stay available for text, and arrows retain list navigation.
     let function_key = (Key::F1..=Key::F35).contains(&key);
-    !function_key && !matches!(key, Key::Tab | Key::Enter | Key::Delete)
+    !(function_key
+        || matches!(key, Key::Tab | Key::Enter | Key::Delete)
+        || (m == Modifiers::NONE && key == Key::Space))
 }
 
 pub struct ShortcutEditor {
@@ -677,12 +684,12 @@ mod tests {
     fn new_defaults_preserve_legacy_shortcuts_and_can_be_reassigned() {
         let custom = chord(Key::F9, Modifiers::NONE);
         for profile in [Profile::Default, Profile::Commander] {
-            for (key, command) in [
-                (Key::P, Command::Palette),
-                (Key::J, Command::FolderJump),
-                (Key::T, Command::ReopenTab),
+            for (default, command) in [
+                (chord(Key::P, CMD_SHIFT), Command::Palette),
+                (chord(Key::J, CMD_SHIFT), Command::FolderJump),
+                (chord(Key::T, CMD_SHIFT), Command::ReopenTab),
+                (chord(Key::Space, Modifiers::NONE), Command::QuickLook),
             ] {
-                let default = chord(key, CMD_SHIFT);
                 let mut shortcuts: Shortcuts = serde_json::from_value(serde_json::json!({
                     "profile": profile,
                     "overrides": {"Refresh": default}

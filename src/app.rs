@@ -1,4 +1,5 @@
 mod column_view;
+mod quick_look;
 mod selection;
 
 use crate::command_palette::{CommandPalette, PaletteOutcome};
@@ -18,6 +19,7 @@ use crate::tab_drag::{clamp_tab_slot, DragTab, TabDrop, TabDropTargets};
 use crate::theme::{appearance_menu, paint_focus, Palette, Theme};
 use crate::vfs::{self as fs_ops, Endpoint, FileEntry, Location};
 use eframe::egui::{self, Color32, FontId, RichText, Sense, Stroke, Vec2};
+use quick_look::QuickLook;
 use selection::{EntryIdentity, Rule, RuleKind};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -1675,6 +1677,7 @@ enum Action {
         delta: isize,
         extend: bool,
     },
+    ToggleCursorSelection,
     ClearSelection,
     ColumnStep {
         right: bool,
@@ -1901,6 +1904,8 @@ pub struct PawCommander {
     bookmark_editor: Option<BookmarkEditor>,
     workspaces: Vec<NamedWorkspace>,
     preview: Preview,
+    quick_look: Option<QuickLook>,
+    quick_look_preview: Option<Preview>,
     properties: Option<crate::properties::Properties>,
     clipboard: Option<Clipboard>,
     system_clipboard: SystemClipboard,
@@ -2049,6 +2054,8 @@ impl PawCommander {
             bookmark_editor: None,
             workspaces,
             preview: Preview::new(),
+            quick_look: None,
+            quick_look_preview: None,
             properties: None,
             clipboard: None,
             system_clipboard: SystemClipboard::new(cc),
@@ -2196,6 +2203,7 @@ impl PawCommander {
     fn drop_enabled(&self) -> bool {
         self.job.is_none()
             && self.transfer.is_none()
+            && self.quick_look.is_none()
             && self.dialog.is_none()
             && self.properties.is_none()
             && self.sftp_form.is_none()
@@ -2638,6 +2646,19 @@ impl PawCommander {
                 let view = self.folder_view(self.active);
                 self.tab_mut().move_selection(delta, view, extend);
                 self.tab().focus_cursor(ctx);
+            }
+            Action::ToggleCursorSelection => {
+                let view = self.folder_view(self.active);
+                let tab = self.tab_mut();
+                let visible = tab.visible(view);
+                if let Some(index) = visible
+                    .iter()
+                    .copied()
+                    .find(|&index| Some(&tab.entries[index].path) == tab.cursor.as_ref())
+                {
+                    tab.choose(index, &visible, egui::Modifiers::COMMAND);
+                    tab.focus_cursor(ctx);
+                }
             }
             Action::ClearSelection => {
                 let view = self.folder_view(self.active);
@@ -3297,6 +3318,7 @@ impl PawCommander {
                 self.settings.preview = !self.settings.preview;
                 return;
             }
+            Command::QuickLook => return self.open_quick_look(ctx),
             Command::EditInZed => {
                 let paths = self.selected();
                 let [path] = paths.as_slice() else {
@@ -3393,6 +3415,7 @@ impl PawCommander {
                 self.bookmarks.iter().any(|bookmark| bookmark.id == id)
             })
             || self.command_palette.is_some()
+            || self.quick_look.is_some()
             || self.folder_jump.is_some()
             || self.show_accessibility
             || self.show_list_columns
@@ -3455,6 +3478,14 @@ impl PawCommander {
                             delta: if key == egui::Key::ArrowUp { -1 } else { 1 },
                             extend: modifiers.shift,
                         })
+                    } else if !focused
+                        && key == egui::Key::Space
+                        && modifiers == egui::Modifiers::SHIFT
+                    {
+                        if repeat {
+                            return false;
+                        }
+                        Some(Action::ToggleCursorSelection)
                     } else if !focused
                         && self.folder_view(pane).mode == FolderMode::Columns
                         && modifiers == egui::Modifiers::NONE
@@ -3624,6 +3655,7 @@ impl PawCommander {
             selected.first()
         };
         let restore_file_cursor = focused_file.is_some() && open_target.is_some();
+        let can_quick_look = self.quick_look_entry(focused_file).is_some();
         let idle = self.job.is_none();
         let writable = !tab.path.is_archive();
         let outcome = palette.show(
@@ -3648,6 +3680,7 @@ impl PawCommander {
                         || (path.remote() && self.tools.zed.is_some() && self.editor_job.is_none())
                 }),
                 Command::OtherPane => self.settings.split,
+                Command::QuickLook => can_quick_look,
                 Command::RestoreSelection => tab.previous_selection.is_some(),
                 Command::NewFolder => idle && writable,
                 Command::Rename => idle && writable && has_selection && selected.len() == 1,
@@ -5138,6 +5171,7 @@ impl eframe::App for PawCommander {
             Vec::new()
         };
         self.keyboard(ctx);
+        let quick_look_focus = self.show_quick_look(ctx);
         let mut actions = vec![];
         let mut drop_targets = DropTargets::default();
         let mut tab_targets = TabDropTargets::default();
@@ -5224,6 +5258,7 @@ impl eframe::App for PawCommander {
             && !self.show_help
             && self.shortcut_editor.is_none()
             && self.command_palette.is_none()
+            && self.quick_look.is_none()
             && self.folder_jump.is_none()
             && !self.show_accessibility
             && !self.show_list_columns
@@ -5268,6 +5303,12 @@ impl eframe::App for PawCommander {
             }
         }
         self.restore_dialog_file_focus(ctx);
+        if let Some(id) = quick_look_focus {
+            if !self.keyboard_blocked(ctx) && self.tab().rendered_rows.contains_key(&id) {
+                ctx.memory_mut(|memory| memory.request_focus(id));
+                ctx.request_repaint();
+            }
+        }
         if let Some(id) = self.palette_focus_to_restore.take() {
             if !self.keyboard_blocked(ctx) && !ctx.wants_keyboard_input() {
                 ctx.memory_mut(|memory| memory.request_focus(id));
@@ -7328,7 +7369,7 @@ mod tests {
         assert!(!clipboard.matches(None));
     }
 
-    fn wait_for_directory(tab: &mut Tab) {
+    pub(super) fn wait_for_directory(tab: &mut Tab) {
         let deadline = Instant::now() + Duration::from_secs(5);
         while tab.loading.is_some() && Instant::now() < deadline {
             tab.poll();
