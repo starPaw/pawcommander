@@ -358,7 +358,7 @@ fn freshness_for_paths(paths: &[PathBuf], can_check_date: impl Fn() -> bool) -> 
 mod tests {
     use super::*;
     use std::{
-        fs::{self, File, FileTimes},
+        fs::{self, FileTimes, OpenOptions},
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -490,7 +490,9 @@ mod tests {
         fs::write(&old, b"old").unwrap();
         fs::write(&new, b"new").unwrap();
         let old_time = SystemTime::now() - Duration::from_secs(3 * 24 * 60 * 60);
-        File::open(&old)
+        OpenOptions::new()
+            .write(true)
+            .open(&old)
             .unwrap()
             .set_times(FileTimes::new().set_modified(old_time))
             .unwrap();
