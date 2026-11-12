@@ -2,7 +2,9 @@
 use chrono::{DateTime, Local};
 use eframe::egui;
 use std::collections::HashSet;
-use std::fs::{self, Metadata};
+#[cfg(any(not(windows), test))]
+use std::fs;
+use std::fs::Metadata;
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -14,6 +16,9 @@ use std::time::{Duration, Instant};
 mod unix;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use unix::scan_root;
+
+#[cfg(windows)]
+mod windows;
 
 #[derive(Default, Clone, Debug)]
 struct Summary {
@@ -29,6 +34,7 @@ struct Summary {
     cancelled: bool,
 }
 impl Summary {
+    #[cfg(not(windows))]
     fn count(&mut self, metadata: &Metadata) {
         if metadata.is_symlink() {
             self.links += 1;
@@ -201,6 +207,16 @@ fn scan(paths: &[PathBuf], cancel: &AtomicBool, mut progress: impl FnMut(&Summar
         {
             continue;
         }
+        #[cfg(windows)]
+        let (root, metadata) = match windows::open_root(&path) {
+            Ok(root) => root,
+            Err(error) => {
+                summary.error(&path, error);
+                progress(&summary);
+                continue;
+            }
+        };
+        #[cfg(not(windows))]
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
             Err(error) => {
@@ -214,6 +230,9 @@ fn scan(paths: &[PathBuf], cancel: &AtomicBool, mut progress: impl FnMut(&Summar
             accepted.insert(path.clone());
         }
 
+        #[cfg(windows)]
+        windows::scan_root(path, root, metadata, cancel, &mut summary, &mut progress);
+        #[cfg(not(windows))]
         scan_root(path, metadata, cancel, &mut summary, &mut progress);
     }
     summary.cancelled = cancel.load(Ordering::Relaxed);
@@ -221,7 +240,7 @@ fn scan(paths: &[PathBuf], cancel: &AtomicBool, mut progress: impl FnMut(&Summar
     summary
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn scan_root(
     path: PathBuf,
     metadata: Metadata,
