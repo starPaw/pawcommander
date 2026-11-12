@@ -8212,14 +8212,16 @@ mod tests {
         use egui::{Event, Key, Modifiers};
 
         let root = tempfile::tempdir().unwrap();
-        let base: Location = root.path().to_path_buf().into();
+        // Include an ancestor that also matches the fuzzy query, independently of TEMP.
+        let base: Location = root.path().join("PawCommanderQA").into();
         let target = base.join("PawCommander");
         let missing = base.join("Missing");
+        std::fs::create_dir(base.path()).unwrap();
         std::fs::create_dir(target.path()).unwrap();
         let ctx = egui::Context::default();
         let cc = eframe::CreationContext::_new_kittest(ctx.clone());
         let mut frame = eframe::Frame::_new_kittest();
-        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        let mut app = PawCommander::new(&cc, Some(base.path().into()));
         wait_for_directory(app.tab_mut());
         app.poll(&ctx);
         app.action(Action::Navigate(0, target.clone()), &ctx);
@@ -8228,12 +8230,12 @@ mod tests {
         app.action(Action::Navigate(0, missing.clone()), &ctx);
         wait_for_directory(app.tab_mut());
         app.poll(&ctx);
-        assert!(app.settings.folder_history.ranked("missing").is_empty());
+        assert!(!app.settings.folder_history.ranked("").contains(&&missing));
 
         let mut storage = MemoryStorage::default();
         eframe::App::save(&mut app, &mut storage);
         let restored: Settings = eframe::get_value(&storage, "pawcommander.settings").unwrap();
-        assert_eq!(restored.folder_history.ranked("pwcm"), vec![&target]);
+        assert_eq!(restored.folder_history.ranked("pwcm"), vec![&target, &base]);
 
         app.active = 1;
         let mut run = |app: &mut PawCommander, events| {
