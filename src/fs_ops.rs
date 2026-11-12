@@ -802,15 +802,10 @@ pub(crate) fn open_regular_source(source: &Path) -> io::Result<fs::File> {
     // Refuse a regular file changed into a symlink between inspection and open.
     // Nonblocking open also prevents hanging if it has become a FIFO. This does
     // not create a snapshot or protect against concurrent parent replacement.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(0x100 | 0x4); // O_NOFOLLOW | O_NONBLOCK, sys/fcntl.h
-    }
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(0x20000 | 0x800); // O_NOFOLLOW | O_NONBLOCK
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
     #[cfg(windows)]
     {
@@ -1432,6 +1427,51 @@ mod tests {
         symlink(&actual, &replacement).unwrap();
         assert!(open_regular_source(&replacement).is_err());
         assert_eq!(fs::read(actual).unwrap(), b"private");
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn regular_source_open_refuses_a_fifo_without_blocking() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+
+        const CHILD_FIFO: &str = "PAWCOMMANDER_TEST_REGULAR_SOURCE_FIFO";
+        if let Some(fifo) = std::env::var_os(CHILD_FIFO) {
+            assert!(open_regular_source(Path::new(&fifo)).is_err());
+            return;
+        }
+
+        let root = tempdir().unwrap();
+        let fifo = root.path().join("replacement-fifo");
+        let name = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: name is a live NUL-terminated path inside the test directory.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+
+        // A missing O_NONBLOCK would wait forever for a writer. Isolate the
+        // open so the parent can terminate it and fail without hanging the suite.
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "fs_ops::tests::regular_source_open_refuses_a_fifo_without_blocking",
+            ])
+            .env(CHILD_FIFO, &fifo)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "FIFO source rejection failed: {status}");
+                break;
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("opening a FIFO source blocked instead of rejecting it");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[cfg(unix)]
