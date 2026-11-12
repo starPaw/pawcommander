@@ -2,12 +2,14 @@
 mod content;
 mod directory;
 mod filters;
+mod index;
 
 use crate::name_match::{normalize, Mask};
 use content::{LineMatch, Scan, Scanner};
 use directory::{Directory, Entry, EntryKind, EntryMetadata};
 use eframe::egui;
 use filters::{FilterInput, Filters};
+use index::IndexInfo;
 use std::{
     io::{self, Read},
     path::{Path, PathBuf},
@@ -25,6 +27,8 @@ const MAX_RESULTS: usize = 1000;
 const MAX_OPEN_DIRECTORIES: usize = 64;
 const MAX_PATTERN_BYTES: usize = 1024;
 const TIMEOUT: Duration = Duration::from_secs(15);
+const INDEX_INFO_BUDGET: Duration = Duration::from_millis(300);
+const INDEX_REVEAL_WAIT: Duration = Duration::from_secs(2);
 
 struct Results {
     matches: Vec<SearchMatch>,
@@ -46,12 +50,19 @@ impl From<PathBuf> for SearchMatch {
     }
 }
 
-struct Job {
+struct Job<T = Result<Results, String>> {
     cancel: Arc<AtomicBool>,
-    result: Receiver<Result<Results, String>>,
+    result: Receiver<T>,
 }
 
-impl Job {
+struct IndexReveal {
+    // Keep a cancelled check in its slot until it returns from the filesystem.
+    path: Option<PathBuf>,
+    started: Instant,
+    result: Receiver<(Instant, io::Result<()>)>,
+}
+
+impl<T> Job<T> {
     fn cancel(&self) {
         self.cancel.store(true, Ordering::Relaxed);
     }
@@ -61,7 +72,7 @@ impl Job {
     }
 }
 
-impl Drop for Job {
+impl<T> Drop for Job<T> {
     fn drop(&mut self) {
         self.cancel();
     }
@@ -96,6 +107,10 @@ pub struct Search {
     results: Option<Results>,
     selected: Option<usize>,
     error: Option<String>,
+    index_info: Option<IndexInfo>,
+    index_inspection: Option<Job<IndexInfo>>,
+    pending_index_inspection: Option<PathBuf>,
+    index_reveal: Option<IndexReveal>,
 }
 
 impl Search {
@@ -111,12 +126,22 @@ impl Search {
     }
 
     fn clear(&mut self) {
-        for job in self.jobs.iter().flatten() {
-            job.cancel();
-        }
+        self.cancel_work();
         self.results = None;
         self.selected = None;
         self.error = None;
+        self.index_info = None;
+    }
+
+    fn cancel_work(&mut self) {
+        for job in self.jobs.iter().flatten() {
+            job.cancel();
+        }
+        if let Some(inspection) = &self.index_inspection {
+            inspection.cancel();
+        }
+        self.pending_index_inspection = None;
+        self.cancel_index_reveal();
     }
 
     fn job(&self) -> Option<&Job> {
@@ -163,10 +188,10 @@ impl Search {
         let mode = self.mode;
         let folder_target = self.folder_target;
         let folder = self.folder.clone();
-        let cli = cli.map(Path::to_path_buf);
+        let worker_cli = cli.map(Path::to_path_buf);
         let query = self.query.clone();
         let exclusions = self.exclusions.clone();
-        let ctx = ctx.clone();
+        let worker_ctx = ctx.clone();
         let worker = std::thread::Builder::new().spawn(move || {
             let result = match filters {
                 Some(filters) => FolderSearch::new(folder_target, &query, &exclusions, filters)
@@ -178,17 +203,24 @@ impl Search {
                         )
                     }),
                 None => run(
-                    cli.as_deref().expect("validated locate tool"),
+                    worker_cli.as_deref().expect("validated locate tool"),
                     &query,
                     &worker_cancel,
                     TIMEOUT,
                 ),
             };
             let _ = tx.send(result);
-            ctx.request_repaint();
+            worker_ctx.request_repaint();
         });
         match worker {
-            Ok(_) => self.jobs[mode as usize] = Some(Job { cancel, result: rx }),
+            Ok(_) => {
+                self.jobs[mode as usize] = Some(Job { cancel, result: rx });
+                if mode == Mode::Index {
+                    self.index_info = Some(IndexInfo::unknown());
+                    self.pending_index_inspection = cli.map(Path::to_path_buf);
+                    self.poll_index_inspection(ctx);
+                }
+            }
             Err(error) => {
                 self.error = Some(crate::tr_format!(
                     "Не удалось запустить поиск: {error}",
@@ -223,9 +255,148 @@ impl Search {
         }
     }
 
+    fn poll_index_inspection(&mut self, ctx: &egui::Context) {
+        // A slow metadata call must not delay search results or start more workers.
+        if let Some(inspection) = &self.index_inspection {
+            match inspection.result.try_recv() {
+                Ok(info) => {
+                    if !inspection.cancelled() {
+                        self.index_info = Some(info);
+                    }
+                    self.index_inspection = None;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => self.index_inspection = None,
+                Err(mpsc::TryRecvError::Empty) => return,
+            }
+        }
+        let Some(cli) = self.pending_index_inspection.take() else {
+            return;
+        };
+        let (tx, result) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
+        let ctx = ctx.clone();
+        if std::thread::Builder::new()
+            .spawn(move || {
+                let _ = tx.send(index::inspect(&cli, &worker_cancel, INDEX_INFO_BUDGET));
+                ctx.request_repaint();
+            })
+            .is_ok()
+        {
+            self.index_inspection = Some(Job { cancel, result });
+        }
+    }
+
+    fn cancel_index_reveal(&mut self) {
+        if let Some(check) = &mut self.index_reveal {
+            check.path = None;
+        }
+    }
+
+    fn check_index_reveal(&mut self, path: PathBuf, ctx: &egui::Context) {
+        if self.index_reveal.is_some() {
+            self.error = Some(
+                crate::i18n::text("Предыдущая проверка пути ещё ждёт ответа файловой системы.")
+                    .into(),
+            );
+            ctx.request_repaint();
+            return;
+        }
+        let (tx, result) = mpsc::channel();
+        let candidate = path.clone();
+        let ctx = ctx.clone();
+        let started = Instant::now();
+        let worker = std::thread::Builder::new().spawn(move || {
+            // A dangling symlink is itself a file-manager entry.
+            let result = candidate.symlink_metadata().map(|_| ());
+            let _ = tx.send((Instant::now(), result));
+            ctx.request_repaint();
+        });
+        match worker {
+            Ok(_) => {
+                self.error = None;
+                self.index_reveal = Some(IndexReveal {
+                    path: Some(path),
+                    started,
+                    result,
+                });
+            }
+            Err(error) => {
+                self.error = Some(crate::tr_format!(
+                    "Не удалось проверить путь из индекса. {error}",
+                    "Could not check the indexed path. {error}"
+                ));
+            }
+        }
+    }
+
+    fn poll_index_reveal(&mut self, ctx: &egui::Context) -> Option<PathBuf> {
+        let check = self.index_reveal.as_mut()?;
+        let result = match check.result.try_recv() {
+            Ok((finished, _)) if finished.duration_since(check.started) >= INDEX_REVEAL_WAIT => {
+                Err(io::ErrorKind::TimedOut.into())
+            }
+            Ok((_, result)) => result,
+            Err(mpsc::TryRecvError::Empty) => {
+                if check.started.elapsed() >= INDEX_REVEAL_WAIT && check.path.take().is_some() {
+                    self.error = Some(
+                        crate::i18n::text(
+                            "Файловая система не ответила на проверку пути из индекса.",
+                        )
+                        .into(),
+                    );
+                    ctx.request_repaint();
+                }
+                return None;
+            }
+            Err(mpsc::TryRecvError::Disconnected) => Err(io::ErrorKind::Interrupted.into()),
+        };
+        ctx.request_repaint();
+        let path = self.index_reveal.take()?.path?;
+        match result {
+            Ok(()) => return Some(path),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                if let Some(results) = &mut self.results {
+                    results.matches.retain(|hit| hit.path != path);
+                }
+                self.selected = None;
+                let path = path.display();
+                self.error = Some(crate::tr_format!(
+                    "Путь из индекса больше не существует: {path}",
+                    "The indexed path no longer exists: {path}"
+                ));
+            }
+            Err(error) => {
+                self.error = Some(if error.kind() == io::ErrorKind::TimedOut {
+                    crate::i18n::text("Файловая система не ответила на проверку пути из индекса.")
+                        .into()
+                } else {
+                    crate::tr_format!(
+                        "Не удалось проверить путь из индекса. {error}",
+                        "Could not check the indexed path. {error}"
+                    )
+                });
+            }
+        }
+        None
+    }
+
+    fn checking_index_reveal(&self) -> bool {
+        self.index_reveal
+            .as_ref()
+            .is_some_and(|check| check.path.is_some())
+    }
+
     pub fn show(&mut self, ctx: &egui::Context, cli: Option<&Path>) -> Option<PathBuf> {
         self.poll();
+        self.poll_index_inspection(ctx);
         if !self.visible {
+            self.poll_index_reveal(ctx);
             return None;
         }
         let mut visible = true;
@@ -333,7 +504,7 @@ impl Search {
                         if job.cancelled() {
                             ui.label(crate::i18n::text("Остановка поиска…"));
                         } else if ui.button(crate::i18n::text("Отмена")).clicked() {
-                            job.cancel();
+                            self.cancel_work();
                             self.error = Some(crate::i18n::text("Поиск отменён").into());
                         }
                     }
@@ -352,6 +523,10 @@ impl Search {
                     ui.colored_label(ui.visuals().error_fg_color, error);
                 }
                 if self.mode == Mode::Index {
+                    if let Some(info) = &self.index_info {
+                        ui.small(&info.source);
+                        ui.small(&info.freshness);
+                    }
                     ui.small(crate::i18n::text("Если база отсутствует или устарела, обновите её средствами ОС (locate.updatedb / updatedb)."));
                 }
                 if let Some(results) = &self.results {
@@ -367,7 +542,7 @@ impl Search {
                     if !results.warning.is_empty() {
                         ui.colored_label(ui.visuals().warn_fg_color, &results.warning);
                     }
-                    if results.matches.is_empty() {
+                    if results.matches.is_empty() && self.error.is_none() {
                         ui.label(match self.mode {
                             Mode::Folder if has_context => crate::i18n::text("В просмотренных файлах совпадений нет."),
                             Mode::Folder => crate::i18n::text("В просмотренных папках совпадений нет."),
@@ -376,6 +551,7 @@ impl Search {
                     }
                     let excerpt_height = ui.text_style_height(&egui::TextStyle::Body);
                     let button_height = 28.0_f32.max(excerpt_height);
+                    let can_reveal = !self.checking_index_reveal();
                     let row_height = if has_context {
                         button_height + excerpt_height + ui.spacing().item_spacing.y
                     } else {
@@ -405,7 +581,7 @@ impl Search {
                                     if response.clicked() {
                                         self.selected = Some(index);
                                     }
-                                    if response.double_clicked() {
+                                    if response.double_clicked() && can_reveal {
                                         reveal = Some(hit.path.clone());
                                     }
                                     if let Some(context) = &hit.context {
@@ -418,8 +594,14 @@ impl Search {
                                 });
                             }
                         });
-                    if ui.add_enabled(self.selected.is_some(), egui::Button::new(crate::i18n::text("Показать в панели"))).clicked() {
+                    if ui.add_enabled(self.selected.is_some() && can_reveal, egui::Button::new(crate::i18n::text("Показать в панели"))).clicked() {
                         reveal = self.selected.map(|index| results.matches[index].path.clone());
+                    }
+                    if !can_reveal {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(crate::i18n::text("Проверка пути из индекса…"));
+                        });
                     }
                     ui.small(crate::i18n::text("Двойной щелчок — перейти к результату в активной панели."));
                 }
@@ -431,12 +613,21 @@ impl Search {
                 visible = false;
             }
         }
+        if !visible {
+            self.cancel_index_reveal();
+            reveal = None;
+        }
+        let checked = self.poll_index_reveal(ctx);
+        if self.mode == Mode::Index {
+            if let Some(path) = reveal.take() {
+                self.check_index_reveal(path, ctx);
+            }
+            reveal = checked;
+        }
         self.visible = visible && reveal.is_none();
         if !self.visible {
-            for job in self.jobs.iter().flatten() {
-                job.cancel();
-            }
-        } else if self.job().is_some() {
+            self.cancel_work();
+        } else if self.job().is_some() || self.checking_index_reveal() {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
         reveal
@@ -972,6 +1163,107 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(paths(&results), [path]);
+    }
+
+    #[test]
+    fn missing_index_result_is_removed_without_revealing_or_losing_other_hits() {
+        let ctx = egui::Context::default();
+        let root = tempfile::tempdir().unwrap();
+        let stale = root.path().join("removed-parent").join("indexed.txt");
+        let valid = root.path().join("valid.txt");
+        fs::write(&valid, "disposable file").unwrap();
+        let (tx, result) = mpsc::channel();
+        tx.send((Instant::now(), stale.symlink_metadata().map(|_| ())))
+            .unwrap();
+        let mut search = Search {
+            mode: Mode::Index,
+            visible: true,
+            results: Some(Results {
+                matches: vec![stale.clone().into(), valid.clone().into()],
+                limited: false,
+                warning: String::new(),
+            }),
+            selected: Some(0),
+            index_reveal: Some(IndexReveal {
+                path: Some(stale.clone()),
+                started: Instant::now(),
+                result,
+            }),
+            ..Default::default()
+        };
+        assert!(search.poll_index_reveal(&ctx).is_none());
+        assert!(search.visible);
+        assert!(search
+            .error
+            .as_ref()
+            .unwrap()
+            .contains(&*stale.to_string_lossy()));
+        assert!(search.selected.is_none());
+        assert_eq!(paths(search.results.as_ref().unwrap()), [valid]);
+    }
+
+    #[test]
+    fn index_results_arrive_even_if_inspection_is_still_waiting() {
+        let mut search = Search {
+            mode: Mode::Index,
+            ..Default::default()
+        };
+        let (tx, result) = mpsc::channel();
+        let (inspection_tx, inspection) = mpsc::channel();
+        search.index_inspection = Some(Job {
+            cancel: Arc::new(AtomicBool::new(false)),
+            result: inspection,
+        });
+        search.jobs[Mode::Index as usize] = Some(Job {
+            cancel: Arc::new(AtomicBool::new(false)),
+            result,
+        });
+        let path = PathBuf::from("/indexed.txt");
+        tx.send(Ok(Results {
+            matches: vec![path.clone().into()],
+            limited: false,
+            warning: String::new(),
+        }))
+        .unwrap();
+
+        search.poll();
+
+        assert!(search.index_inspection.is_some());
+        assert!(search.job().is_none());
+        assert_eq!(paths(search.results.as_ref().unwrap()), [path]);
+
+        let ctx = egui::Context::default();
+        let fixture = tempfile::tempdir().unwrap();
+        search.index_inspection.as_ref().unwrap().cancel();
+        search.pending_index_inspection = Some(fixture.path().join("missing-locate"));
+        search.poll_index_inspection(&ctx);
+        assert!(search.pending_index_inspection.is_some());
+        inspection_tx.send(IndexInfo::unknown()).unwrap();
+        search.poll_index_inspection(&ctx);
+        assert!(search.index_info.is_none());
+        assert!(search.pending_index_inspection.is_none());
+        assert!(!search.index_inspection.as_ref().unwrap().cancelled());
+    }
+
+    #[test]
+    fn timed_out_reveal_discards_late_success_and_releases_the_ui() {
+        let ctx = egui::Context::default();
+        let (tx, result) = mpsc::channel();
+        let mut search = Search {
+            index_reveal: Some(IndexReveal {
+                path: Some(PathBuf::from("/indexed.txt")),
+                started: Instant::now() - INDEX_REVEAL_WAIT,
+                result,
+            }),
+            ..Default::default()
+        };
+        assert!(search.poll_index_reveal(&ctx).is_none());
+        assert!(!search.checking_index_reveal());
+        assert!(search.index_reveal.is_some());
+        assert!(search.error.is_some());
+        tx.send((Instant::now(), Ok(()))).unwrap();
+        assert!(search.poll_index_reveal(&ctx).is_none());
+        assert!(search.index_reveal.is_none());
     }
 
     #[test]
