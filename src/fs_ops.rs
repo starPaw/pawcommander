@@ -452,7 +452,67 @@ fn ensure_absent(path: &Path) -> Result<(), String> {
 
 static STAGING_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn create_staging_directory(parent: &Path) -> Result<PathBuf, String> {
+struct StagingDirectory {
+    path: PathBuf,
+    original: fs::Metadata,
+}
+
+impl StagingDirectory {
+    fn new(path: PathBuf) -> Result<Self, String> {
+        let original = fs::symlink_metadata(&path).map_err(|error| {
+            crate::tr_format!(
+                "Не удалось проверить временную папку «{}»: {error}",
+                "Could not inspect temporary folder “{}”: {error}",
+                path.display()
+            )
+        })?;
+        if !original.is_dir() || original.file_type().is_symlink() {
+            return Err(crate::tr_format!(
+                "Временная папка «{}» изменилась до копирования; данные сохранены",
+                "Temporary folder “{}” changed before copying; data was preserved",
+                path.display()
+            ));
+        }
+        Ok(Self { path, original })
+    }
+
+    fn same_owned(&self) -> io::Result<bool> {
+        let candidate = fs::symlink_metadata(&self.path)?;
+        if !candidate.is_dir() || candidate.file_type().is_symlink() {
+            return Ok(false);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Ok(self.original.dev() == candidate.dev() && self.original.ino() == candidate.ino())
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            Ok(self.original.volume_serial_number().is_some()
+                && self.original.volume_serial_number() == candidate.volume_serial_number()
+                && self.original.file_index().is_some()
+                && self.original.file_index() == candidate.file_index())
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            Ok(false)
+        }
+    }
+
+    fn ensure_owned(&self) -> io::Result<()> {
+        if self.same_owned()? {
+            Ok(())
+        } else {
+            Err(io::Error::other(crate::tr_format!(
+                "Временная папка изменилась; её содержимое сохранено",
+                "Staging directory identity changed; its contents were preserved"
+            )))
+        }
+    }
+}
+
+fn create_staging_directory(parent: &Path) -> Result<StagingDirectory, String> {
     for _ in 0..100 {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -480,7 +540,7 @@ fn create_staging_directory(parent: &Path) -> Result<PathBuf, String> {
             builder
         };
         match builder.create(&path) {
-            Ok(()) => return Ok(path),
+            Ok(()) => return StagingDirectory::new(path),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                 crate::recovery::abandon_staging(&location).map_err(|error| error.to_string())?;
                 continue;
@@ -582,7 +642,7 @@ pub(crate) fn copy_atomically_cancellable(
     progress.check_cancelled()?;
     let staging = create_staging_directory(parent)?;
     if let Err(error) =
-        crate::recovery::register_staging(&crate::vfs::Location::Local(staging.clone()))
+        crate::recovery::register_staging(&crate::vfs::Location::Local(staging.path.clone()))
     {
         let cleanup = remove_staging(&staging);
         return Err(match cleanup {
@@ -590,11 +650,21 @@ pub(crate) fn copy_atomically_cancellable(
             Err(cleanup) => TransferError::Failed(crate::tr_format!(
                 "Не удалось зарегистрировать временную копию «{}»: {error}; очистка не удалась: {cleanup}",
                 "Could not register temporary copy “{}”: {error}; cleanup failed: {cleanup}",
-                staging.display()
+                staging.path.display()
             )),
         });
     }
-    let payload = staging.join("payload");
+    let check_staging = || {
+        staging.ensure_owned().map_err(|error| {
+            TransferError::Failed(crate::tr_format!(
+                "Временная копия «{}» изменилась: {error}",
+                "Temporary copy “{}” changed: {error}",
+                staging.path.display()
+            ))
+        })
+    };
+    check_staging()?;
+    let payload = staging.path.join("payload");
     let result = copy_tree(source, &payload, progress, &manifest, after_entry)
         // Revisit every entry, including early files after later files copied.
         .and_then(|()| {
@@ -613,6 +683,7 @@ pub(crate) fn copy_atomically_cancellable(
                     .unwrap_or_else(|| at(crate::i18n::text("Не удалось скопировать"), source, e))
             })
         })
+        .and_then(|()| check_staging())
         // No cancellation inside publication, rollback, or staging cleanup.
         .and_then(|()| publish(&payload, destination).map_err(Into::into));
     match (result, remove_staging(&staging)) {
@@ -621,12 +692,12 @@ pub(crate) fn copy_atomically_cancellable(
         (Err(error), Err(cleanup)) => Err(crate::tr_format!(
             "{error}. Осталась временная копия «{}»: {cleanup}",
             "{error}. Temporary copy remains at “{}”: {cleanup}",
-            staging.display()
+            staging.path.display()
         ).into()),
         (Ok(()), Err(cleanup)) => Err(crate::tr_format!(
             "Копия «{}» готова, но не удалось удалить её пустую временную папку «{}»: {cleanup}",
             "Copy “{}” is ready, but its empty temporary folder “{}” could not be removed: {cleanup}",
-            destination.display(), staging.display()
+            destination.display(), staging.path.display()
         ).into()),
     }
 }
@@ -1089,7 +1160,8 @@ fn copy_symlink(_: &Path, _: &Path, _: &fs::Metadata) -> io::Result<()> {
 
 /// Restore permissions only inside an unpublished private copy before cleanup;
 /// never follow a symlink or change any source permissions.
-fn remove_staging(path: &Path) -> io::Result<()> {
+fn remove_staging(staging: &StagingDirectory) -> io::Result<()> {
+    staging.ensure_owned()?;
     fn make_removable(path: &Path) -> io::Result<()> {
         let metadata = fs::symlink_metadata(path)?;
         if metadata.file_type().is_symlink() {
@@ -1118,8 +1190,9 @@ fn remove_staging(path: &Path) -> io::Result<()> {
         }
         Ok(())
     }
-    make_removable(path)?;
-    fs::remove_dir_all(path)
+    make_removable(&staging.path)?;
+    staging.ensure_owned()?;
+    fs::remove_dir_all(&staging.path)
 }
 
 fn at(action: &str, path: &Path, error: io::Error) -> String {
@@ -1254,6 +1327,52 @@ mod tests {
         assert_eq!(fs::read(&source).unwrap(), b"source bytes");
         assert_eq!(fs::read(&target).unwrap(), b"old destination");
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_failure_preserves_a_directory_replacing_its_staging_path() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let destination = root.path().join("destination");
+        let displaced = root.path().join("displaced-staging");
+        fs::write(&source, b"source bytes").unwrap();
+        let mut replacement = None;
+        let result = copy_atomically_checked(
+            &source,
+            &destination,
+            &mut Progress::default(),
+            |_, _| panic!("failed copy must not publish"),
+            &mut |_| {
+                let staging = fs::read_dir(root.path())?
+                    .map(Result::unwrap)
+                    .find(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with(".pawcommander-copy-")
+                    })
+                    .ok_or_else(|| io::Error::other("staging path not found"))?
+                    .path();
+                fs::rename(&staging, &displaced)?;
+                fs::create_dir(&staging)?;
+                fs::write(staging.join("foreign"), b"not owned by the copy")?;
+                replacement = Some(staging);
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        let replacement = replacement.expect("copy hook ran");
+        assert_eq!(
+            fs::read(replacement.join("foreign")).unwrap(),
+            b"not owned by the copy"
+        );
+        assert_eq!(
+            fs::read(displaced.join("payload")).unwrap(),
+            b"source bytes"
+        );
+        assert_eq!(fs::read(source).unwrap(), b"source bytes");
+        assert!(!destination.exists());
     }
 
     #[test]
