@@ -2,11 +2,12 @@
 //!
 //! All I/O belongs on background workers. Records are descriptions, never
 //! executable plans: recovery does not retry operations, inspect destinations,
-//! discover staging directories, or remove any source, target, or staging data.
+//! discover arbitrary staging directories, or remove any source, target, or staging data.
 use eframe::egui;
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 
@@ -21,6 +22,85 @@ pub(crate) struct Record {
     pub label: String,
     pub description: String,
     pub started: u64,
+    #[serde(default, skip_serializing)]
+    pub staging: Vec<StagingRecord>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct StagingRecord {
+    /// Display-only receipt. Never used as a cleanup target.
+    pub location: String,
+    pub identity: Option<LocalIdentity>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct LocalIdentity {
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(windows)]
+    volume: Option<u32>,
+    #[cfg(windows)]
+    file_index: Option<u64>,
+}
+
+impl LocalIdentity {
+    fn of(path: &Path) -> io::Result<Self> {
+        let metadata = fs::symlink_metadata(path)?;
+        if !metadata.is_dir() {
+            return Err(io::Error::other("Staging path is no longer a directory"));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Ok(Self {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            })
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            Ok(Self {
+                volume: metadata.volume_serial_number(),
+                file_index: metadata.file_index(),
+            })
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            Ok(Self {})
+        }
+    }
+}
+
+thread_local! {
+    static ACTIVE_MARKER: RefCell<Option<File>> = const { RefCell::new(None) };
+}
+
+/// Append a receipt only for a staging directory created by the current worker.
+/// The receipt is synced before payload data is written. A partial final line
+/// after a crash is reported while earlier receipts remain readable.
+pub(crate) fn register_staging(location: &crate::vfs::Location) -> io::Result<()> {
+    ACTIVE_MARKER.with(|active| {
+        let mut active = active.borrow_mut();
+        let Some(file) = active.as_mut() else {
+            return Ok(());
+        };
+        let receipt = StagingRecord {
+            location: location.display(),
+            identity: location.local().map(LocalIdentity::of).transpose()?,
+        };
+        let mut bytes = serde_json::to_vec(&receipt).map_err(io::Error::other)?;
+        bytes.push(b'\n');
+        let length = file.metadata()?.len();
+        if length.saturating_add(bytes.len() as u64) > MAX_BYTES as u64 {
+            return Err(io::Error::other("Recovery staging journal exceeds 128 KiB"));
+        }
+        file.seek(SeekFrom::End(0))?;
+        file.write_all(&bytes)?;
+        file.sync_all()
+    })
 }
 
 #[derive(Deserialize, Serialize)]
@@ -146,8 +226,8 @@ impl Recovery {
                     "These operations have no confirmed completion. Some files may have been processed. Check both folders and result history before retrying."
                 ));
                 ui.label(crate::tr_format!(
-                    "Это отчёт запуска. Ожидающие задания и временные копии пока не отслеживаются. Автоматический повтор и удаление файлов не выполняются.",
-                    "This is a startup report. Queued jobs and temporary copies are not tracked yet. No automatic retry or file removal is performed."
+                    "Временные копии перечислены только по сохранённым записям; их текущее содержимое не проверено. Ожидающие задания не отслеживаются. Автоматический повтор и удаление файлов не выполняются.",
+                    "Temporary copies are listed only from saved receipts; their current contents are unverified. Queued jobs are not tracked. No automatic retry or file removal is performed."
                 ));
                 if let Some(directory) = &self.directory {
                     ui.add(egui::Label::new(directory.display().to_string()).selectable(true).wrap());
@@ -174,6 +254,13 @@ impl Recovery {
                         ui.separator();
                         ui.add(egui::Label::new(format!("{time} · {}", record.label)).selectable(true).wrap());
                         ui.add(egui::Label::new(&record.description).selectable(true).wrap());
+                        for staging in &record.staging {
+                            ui.add(egui::Label::new(crate::tr_format!(
+                                "Зарегистрирована временная копия: {}",
+                                "Registered temporary copy: {}",
+                                staging.location
+                            )).selectable(true).wrap());
+                        }
                     }
                 });
             });
@@ -206,6 +293,7 @@ pub(crate) fn begin(
             label: label.into(),
             description: description.into(),
             started,
+            staging: Vec::new(),
         },
     };
     let bytes = serde_json::to_vec(&saved).map_err(io::Error::other)?;
@@ -226,6 +314,7 @@ pub(crate) fn begin(
         .tempfile_in(directory)?;
     temporary.as_file().try_lock().map_err(io::Error::other)?;
     temporary.write_all(&bytes)?;
+    temporary.write_all(b"\n")?;
     temporary.as_file().sync_all()?;
     // Publish only a complete, already locked record. A concurrent startup scan
     // must never mistake a writer's partly serialized marker for corrupt data.
@@ -239,6 +328,29 @@ pub(crate) fn begin(
 }
 
 impl PendingOperation {
+    /// Activate this marker only on the worker thread running its operation.
+    pub fn run<R>(&self, work: impl FnOnce() -> R) -> io::Result<R> {
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                ACTIVE_MARKER.with(|active| *active.borrow_mut() = None);
+            }
+        }
+        let clone = self.file.try_clone()?;
+        ACTIVE_MARKER.with(|active| {
+            let mut active = active.borrow_mut();
+            if active.is_some() {
+                return Err(io::Error::other(
+                    "Recovery worker already has an active marker",
+                ));
+            }
+            *active = Some(clone);
+            Ok(())
+        })?;
+        let _clear = Clear;
+        Ok(work())
+    }
+
     /// Call only after a normal worker return and successful result persistence.
     /// A caught panic or failed history save must drop the handle instead.
     pub fn complete(self) -> io::Result<()> {
@@ -345,10 +457,20 @@ pub(crate) fn scan(directory: &Path) -> Report {
         }
         let path = entry.path();
         match read_record(&path) {
-            Ok(Some(record)) => {
+            Ok(Some((record, warnings))) => {
+                for warning in warnings {
+                    report.errors.push(format!("{}: {warning}", path.display()));
+                }
                 report_bytes = report_bytes
                     .saturating_add(record.label.len())
-                    .saturating_add(record.description.len());
+                    .saturating_add(record.description.len())
+                    .saturating_add(
+                        record
+                            .staging
+                            .iter()
+                            .map(|entry| entry.location.len())
+                            .sum::<usize>(),
+                    );
                 if report_bytes > 8 * 1024 * 1024 {
                     report
                         .errors
@@ -374,7 +496,7 @@ fn is_marker_name(name: &std::ffi::OsStr) -> bool {
         })
 }
 
-fn read_record(path: &Path) -> io::Result<Option<Record>> {
+fn read_record(path: &Path) -> io::Result<Option<(Record, Vec<String>)>> {
     if !fs::symlink_metadata(path)?.file_type().is_file() {
         return Err(io::Error::other("Recovery marker is not a regular file"));
     }
@@ -406,11 +528,35 @@ fn read_record(path: &Path) -> io::Result<Option<Record>> {
     if bytes.len() > MAX_BYTES {
         return Err(io::Error::other("Recovery record exceeds 128 KiB"));
     }
-    let saved: Saved = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+    let first_end = bytes
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .unwrap_or(bytes.len());
+    let saved: Saved = serde_json::from_slice(&bytes[..first_end]).map_err(io::Error::other)?;
     if saved.version != VERSION {
         return Err(io::Error::other("Unsupported recovery record version"));
     }
-    Ok(Some(saved.record))
+    let mut record = saved.record;
+    let mut warnings = Vec::new();
+    if first_end < bytes.len() {
+        let mut remainder = &bytes[first_end + 1..];
+        while !remainder.is_empty() {
+            let Some(end) = remainder.iter().position(|byte| *byte == b'\n') else {
+                warnings.push("Incomplete staging receipt preserved".into());
+                break;
+            };
+            if end > 0 {
+                match serde_json::from_slice::<StagingRecord>(&remainder[..end]) {
+                    Ok(receipt) => record.staging.push(receipt),
+                    Err(error) => {
+                        warnings.push(format!("Invalid staging receipt preserved: {error}"))
+                    }
+                }
+            }
+            remainder = &remainder[end + 1..];
+        }
+    }
+    Ok(Some((record, warnings)))
 }
 
 fn sync_directory(directory: &Path) -> io::Result<()> {
@@ -431,7 +577,15 @@ mod tests {
     fn crash_process_helper() {
         let directory =
             PathBuf::from(std::env::var_os("PAWCOMMANDER_RECOVERY_CRASH_TEST_DIR").unwrap());
-        let _pending = begin(&directory, "copy", "source -> target", 42).unwrap();
+        let staging = directory.parent().unwrap().join(".pawcommander-copy-owned");
+        fs::create_dir(&staging).unwrap();
+        let pending = begin(&directory, "copy", "source -> target", 42).unwrap();
+        pending
+            .run(|| {
+                register_staging(&crate::vfs::Location::Local(staging.clone())).unwrap();
+                fs::write(staging.join("payload"), b"incomplete copy").unwrap();
+            })
+            .unwrap();
         fs::write(directory.parent().unwrap().join("ready"), b"ready").unwrap();
         loop {
             std::thread::park();
@@ -490,7 +644,21 @@ mod tests {
                 label: "copy".into(),
                 description: "source -> target".into(),
                 started: 42,
+                staging: vec![StagingRecord {
+                    location: root
+                        .path()
+                        .join(".pawcommander-copy-owned")
+                        .display()
+                        .to_string(),
+                    identity: Some(
+                        LocalIdentity::of(&root.path().join(".pawcommander-copy-owned")).unwrap()
+                    ),
+                }],
             }]
+        );
+        assert_eq!(
+            fs::read(root.path().join(".pawcommander-copy-owned/payload")).unwrap(),
+            b"incomplete copy"
         );
         assert_eq!(
             fs::read(foreign).unwrap(),
@@ -515,6 +683,93 @@ mod tests {
     }
 
     #[test]
+    fn only_active_owned_marker_receives_staging_receipts() {
+        let root = tempfile::tempdir().unwrap();
+        let recovery = root.path().join("recovery");
+        let owned = root.path().join(".pawcommander-copy-owned");
+        let foreign = root.path().join(".pawcommander-copy-foreign");
+        fs::create_dir(&owned).unwrap();
+        fs::create_dir(&foreign).unwrap();
+        fs::write(foreign.join("payload"), b"foreign").unwrap();
+        let pending = begin(&recovery, "copy", "one item", 5).unwrap();
+        pending
+            .run(|| {
+                register_staging(&crate::vfs::Location::Local(owned.clone())).unwrap();
+                assert!(scan(&recovery).unfinished.is_empty());
+            })
+            .unwrap();
+        drop(pending);
+        let report = scan(&recovery);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.unfinished.len(), 1);
+        assert_eq!(report.unfinished[0].staging.len(), 1);
+        assert_eq!(
+            report.unfinished[0].staging[0].location,
+            owned.display().to_string()
+        );
+        assert_eq!(fs::read(foreign.join("payload")).unwrap(), b"foreign");
+        assert!(owned.is_dir());
+    }
+
+    #[test]
+    fn incomplete_staging_receipt_preserves_prior_receipts() {
+        let root = tempfile::tempdir().unwrap();
+        let owned = root.path().join("owned");
+        fs::create_dir(&owned).unwrap();
+        let pending = begin(root.path(), "copy", "one item", 5).unwrap();
+        pending
+            .run(|| register_staging(&crate::vfs::Location::Local(owned.clone())).unwrap())
+            .unwrap();
+        let path = pending.path.clone();
+        drop(pending);
+        OpenOptions::new()
+            .append(true)
+            .open(path)
+            .unwrap()
+            .write_all(b"{partial")
+            .unwrap();
+        let report = scan(root.path());
+        assert_eq!(report.unfinished.len(), 1);
+        assert_eq!(report.unfinished[0].staging.len(), 1);
+        assert_eq!(report.errors.len(), 1);
+    }
+
+    #[test]
+    fn interrupted_local_copy_is_listed_with_its_payload() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.txt");
+        let target = root.path().join("target.txt");
+        fs::write(&source, b"source data").unwrap();
+        let recovery = root.path().join("recovery");
+        let pending = begin(&recovery, "copy", "source -> target", 6).unwrap();
+        let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pending
+                .run(|| {
+                    crate::fs_ops::copy_atomically_with_progress(
+                        &source,
+                        &target,
+                        &mut crate::operations::Progress::default(),
+                        |_, _| panic!("injected crash before publication"),
+                    )
+                })
+                .unwrap()
+                .unwrap();
+        }));
+        assert!(stopped.is_err());
+        drop(pending);
+        let report = scan(&recovery);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.unfinished.len(), 1);
+        let registered = &report.unfinished[0].staging;
+        assert_eq!(registered.len(), 1);
+        assert!(registered[0].identity.is_some());
+        let staging = Path::new(&registered[0].location);
+        assert_eq!(fs::read(staging.join("payload")).unwrap(), b"source data");
+        assert!(!target.exists());
+        assert_eq!(fs::read(source).unwrap(), b"source data");
+    }
+
+    #[test]
     fn live_worker_is_not_reported_as_interrupted() {
         let root = tempfile::tempdir().unwrap();
         let pending = begin(root.path(), "copy", "source -> target", 1).unwrap();
@@ -522,7 +777,8 @@ mod tests {
         assert!(report.unfinished.is_empty());
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         drop(pending);
-        assert_eq!(scan(root.path()).unfinished.len(), 1);
+        let stopped = scan(root.path());
+        assert_eq!(stopped.unfinished.len(), 1, "{:?}", stopped.errors);
     }
 
     #[test]

@@ -570,6 +570,19 @@ pub(crate) fn copy_atomically_cancellable(
     )?;
     progress.check_cancelled()?;
     let staging = create_staging_directory(parent)?;
+    if let Err(error) =
+        crate::recovery::register_staging(&crate::vfs::Location::Local(staging.clone()))
+    {
+        let cleanup = remove_staging(&staging);
+        return Err(match cleanup {
+            Ok(()) => TransferError::Failed(error.to_string()),
+            Err(cleanup) => TransferError::Failed(crate::tr_format!(
+                "Не удалось зарегистрировать временную копию «{}»: {error}; очистка не удалась: {cleanup}",
+                "Could not register temporary copy “{}”: {error}; cleanup failed: {cleanup}",
+                staging.display()
+            )),
+        });
+    }
     let payload = staging.join("payload");
     let result = copy_tree(source, &payload, progress, &manifest, after_entry)
         // Revisit every entry, including early files after later files copied.

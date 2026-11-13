@@ -994,6 +994,10 @@ pub(super) fn with_staging_typed(
             .tempdir_in(parent)
             .map_err(|e| fs_ops::copy_space_error(parent, &e).unwrap_or_else(|| err(e)))?;
         let location = Location::Local(staging.path().into());
+        if let Err(error) = crate::recovery::register_staging(&location) {
+            let cleanup = staging.close().map_err(err);
+            return staging_result_typed(Err(err(error).into()), cleanup, &location, target);
+        }
         let result = work(&location, &mut preserve);
         if preserve {
             let _ = staging.keep();
@@ -1026,6 +1030,16 @@ pub(super) fn with_staging_typed(
         }
     }
     let staging = staging.ok_or("Не удалось создать временную папку SFTP")?;
+    if let Err(error) = crate::recovery::register_staging(&staging) {
+        let cleanup = remove_remote_tree(
+            &sftp,
+            &staging,
+            MAX_TREE_DEPTH + 1,
+            &mut Progress::default(),
+            false,
+        );
+        return staging_result_typed(Err(err(error).into()), cleanup, &staging, target);
+    }
     let result = work(&staging, &mut preserve);
     if preserve {
         return result;
