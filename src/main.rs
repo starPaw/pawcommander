@@ -32,6 +32,8 @@ mod theme;
 mod thumbnails;
 mod tools;
 mod vfs;
+#[cfg(windows)]
+mod windows_file_id;
 mod zed;
 
 fn main() -> eframe::Result {

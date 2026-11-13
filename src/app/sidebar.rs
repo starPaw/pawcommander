@@ -12,7 +12,9 @@ use crate::vfs::Location;
 use crate::{icons, shortcuts};
 use eframe::egui;
 use eframe::egui::{Color32, FontId, RichText, Sense, Stroke, Vec2};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(not(windows))]
+use std::path::PathBuf;
 
 pub(super) fn place_button(ui: &mut egui::Ui, label: &str, selected: bool) -> bool {
     let colors = Palette::from_ctx(ui.ctx());

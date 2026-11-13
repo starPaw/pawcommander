@@ -16,8 +16,45 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{fs, io};
 
 pub(super) enum EntryMetadata {
-    Local(fs::Metadata),
+    Local(LocalEntryMetadata),
     Remote(FileStat),
+}
+
+#[derive(Clone)]
+pub(super) struct LocalEntryMetadata {
+    metadata: fs::Metadata,
+    #[cfg(windows)]
+    identity: Option<crate::windows_file_id::WindowsFileId>,
+}
+
+impl LocalEntryMetadata {
+    fn at(path: &Path, metadata: fs::Metadata) -> Self {
+        #[cfg(not(windows))]
+        let _ = path;
+        Self {
+            metadata,
+            #[cfg(windows)]
+            identity: crate::windows_file_id::from_path(path).ok().flatten(),
+        }
+    }
+
+    fn from_file(file: &fs::File, metadata: fs::Metadata) -> Self {
+        #[cfg(not(windows))]
+        let _ = file;
+        Self {
+            metadata,
+            #[cfg(windows)]
+            identity: crate::windows_file_id::from_handle(file).ok().flatten(),
+        }
+    }
+}
+
+impl std::ops::Deref for LocalEntryMetadata {
+    type Target = fs::Metadata;
+
+    fn deref(&self) -> &Self::Target {
+        &self.metadata
+    }
 }
 
 impl EntryMetadata {
@@ -36,11 +73,7 @@ impl EntryMetadata {
         }
         #[cfg(windows)]
         if let (Self::Local(left), Self::Local(right)) = (self, other) {
-            use std::os::windows::fs::MetadataExt;
-            return left.volume_serial_number().is_some()
-                && left.volume_serial_number() == right.volume_serial_number()
-                && left.file_index().is_some()
-                && left.file_index() == right.file_index();
+            return left.identity.is_some() && left.identity == right.identity;
         }
         let _ = other;
         false
@@ -63,7 +96,7 @@ impl EntryMetadata {
     pub(super) fn matches_file(&self, current: &Self) -> bool {
         match (self, current) {
             (Self::Local(expected), Self::Local(actual)) => {
-                #[cfg(unix)]
+                #[cfg(any(unix, windows))]
                 if !self.same_object(current) {
                     return false;
                 }
@@ -123,7 +156,9 @@ pub(super) fn entry_kind(file: bool, dir: bool, symlink: bool) -> &'static str {
 pub(super) fn entry_metadata(location: &Location) -> Result<Option<EntryMetadata>, String> {
     if let Some(path) = location.local() {
         match fs::symlink_metadata(path) {
-            Ok(meta) => Ok(Some(EntryMetadata::Local(meta))),
+            Ok(meta) => Ok(Some(EntryMetadata::Local(LocalEntryMetadata::at(
+                path, meta,
+            )))),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(format!("{location}: {e}")),
         }
@@ -181,14 +216,18 @@ pub(super) fn transfer_plan(
         }
         return Ok(plan
             .into_iter()
-            .map(|item| TransferItem {
-                original: item.original.into(),
-                source: item.source.into(),
-                target: item.target.into(),
-                covered: item.covered,
-                local_move_source: guard_source
-                    .then_some(EntryMetadata::Local(item.source_metadata)),
-                replacement: None,
+            .map(|item| {
+                let local_move_source = guard_source.then(|| {
+                    EntryMetadata::Local(LocalEntryMetadata::at(&item.source, item.source_metadata))
+                });
+                TransferItem {
+                    original: item.original.into(),
+                    source: item.source.into(),
+                    target: item.target.into(),
+                    covered: item.covered,
+                    local_move_source,
+                    replacement: None,
+                }
             })
             .collect());
     }
@@ -966,7 +1005,10 @@ static LOCAL_STAGING_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 struct LocalStaging {
     path: PathBuf,
+    #[cfg(unix)]
     original: fs::Metadata,
+    #[cfg(windows)]
+    original_id: crate::windows_file_id::WindowsFileId,
     remove_on_drop: bool,
 }
 
@@ -984,18 +1026,30 @@ impl LocalStaging {
             ));
             let location = Location::Local(path.clone());
             crate::recovery::plan_staging(&location).map_err(err)?;
-            let mut builder = fs::DirBuilder::new();
+            let builder = fs::DirBuilder::new();
             #[cfg(unix)]
-            {
+            let builder = {
                 use std::os::unix::fs::DirBuilderExt;
+                let mut builder = builder;
                 builder.mode(0o700);
-            }
+                builder
+            };
             match builder.create(&path) {
                 Ok(()) => {
                     let original = fs::symlink_metadata(&path).map_err(err)?;
+                    if !original.is_dir() || original.file_type().is_symlink() {
+                        return Err("Temporary transfer folder changed before copying".into());
+                    }
+                    #[cfg(windows)]
+                    let original_id = crate::windows_file_id::from_path(&path)
+                        .map_err(err)?
+                        .ok_or("Temporary transfer folder identity unavailable")?;
                     return Ok(Self {
                         path,
+                        #[cfg(unix)]
                         original,
+                        #[cfg(windows)]
+                        original_id,
                         remove_on_drop: true,
                     });
                 }
@@ -1028,11 +1082,7 @@ impl LocalStaging {
         }
         #[cfg(windows)]
         {
-            use std::os::windows::fs::MetadataExt;
-            Ok(self.original.volume_serial_number().is_some()
-                && self.original.volume_serial_number() == candidate.volume_serial_number()
-                && self.original.file_index().is_some()
-                && self.original.file_index() == candidate.file_index())
+            Ok(crate::windows_file_id::from_path(&self.path)? == Some(self.original_id))
         }
         #[cfg(not(any(unix, windows)))]
         {
@@ -1463,7 +1513,12 @@ pub(super) enum SourceReader {
 impl SourceReader {
     pub(super) fn metadata(&mut self) -> Result<EntryMetadata, String> {
         match self {
-            Self::Local(input) => input.metadata().map(EntryMetadata::Local).map_err(err),
+            Self::Local(input) => input
+                .metadata()
+                .map(|metadata| {
+                    EntryMetadata::Local(LocalEntryMetadata::from_file(input, metadata))
+                })
+                .map_err(err),
             Self::Remote(input) => input.stat().map(EntryMetadata::Remote).map_err(|e| {
                 format!("Не удалось проверить открытый исходный файл SFTP (fstat): {e}")
             }),

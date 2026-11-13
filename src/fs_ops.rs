@@ -454,7 +454,10 @@ static STAGING_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 struct StagingDirectory {
     path: PathBuf,
+    #[cfg(unix)]
     original: fs::Metadata,
+    #[cfg(windows)]
+    original_id: crate::windows_file_id::WindowsFileId,
 }
 
 impl StagingDirectory {
@@ -473,7 +476,17 @@ impl StagingDirectory {
                 path.display()
             ));
         }
-        Ok(Self { path, original })
+        #[cfg(windows)]
+        let original_id = crate::windows_file_id::from_path(&path)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("Temporary folder identity unavailable: {}", path.display()))?;
+        Ok(Self {
+            path,
+            #[cfg(unix)]
+            original,
+            #[cfg(windows)]
+            original_id,
+        })
     }
 
     fn same_owned(&self) -> io::Result<bool> {
@@ -488,11 +501,7 @@ impl StagingDirectory {
         }
         #[cfg(windows)]
         {
-            use std::os::windows::fs::MetadataExt;
-            Ok(self.original.volume_serial_number().is_some()
-                && self.original.volume_serial_number() == candidate.volume_serial_number()
-                && self.original.file_index().is_some()
-                && self.original.file_index() == candidate.file_index())
+            Ok(crate::windows_file_id::from_path(&self.path)? == Some(self.original_id))
         }
         #[cfg(not(any(unix, windows)))]
         {
@@ -1378,23 +1387,19 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_cleanup_preserves_replaced_staging_directory() {
-        use std::os::windows::fs::MetadataExt;
-
         let root = tempfile::tempdir().unwrap();
         let staging = create_staging_directory(root.path()).unwrap();
         let displaced = root.path().join("displaced-staging");
-        let original_volume = staging
-            .original
-            .volume_serial_number()
-            .expect("NTFS volume ID");
-        let original_file = staging.original.file_index().expect("NTFS file ID");
+        let original_id = staging.original_id;
         fs::write(staging.path.join("payload"), b"owned copy").unwrap();
         fs::rename(&staging.path, &displaced).unwrap();
         fs::create_dir(&staging.path).unwrap();
         fs::write(staging.path.join("foreign"), b"not owned by the copy").unwrap();
-        let replacement = fs::symlink_metadata(&staging.path).unwrap();
-        assert_eq!(replacement.volume_serial_number(), Some(original_volume));
-        assert_ne!(replacement.file_index(), Some(original_file));
+        let replacement = crate::windows_file_id::from_path(&staging.path)
+            .unwrap()
+            .expect("replacement file ID");
+        assert_eq!(replacement.volume, original_id.volume);
+        assert_ne!(replacement.id, original_id.id);
 
         assert!(remove_staging(&staging).is_err());
         assert_eq!(
