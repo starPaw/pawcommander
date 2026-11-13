@@ -5,11 +5,20 @@ mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::NativeDrag;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+mod desktop;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+pub use desktop::NativeDrag;
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "windows")]
+mod windows;
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 #[derive(Default)]
 pub struct NativeDrag;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 impl NativeDrag {
     pub fn active(&self) -> bool {
         false

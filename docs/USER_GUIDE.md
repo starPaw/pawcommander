@@ -44,7 +44,9 @@ Copy and cut local files to the system clipboard with `Cmd/Ctrl+C` / `X`; paste 
 
 Drag a selection onto a folder, pane, tab, or breadcrumb. Internal drops copy by default; holding `Shift` moves local items or items within the same SFTP connection. Cross-connection and local/remote drops copy only. `Esc` cancels an internal drag.
 
-Incoming drops from a system file manager always copy. Outgoing OS drag and drop is implemented on macOS for local files: Finder copies them, and other apps may open or attach them. Remote items must first be copied locally. Outgoing native drag on Windows/Linux and remote file promises are not implemented.
+Incoming drops from a system file manager always copy. To drag local files into another application, drag the selection across the window edge. Outgoing native drags offer copy on macOS, Windows, Linux X11 and Wayland; the receiving app may copy, open or attach the files. Shift does not authorize an external move. Press Esc to cancel. Returning an outgoing Windows/Linux drag to PawCommander cancels that handoff; start a new internal drag to transfer between panes. The receiving app handles its own conflicts and copy progress. Remote items must first be copied locally; remote file promises are not implemented.
+
+Wayland outgoing drag uses the window's active pointer press and requires `wl_data_device_manager` version 3. It does not require the clipboard's data-control extension. Wayland clipboard copy/cut/paste separately needs `ext-data-control` or `wlr-data-control` as described above.
 
 ## Copying, moving, and conflicts
 
