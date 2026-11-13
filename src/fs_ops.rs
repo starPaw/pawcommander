@@ -511,7 +511,23 @@ pub(crate) fn copy_atomically_cancellable(
     progress.check_cancelled()?;
     progress.item(source);
     let cancel = progress.cancellation();
-    let manifest = SourceManifest::capture_cancellable(source, &cancel).map_err(|e| {
+    let source_location = crate::vfs::Location::Local(source.to_path_buf());
+    let target_location = crate::vfs::Location::Local(destination.to_path_buf());
+    let manifest = SourceManifest::capture_observed(source, &cancel, &mut |path, error| {
+        let location = crate::vfs::Location::Local(path.to_path_buf());
+        if let Some(error) = error {
+            progress.results.staged(
+                &location,
+                Some(error.to_string()),
+                TransferError::is_cancelled_io(error),
+            );
+        } else {
+            progress
+                .results
+                .capturing(&source_location, &target_location, &location);
+        }
+    })
+    .map_err(|e| {
         TransferError::io(e, |e| {
             at(
                 crate::i18n::text("Не удалось проверить источник"),
@@ -520,15 +536,7 @@ pub(crate) fn copy_atomically_cancellable(
             )
         })
     })?;
-    progress.results.descendants(
-        &crate::vfs::Location::Local(source.to_path_buf()),
-        &crate::vfs::Location::Local(destination.to_path_buf()),
-        manifest
-            .entries
-            .keys()
-            .cloned()
-            .map(crate::vfs::Location::Local),
-    );
+    progress.results.captured();
     let parent = destination
         .parent()
         .ok_or("Недопустимое место назначения копии")?;
@@ -755,12 +763,21 @@ impl SourceManifest {
         Self::capture_cancellable(path, &Cancellation::default())
     }
 
+    #[cfg(test)]
     fn capture_cancellable(path: &Path, cancel: &Cancellation) -> io::Result<Self> {
+        Self::capture_observed(path, cancel, &mut |_, _| {})
+    }
+
+    fn capture_observed(
+        path: &Path,
+        cancel: &Cancellation,
+        observe: &mut impl FnMut(&Path, Option<&io::Error>),
+    ) -> io::Result<Self> {
         let mut manifest = Self {
             entries: BTreeMap::new(),
             bytes: 0,
         };
-        manifest.capture_entry(path, 0, cancel)?;
+        manifest.capture_entry(path, 0, cancel, observe)?;
         Ok(manifest)
     }
 
@@ -769,6 +786,22 @@ impl SourceManifest {
         path: &Path,
         depth: usize,
         cancel: &Cancellation,
+        observe: &mut impl FnMut(&Path, Option<&io::Error>),
+    ) -> io::Result<()> {
+        observe(path, None);
+        let result = self.capture_entry_inner(path, depth, cancel, observe);
+        if let Err(error) = &result {
+            observe(path, Some(error));
+        }
+        result
+    }
+
+    fn capture_entry_inner(
+        &mut self,
+        path: &Path,
+        depth: usize,
+        cancel: &Cancellation,
+        observe: &mut impl FnMut(&Path, Option<&io::Error>),
     ) -> io::Result<()> {
         cancel.check()?;
         if depth > 128 {
@@ -801,7 +834,7 @@ impl SourceManifest {
         }
         if let Some(names) = &children {
             for name in names {
-                self.capture_entry(&path.join(name), depth + 1, cancel)?;
+                self.capture_entry(&path.join(name), depth + 1, cancel, observe)?;
             }
         }
         let entry = SourceEntry {

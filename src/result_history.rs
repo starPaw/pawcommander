@@ -147,36 +147,60 @@ impl Results {
     }
 
     /// Expand only an already captured copy manifest; never perform extra I/O.
+    #[cfg(test)]
     pub fn descendants(
         &mut self,
         source: &Location,
         target: &Location,
         entries: impl Iterator<Item = Location>,
     ) {
+        self.capturing(source, target, source);
+        for entry in entries {
+            self.capturing(source, target, &entry);
+        }
+        self.captured();
+    }
+
+    /// Observe the existing source-manifest walk without extending it. These
+    /// rows remain unstarted until copying begins; traversal alone publishes nothing.
+    pub fn capturing(&mut self, source: &Location, target: &Location, entry: &Location) {
         let (Some(root), Some(original)) = (self.active, self.active_source.clone()) else {
             return;
         };
-        self.items[root].descendants_enumerated = true;
-        self.nested_index.clear();
-        let start = self.items.len();
-        for entry in entries {
-            let Ok(relative) = entry.path().strip_prefix(source.path()) else {
-                continue;
-            };
-            if relative.as_os_str().is_empty() {
-                continue;
-            }
-            let display_source = original.join(relative);
-            if let Some(index) = self.add_row(
-                &display_source,
-                Some(target.join(relative).display()),
-                Some(root),
-            ) {
-                self.nested_index.insert(entry, index);
+        if !entry.same_backend(source) {
+            return;
+        }
+        let Ok(relative) = entry.path().strip_prefix(source.path()) else {
+            return;
+        };
+        if self.group.is_none() {
+            let start = self.items.len();
+            self.group = Some((root, start..start));
+            self.observed_group = true;
+            self.nested_index.clear();
+        }
+        if relative.as_os_str().is_empty() || self.nested_index.contains_key(entry) {
+            return;
+        }
+        if let Some(index) = self.add_row(
+            &original.join(relative),
+            Some(target.join(relative).display()),
+            Some(root),
+        ) {
+            self.nested_index.insert(entry.clone(), index);
+            if let Some((_, range)) = &mut self.group {
+                range.end = self.items.len();
             }
         }
-        self.group = Some((root, start..self.items.len()));
-        self.observed_group = false;
+    }
+
+    /// Only a fully validated manifest establishes coverage. Publication remains
+    /// pending and uses the same root acknowledgement as ordinary copy results.
+    pub fn captured(&mut self) {
+        if let Some(root) = self.active {
+            self.items[root].descendants_enumerated = true;
+            self.observed_group = false;
+        }
     }
 
     /// Record only entries already visited by recursive removal. No extra
