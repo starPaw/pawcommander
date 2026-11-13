@@ -280,7 +280,16 @@ fn transfer(sources: &[PathBuf], destination: &Path, kind: TransferKind) -> Resu
 
 pub fn trash_entries(paths: &[PathBuf], progress: &mut Progress) -> Result<usize, String> {
     let paths = normalize_selection(paths, progress).map_err(|error| error.to_string())?;
+    progress.results.plan(
+        paths
+            .iter()
+            .map(|entry| (crate::vfs::Location::Local(entry.original.clone()), None))
+            .collect(),
+    );
     for (completed, entry) in paths.iter().enumerate() {
+        progress
+            .results
+            .begin(&crate::vfs::Location::Local(entry.original.clone()));
         let path = &entry.source;
         progress.item(path);
         // Use the operating system's trash. There is deliberately no permanent
@@ -291,6 +300,12 @@ pub fn trash_entries(paths: &[PathBuf], progress: &mut Progress) -> Result<usize
                 path.display()
             ));
         }
+        progress.results.record(
+            &crate::vfs::Location::Local(entry.original.clone()),
+            None,
+            crate::result_history::Outcome::Completed,
+            None,
+        );
     }
     Ok(paths.len())
 }

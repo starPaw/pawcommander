@@ -165,6 +165,7 @@ impl ProgressView {
 
 #[derive(Default)]
 pub(crate) struct Progress {
+    pub results: crate::result_history::Results,
     cancel: Cancellation,
     view: Option<Arc<Mutex<Snapshot>>>,
     current: Snapshot,

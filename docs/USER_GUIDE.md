@@ -64,6 +64,16 @@ Local copies preserve file contents, symlink targets, ordinary permissions, and 
 
 Local delete sends items to the OS trash after confirmation. Restore them using the system file manager. Remote delete is permanent and uses a separate explicit confirmation.
 
+### Result history
+
+Choose **Result history** in the footer to review completed copy, move, rename, create-folder, and delete operations, including earlier sessions. Expand an operation for source and destination paths, each selected item's outcome, and its failure or warning reason. Text can be selected and copied; scroll horizontally for long paths and errors. Embedded line breaks appear as `\n` and `\r`; the saved file retains the original text. **Completed with warning** means the item was published but a later step, such as temporary-folder cleanup, failed. Check the recorded recovery guidance before retrying. **Failed** does not prove that a remote server made no changes when its reply was lost.
+
+Folders are reported as whole selected items; the history does not enumerate every descendant. A cancelled, unpublished folder copy never appears as completed merely because some children were written to private staging. **Not started** distinguishes the unprocessed remainder from an item that failed or was stopped. A failed permanent remote deletion may have removed part of the recorded folder.
+
+History is saved in `PawCommander/operation-history.json` under the OS local application-data directory; its full path appears in the history window. It retains up to 100 recent operations, dropping older operations when their combined item count exceeds 100,000; the newest operation is retained as a whole. Snapshots larger than 32 MiB are kept only in memory, with a visible save error. The background worker attempts an atomic save before announcing operation completion. This is a results log, not a crash-recovery journal: an operation interrupted by process termination or power loss may be missing.
+
+History contains file paths, server names, usernames, and error messages. It does not record file contents or authentication secrets. Non-UTF-8 path characters use display replacements; history is not a source of exact paths for automated replay. Review the file before sharing it. Close PawCommander before manually removing history. A damaged or unsupported history file is preserved and disables saving until you fix or move it and restart. Only one running app instance can write history; another instance reports a save error. A history error does not change the file operation's outcome.
+
 ## SFTP connections
 
 1. Verify the server's fingerprint through a trusted channel. Connect with OpenSSH and accept only the verified host key so it is recorded in `~/.ssh/known_hosts`:

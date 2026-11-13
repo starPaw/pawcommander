@@ -13,6 +13,7 @@ use crate::icons::{self, Icon};
 use crate::list_columns::{Column, ColumnLayout, ListColumns};
 use crate::operations::{Cancellation, Progress, ProgressView};
 use crate::preview::Preview;
+use crate::result_history::History;
 use crate::search::panel::{ReadyAction, TabTarget};
 use crate::shortcuts::{self, Command, ShortcutEditor, Shortcuts};
 use crate::tab_drag::{clamp_tab_slot, DragTab, TabDrop, TabDropTargets};
@@ -1917,6 +1918,8 @@ pub struct PawCommander {
     job: Option<Job>,
     transfer: Option<TransferInteraction>,
     notice: Option<(String, bool)>,
+    history: History,
+    show_history: bool,
     show_help: bool,
     shortcut_editor: Option<ShortcutEditor>,
     command_palette: Option<CommandPalette>,
@@ -2077,6 +2080,8 @@ impl PawCommander {
                 )
             }),
             show_help: false,
+            history: History::new(&cc.egui_ctx),
+            show_history: false,
             shortcut_editor: None,
             command_palette: None,
             folder_jump: None,
@@ -2178,10 +2183,28 @@ impl PawCommander {
         let worker_ctx = ctx.clone();
         let (mut reporter, progress) = Progress::tracked();
         let started = Instant::now();
+        let history = self.history.sender();
+        let history_label = label.to_owned();
         if let Err(error) = std::thread::Builder::new()
             .name("pawcommander-file-operation".into())
             .spawn(move || {
-                let _ = tx.send(work(&mut reporter));
+                let history_started = crate::result_history::now();
+                let result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&mut reporter)))
+                        .unwrap_or_else(|_| {
+                            Err(crate::i18n::text(
+                        "Фоновая операция неожиданно завершилась. Проверьте файлы в обеих папках.",
+                    )
+                    .into())
+                        });
+                if let Some(record) = std::mem::take(&mut reporter.results).finish(
+                    history_label,
+                    history_started,
+                    &result,
+                ) {
+                    history.append(record);
+                }
+                let _ = tx.send(result);
                 worker_ctx.request_repaint();
             })
         {
@@ -2211,6 +2234,7 @@ impl PawCommander {
             && self.properties.is_none()
             && self.sftp_form.is_none()
             && !self.show_help
+            && !self.show_history
             && self.shortcut_editor.is_none()
             && self.command_palette.is_none()
             && self.folder_jump.is_none()
@@ -3457,6 +3481,7 @@ impl PawCommander {
             || self.conflict_open()
             || self.sftp_form.is_some()
             || self.show_help
+            || self.show_history
             || self.shortcut_editor.is_some()
             || self.bookmark_editor.is_some()
             || self.bookmark_menu_open.is_some_and(|id| {
@@ -4533,6 +4558,15 @@ impl PawCommander {
     fn footer(&mut self, ctx: &egui::Context) {
         let colors = Palette::from_ctx(ctx);
         let mut stop_requested = false;
+        let history_error = self.history.error.is_some();
+        let history_button = |ui: &mut egui::Ui| {
+            let response = ui.button(crate::i18n::text("Журнал результатов"));
+            paint_focus(ui, &response, 5);
+            if history_error {
+                ui.colored_label(colors.error, crate::i18n::text("История не сохранена"));
+            }
+            response.clicked()
+        };
         egui::TopBottomPanel::bottom("status")
             .frame(
                 egui::Frame::new()
@@ -4542,6 +4576,7 @@ impl PawCommander {
             .show(ctx, |ui| {
                 if let Some(job) = &mut self.job {
                     ui.horizontal(|ui| {
+                        self.show_history |= history_button(ui);
                         ui.spinner();
                         ui.label(crate::tr_format!(
                             "Файловые операции: {} · {} с",
@@ -4570,7 +4605,8 @@ impl PawCommander {
                         ui.label(RichText::new(message).color(colors.muted));
                     }
                 } else if let Some((message, error)) = self.notice.clone() {
-                    ui.horizontal_top(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                        self.show_history |= history_button(ui);
                         if ui.small_button("×").clicked() {
                             self.notice = None;
                         }
@@ -4596,6 +4632,7 @@ impl PawCommander {
                     });
                 } else {
                     ui.horizontal(|ui| {
+                        self.show_history |= history_button(ui);
                         let visible = self.tab().visible(self.folder_view(self.active)).len();
                         ui.label(
                             RichText::new(crate::tr_format!(
@@ -5062,8 +5099,14 @@ impl PawCommander {
                     ctx,
                     crate::i18n::text("Создание папки"),
                     move |progress| {
+                        let target = parent.join(&name);
+                        progress
+                            .results
+                            .plan(vec![(parent.clone(), Some(target.display()))]);
+                        progress.results.begin(&parent);
                         progress.item(&parent.path().join(&name));
                         fs_ops::create_directory(&parent, &name).map(|p| {
+                            progress.results.target(&parent, p.display());
                             crate::tr_format!(
                                 "Папка создана: {}",
                                 "Folder created: {}",
@@ -5076,8 +5119,12 @@ impl PawCommander {
                     ctx,
                     crate::i18n::text("Переименование"),
                     move |progress| {
+                        let target = source.parent().map(|parent| parent.join(&name).display());
+                        progress.results.plan(vec![(source.clone(), target)]);
+                        progress.results.begin(&source);
                         progress.item(source.path());
                         fs_ops::rename_entry(&source, &name).map(|p| {
+                            progress.results.target(&source, p.display());
                             crate::tr_format!("Переименовано: {}", "Renamed: {}", p.display())
                         })
                     },
@@ -5228,6 +5275,7 @@ impl eframe::App for PawCommander {
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.history.poll();
         let colors = Palette::from_ctx(ctx);
         self.poll(ctx);
         self.transfer_stop_shortcut(ctx);
@@ -5261,6 +5309,7 @@ impl eframe::App for PawCommander {
         let mut tab_targets = TabDropTargets::default();
         self.toolbar(ctx, &mut actions);
         self.footer(ctx);
+        self.history.show(ctx, &mut self.show_history);
         self.show_search_results(ctx);
         self.sidebar(ctx, &mut actions);
         let drop_enabled = self.drop_enabled() && !self.native_drag.active();
@@ -5343,6 +5392,7 @@ impl eframe::App for PawCommander {
             && !self.conflict_open()
             && self.sftp_form.is_none()
             && !self.show_help
+            && !self.show_history
             && self.shortcut_editor.is_none()
             && self.command_palette.is_none()
             && self.quick_look.is_none()
@@ -8946,6 +8996,57 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn result_history_blocks_file_shortcuts_while_reading_selectable_labels() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("keep.txt");
+        std::fs::write(&file, b"unchanged").unwrap();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        wait_for_directory(app.tab_mut());
+        app.tab_mut().selected.insert(file.clone().into());
+        app.show_history = true;
+        assert!(app.keyboard_blocked(&ctx));
+        assert!(!app.drop_enabled());
+        let events = [
+            (egui::Key::C, egui::Modifiers::COMMAND),
+            (egui::Key::X, egui::Modifiers::COMMAND),
+            (egui::Key::Delete, egui::Modifiers::NONE),
+        ]
+        .into_iter()
+        .flat_map(|(key, modifiers)| {
+            [true, false].map(move |pressed| egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed,
+                repeat: false,
+                modifiers,
+            })
+        })
+        .collect();
+        let mut input = egui::RawInput {
+            events,
+            ..Default::default()
+        };
+        eframe::App::raw_input_hook(&mut app, &ctx, &mut input);
+        let _ = ctx.run(input, |ctx| {
+            app.keyboard(ctx);
+            app.history.show(ctx, &mut app.show_history);
+        });
+        assert!(
+            app.clipboard.is_none(),
+            "history selection must not copy/cut underlying file paths"
+        );
+        assert!(
+            app.dialog.is_none(),
+            "Delete must not open a file deletion dialog"
+        );
+        assert!(app.notice.is_none());
+        assert_eq!(std::fs::read(&file).unwrap(), b"unchanged");
+        assert!(app.tab().selected.contains(&file.into()));
     }
 
     #[test]

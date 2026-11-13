@@ -1059,6 +1059,18 @@ pub fn transfer_with_conflicts(
     decide: impl FnMut(Conflict) -> Result<Answer, String>,
     moved: impl FnMut(&Location, &[PathBuf]),
 ) -> Result<TransferSummary, String> {
+    progress.results.plan(
+        sources
+            .iter()
+            .map(|source| {
+                let target = source
+                    .path()
+                    .file_name()
+                    .map(|name| destination.join(name).display());
+                (source.clone(), target)
+            })
+            .collect(),
+    );
     let mut summary = TransferSummary {
         remaining: sources.to_vec(),
         preparing: true,
@@ -1075,6 +1087,7 @@ pub fn transfer_with_conflicts(
     ) {
         Ok(()) => Ok(summary),
         Err(TransferError::Cancelled) => {
+            progress.results.cancelled = true;
             summary.cancelled = true;
             Ok(summary)
         }
@@ -1107,6 +1120,11 @@ fn transfer_run(
 ) -> Result<(), TransferError> {
     progress.check_cancelled()?;
     let plan = transfer_plan(sources, destination, kind, progress)?;
+    progress.results.plan(
+        plan.iter()
+            .map(|item| (item.original.clone(), Some(item.target.display())))
+            .collect(),
+    );
     summary.remaining = plan.iter().map(|item| item.original.clone()).collect();
     summary.preparing = false;
     let cancel = progress.cancellation();
@@ -1128,6 +1146,7 @@ fn transfer_run(
     let mut ready = Vec::with_capacity(plan.len());
     for (mut item, target_meta) in plan.into_iter().zip(targets) {
         cancel.check()?;
+        progress.results.begin(&item.original);
         if let Some(target_meta) = target_meta {
             progress.item(item.original.path());
             index += 1;
@@ -1168,6 +1187,12 @@ fn transfer_run(
             match decision {
                 Decision::Cancel => return Err(TransferError::Cancelled),
                 Decision::Skip => {
+                    progress.results.record(
+                        &item.original,
+                        Some(item.target.display()),
+                        crate::result_history::Outcome::Skipped,
+                        Some(crate::i18n::text("Пропущено при разрешении конфликта").into()),
+                    );
                     summary.skipped += 1;
                     remove_pending(summary, &item.original);
                     continue;
@@ -1184,10 +1209,16 @@ fn transfer_run(
                 }
             }
         }
+        progress
+            .results
+            .target(&item.original, item.target.display());
         ready.push(item);
+        // A resolved conflict has not started the filesystem mutation.
+        progress.results.clear_active();
     }
     for item in ready {
         cancel.check()?;
+        progress.results.begin(&item.original);
         progress.item(item.source.path());
         let expected = item.replacement.as_ref().map(|(_, target)| target);
         if let Some((expected_source, _)) = &item.replacement {
@@ -1215,6 +1246,18 @@ fn transfer_run(
         };
         // Publication precedes cleanup: a committed item stays completed even
         // when cleanup fails, and must not appear in the retryable remainder.
+        let outcome = match (&result, committed) {
+            (Ok(()), true) => crate::result_history::Outcome::Completed,
+            (Err(_), true) => crate::result_history::Outcome::CompletedWithWarning,
+            (Err(TransferError::Cancelled), false) => crate::result_history::Outcome::Cancelled,
+            _ => crate::result_history::Outcome::Failed,
+        };
+        progress.results.record(
+            &item.original,
+            Some(item.target.display()),
+            outcome,
+            result.as_ref().err().map(ToString::to_string),
+        );
         record_item_result(summary, &item.original, committed, result)?;
     }
     // Do not observe a late request after the final successful publication.
@@ -1983,6 +2026,9 @@ pub fn trash_entries_with_progress(
     paths: &[Location],
     progress: &mut Progress,
 ) -> Result<usize, String> {
+    progress
+        .results
+        .plan(paths.iter().map(|path| (path.clone(), None)).collect());
     if paths.iter().any(Location::is_archive) {
         return Err(archive::readonly().into());
     }
@@ -1995,8 +2041,12 @@ pub fn trash_entries_with_progress(
             return Err("Недопустимый путь удаления SFTP".into());
         }
         for (completed, path) in paths.iter().enumerate() {
+            progress.results.begin(path);
             progress.item(path.path());
             remove_remote_tree(&remote(path)?, path.path(), MAX_TREE_DEPTH, progress).map_err(|e| format!("{e}. Удалено целых элементов: {completed}; текущая папка могла быть удалена частично."))?;
+            progress
+                .results
+                .record(path, None, crate::result_history::Outcome::Completed, None);
         }
         return Ok(paths.len());
     }
@@ -2090,6 +2140,25 @@ mod tests {
         assert!(!report.preparing);
         assert_eq!((report.completed, report.skipped), (1, 1));
         assert_eq!(report.remaining, vec![tree.clone(), third.clone()]);
+        use crate::result_history::Outcome;
+        assert_eq!(
+            progress
+                .results
+                .items
+                .iter()
+                .map(|row| row.outcome)
+                .collect::<Vec<_>>(),
+            [
+                Outcome::Completed,
+                Outcome::Skipped,
+                Outcome::Cancelled,
+                Outcome::NotStarted
+            ]
+        );
+        let record = std::mem::take(&mut progress.results)
+            .finish("copy".into(), 0, &Ok("Stopped".into()))
+            .unwrap();
+        assert!(record.items[3].reason.is_some());
         assert_eq!(
             fs::read(destination.join("first").path()).unwrap(),
             b"first payload"
@@ -2105,6 +2174,112 @@ mod tests {
             vec![0x5a; 3 * 1024 * 1024]
         );
         assert_eq!(fs::read_dir(destination.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn result_history_retains_partial_failure_and_actual_keep_both_target() {
+        use crate::result_history::Outcome;
+        let fixture = tempfile::tempdir().unwrap();
+        let root: Location = fixture.path().to_path_buf().into();
+        let destination = create_directory(&root, "destination").unwrap();
+        let sources: Vec<_> = ["a", "b", "c"].map(|name| root.join(name)).into();
+        for source in &sources {
+            fs::write(source.path(), source.name()).unwrap();
+        }
+        fs::write(destination.join("a").path(), b"old destination").unwrap();
+        let mut progress = Progress::default();
+        let result = transfer_with_conflicts(
+            &sources,
+            &destination,
+            TransferKind::Copy,
+            &mut progress,
+            |_| {
+                fs::remove_file(sources[1].path()).unwrap();
+                Ok(Answer {
+                    decision: Decision::KeepBoth,
+                    apply_to_group: false,
+                })
+            },
+            |_, _| panic!("copy"),
+        );
+        assert!(result.is_err());
+        let record = std::mem::take(&mut progress.results)
+            .finish("copy".into(), 0, &result.map(|_| String::new()))
+            .unwrap();
+        assert_eq!(
+            record
+                .items
+                .iter()
+                .map(|row| row.outcome)
+                .collect::<Vec<_>>(),
+            [Outcome::Completed, Outcome::Failed, Outcome::NotStarted]
+        );
+        assert_eq!(
+            record.items[0].target,
+            Some(destination.join("a (2)").display())
+        );
+        assert!(record.items[1].reason.as_ref().unwrap().contains('b'));
+        assert!(record.items[2].reason.is_some());
+        assert_eq!(
+            fs::read(destination.join("a").path()).unwrap(),
+            b"old destination"
+        );
+        assert_eq!(fs::read(destination.join("a (2)").path()).unwrap(), b"a");
+        assert_eq!(fs::read(sources[0].path()).unwrap(), b"a");
+        assert_eq!(fs::read(sources[2].path()).unwrap(), b"c");
+        assert_eq!(fs::read_dir(destination.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn result_history_distinguishes_non_utf8_paths_with_identical_display() {
+        use crate::result_history::Outcome;
+        use std::os::unix::ffi::OsStringExt;
+        let fixture = tempfile::tempdir().unwrap();
+        let root: Location = fixture.path().to_path_buf().into();
+        let destination = create_directory(&root, "destination").unwrap();
+        let names = [
+            OsString::from_vec(b"same\xff".to_vec()),
+            OsString::from_vec(b"same\xfe".to_vec()),
+        ];
+        let sources = names.each_ref().map(|name| root.join(name));
+        assert_eq!(sources[0].display(), sources[1].display());
+        fs::write(sources[0].path(), b"first source").unwrap();
+        fs::write(sources[1].path(), b"second source").unwrap();
+        fs::write(destination.join(&names[0]).path(), b"old target").unwrap();
+        let mut progress = Progress::default();
+        let summary = transfer_with_conflicts(
+            &sources,
+            &destination,
+            TransferKind::Copy,
+            &mut progress,
+            |_| {
+                Ok(Answer {
+                    decision: Decision::Skip,
+                    apply_to_group: false,
+                })
+            },
+            |_, _| panic!("copy"),
+        )
+        .unwrap();
+        assert_eq!((summary.completed, summary.skipped), (1, 1));
+        assert_eq!(
+            progress
+                .results
+                .items
+                .iter()
+                .map(|row| row.outcome)
+                .collect::<Vec<_>>(),
+            [Outcome::Skipped, Outcome::Completed]
+        );
+        assert_eq!(
+            fs::read(destination.join(&names[0]).path()).unwrap(),
+            b"old target"
+        );
+        assert_eq!(
+            fs::read(destination.join(&names[1]).path()).unwrap(),
+            b"second source"
+        );
     }
 
     #[test]
