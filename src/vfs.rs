@@ -1643,9 +1643,10 @@ fn with_staging_typed(
     // source tree may already use all 128 supported descendant levels.
     let cleanup = remove_remote_tree(
         &sftp,
-        staging.path(),
+        &staging,
         MAX_TREE_DEPTH + 1,
         &mut Progress::default(),
+        false,
     );
     staging_result_typed(result, cleanup, &staging, target)
 }
@@ -2020,29 +2021,40 @@ fn copy_tree_entry(
 
 fn remove_remote_tree(
     sftp: &Sftp,
-    path: &Path,
+    location: &Location,
     remaining_depth: usize,
     progress: &mut Progress,
+    journal: bool,
 ) -> Result<(), String> {
-    progress.item(path);
-    let stat = sftp.lstat(path).map_err(err)?;
-    if stat.is_dir() {
-        for (child, _) in sftp.readdir(path).map_err(err)? {
-            let child_depth = remaining_depth
-                .checked_sub(1)
-                .ok_or("Слишком большая глубина папок")?;
-            let name = child
-                .file_name()
-                .and_then(|n| n.to_str())
-                .ok_or("Некорректное имя SFTP")?;
-            validate_name(name)?;
-            remove_remote_tree(sftp, &path.join(name), child_depth, progress)?;
-        }
-        progress.item(path);
-        sftp.rmdir(path).map_err(err)
-    } else {
-        sftp.unlink(path).map_err(err)
+    if journal {
+        progress.results.removing(location);
     }
+    let path = location.path();
+    let result = (|| {
+        progress.item(path);
+        let stat = sftp.lstat(path).map_err(err)?;
+        if stat.is_dir() {
+            for (child, _) in sftp.readdir(path).map_err(err)? {
+                let child_depth = remaining_depth
+                    .checked_sub(1)
+                    .ok_or("Слишком большая глубина папок")?;
+                let name = child
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .ok_or("Некорректное имя SFTP")?;
+                validate_name(name)?;
+                remove_remote_tree(sftp, &location.join(name), child_depth, progress, journal)?;
+            }
+            progress.item(path);
+            sftp.rmdir(path).map_err(err)
+        } else {
+            sftp.unlink(path).map_err(err)
+        }
+    })();
+    if journal {
+        progress.results.removed(location, &result);
+    }
+    result
 }
 #[cfg(test)]
 pub fn trash_entries(paths: &[Location]) -> Result<usize, String> {
@@ -2070,7 +2082,7 @@ pub fn trash_entries_with_progress(
         for (completed, path) in paths.iter().enumerate() {
             progress.results.begin(path);
             progress.item(path.path());
-            remove_remote_tree(&remote(path)?, path.path(), MAX_TREE_DEPTH, progress).map_err(|e| format!("{e}. Удалено целых элементов: {completed}; текущая папка могла быть удалена частично."))?;
+            remove_remote_tree(&remote(path)?, path, MAX_TREE_DEPTH, progress, true).map_err(|e| format!("{e}. Удалено целых элементов: {completed}; текущая папка могла быть удалена частично."))?;
             progress
                 .results
                 .record(path, None, crate::result_history::Outcome::Completed, None);
@@ -4433,7 +4445,24 @@ mod tests {
         fs::write(disposable.path().join("file"), "delete").unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(source.path(), disposable.path().join("link")).unwrap();
-        trash_entries(std::slice::from_ref(&disposable)).unwrap();
+        fs::create_dir(disposable.path().join("nested")).unwrap();
+        fs::write(disposable.path().join("nested/child"), "nested delete").unwrap();
+        let mut deletion = Progress::default();
+        trash_entries_with_progress(std::slice::from_ref(&disposable), &mut deletion).unwrap();
+        let record = deletion
+            .results
+            .finish("delete".into(), 1, &Ok("removed".into()))
+            .unwrap();
+        assert!(record.items[0].descendants_enumerated);
+        assert_eq!(record.items.len(), if cfg!(unix) { 5 } else { 4 });
+        assert!(record
+            .items
+            .iter()
+            .all(|row| row.outcome == crate::result_history::Outcome::Completed));
+        assert!(record
+            .items
+            .iter()
+            .any(|row| row.source == disposable.join("nested/child").display()));
         assert!(!disposable.path().exists());
         assert!(source.path().exists());
         let renamed = rename_entry(&uploaded, "renamed").unwrap();

@@ -77,6 +77,7 @@ pub(crate) struct Results {
     active_source: Option<Location>,
     nested_index: HashMap<Location, usize>,
     group: Option<(usize, std::ops::Range<usize>)>,
+    observed_group: bool,
     weight: usize,
     omitted: usize,
     details_truncated: bool,
@@ -89,6 +90,8 @@ impl Results {
         self.index.clear();
         self.nested_index.clear();
         self.group = None;
+        self.observed_group = false;
+        self.cancelled = false;
         self.weight = 0;
         self.omitted = 0;
         self.details_truncated = false;
@@ -171,6 +174,55 @@ impl Results {
             }
         }
         self.group = Some((root, start..self.items.len()));
+        self.observed_group = false;
+    }
+
+    /// Record only entries already visited by recursive removal. No extra
+    /// traversal is needed, and an interrupted walk never claims full coverage.
+    pub fn removing(&mut self, source: &Location) {
+        let (Some(root), Some(original)) = (self.active, self.active_source.clone()) else {
+            return;
+        };
+        if !source.same_backend(&original) {
+            return;
+        }
+        let Ok(relative) = source.path().strip_prefix(original.path()) else {
+            return;
+        };
+        if self.group.is_none() {
+            let start = self.items.len();
+            self.group = Some((root, start..start));
+            self.observed_group = true;
+            self.nested_index.clear();
+        }
+        if !self.observed_group
+            || relative.as_os_str().is_empty()
+            || self.nested_index.contains_key(source)
+        {
+            return;
+        }
+        if let Some(index) = self.add_row(source, None, Some(root)) {
+            self.nested_index.insert(source.clone(), index);
+            if let Some((_, range)) = &mut self.group {
+                range.end = self.items.len();
+            }
+        }
+    }
+
+    /// A confirmed deletion remains completed if a later sibling or ancestor
+    /// fails. Root completion is recorded by the operation's existing caller.
+    pub fn removed(&mut self, source: &Location, result: &Result<(), String>) {
+        if !self.observed_group {
+            return;
+        }
+        if let Some(&index) = self.nested_index.get(source) {
+            self.items[index].outcome = if result.is_ok() {
+                Outcome::Completed
+            } else {
+                Outcome::Failed
+            };
+            self.reason(index, result.as_ref().err().map(String::as_str));
+        }
     }
 
     /// A successful private write remains unconfirmed until the root publishes.
@@ -216,14 +268,22 @@ impl Results {
     fn finish_group(&mut self, root: usize, outcome: Outcome) {
         if let Some((owner, range)) = self.group.take() {
             if owner == root {
+                if self.observed_group
+                    && matches!(outcome, Outcome::Completed | Outcome::CompletedWithWarning)
+                {
+                    self.items[root].descendants_enumerated = true;
+                }
                 for index in range {
-                    if matches!(outcome, Outcome::Completed | Outcome::CompletedWithWarning) {
+                    if !self.observed_group
+                        && matches!(outcome, Outcome::Completed | Outcome::CompletedWithWarning)
+                    {
                         self.items[index].outcome = Outcome::Completed;
                         self.reason(index, None);
                     }
                 }
             }
         }
+        self.observed_group = false;
         self.nested_index.clear();
     }
 
@@ -425,21 +485,23 @@ struct Update {
 
 struct Append {
     record: Record,
-    saved: Sender<()>,
+    saved: Sender<bool>,
 }
 
 #[derive(Clone, Default)]
 pub(crate) struct HistorySender(Option<Sender<Append>>);
 
 impl HistorySender {
-    /// The operation worker waits for persistence before publishing completion.
-    pub fn append(&self, record: Record) {
+    /// Wait for the save attempt and report whether the record reached disk.
+    /// Recovery markers must remain available when persistence fails.
+    pub fn append(&self, record: Record) -> bool {
         if let Some(sender) = &self.0 {
             let (saved, wait) = mpsc::channel();
             if sender.send(Append { record, saved }).is_ok() {
-                let _ = wait.recv();
+                return wait.recv().unwrap_or(false);
             }
         }
+        false
     }
 }
 
@@ -513,7 +575,7 @@ impl History {
                         error: error.clone(),
                     });
                     ctx.request_repaint();
-                    let _ = request.saved.send(());
+                    let _ = request.saved.send(lock.is_some() && error.is_none());
                 }
             });
         match worker {
@@ -560,8 +622,9 @@ impl History {
             .open(open)
             .default_size([780.0, 560.0])
             .show(ctx, |ui| {
-                ui.label(crate::i18n::text(
-                    "Копии раскрываются по манифесту; остальные результаты могут относиться только к выбранному объекту.",
+                ui.label(crate::tr_format!(
+                    "Копии раскрываются по манифесту, SFTP-удаление — по посещённым элементам. Неполный обход отмечен.",
+                    "Copies expand from their manifest; SFTP removal lists visited entries. Incomplete traversal is marked."
                 ));
                 ui.label(crate::i18n::text(
                     "До 100 операций и 100 000 строк; объём истории ограничен. Неполные записи помечены.",
@@ -626,7 +689,7 @@ impl History {
                                                 ui.add(
                                                     egui::Label::new(format!(
                                                         "{}\n{} → {}\n{}",
-                                                        if row.parent.is_none() && !row.descendants_enumerated { format!("{} · {}", row.outcome.label(), crate::i18n::text("Только выбранный объект; потомки не перечислены")) } else { row.outcome.label().to_owned() },
+                                                        if row.parent.is_none() && !row.descendants_enumerated { format!("{} · {}", row.outcome.label(), crate::tr_format!("Потомки не перечислены полностью", "Descendants were not fully listed")) } else { row.outcome.label().to_owned() },
                                                         single_line(&row.source),
                                                         single_line(target),
                                                         single_line(
@@ -702,13 +765,16 @@ fn save(path: &Path, saved: &Saved) -> io::Result<()> {
             "History exceeds 32 MiB; existing file preserved",
         ));
     }
-    let mut file = tempfile::NamedTempFile::new_in(
-        path.parent()
-            .ok_or_else(|| io::Error::other("Missing history parent"))?,
-    )?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("Missing history parent"))?;
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
     file.write_all(&bytes)?;
     file.as_file().sync_all()?;
     file.persist(path).map_err(|error| error.error)?;
+    // Recovery may forget its pending marker only after the rename is durable.
+    #[cfg(unix)]
+    File::open(parent)?.sync_all()?;
     Ok(())
 }
 
@@ -891,7 +957,7 @@ mod tests {
         let path = dir.path().join("history.json");
         let ctx = egui::Context::default();
         let mut history = History::open(path.clone(), &ctx);
-        history.sender().append(record());
+        assert!(history.sender().append(record()));
         let saved: Saved = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(
             saved.records.len(),
@@ -905,7 +971,7 @@ mod tests {
         let corrupt = dir.path().join("corrupt.json");
         fs::write(&corrupt, b"{incomplete history").unwrap();
         let mut history = History::open(corrupt.clone(), &ctx);
-        history.sender().append(record());
+        assert!(!history.sender().append(record()));
         history.poll();
         assert!(history.error.is_some());
         assert_eq!(
@@ -924,6 +990,11 @@ mod tests {
         save(&path, &saved).unwrap();
         let baseline = fs::read(&path).unwrap();
         assert!(open_store(&path).is_err());
+        let ctx = egui::Context::default();
+        let mut history = History::open(path.clone(), &ctx);
+        assert!(!history.sender().append(record()));
+        history.poll();
+        assert!(history.error.is_some());
         assert_eq!(fs::read(&path).unwrap(), baseline);
         drop(lock);
         fs::write(&path, br#"{"version":999,"records":[]}"#).unwrap();
@@ -1097,6 +1168,148 @@ mod tests {
         assert_eq!(record.items[0].outcome, Outcome::CompletedWithWarning);
         assert_eq!(record.items[1].outcome, Outcome::Completed);
         assert!(record.items[1].reason.is_none());
+    }
+
+    #[test]
+    fn observed_removals_preserve_confirmed_children_after_partial_failure() {
+        let root = local("/tree");
+        let directory = root.join("nested");
+        let child = directory.join("removed");
+        let failed = root.join("denied");
+        let mut results = Results::default();
+        results.plan([(root.clone(), None)]);
+        results.begin(&root);
+        for entry in [&root, &directory, &child] {
+            results.removing(entry);
+        }
+        results.removed(&child, &Ok(()));
+        results.removed(&directory, &Ok(()));
+        results.removing(&failed);
+        results.removed(&failed, &Err("permission denied".into()));
+        results.removed(&root, &Err("permission denied".into()));
+        let record = results
+            .finish("delete".into(), 0, &Err("partial removal".into()))
+            .unwrap();
+        assert_eq!(
+            record.items.len(),
+            4,
+            "unvisited descendants are never invented"
+        );
+        assert!(!record.items[0].descendants_enumerated);
+        assert_eq!(record.items[0].outcome, Outcome::Failed);
+        assert_eq!(record.items[1].outcome, Outcome::Completed);
+        assert_eq!(record.items[2].outcome, Outcome::Completed);
+        assert_eq!(record.items[3].outcome, Outcome::Failed);
+        assert_eq!(record.items[3].reason.as_deref(), Some("permission denied"));
+        assert!(record.items[1..]
+            .iter()
+            .all(|row| row.parent == Some(0) && row.target.is_none()));
+        let reopened: Record =
+            serde_json::from_slice(&serde_json::to_vec(&record).unwrap()).unwrap();
+        assert!(!reopened.items[0].descendants_enumerated);
+        assert_eq!(reopened.items[2].outcome, Outcome::Completed);
+    }
+
+    #[test]
+    fn successful_observed_removal_marks_coverage_and_keeps_roots_independent() {
+        let first = local("/first");
+        let second = local("/second");
+        let child = first.join("file");
+        let mut results = Results::default();
+        results.plan([(first.clone(), None), (second.clone(), None)]);
+        results.begin(&first);
+        results.removing(&first);
+        results.removing(&child);
+        results.removing(&child);
+        results.removing(&second.join("unrelated"));
+        results.removed(&child, &Ok(()));
+        results.record(&first, None, Outcome::Completed, None);
+        results.begin(&second);
+        results.removing(&second);
+        results.record(&second, None, Outcome::Completed, None);
+        let record = results
+            .finish("delete".into(), 0, &Ok("deleted".into()))
+            .unwrap();
+        assert_eq!(record.items.len(), 3, "no duplicate or unrelated rows");
+        assert!(record.items[0].descendants_enumerated);
+        assert!(
+            record.items[1].descendants_enumerated,
+            "empty directory is fully visited"
+        );
+        assert_eq!(record.items[2].parent, Some(0));
+        assert!(record
+            .items
+            .iter()
+            .all(|row| row.outcome == Outcome::Completed));
+    }
+
+    #[test]
+    fn observed_removal_limits_do_not_change_root_result() {
+        let root = local("/tree");
+        let mut results = Results::default();
+        results.plan([(root.clone(), None)]);
+        results.begin(&root);
+        results.removing(&root);
+        results.weight = MAX_RECORD_WEIGHT;
+        results.removing(&root.join("not-retained"));
+        results.record(&root, None, Outcome::Completed, None);
+        let record = results
+            .finish("delete".into(), 0, &Ok("deleted".into()))
+            .unwrap();
+        assert_eq!(record.items.len(), 1);
+        assert_eq!(record.omitted, 1);
+        assert!(record.items[0].descendants_enumerated);
+        assert_eq!(record.items[0].outcome, Outcome::Completed);
+    }
+
+    #[test]
+    fn new_plan_resets_previous_cancellation_and_partial_removal() {
+        let root = local("/tree");
+        let mut results = Results::default();
+        results.plan([(root.clone(), None)]);
+        results.begin(&root);
+        results.removing(&root);
+        results.removing(&root.join("visited"));
+        results.cancelled = true;
+        results.plan([(root.clone(), None)]);
+        results.begin(&root);
+        let record = results
+            .finish("move".into(), 0, &Ok("moved".into()))
+            .unwrap();
+        assert!(!record.cancelled);
+        assert_eq!(record.items.len(), 1);
+        assert!(!record.items[0].descendants_enumerated);
+        assert_eq!(record.items[0].outcome, Outcome::Completed);
+    }
+
+    #[test]
+    fn history_acknowledgment_reports_save_failure_and_subsequent_recovery() {
+        assert!(!HistorySender::default().append(record()));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.json");
+        let ctx = egui::Context::default();
+        let mut history = History::open(path.clone(), &ctx);
+        assert!(history.sender().append(record()));
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(!history.sender().append(record()));
+        history.poll();
+        assert!(history.error.is_some());
+        assert_eq!(
+            history.records.len(),
+            2,
+            "failed save stays reviewable in memory"
+        );
+        fs::remove_dir(&path).unwrap();
+        assert!(history.sender().append(record()));
+        history.poll();
+        assert!(history.error.is_none());
+        let saved: Saved = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(
+            saved.records.len(),
+            3,
+            "successful retry persists earlier in-memory results"
+        );
     }
 
     #[test]
