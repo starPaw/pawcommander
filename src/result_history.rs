@@ -320,6 +320,41 @@ impl Results {
         }
     }
 
+    /// Preserve local selections already folded into this item by planning.
+    /// Skipping requires no descendant walk and proves no filesystem outcome.
+    pub fn skip_selected(&mut self, source: &Location, target: String, covered: &mut Vec<PathBuf>) {
+        if let Some(&root) = self.index.get(source) {
+            // The skipped item's existing selection buffer is no longer used
+            // for a transfer. Deduplicate it in place so even omitted rows are
+            // counted once, without retaining an unbounded set of paths.
+            covered.sort_unstable();
+            covered.dedup();
+            for path in covered {
+                let entry = Location::Local(path.clone());
+                if entry == *source {
+                    continue;
+                }
+                // The selected spelling can use a parent alias. Do not guess a
+                // relative target or imply that every descendant was visited.
+                if let Some(index) = self.add_row(&entry, None, Some(root)) {
+                    self.items[index].outcome = Outcome::Skipped;
+                    self.reason(
+                        index,
+                        Some(crate::i18n::text(
+                            "Пропущено вместе с выбранным элементом; отдельный перенос не начинался",
+                        )),
+                    );
+                }
+            }
+        }
+        self.record(
+            source,
+            Some(target),
+            Outcome::Skipped,
+            Some(crate::i18n::text("Пропущено при разрешении конфликта").into()),
+        );
+    }
+
     pub fn record(
         &mut self,
         source: &Location,
@@ -1302,6 +1337,32 @@ mod tests {
         assert_eq!(record.omitted, 1);
         assert!(record.items[0].descendants_enumerated);
         assert_eq!(record.items[0].outcome, Outcome::Completed);
+    }
+
+    #[test]
+    fn skipped_selection_limits_do_not_change_skip_or_claim_tree_coverage() {
+        let root = local("/tree");
+        let mut results = Results::default();
+        results.plan([(root.clone(), Some("/target".into()))]);
+        results.begin(&root);
+        results.weight = MAX_RECORD_WEIGHT;
+        let mut covered = vec![
+            root.join("not-retained").path().to_owned(),
+            root.join("another").path().to_owned(),
+            root.join("not-retained").path().to_owned(),
+            root.join("another").path().to_owned(),
+        ];
+        results.skip_selected(&root, "/target".into(), &mut covered);
+        let record = results
+            .finish("copy".into(), 0, &Ok("Skipped".into()))
+            .unwrap();
+        assert_eq!(record.items.len(), 1);
+        assert_eq!(
+            record.omitted, 2,
+            "each distinct omitted selection counts once"
+        );
+        assert!(!record.items[0].descendants_enumerated);
+        assert_eq!(record.items[0].outcome, Outcome::Skipped);
     }
 
     #[test]

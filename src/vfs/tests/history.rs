@@ -1,6 +1,145 @@
 use super::*;
 
 #[test]
+fn result_history_skip_retains_covered_selections_without_walking_the_tree() {
+    use crate::result_history::Outcome;
+    for kind in [TransferKind::Copy, TransferKind::Move] {
+        let fixture = tempfile::tempdir().unwrap();
+        let root: Location = fixture.path().to_path_buf().into();
+        let source = create_directory(&root, "tree").unwrap();
+        let nested = create_directory(&source, "nested").unwrap();
+        let selected = nested.join("selected");
+        let unselected = source.join("not-selected");
+        fs::write(selected.path(), b"selected source").unwrap();
+        fs::write(unselected.path(), b"unselected source").unwrap();
+        let destination = create_directory(&root, "destination").unwrap();
+        let old = create_directory(&destination, "tree").unwrap().join("old");
+        fs::write(old.path(), b"existing destination").unwrap();
+        let mut progress = Progress::default();
+        let summary = transfer_with_conflicts(
+            &[source.clone(), selected.clone(), selected.clone()],
+            &destination,
+            kind,
+            &mut progress,
+            |_| {
+                Ok(Answer {
+                    decision: Decision::Skip,
+                    apply_to_group: false,
+                })
+            },
+            |_, _| panic!("skipped sources must not be consumed"),
+        )
+        .unwrap();
+        assert_eq!((summary.completed, summary.skipped), (0, 1));
+        let record = std::mem::take(&mut progress.results)
+            .finish("skip".into(), 0, &Ok("Skipped".into()))
+            .unwrap();
+        assert_eq!(record.items.len(), 2, "no unselected or duplicate rows");
+        assert!(record
+            .items
+            .iter()
+            .all(|row| row.outcome == Outcome::Skipped));
+        assert_eq!(record.items[1].source, selected.display());
+        assert_eq!(record.items[1].parent, Some(0));
+        assert!(record.items[1].target.is_none());
+        assert_eq!(
+            record.items[1].reason.as_deref(),
+            Some(crate::i18n::text(
+                "Пропущено вместе с выбранным элементом; отдельный перенос не начинался"
+            ))
+        );
+        assert!(!record.items[0].descendants_enumerated);
+        let reopened: crate::result_history::Record =
+            serde_json::from_slice(&serde_json::to_vec(&record).unwrap()).unwrap();
+        assert_eq!(reopened.items[1].outcome, Outcome::Skipped);
+        assert!(!reopened.items[0].descendants_enumerated);
+        assert_eq!(fs::read(selected.path()).unwrap(), b"selected source");
+        assert_eq!(fs::read(unselected.path()).unwrap(), b"unselected source");
+        assert_eq!(fs::read(old.path()).unwrap(), b"existing destination");
+        assert_eq!(fs::read_dir(destination.path()).unwrap().count(), 1);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn result_history_skip_preserves_selected_alias_after_later_cancel_or_failure() {
+    use crate::result_history::Outcome;
+    use std::os::unix::fs::symlink;
+    for cancelled in [false, true] {
+        let fixture = tempfile::tempdir().unwrap();
+        let root: Location = fixture.path().to_path_buf().into();
+        let source = create_directory(&root, "tree").unwrap();
+        let selected = source.join("selected");
+        fs::write(selected.path(), b"source").unwrap();
+        let alias = root.join("alias");
+        symlink(source.path(), alias.path()).unwrap();
+        let selected_alias = alias.join("selected");
+        let pending = root.join("pending");
+        fs::write(pending.path(), b"pending source").unwrap();
+        let destination = create_directory(&root, "destination").unwrap();
+        create_directory(&destination, "tree").unwrap();
+        fs::write(destination.join("pending").path(), b"existing destination").unwrap();
+        let mut progress = Progress::default();
+        let result = transfer_with_conflicts(
+            &[source.clone(), selected_alias.clone(), pending.clone()],
+            &destination,
+            TransferKind::Copy,
+            &mut progress,
+            |conflict| {
+                let decision = if conflict.source.location == source {
+                    if !cancelled {
+                        // A later planned item disappears during conflict handling.
+                        fs::remove_file(pending.path()).unwrap();
+                    }
+                    Decision::Skip
+                } else {
+                    assert!(cancelled);
+                    Decision::Cancel
+                };
+                Ok(Answer {
+                    decision,
+                    apply_to_group: false,
+                })
+            },
+            |_, _| panic!("copy"),
+        );
+        assert_eq!(result.is_ok(), cancelled);
+        let record = std::mem::take(&mut progress.results)
+            .finish("copy".into(), 0, &result.map(|_| "Stopped".into()))
+            .unwrap();
+        assert_eq!(record.items.len(), 3);
+        assert_eq!(record.items[0].outcome, Outcome::Skipped);
+        assert!(!record.items[0].descendants_enumerated);
+        assert_eq!(
+            record.items[1].outcome,
+            if cancelled {
+                Outcome::Cancelled
+            } else {
+                Outcome::Failed
+            }
+        );
+        assert_eq!(record.items[2].source, selected_alias.display());
+        assert_eq!(record.items[2].outcome, Outcome::Skipped);
+        assert_eq!(record.items[2].parent, Some(0));
+        assert!(
+            record.items[2].target.is_none(),
+            "alias target is not guessed"
+        );
+        assert_eq!(fs::read(selected.path()).unwrap(), b"source");
+        assert_eq!(
+            fs::read(destination.join("pending").path()).unwrap(),
+            b"existing destination"
+        );
+        assert_eq!(
+            fs::read_dir(destination.join("tree").path())
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+}
+
+#[test]
 fn copy_hash_failure_keeps_partial_batch_and_nested_history_truthful() {
     use crate::result_history::Outcome;
     let fixture = tempfile::tempdir().unwrap();

@@ -651,6 +651,7 @@ fn translate(english: bool, russian: &'static str) -> &'static str {
         "Копии раскрываются по манифесту; остальные результаты могут относиться только к выбранному объекту." => "Copies expand from their manifest; other results may cover only the selected item.",
         "До 100 операций и 100 000 строк; объём истории ограничен. Неполные записи помечены." => "Up to 100 operations and 100,000 rows; history size is bounded. Incomplete records are marked.",
         "Только выбранный объект; потомки не перечислены" => "Selected item only; descendants not enumerated",
+        "Пропущено вместе с выбранным элементом; отдельный перенос не начинался" => "Skipped together with the selected item; no separate transfer was started",
         "Публикация не подтверждена" => "Publication unconfirmed",
         "Длинные пути или сообщения сокращены из-за лимита журнала." => "Long paths or messages were shortened by history limits.",
         "Журнал пуст" => "No results yet",
