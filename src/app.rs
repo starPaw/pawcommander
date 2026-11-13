@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 static NEXT_BOOKMARK_ID: AtomicU64 = AtomicU64::new(1);
@@ -1860,6 +1860,21 @@ struct Job {
     progress: ProgressView,
 }
 
+type JobWork = Box<dyn FnOnce(&mut Progress) -> Result<String, String> + Send>;
+type CutRequest = (u64, Vec<Location>);
+
+// One global worker serializes all mutations, including aliased and nested paths.
+// Pending closures own their inputs; no filesystem work is done until dispatch.
+struct PendingJob {
+    label: String,
+    description: String,
+    work: JobWork,
+    transfer: Option<TransferInteraction>,
+    cut: Option<CutRequest>,
+}
+
+const MAX_PENDING_JOBS: usize = 100;
+
 #[derive(Clone)]
 struct SftpForm {
     host: String,
@@ -1916,6 +1931,11 @@ pub struct PawCommander {
     dialog_focus: bool,
     dialog_file_focus: Option<(u64, Location)>,
     job: Option<Job>,
+    pending_jobs: VecDeque<PendingJob>,
+    queue_start_failed: bool,
+    #[cfg(test)]
+    fail_job_spawn: bool,
+    active_cut: Option<CutRequest>,
     transfer: Option<TransferInteraction>,
     notice: Option<(String, bool)>,
     history: History,
@@ -2069,6 +2089,11 @@ impl PawCommander {
             dialog_focus: false,
             dialog_file_focus: None,
             job: None,
+            pending_jobs: VecDeque::new(),
+            queue_start_failed: false,
+            #[cfg(test)]
+            fail_job_spawn: false,
+            active_cut: None,
             transfer: None,
             notice: bookmark_shortcut_conflict.then(|| {
                 (
@@ -2176,18 +2201,70 @@ impl PawCommander {
         label: &str,
         work: impl FnOnce(&mut Progress) -> Result<String, String> + Send + 'static,
     ) {
-        if self.job.is_some() {
+        self.start_described_job(ctx, label, label.into(), work);
+    }
+
+    fn start_described_job(
+        &mut self,
+        ctx: &egui::Context,
+        label: &str,
+        description: String,
+        work: impl FnOnce(&mut Progress) -> Result<String, String> + Send + 'static,
+    ) {
+        self.submit_job(
+            ctx,
+            PendingJob {
+                label: label.into(),
+                description,
+                work: Box::new(work),
+                transfer: None,
+                cut: None,
+            },
+        );
+    }
+
+    fn submit_job(&mut self, ctx: &egui::Context, job: PendingJob) {
+        if self.pending_jobs.len() >= MAX_PENDING_JOBS {
+            self.notice = Some((crate::i18n::text("Очередь заполнена (100 заданий). Дождитесь завершения или удалите ожидающее задание.").into(), true));
             return;
         }
-        let (tx, rx) = mpsc::channel();
-        let worker_ctx = ctx.clone();
-        let (mut reporter, progress) = Progress::tracked();
-        let started = Instant::now();
-        let history = self.history.sender();
-        let history_label = label.to_owned();
-        if let Err(error) = std::thread::Builder::new()
-            .name("pawcommander-file-operation".into())
-            .spawn(move || {
+        if self.job.is_none() && self.pending_jobs.is_empty() {
+            self.notice = None;
+        }
+        self.pending_jobs.push_back(job);
+        self.start_next_job(ctx);
+        ctx.request_repaint();
+    }
+
+    fn start_next_job(&mut self, ctx: &egui::Context) {
+        if self.queue_start_failed {
+            return;
+        }
+        while self.job.is_none() {
+            let Some(PendingJob {
+                label,
+                description,
+                work,
+                transfer,
+                cut,
+                ..
+            }) = self.pending_jobs.pop_front()
+            else {
+                break;
+            };
+            debug_assert!(self.transfer.is_none());
+            let (tx, rx) = mpsc::channel();
+            let worker_ctx = ctx.clone();
+            let (mut reporter, progress) = Progress::tracked();
+            let started = Instant::now();
+            let history = self.history.sender();
+            let history_label = label.clone();
+            // A failed OS spawn consumes its closure. Retain the work separately
+            // so failure cannot discard this job or the jobs behind it.
+            let work = Arc::new(Mutex::new(Some(work)));
+            let worker_work = work.clone();
+            let worker = move || {
+                let work = worker_work.lock().unwrap().take().unwrap();
                 let history_started = crate::result_history::now();
                 let result =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&mut reporter)))
@@ -2206,29 +2283,47 @@ impl PawCommander {
                 }
                 let _ = tx.send(result);
                 worker_ctx.request_repaint();
-            })
-        {
-            self.notice = Some((
-                crate::tr_format!(
-                    "Не удалось запустить операцию: {error}",
-                    "Could not start operation: {error}"
-                ),
-                true,
-            ));
-            return;
+            };
+            let builder = std::thread::Builder::new().name("pawcommander-file-operation".into());
+            #[cfg(test)]
+            let spawn_result = if self.fail_job_spawn {
+                Err(std::io::Error::other("injected worker spawn failure"))
+            } else {
+                builder.spawn(worker)
+            };
+            #[cfg(not(test))]
+            let spawn_result = builder.spawn(worker);
+            if let Err(error) = spawn_result {
+                self.pending_jobs.push_front(PendingJob {
+                    label,
+                    description,
+                    work: work.lock().unwrap().take().unwrap(),
+                    transfer,
+                    cut,
+                });
+                self.queue_start_failed = true;
+                self.notice = Some((
+                    crate::tr_format!(
+                        "Не удалось запустить операцию: {error}",
+                        "Could not start operation: {error}"
+                    ),
+                    true,
+                ));
+                break;
+            }
+            self.job = Some(Job {
+                label,
+                started,
+                result: rx,
+                progress,
+            });
+            self.transfer = transfer;
+            self.active_cut = cut;
+            ctx.request_repaint();
         }
-        self.job = Some(Job {
-            label: label.into(),
-            started,
-            result: rx,
-            progress,
-        });
-        self.notice = None;
-        ctx.request_repaint();
     }
     fn drop_enabled(&self) -> bool {
-        self.job.is_none()
-            && self.transfer.is_none()
+        !self.conflict_open()
             && self.quick_look.is_none()
             && self.dialog.is_none()
             && self.properties.is_none()
@@ -2251,7 +2346,7 @@ impl PawCommander {
         kind: TransferKind,
         from_cut_clipboard: bool,
     ) {
-        if sources.is_empty() || self.job.is_some() || self.transfer.is_some() {
+        if sources.is_empty() {
             return;
         }
         if destination.is_archive() || sources.iter().any(Location::is_archive) {
@@ -2265,9 +2360,42 @@ impl PawCommander {
         } else {
             None
         };
+        let cut = cut_generation.map(|generation| (generation, sources.clone()));
+        if let Some((generation, paths)) = &cut {
+            let overlaps = |(other_generation, other_paths): &CutRequest| {
+                generation == other_generation
+                    && paths.iter().any(|path| {
+                        other_paths.iter().any(|other| {
+                            path.same_backend(other)
+                                && (path.path().starts_with(other.path())
+                                    || other.path().starts_with(path.path()))
+                        })
+                    })
+            };
+            if self.active_cut.as_ref().is_some_and(overlaps)
+                || self
+                    .pending_jobs
+                    .iter()
+                    .filter_map(|job| job.cut.as_ref())
+                    .any(overlaps)
+            {
+                self.notice = Some((
+                    crate::i18n::text("Эти вырезанные объекты уже ожидают перемещения.").into(),
+                    true,
+                ));
+                return;
+            }
+        }
+        let description = format!(
+            "{} ({}): {} → {}",
+            label,
+            sources.len(),
+            sources.first().unwrap().display(),
+            destination.display()
+        );
         let (events, rx) = mpsc::channel();
         let worker_ctx = ctx.clone();
-        self.start_progress_job(ctx, label, move |progress| {
+        let work = move |progress: &mut Progress| {
             let cancellation = progress.cancellation();
             let summary = fs_ops::transfer_with_conflicts(
                 &sources,
@@ -2303,14 +2431,21 @@ impl PawCommander {
                 summary.cancelled,
                 &destination.display(),
             ))
-        });
-        if self.job.is_some() {
-            self.transfer = Some(TransferInteraction {
-                events: rx,
-                cut_generation,
-                conflict: None,
-            });
-        }
+        };
+        self.submit_job(
+            ctx,
+            PendingJob {
+                label: label.into(),
+                description,
+                work: Box::new(work),
+                transfer: Some(TransferInteraction {
+                    events: rx,
+                    cut_generation,
+                    conflict: None,
+                }),
+                cut,
+            },
+        );
     }
 
     fn poll_transfer(&mut self) {
@@ -2549,10 +2684,12 @@ impl PawCommander {
                 // result. Consume them before releasing transfer ownership.
                 self.poll_transfer();
                 self.transfer = None;
+                self.active_cut = None;
                 self.job = None;
                 self.refresh(ctx);
             }
         }
+        self.start_next_job(ctx);
     }
     fn copy_files(&mut self, cut: bool) {
         let paths = self.selected();
@@ -2930,7 +3067,7 @@ impl PawCommander {
             }
             Action::Copy(cut) => self.copy_files(cut),
             Action::Paste(move_here) if self.drop_enabled() => self.paste_files(move_here, ctx),
-            Action::Transfer(kind) if self.job.is_none() && self.settings.split => {
+            Action::Transfer(kind) if !self.conflict_open() && self.settings.split => {
                 let sources = self.selected();
                 let destination = self.panes[1 - self.active].tab().path.clone();
                 self.start_transfer(
@@ -2946,7 +3083,7 @@ impl PawCommander {
                     false,
                 );
             }
-            Action::NewFolder if self.job.is_none() => {
+            Action::NewFolder if !self.conflict_open() => {
                 self.remember_dialog_file_focus(ctx);
                 self.dialog = Some(Dialog::NewFolder {
                     parent: self.tab().path.clone(),
@@ -2954,7 +3091,7 @@ impl PawCommander {
                 });
                 self.dialog_focus = true;
             }
-            Action::Rename if self.job.is_none() => {
+            Action::Rename if !self.conflict_open() => {
                 let selected = self.selected();
                 if selected.len() == 1 {
                     self.remember_dialog_file_focus(ctx);
@@ -2964,7 +3101,7 @@ impl PawCommander {
                     self.dialog_focus = true;
                 }
             }
-            Action::Trash if self.job.is_none() => {
+            Action::Trash if !self.conflict_open() => {
                 let paths = self.selected();
                 if !paths.is_empty() {
                     self.remember_dialog_file_focus(ctx);
@@ -3193,7 +3330,7 @@ impl PawCommander {
             .then(|| self.panes[1 - self.active].tab().path.clone())
             .filter(|path| !path.is_archive());
         let enabled = !self.keyboard_blocked(ctx);
-        let can_copy = self.job.is_none() && self.transfer.is_none();
+        let can_copy = !self.conflict_open();
         self.search
             .panel
             .show(ctx, target, destination, enabled, can_copy);
@@ -3258,21 +3395,14 @@ impl PawCommander {
                 }
             }
             ReadyAction::Copy { paths, destination } => {
-                if self.job.is_some() || self.transfer.is_some() {
-                    self.search.panel.reject(
-                        crate::i18n::text("Дождитесь завершения текущей файловой операции и повторите копирование."),
-                        ctx,
-                    );
-                } else {
-                    self.start_transfer(
-                        ctx,
-                        crate::i18n::text("Копирование в соседнюю панель"),
-                        paths.into_iter().map(Location::from).collect(),
-                        destination,
-                        TransferKind::Copy,
-                        false,
-                    );
-                }
+                self.start_transfer(
+                    ctx,
+                    crate::i18n::text("Копирование в соседнюю панель"),
+                    paths.into_iter().map(Location::from).collect(),
+                    destination,
+                    TransferKind::Copy,
+                    false,
+                );
             }
         }
     }
@@ -3729,7 +3859,7 @@ impl PawCommander {
         };
         let restore_file_cursor = focused_file.is_some() && open_target.is_some();
         let can_quick_look = self.quick_look_entry(focused_file).is_some();
-        let idle = self.job.is_none();
+        let idle = !self.conflict_open();
         let writable = !tab.path.is_archive();
         let outcome = palette.show(
             ctx,
@@ -3763,7 +3893,6 @@ impl PawCommander {
                 }
                 Command::CopyToPane | Command::MoveToPane => {
                     idle && writable
-                        && self.transfer.is_none()
                         && self.settings.split
                         && has_selection
                         && !self.panes[1 - self.active].tab().path.is_archive()
@@ -3981,9 +4110,9 @@ impl PawCommander {
                         actions.push(Action::ConnectSftp);
                     }
                     for (icon, tip, enabled, action) in [
-                        (Icon::NewFolder, self.settings.shortcuts.hint(ctx, Command::NewFolder, Command::NewFolder.label()), writable && self.job.is_none(), Action::NewFolder),
+                        (Icon::NewFolder, self.settings.shortcuts.hint(ctx, Command::NewFolder, Command::NewFolder.label()), writable && !self.conflict_open(), Action::NewFolder),
                         (Icon::Copy, crate::i18n::text("Копировать · ⌘/Ctrl+C").into(), writable && !self.tab().selected.is_empty(), Action::Copy(false)),
-                        (Icon::Paste, crate::i18n::text("Вставить · ⌘/Ctrl+V").into(), writable && self.job.is_none(), Action::Paste(false)),
+                        (Icon::Paste, crate::i18n::text("Вставить · ⌘/Ctrl+V").into(), writable && !self.conflict_open(), Action::Paste(false)),
                     ] {
                         if ui.add_enabled_ui(enabled, |ui| icons::button(ui, icon, "", false)).inner.on_hover_text(tip).clicked() {
                             actions.push(action);
@@ -4602,7 +4731,16 @@ impl PawCommander {
                     });
                     operation_details(ui, job.progress.snapshot());
                     if let Some((message, _)) = &self.notice {
-                        ui.label(RichText::new(message).color(colors.muted));
+                        egui::ScrollArea::vertical()
+                            .id_salt("active_operation_notice")
+                            .max_height(80.0)
+                            .show(ui, |ui| {
+                                ui.add(
+                                    egui::Label::new(RichText::new(message).color(colors.muted))
+                                        .wrap()
+                                        .selectable(true),
+                                );
+                            });
                     }
                 } else if let Some((message, error)) = self.notice.clone() {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
@@ -4656,9 +4794,70 @@ impl PawCommander {
                         });
                     });
                 }
+                self.pending_queue_ui(ui);
             });
         if stop_requested {
             self.request_transfer_stop(ctx);
+        }
+    }
+
+    fn move_pending_job(&mut self, index: usize, direction: isize) {
+        if let Some(other) = index.checked_add_signed(direction) {
+            if index < self.pending_jobs.len() && other < self.pending_jobs.len() {
+                self.pending_jobs.swap(index, other);
+            }
+        }
+    }
+
+    fn pending_queue_ui(&mut self, ui: &mut egui::Ui) {
+        if self.pending_jobs.is_empty() {
+            self.queue_start_failed = false;
+            return;
+        }
+        if self.queue_start_failed {
+            let retry = ui.button(crate::i18n::text("Повторить запуск очереди"));
+            paint_focus(ui, &retry, 5);
+            if retry.clicked() {
+                self.queue_start_failed = false;
+                self.start_next_job(ui.ctx());
+            }
+        }
+        let mut remove = None;
+        let mut reorder = None;
+        egui::CollapsingHeader::new(crate::tr_format!(
+            "Очередь: {} · одновременно: 1",
+            "Queued: {} · concurrency: 1",
+            self.pending_jobs.len()
+        ))
+        .id_salt("pending_file_jobs")
+        .show(ui, |ui| {
+            ui.label(crate::i18n::text("Остановка действует только на текущее задание. Ожидающие задания хранятся до закрытия приложения."));
+            egui::ScrollArea::vertical().id_salt("pending_jobs_scroll").max_height(120.0).show(ui, |ui| {
+                for (index, job) in self.pending_jobs.iter().enumerate() {
+                    ui.push_id(index, |ui| {
+                        ui.horizontal(|ui| {
+                            let up = ui.add_enabled(index > 0, egui::Button::new("↑")).on_hover_text(crate::i18n::text("Раньше"));
+                            paint_focus(ui, &up, 5);
+                            if up.clicked() { reorder = Some((index, -1)); }
+                            let down = ui.add_enabled(index + 1 < self.pending_jobs.len(), egui::Button::new("↓")).on_hover_text(crate::i18n::text("Позже"));
+                            paint_focus(ui, &down, 5);
+                            if down.clicked() { reorder = Some((index, 1)); }
+                            let cancel = ui.button(crate::i18n::text("Удалить из очереди"));
+                            paint_focus(ui, &cancel, 5);
+                            if cancel.clicked() { remove = Some(index); }
+                            ui.add(egui::Label::new(format!("{}. {}", index + 1, job.description)).truncate()).on_hover_text(&job.description);
+                        });
+                    });
+                }
+            });
+        });
+        if let Some(index) = remove {
+            self.pending_jobs.remove(index);
+            if self.pending_jobs.is_empty() {
+                self.queue_start_failed = false;
+            }
+        } else if let Some((index, direction)) = reorder {
+            self.move_pending_job(index, direction);
         }
     }
 
@@ -5095,9 +5294,14 @@ impl PawCommander {
         if confirm && !cancel {
             match dialog {
                 Dialog::SelectionRule { .. } => unreachable!("rule handled above"),
-                Dialog::NewFolder { parent, name } => self.start_progress_job(
+                Dialog::NewFolder { parent, name } => self.start_described_job(
                     ctx,
                     crate::i18n::text("Создание папки"),
+                    format!(
+                        "{}: {}",
+                        crate::i18n::text("Создание папки"),
+                        parent.join(&name)
+                    ),
                     move |progress| {
                         let target = parent.join(&name);
                         progress
@@ -5115,9 +5319,15 @@ impl PawCommander {
                         })
                     },
                 ),
-                Dialog::Rename { source, name } => self.start_progress_job(
+                Dialog::Rename { source, name } => self.start_described_job(
                     ctx,
                     crate::i18n::text("Переименование"),
+                    format!(
+                        "{}: {} → {}",
+                        crate::i18n::text("Переименование"),
+                        source,
+                        name
+                    ),
                     move |progress| {
                         let target = source.parent().map(|parent| parent.join(&name).display());
                         progress.results.plan(vec![(source.clone(), target)]);
@@ -5132,9 +5342,15 @@ impl PawCommander {
                 Dialog::WorkspaceName { editing, name } => {
                     self.save_workspace_name(editing, name);
                 }
-                Dialog::Trash { paths } => self.start_progress_job(
+                Dialog::Trash { paths } => self.start_described_job(
                     ctx,
                     crate::i18n::text("Удаление файлов"),
+                    format!(
+                        "{} ({}): {}",
+                        crate::i18n::text("Удаление файлов"),
+                        paths.len(),
+                        paths.first().map(Location::display).unwrap_or_default()
+                    ),
                     move |progress| {
                         fs_ops::trash_entries_with_progress(&paths, progress).map(|n| {
                             crate::tr_format!("Обработано объектов: {n}", "Items processed: {n}")
@@ -5279,7 +5495,9 @@ impl eframe::App for PawCommander {
         let colors = Palette::from_ctx(ctx);
         self.poll(ctx);
         self.transfer_stop_shortcut(ctx);
-        if self.job.is_some() && ctx.input(|i| i.viewport().close_requested()) {
+        if (self.job.is_some() || !self.pending_jobs.is_empty())
+            && ctx.input(|i| i.viewport().close_requested())
+        {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.notice = Some((
                 crate::i18n::text("Дождитесь завершения файловой операции, затем закройте окно.")
@@ -5412,7 +5630,11 @@ impl eframe::App for PawCommander {
                 self.active = destination;
             }
         }
-        if let Some(Err(error)) = self.native_drag.handoff(ctx, frame, enabled) {
+        if let Some(Err(error)) = self.native_drag.handoff(
+            ctx,
+            frame,
+            enabled && self.job.is_none() && self.pending_jobs.is_empty(),
+        ) {
             self.notice = Some((error, true));
         }
         if let Some(result) = drop_targets.finish(ctx, enabled) {
@@ -5424,19 +5646,21 @@ impl eframe::App for PawCommander {
         if let Some(action) = self.search.panel.poll(ctx) {
             self.dispatch_search_result(action, ctx);
         }
-        if let Some(transfer) = &mut self.transfer {
-            if let Some(conflict) = &mut transfer.conflict {
-                if conflict.show(ctx) {
-                    transfer.conflict = None;
-                    if let Some(palette) = &mut self.command_palette {
-                        palette.refocus_query();
+        if self.dialog.is_none() {
+            if let Some(transfer) = &mut self.transfer {
+                if let Some(conflict) = &mut transfer.conflict {
+                    if conflict.show(ctx) {
+                        transfer.conflict = None;
+                        if let Some(palette) = &mut self.command_palette {
+                            palette.refocus_query();
+                        }
+                        if let Some(jump) = &mut self.folder_jump {
+                            jump.refocus_query();
+                        }
+                        ctx.request_repaint();
                     }
-                    if let Some(jump) = &mut self.folder_jump {
-                        jump.refocus_query();
-                    }
-                    ctx.request_repaint();
+                    return;
                 }
-                return;
             }
         }
         self.restore_dialog_file_focus(ctx);
@@ -8998,6 +9222,460 @@ mod tests {
             .join("\n")
     }
 
+    fn hold_queue(app: &mut PawCommander) -> mpsc::Sender<Result<String, String>> {
+        let (send, receive) = mpsc::channel();
+        let (_, progress) = Progress::tracked();
+        app.job = Some(Job {
+            label: "held operation".into(),
+            started: Instant::now(),
+            result: receive,
+            progress,
+        });
+        send
+    }
+
+    fn poll_queue_until(
+        app: &mut PawCommander,
+        ctx: &egui::Context,
+        condition: impl Fn(&PawCommander) -> bool,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !condition(app) && Instant::now() < deadline {
+            app.poll(ctx);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(condition(app), "queue did not reach expected state");
+    }
+
+    fn answer_queue_conflict(app: &mut PawCommander, ctx: &egui::Context, label: &str) {
+        let mut draw = |events| {
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(800.0, 600.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    let transfer = app.transfer.as_mut().unwrap();
+                    if transfer.conflict.as_mut().unwrap().show(ctx) {
+                        transfer.conflict = None;
+                    }
+                },
+            )
+        };
+        draw(vec![]);
+        let output = draw(vec![]);
+        let point = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == label => {
+                    Some(text.pos + text.galley.size() * 0.5)
+                }
+                _ => None,
+            })
+            .expect("conflict decision button");
+        for pressed in [true, false] {
+            draw(vec![
+                egui::Event::PointerMoved(point),
+                egui::Event::PointerButton {
+                    pos: point,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]);
+        }
+    }
+
+    #[test]
+    fn queue_serializes_workers_reorders_removes_and_continues_after_panic() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        let (order, observed) = mpsc::channel();
+        let first_order = order.clone();
+        let (release, blocked) = mpsc::channel();
+        app.start_progress_job(&ctx, "first", move |_| {
+            first_order.send(0).unwrap();
+            blocked.recv_timeout(Duration::from_secs(5)).unwrap();
+            Ok("first done".into())
+        });
+        assert_eq!(observed.recv_timeout(Duration::from_secs(2)).unwrap(), 0);
+        for index in 1..=3 {
+            let order = order.clone();
+            app.start_progress_job(&ctx, &format!("queued {index}"), move |_| {
+                order.send(index).unwrap();
+                if index == 2 {
+                    panic!("worker panic must release queue ownership");
+                }
+                Ok(format!("done {index}"))
+            });
+        }
+        assert_eq!(app.pending_jobs.len(), 3);
+        assert!(
+            observed.try_recv().is_err(),
+            "pending workers must not start"
+        );
+        app.move_pending_job(1, -1);
+        app.move_pending_job(0, -1); // Out-of-range controls cannot reorder the active job.
+        app.pending_jobs.remove(2);
+        assert_eq!(app.pending_jobs[0].label, "queued 2");
+        release.send(()).unwrap();
+        poll_queue_until(&mut app, &ctx, |app| {
+            app.job.is_none() && app.pending_jobs.is_empty()
+        });
+        assert_eq!(observed.try_iter().collect::<Vec<_>>(), vec![2, 1]);
+        assert_eq!(app.notice, Some(("done 1".into(), false)));
+    }
+
+    #[test]
+    fn queue_is_bounded_and_removing_pending_work_has_no_side_effects() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        let held = hold_queue(&mut app);
+        let (started, observed) = mpsc::channel();
+        for _ in 0..=MAX_PENDING_JOBS {
+            let started = started.clone();
+            app.start_progress_job(&ctx, "pending", move |_| {
+                started.send(()).unwrap();
+                Ok("done".into())
+            });
+        }
+        assert_eq!(app.pending_jobs.len(), MAX_PENDING_JOBS);
+        assert!(app.notice.as_ref().unwrap().0.contains("100"));
+        assert!(app.notice.as_ref().unwrap().1);
+        app.pending_jobs.clear();
+        held.send(Ok("done".into())).unwrap();
+        app.poll(&ctx);
+        assert!(app.job.is_none());
+        assert!(observed.try_recv().is_err());
+    }
+
+    #[test]
+    fn queue_spawn_failure_preserves_work_and_order_until_explicit_retry() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        let held = hold_queue(&mut app);
+        let (started, observed) = mpsc::channel();
+        for index in 0..2 {
+            let started = started.clone();
+            let destination = root.path().join(format!("job-{index}"));
+            app.start_progress_job(&ctx, &format!("job {index}"), move |_| {
+                std::fs::write(destination, b"captured job payload")
+                    .map_err(|error| error.to_string())?;
+                started.send(index).unwrap();
+                Ok(format!("done {index}"))
+            });
+        }
+        app.fail_job_spawn = true;
+        held.send(Ok("released".into())).unwrap();
+        app.poll(&ctx);
+        assert!(app.job.is_none());
+        assert!(app.queue_start_failed);
+        assert_eq!(app.pending_jobs.len(), 2);
+        assert_eq!(app.pending_jobs[0].label, "job 0");
+        assert_eq!(app.pending_jobs[1].label, "job 1");
+        assert!(observed.try_recv().is_err());
+        assert!(!root.path().join("job-0").exists());
+        app.fail_job_spawn = false;
+        app.poll(&ctx);
+        assert!(
+            app.job.is_none(),
+            "OS recovery does not cause unbounded automatic retries"
+        );
+        operation_footer_frame(&mut app, &ctx, vec![]);
+        let output = operation_footer_frame(&mut app, &ctx, vec![]);
+        let retry = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text)
+                    if text.galley.text() == crate::i18n::text("Повторить запуск очереди") =>
+                {
+                    Some(text.pos + text.galley.size() * 0.5)
+                }
+                _ => None,
+            })
+            .expect("failed queue exposes explicit retry");
+        for pressed in [true, false] {
+            operation_footer_frame(
+                &mut app,
+                &ctx,
+                vec![
+                    egui::Event::PointerMoved(retry),
+                    egui::Event::PointerButton {
+                        pos: retry,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        poll_queue_until(&mut app, &ctx, |app| {
+            app.job.is_none() && app.pending_jobs.is_empty()
+        });
+        assert_eq!(observed.try_iter().collect::<Vec<_>>(), vec![0, 1]);
+        for index in 0..2 {
+            assert_eq!(
+                std::fs::read(root.path().join(format!("job-{index}"))).unwrap(),
+                b"captured job payload"
+            );
+        }
+    }
+
+    #[test]
+    fn queued_same_target_copies_revalidate_conflicts_capture_destination_and_save_ordered_history()
+    {
+        for decision in ["Заменить", "Сохранить обе версии"] {
+            let root = tempfile::tempdir().unwrap();
+            let first = root.path().join("first");
+            let second = root.path().join("second");
+            let target = root.path().join("target");
+            let other = root.path().join("other");
+            for path in [&first, &second, &target, &other] {
+                std::fs::create_dir(path).unwrap();
+            }
+            std::fs::write(first.join("same.txt"), b"first payload").unwrap();
+            std::fs::write(second.join("same.txt"), b"second payload").unwrap();
+            let ctx = egui::Context::default();
+            let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+            let mut app = PawCommander::new(&cc, Some(root.path().into()));
+            let history_path = root.path().join("history.json");
+            app.history = History::for_test(history_path.clone(), &ctx);
+            let held = hold_queue(&mut app);
+            for (label, source) in [("first", &first), ("second", &second)] {
+                app.start_transfer(
+                    &ctx,
+                    label,
+                    vec![source.join("same.txt").into()],
+                    target.clone().into(),
+                    TransferKind::Copy,
+                    false,
+                );
+            }
+            assert!(
+                app.transfer.is_none(),
+                "a pending transfer cannot take active interaction ownership"
+            );
+            assert!(!target.join("same.txt").exists());
+            app.action(Action::Navigate(0, other.clone().into()), &ctx);
+            held.send(Ok("released".into())).unwrap();
+            poll_queue_until(&mut app, &ctx, PawCommander::conflict_open);
+            assert_eq!(app.job.as_ref().unwrap().label, "second");
+            assert_eq!(
+                std::fs::read(target.join("same.txt")).unwrap(),
+                b"first payload"
+            );
+            let saved: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&history_path).unwrap()).unwrap();
+            assert_eq!(
+                saved["records"].as_array().unwrap().len(),
+                1,
+                "first result persisted before second conflict"
+            );
+            assert_eq!(saved["records"][0]["label"], "first");
+            answer_queue_conflict(&mut app, &ctx, crate::i18n::text(decision));
+            poll_queue_until(&mut app, &ctx, |app| app.job.is_none());
+            let keep_both = decision == "Сохранить обе версии";
+            assert_eq!(
+                std::fs::read(target.join("same.txt")).unwrap(),
+                if keep_both {
+                    b"first payload".as_slice()
+                } else {
+                    b"second payload".as_slice()
+                }
+            );
+            if keep_both {
+                assert_eq!(
+                    std::fs::read(target.join("same (2).txt")).unwrap(),
+                    b"second payload"
+                );
+            }
+            assert_eq!(
+                std::fs::read_dir(&other).unwrap().count(),
+                0,
+                "navigation cannot retarget queued copies"
+            );
+            assert_eq!(
+                std::fs::read(first.join("same.txt")).unwrap(),
+                b"first payload"
+            );
+            assert_eq!(
+                std::fs::read(second.join("same.txt")).unwrap(),
+                b"second payload"
+            );
+            assert_eq!(
+                std::fs::read_dir(&target).unwrap().count(),
+                if keep_both { 2 } else { 1 },
+                "no staging remains"
+            );
+            let saved: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&history_path).unwrap()).unwrap();
+            assert_eq!(saved["records"].as_array().unwrap().len(), 2);
+            assert_eq!(saved["records"][1]["label"], "second");
+            assert_eq!(saved["records"][1]["items"][0]["outcome"], "Completed");
+        }
+    }
+
+    #[test]
+    fn queued_transfer_failure_and_conflict_stop_release_only_the_active_job() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(source.join("conflict.txt"), b"new").unwrap();
+        std::fs::write(target.join("conflict.txt"), b"old").unwrap();
+        std::fs::write(source.join("next.txt"), b"next").unwrap();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        let held = hold_queue(&mut app);
+        for name in ["missing.txt", "conflict.txt", "next.txt"] {
+            app.start_transfer(
+                &ctx,
+                name,
+                vec![source.join(name).into()],
+                target.clone().into(),
+                TransferKind::Copy,
+                false,
+            );
+        }
+        held.send(Ok("released".into())).unwrap();
+        poll_queue_until(&mut app, &ctx, PawCommander::conflict_open);
+        assert_eq!(app.job.as_ref().unwrap().label, "conflict.txt");
+        assert_eq!(app.pending_jobs.len(), 1);
+        assert!(!target.join("next.txt").exists());
+        app.request_transfer_stop(&ctx);
+        assert_eq!(
+            app.job.as_ref().unwrap().label,
+            "conflict.txt",
+            "Stop waits for terminal handoff"
+        );
+        poll_queue_until(&mut app, &ctx, |app| {
+            app.job.is_none() && app.pending_jobs.is_empty()
+        });
+        assert_eq!(std::fs::read(target.join("conflict.txt")).unwrap(), b"old");
+        assert_eq!(std::fs::read(source.join("conflict.txt")).unwrap(), b"new");
+        assert_eq!(std::fs::read(target.join("next.txt")).unwrap(), b"next");
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn queued_copy_waits_for_destination_creation_and_source_rename() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.txt");
+        let target = root.path().join("created later");
+        std::fs::write(&source, b"source payload").unwrap();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        let held = hold_queue(&mut app);
+        let parent: Location = root.path().to_path_buf().into();
+        app.start_progress_job(&ctx, "create destination", move |_| {
+            fs_ops::create_directory(&parent, "created later").map(|path| path.display())
+        });
+        app.start_transfer(
+            &ctx,
+            "copy after create",
+            vec![source.clone().into()],
+            target.clone().into(),
+            TransferKind::Copy,
+            false,
+        );
+        let rename_source: Location = source.clone().into();
+        app.start_progress_job(&ctx, "rename source", move |_| {
+            fs_ops::rename_entry(&rename_source, "renamed.txt").map(|path| path.display())
+        });
+        app.start_transfer(
+            &ctx,
+            "stale source",
+            vec![source.clone().into()],
+            target.clone().into(),
+            TransferKind::Copy,
+            false,
+        );
+        assert!(
+            !target.exists(),
+            "queued operations must not mutate the destination"
+        );
+        held.send(Ok("released".into())).unwrap();
+        poll_queue_until(&mut app, &ctx, |app| {
+            app.job.is_none() && app.pending_jobs.is_empty()
+        });
+        assert_eq!(
+            std::fs::read(target.join("source.txt")).unwrap(),
+            b"source payload"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("renamed.txt")).unwrap(),
+            b"source payload"
+        );
+        assert!(!source.exists());
+        assert!(
+            app.notice.as_ref().unwrap().1,
+            "stale source failure must remain visible"
+        );
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn queued_cut_moves_reserve_sources_and_do_not_consume_replaced_clipboard() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("cut.txt");
+        let target = root.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(&source, b"cut payload").unwrap();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        app.clipboard = Some(Clipboard::new(
+            vec![source.clone().into()],
+            true,
+            ClipboardOrigin::App(None),
+        ));
+        let held = hold_queue(&mut app);
+        for _ in 0..2 {
+            app.start_transfer(
+                &ctx,
+                "cut move",
+                vec![source.clone().into()],
+                target.clone().into(),
+                TransferKind::Move,
+                true,
+            );
+        }
+        assert_eq!(app.pending_jobs.len(), 1, "duplicate cut move is rejected");
+        assert!(source.exists());
+        let replacement: Location = root.path().join("new clipboard.txt").into();
+        app.clipboard = Some(Clipboard::new(
+            vec![replacement.clone()],
+            true,
+            ClipboardOrigin::App(None),
+        ));
+        held.send(Ok("released".into())).unwrap();
+        poll_queue_until(&mut app, &ctx, |app| {
+            app.job.is_none() && app.pending_jobs.is_empty()
+        });
+        assert!(!source.exists());
+        assert_eq!(
+            std::fs::read(target.join("cut.txt")).unwrap(),
+            b"cut payload"
+        );
+        assert_eq!(app.clipboard.as_ref().unwrap().paths, vec![replacement]);
+        assert!(app.active_cut.is_none());
+    }
+
     #[test]
     fn result_history_blocks_file_shortcuts_while_reading_selectable_labels() {
         let root = tempfile::tempdir().unwrap();
@@ -9154,6 +9832,61 @@ mod tests {
     }
 
     #[test]
+    fn queue_active_notice_stays_bounded_and_keeps_stop_visible() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        let _held = hold_queue(&mut app);
+        let (_events, events) = mpsc::channel();
+        app.transfer = Some(TransferInteraction {
+            events,
+            cut_generation: None,
+            conflict: None,
+        });
+        app.notice = Some((
+            (0..1000)
+                .map(|index| format!("previous remaining path {index}\n"))
+                .collect(),
+            true,
+        ));
+        operation_footer_frame(&mut app, &ctx, vec![]);
+        let output = operation_footer_frame(&mut app, &ctx, vec![]);
+        let notice_clip = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text)
+                    if text.galley.text().contains("previous remaining path 999") =>
+                {
+                    Some(shape.clip_rect)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            notice_clip.height() <= 86.0,
+            "previous result must scroll within a bounded area: {notice_clip:?}"
+        );
+        let (clip, stop) = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == "Stop" => Some((
+                    shape.clip_rect,
+                    egui::Rect::from_min_size(text.pos, text.galley.size()),
+                )),
+                _ => None,
+            })
+            .expect("Stop remains rendered");
+        assert!(clip.contains_rect(stop), "Stop must remain visible");
+        assert!(
+            stop.top() > 350.0,
+            "footer must leave room for file navigation"
+        );
+    }
+
+    #[test]
     fn transfer_stop_button_keeps_pending_ownership_and_navigation_until_result() {
         let root = tempfile::tempdir().unwrap();
         let other = root.path().join("another folder");
@@ -9228,7 +9961,10 @@ mod tests {
         assert_eq!(app.tab().path.path(), other);
         app.poll(&ctx);
         assert!(app.job.is_some() && app.transfer.is_some());
-        assert!(!app.drop_enabled());
+        assert!(
+            app.drop_enabled(),
+            "new work may queue while the active transfer stops"
+        );
 
         // Errors after Stop preserve recovery guidance rather than becoming success.
         result
@@ -9367,6 +10103,19 @@ mod tests {
             cut_generation: Some(generation),
             conflict: None,
         });
+        let (next_started, next_observed) = mpsc::channel();
+        let (next_release, next_wait) = mpsc::channel();
+        app.start_progress_job(&ctx, "next job", move |_| {
+            next_started.send(()).unwrap();
+            next_wait.recv_timeout(Duration::from_secs(5)).unwrap();
+            Ok("next completed".into())
+        });
+        app.request_transfer_stop(&ctx);
+        app.poll(&ctx);
+        assert!(
+            next_observed.try_recv().is_err(),
+            "Stop cannot dispatch before terminal cleanup handoff"
+        );
         let success = crate::i18n::transfer_finished(1, 0, &[], false, false, "/destination");
         events
             .send(TransferEvent::Moved(committed, vec![]))
@@ -9377,7 +10126,11 @@ mod tests {
         app.poll(&ctx);
         assert_eq!(app.notice, Some((success, false)));
         assert_eq!(app.clipboard.as_ref().unwrap().paths, vec![pending]);
-        assert!(app.job.is_none() && app.transfer.is_none());
+        assert_eq!(app.job.as_ref().unwrap().label, "next job");
+        assert!(app.transfer.is_none());
+        next_observed.recv_timeout(Duration::from_secs(2)).unwrap();
+        next_release.send(()).unwrap();
+        poll_queue_until(&mut app, &ctx, |app| app.job.is_none());
     }
 
     #[test]

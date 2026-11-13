@@ -454,6 +454,11 @@ pub(crate) struct History {
 }
 
 impl History {
+    #[cfg(test)]
+    pub(crate) fn for_test(path: PathBuf, ctx: &egui::Context) -> Self {
+        Self::open(path, ctx)
+    }
+
     pub fn new(ctx: &egui::Context) -> Self {
         // Unit-test app instances must never touch the user's real history.
         if cfg!(test) {
