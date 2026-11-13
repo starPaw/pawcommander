@@ -675,6 +675,7 @@ fn openssh_round_trip_and_host_verification() {
     assert!(report.errors.is_empty(), "{:?}", report.errors);
     assert_eq!(report.unfinished.len(), 1);
     assert_eq!(report.unfinished[0].staging.len(), 1);
+    assert!(report.unfinished[0].planned_staging.is_empty());
     let staged = interrupted_staging.unwrap();
     assert_eq!(report.unfinished[0].staging[0].location, staged.display());
     assert!(report.unfinished[0].staging[0].identity.is_none());

@@ -1,6 +1,29 @@
 use super::*;
 
 #[test]
+fn staging_cleanup_preserves_a_replacement_directory() {
+    let fixture = tempfile::tempdir().unwrap();
+    let target: Location = fixture.path().join("target").into();
+    let original = fixture.path().join("original-staging");
+    let mut replacement = None;
+    let error = with_staging(&target, |staging, _| {
+        fs::rename(staging.path(), &original).unwrap();
+        fs::create_dir(staging.path()).unwrap();
+        fs::write(staging.path().join("foreign"), b"preserve").unwrap();
+        replacement = Some(staging.path().to_path_buf());
+        Err("injected failure".into())
+    })
+    .unwrap_err();
+    assert!(error.contains("injected failure"));
+    assert!(error.contains("identity changed"));
+    assert_eq!(
+        fs::read(replacement.unwrap().join("foreign")).unwrap(),
+        b"preserve"
+    );
+    assert!(original.is_dir());
+}
+
+#[test]
 fn local_rename_denial_is_definite_and_preserves_both_files() {
     let fixture = tempfile::tempdir().unwrap();
     let source: Location = fixture.path().join("source").into();
