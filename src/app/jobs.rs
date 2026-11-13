@@ -199,13 +199,13 @@ impl PawCommander {
                     true
                 };
                 if !panicked && persisted {
-                    if let Some(pending) = pending {
-                        if let Err(error) = pending.complete() {
-                            result = Err(crate::tr_format!(
+                    if let Some(pending) = pending
+                        && let Err(error) = pending.complete()
+                    {
+                        result = Err(crate::tr_format!(
                                 "Операция завершилась, но очистка записи восстановления не подтверждена: {error}. Проверьте журнал результатов.",
                                 "Operation finished, but recovery record cleanup could not be confirmed: {error}. Check result history."
                             ));
-                        }
                     }
                 } else if !persisted && recovery_directory.is_some() {
                     result = Err(crate::tr_format!(
@@ -590,10 +590,11 @@ impl PawCommander {
     }
 
     pub(super) fn move_pending_job(&mut self, index: usize, direction: isize) {
-        if let Some(other) = index.checked_add_signed(direction) {
-            if index < self.pending_jobs.len() && other < self.pending_jobs.len() {
-                self.pending_jobs.swap(index, other);
-            }
+        if let Some(other) = index.checked_add_signed(direction)
+            && index < self.pending_jobs.len()
+            && other < self.pending_jobs.len()
+        {
+            self.pending_jobs.swap(index, other);
         }
     }
 }

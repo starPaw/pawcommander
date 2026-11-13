@@ -158,7 +158,7 @@ impl PawCommander {
         let visible_panes = 1 + usize::from(self.settings.split);
         egui::DragAndDrop::has_payload_of_type::<DragTab>(ctx)
             || egui::DragAndDrop::has_payload_of_type::<DragFiles>(ctx)
-            || ctx.memory(|memory| memory.any_popup_open())
+            || egui::Popup::is_any_open(ctx)
             // Legacy egui context menus are tracked separately from other popups.
             || self.panes[..visible_panes].iter().any(|pane| {
                 pane.tab_context_menu
@@ -209,7 +209,7 @@ impl PawCommander {
             false
         };
         let focused = !file_focus
-            && (ctx.wants_keyboard_input()
+            && (ctx.egui_wants_keyboard_input()
                 || (self.keyboard_had_focus
                     && ctx.input(|input| input.key_pressed(egui::Key::Escape))));
         let mut actions = Vec::new();

@@ -69,8 +69,8 @@ impl CommandPalette {
         keys: &[egui::Key],
         is_available: impl Fn(Command) -> bool,
     ) -> PaletteOutcome {
-        let modal = egui::Modal::new(egui::Id::new("command_palette")).show(ctx, |ui| {
-            ui.set_width((ctx.screen_rect().width() - 40.0).clamp(160.0, 500.0));
+        let modal = egui::Modal::new(egui::Id::unique("command_palette")).show(ctx, |ui| {
+            ui.set_width((ctx.content_rect().width() - 40.0).clamp(160.0, 500.0));
             ui.heading(Command::Palette.label());
             let query_id = ui.make_persistent_id("query");
             let navigate = keys
@@ -133,7 +133,7 @@ impl CommandPalette {
                 ui.label(text("Команды не найдены"));
             }
             egui::ScrollArea::vertical()
-                .max_height((ctx.screen_rect().height() - 140.0).clamp(60.0, 300.0))
+                .max_height((ctx.content_rect().height() - 140.0).clamp(60.0, 300.0))
                 .show(ui, |ui| {
                     for command in matches {
                         let highlighted = self.highlighted == Some(command);
@@ -151,6 +151,9 @@ impl CommandPalette {
                             })
                             .inner;
                         ctx.accesskit_node_builder(response.id, |node| {
+                            // Shortcut text is a separate atom in newer egui versions.
+                            // Keep the spoken command name separate from its shortcut.
+                            node.set_label(command.label());
                             node.set_selected(highlighted);
                             if !keys.is_empty() {
                                 node.set_keyboard_shortcut(keys);

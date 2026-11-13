@@ -360,7 +360,7 @@ impl DirectoryTree {
                 .pointer
                 .hover_pos()
                 .is_some_and(|pointer| output.inner_rect.contains(pointer))
-                && input.raw_scroll_delta != egui::Vec2::ZERO
+                && input.events.iter().any(|event| matches!(event, egui::Event::MouseWheel { delta, .. } if *delta != egui::Vec2::ZERO))
         }) {
             self.follow_current = false;
         }
@@ -371,7 +371,7 @@ impl DirectoryTree {
 fn tree_button(
     ui: &mut egui::Ui,
     width: f32,
-    key: impl Hash,
+    key: impl Hash + std::fmt::Debug,
     label: &str,
     accessible_label: &str,
     selected: Option<bool>,
@@ -381,14 +381,12 @@ fn tree_button(
     let response = ui.interact(rect, ui.make_persistent_id(key), egui::Sense::click());
     response.widget_info(|| match selected {
         Some(selected) => egui::WidgetInfo::selected(
-            egui::WidgetType::SelectableLabel,
+            egui::Role::Button,
             ui.is_enabled(),
             selected,
             accessible_label,
         ),
-        None => {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), accessible_label)
-        }
+        None => egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), accessible_label),
     });
     if response.gained_focus() {
         response.scroll_to_me(None);

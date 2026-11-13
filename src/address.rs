@@ -108,14 +108,13 @@ impl Completion {
 
     pub fn resolve(&self, address: &str, current: &Location) -> Result<Location, String> {
         let path = vfs::resolve(address, current)?;
-        if address.starts_with("sftp:") {
-            if let Some(completed) = self
+        if address.starts_with("sftp:")
+            && let Some(completed) = self
                 .completed_path
                 .as_ref()
                 .filter(|p| p.same_sftp_authority(&path))
-            {
-                return Ok(completed.with_path(path.path().into()));
-            }
+        {
+            return Ok(completed.with_path(path.path().into()));
         }
         Ok(path)
     }
@@ -185,7 +184,7 @@ impl Completion {
 
     fn start_read(&mut self, parent: Location, allow_unique_session: bool, ctx: &egui::Context) {
         if ACTIVE_READS
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
                 (count < MAX_ACTIVE_READS).then_some(count + 1)
             })
             .is_err()

@@ -545,9 +545,9 @@ fn button_info(ui: &egui::Ui, response: &Response, icon: Icon, label: &str, sele
                 | Icon::List
                 | Icon::FolderColumns
         ) {
-            egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, label)
+            egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, label)
         } else {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+            egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), label)
         }
     });
 }

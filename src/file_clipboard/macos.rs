@@ -45,28 +45,28 @@ impl SystemClipboard {
                     Ok(ProtocolObject::from_retained(url))
                 })
                 .collect::<Result<Vec<_>, String>>()?;
-            let objects = NSArray::from_vec(urls);
+            let objects = NSArray::from_retained_slice(&urls);
             // AppKit owns the resulting URLs independently of PawCommander.
-            let pasteboard = unsafe { NSPasteboard::generalPasteboard() };
-            unsafe { pasteboard.clearContents() };
-            if !unsafe { pasteboard.writeObjects(&objects) } {
+            let pasteboard = NSPasteboard::generalPasteboard();
+            pasteboard.clearContents();
+            if !pasteboard.writeObjects(&objects) {
                 return Err(crate::i18n::text("Не удалось записать файлы в буфер Finder").into());
             }
-            self.cut_revision = cut.then(|| unsafe { pasteboard.changeCount() });
+            self.cut_revision = cut.then(|| pasteboard.changeCount());
             Ok(())
         })
     }
 
     pub fn read(&mut self) -> Result<Option<FileList>, String> {
         autoreleasepool(|_| {
-            let pasteboard = unsafe { NSPasteboard::generalPasteboard() };
-            let revision = unsafe { pasteboard.changeCount() };
-            let items = unsafe { pasteboard.pasteboardItems() };
+            let pasteboard = NSPasteboard::generalPasteboard();
+            let revision = pasteboard.changeCount();
+            let items = pasteboard.pasteboardItems();
             self.read_items(
                 revision,
                 items.iter().flat_map(|items| items.iter()),
                 |item| unsafe { item.stringForType(NSPasteboardTypeFileURL) },
-                || unsafe { pasteboard.changeCount() },
+                || pasteboard.changeCount(),
             )
         })
     }
@@ -131,16 +131,16 @@ impl SystemClipboard {
 fn clipboard_path(value: &NSString) -> Result<PathBuf, String> {
     // Keep the same local-only validation as the other Unix clipboard backend.
     let path = local_file_url(&value.to_string())?;
-    // SAFETY: Foundation copies/parses the live NSString. A Finder file-reference
+    // Foundation copies/parses the live NSString. A Finder file-reference
     // URL identifies a resource, rather than a literal `/.file/id=...` path.
-    let url = unsafe { NSURL::URLWithString(value) }.ok_or(crate::i18n::text(
+    let url = NSURL::URLWithString(value).ok_or(crate::i18n::text(
         "Файловый буфер содержит недопустимый URL",
     ))?;
-    if !unsafe { url.isFileReferenceURL() } {
+    if !url.isFileReferenceURL() {
         // Ordinary paths must retain symlinks and need not currently exist.
         return Ok(path);
     }
-    let resolved = unsafe { url.filePathURL() }.ok_or(crate::i18n::text(
+    let resolved = url.filePathURL().ok_or(crate::i18n::text(
         "Не удалось найти файл из буфера Finder: ссылка устарела или файл недоступен",
     ))?;
     // SAFETY: the filesystem representation belongs to the live resolved NSURL;
@@ -160,13 +160,13 @@ mod tests {
 
     fn native_url(path: &Path) -> Retained<NSURL> {
         let value = url::Url::from_file_path(path).unwrap();
-        unsafe { NSURL::URLWithString(&NSString::from_str(value.as_str())) }.unwrap()
+        NSURL::URLWithString(&NSString::from_str(value.as_str())).unwrap()
     }
 
     fn reference_string(path: &Path) -> Retained<NSString> {
-        let reference = unsafe { native_url(path).fileReferenceURL() }.unwrap();
-        assert!(unsafe { reference.isFileReferenceURL() });
-        unsafe { reference.absoluteString() }.unwrap()
+        let reference = native_url(path).fileReferenceURL().unwrap();
+        assert!(reference.isFileReferenceURL());
+        reference.absoluteString().unwrap()
     }
 
     #[test]
@@ -241,7 +241,7 @@ mod tests {
                 &alias.join("folder"),
                 &pending,
             ]
-            .map(|path| unsafe { native_url(path).absoluteString() }.unwrap());
+            .map(|path| native_url(path).absoluteString().unwrap());
             let read = |clipboard: &mut SystemClipboard| {
                 clipboard
                     .read_items(1, urls.iter(), |url| Some(url.clone()), || 1)
@@ -352,9 +352,9 @@ mod tests {
             symlink(&file, &link).unwrap();
             for path in [&file, &link, &missing, &non_utf8] {
                 let url = native_url(path);
-                assert!(!unsafe { url.isFileReferenceURL() });
+                assert!(!url.isFileReferenceURL());
                 assert_eq!(
-                    clipboard_path(&unsafe { url.absoluteString() }.unwrap()).unwrap(),
+                    clipboard_path(&url.absoluteString().unwrap()).unwrap(),
                     *path
                 );
             }

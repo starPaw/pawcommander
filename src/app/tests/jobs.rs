@@ -65,8 +65,8 @@ fn copy_verification_footer_distinguishes_reads_from_writes() {
     };
     let mut output = None;
     for _ in 0..2 {
-        output = Some(ctx.run(egui::RawInput::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| operation_details(ui, &progress));
+        output = Some(ctx.run_test_ui(egui::RawInput::default(), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| operation_details(ui, &progress));
         }));
     }
     let text = operation_footer_text(&output.unwrap());
@@ -83,7 +83,7 @@ fn copy_verification_footer_distinguishes_reads_from_writes() {
 }
 
 #[test]
-fn queue_serializes_workers_reorders_removes_and_continues_after_panic() {
+fn queue_serializes_workers_reorders_removes_and_continues_after_panic_without_ui() {
     let root = tempfile::tempdir().unwrap();
     let ctx = egui::Context::default();
     let cc = eframe::CreationContext::_new_kittest(ctx.clone());
@@ -500,7 +500,8 @@ fn result_history_blocks_file_shortcuts_while_reading_selectable_labels() {
         ..Default::default()
     };
     eframe::App::raw_input_hook(&mut app, &ctx, &mut input);
-    let _ = ctx.run(input, |ctx| {
+    let _ = ctx.run_test_ui(input, |ui| {
+        let ctx = &ui.ctx().clone();
         app.keyboard(ctx);
         app.history.show(ctx, &mut app.show_history);
     });
@@ -541,7 +542,7 @@ fn transfer_notice_shows_remaining_paths_and_bounds_long_lists() {
         })
         .expect("terminal notice includes the full remaining path");
     for row in &label.1.galley.rows {
-        let rect = row.rect.translate(label.1.pos.to_vec2());
+        let rect = row.rect().translate(label.1.pos.to_vec2());
         assert!(
             label.0.contains_rect(rect),
             "notice row {rect:?} clipped by {:?}",
@@ -584,6 +585,8 @@ fn transfer_notice_shows_remaining_paths_and_bounds_long_lists() {
             vec![
                 egui::Event::PointerMoved(egui::pos2(100.0, clip.center().y)),
                 egui::Event::MouseWheel {
+                    phase: egui::TouchPhase::Move,
+                    source: egui::MouseWheelSource::Unknown,
                     unit: egui::MouseWheelUnit::Point,
                     delta: egui::vec2(0.0, -10_000.0),
                     modifiers: egui::Modifiers::NONE,
@@ -606,7 +609,7 @@ fn transfer_notice_shows_remaining_paths_and_bounds_long_lists() {
         .rows
         .last()
         .unwrap()
-        .rect
+        .rect()
         .translate(text.pos.to_vec2());
     assert!(
         clip.contains_rect(last),
@@ -945,7 +948,7 @@ fn operation_center_stays_live_during_a_stalled_copy_and_reports_the_error() {
     }
 
     fn draw_footer(app: &mut PawCommander, ctx: &egui::Context) -> String {
-        ctx.run(
+        ctx.run_test_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -953,9 +956,10 @@ fn operation_center_stays_live_during_a_stalled_copy_and_reports_the_error() {
                 )),
                 ..Default::default()
             },
-            |ctx| {
+            |ui| {
+                let ctx = &ui.ctx().clone();
                 app.poll(ctx);
-                app.footer(ctx);
+                app.footer(ui);
             },
         )
         .shapes

@@ -327,16 +327,16 @@ impl PawCommander {
                     self.notice = Some((crate::archive::readonly().into(), true));
                 } else if p.remote() {
                     self.open_in_zed(p, true, ctx);
-                } else if let Some(path) = p.local() {
-                    if let Err(e) = open::that_detached(path) {
-                        self.notice = Some((
-                            crate::tr_format!(
-                                "Не удалось открыть файл: {e}",
-                                "Could not open file: {e}"
-                            ),
-                            true,
-                        ));
-                    }
+                } else if let Some(path) = p.local()
+                    && let Err(e) = open::that_detached(path)
+                {
+                    self.notice = Some((
+                        crate::tr_format!(
+                            "Не удалось открыть файл: {e}",
+                            "Could not open file: {e}"
+                        ),
+                        true,
+                    ));
                 }
             }
             Action::History(index, delta) => {

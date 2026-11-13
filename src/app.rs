@@ -146,14 +146,33 @@ impl PawCommander {
 }
 
 impl eframe::App for PawCommander {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // eframe also runs logic while hidden. Drain workers and advance the
+        // queue without requiring a visible frame or painting any widgets.
+        self.history.poll();
+        self.recovery.poll(ctx);
+        self.poll(ctx);
+        // Hidden windows receive close requests through logic-only ticks too.
+        if (self.job.is_some() || !self.pending_jobs.is_empty())
+            && ctx.input(|i| i.viewport().close_requested())
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.notice = Some((
+                crate::i18n::text("Дождитесь завершения файловой операции, затем закройте окно.")
+                    .into(),
+                false,
+            ));
+        }
+    }
+
     fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
-        if let Some(accepted) = self.native_drag.finish_input(input) {
-            if accepted {
-                self.notice = Some((
-                    crate::i18n::text("Файлы переданы принимающему приложению").into(),
-                    false,
-                ));
-            }
+        if let Some(accepted) = self.native_drag.finish_input(input)
+            && accepted
+        {
+            self.notice = Some((
+                crate::i18n::text("Файлы переданы принимающему приложению").into(),
+                false,
+            ));
         }
 
         self.pane_key_presses.clear();
@@ -172,7 +191,7 @@ impl eframe::App for PawCommander {
             }
             _ => true,
         });
-        let pane_keys = (!ctx.wants_keyboard_input() || self.file_row_focus(ctx).is_some())
+        let pane_keys = (!ctx.egui_wants_keyboard_input() || self.file_row_focus(ctx).is_some())
             && !self.keyboard_blocked(ctx);
         let mut pane = self
             .file_row_focus(ctx)
@@ -269,26 +288,14 @@ impl eframe::App for PawCommander {
         });
     }
 
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        self.history.poll();
-        self.recovery.poll(ctx);
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let ctx = &ui.ctx().clone();
         let colors = Palette::from_ctx(ctx);
-        self.poll(ctx);
         self.transfer_stop_shortcut(ctx);
-        if (self.job.is_some() || !self.pending_jobs.is_empty())
-            && ctx.input(|i| i.viewport().close_requested())
-        {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.notice = Some((
-                crate::i18n::text("Дождитесь завершения файловой операции, затем закройте окно.")
-                    .into(),
-                false,
-            ));
-        }
         // Startup findings may arrive while another dialog or picker is open.
         // Suspend those handlers so Enter cannot submit an unrelated operation.
         if self.recovery.is_open() && !self.conflict_open() {
-            egui::CentralPanel::default().show(ctx, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 ui.label(crate::tr_format!(
                     "Закройте отчёт восстановления, чтобы продолжить работу.",
                     "Close the recovery report to continue."
@@ -297,10 +304,10 @@ impl eframe::App for PawCommander {
             self.recovery.show(ctx);
             return;
         }
-        if !self.conflict_open() {
-            if let Some(editor) = &mut self.shortcut_editor {
-                editor.capture(ctx);
-            }
+        if !self.conflict_open()
+            && let Some(editor) = &mut self.shortcut_editor
+        {
+            editor.capture(ctx);
         }
         if self.shortcut_editor.is_none() {
             self.scale_shortcuts(ctx);
@@ -317,11 +324,11 @@ impl eframe::App for PawCommander {
         let mut actions = vec![];
         let mut drop_targets = DropTargets::default();
         let mut tab_targets = TabDropTargets::default();
-        self.toolbar(ctx, &mut actions);
-        self.footer(ctx);
+        self.toolbar(ui, &mut actions);
+        self.footer(ui);
         self.history.show(ctx, &mut self.show_history);
-        self.show_search_results(ctx);
-        self.sidebar(ctx, &mut actions);
+        self.show_search_results(ui);
+        self.sidebar(ui, &mut actions);
         let drop_enabled = self.drop_enabled() && !self.native_drag.active();
         let zed_available = self.tools.zed.is_some();
         if self.settings.preview {
@@ -330,13 +337,13 @@ impl eframe::App for PawCommander {
                 .first()
                 .and_then(|path| self.tab().entries.iter().find(|entry| &entry.path == path))
                 .map(|entry| (entry.size, entry.modified));
-            let narrow = ctx.screen_rect().width() < 900.0;
-            egui::SidePanel::right("preview")
-                .default_width(if narrow { 155.0 } else { 260.0 })
-                .width_range(if narrow { 145.0..=165.0 } else { 200.0..=380.0 })
+            let narrow = ctx.content_rect().width() < 900.0;
+            egui::Panel::right("preview")
+                .default_size(if narrow { 155.0 } else { 260.0 })
+                .size_range(if narrow { 145.0..=165.0 } else { 200.0..=380.0 })
                 .show_separator_line(false)
                 .frame(egui::Frame::new().fill(colors.surface))
-                .show(ctx, |panel_ui| {
+                .show(ui, |panel_ui| {
                     let mut card = workspace_card(colors)
                         .inner_margin(12)
                         .outer_margin(egui::Margin {
@@ -362,7 +369,7 @@ impl eframe::App for PawCommander {
         self.thumbnails.begin_frame();
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(colors.surface).inner_margin(8))
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 let workspace = ui.available_rect_before_wrap();
                 let rects = if self.settings.split {
                     self.settings.pane_layout.rects(ui, workspace)
@@ -439,35 +446,36 @@ impl eframe::App for PawCommander {
         if let Some(action) = self.search.panel.poll(ctx) {
             self.dispatch_search_result(action, ctx);
         }
-        if self.dialog.is_none() {
-            if let Some(transfer) = &mut self.transfer {
-                if let Some(conflict) = &mut transfer.conflict {
-                    if conflict.show(ctx) {
-                        transfer.conflict = None;
-                        if let Some(palette) = &mut self.command_palette {
-                            palette.refocus_query();
-                        }
-                        if let Some(jump) = &mut self.folder_jump {
-                            jump.refocus_query();
-                        }
-                        ctx.request_repaint();
-                    }
-                    return;
+        if self.dialog.is_none()
+            && let Some(transfer) = &mut self.transfer
+            && let Some(conflict) = &mut transfer.conflict
+        {
+            if conflict.show(ctx) {
+                transfer.conflict = None;
+                if let Some(palette) = &mut self.command_palette {
+                    palette.refocus_query();
                 }
+                if let Some(jump) = &mut self.folder_jump {
+                    jump.refocus_query();
+                }
+                ctx.request_repaint();
             }
+            return;
         }
         self.restore_dialog_file_focus(ctx);
-        if let Some(id) = quick_look_focus {
-            if !self.keyboard_blocked(ctx) && self.tab().rendered_rows.contains_key(&id) {
-                ctx.memory_mut(|memory| memory.request_focus(id));
-                ctx.request_repaint();
-            }
+        if let Some(id) = quick_look_focus
+            && !self.keyboard_blocked(ctx)
+            && self.tab().rendered_rows.contains_key(&id)
+        {
+            ctx.memory_mut(|memory| memory.request_focus(id));
+            ctx.request_repaint();
         }
-        if let Some(id) = self.palette_focus_to_restore.take() {
-            if !self.keyboard_blocked(ctx) && !ctx.wants_keyboard_input() {
-                ctx.memory_mut(|memory| memory.request_focus(id));
-                ctx.request_repaint();
-            }
+        if let Some(id) = self.palette_focus_to_restore.take()
+            && !self.keyboard_blocked(ctx)
+            && !ctx.egui_wants_keyboard_input()
+        {
+            ctx.memory_mut(|memory| memory.request_focus(id));
+            ctx.request_repaint();
         }
         if self.command_palette.is_some() {
             self.show_command_palette(ctx, &picker_keys);
@@ -528,7 +536,8 @@ impl eframe::App for PawCommander {
         {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
-        self.keyboard_had_focus = ctx.wants_keyboard_input() && self.file_row_focus(ctx).is_none();
+        self.keyboard_had_focus =
+            ctx.egui_wants_keyboard_input() && self.file_row_focus(ctx).is_none();
     }
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         // Leave readable paths for older builds and if the session cannot be decoded.

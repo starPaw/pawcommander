@@ -1,0 +1,2 @@
+# Keep layout changes separate from compiler and language migrations.
+style_edition = "2021"

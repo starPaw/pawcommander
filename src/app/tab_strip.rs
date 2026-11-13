@@ -26,7 +26,7 @@ pub(super) fn tab_strip(
     const GAP: f32 = 2.0;
     let colors = Palette::from_ctx(ui.ctx());
     let border = workspace_border(colors);
-    let active_id = ui.id().with("last_active_tab");
+    let active_id = ui.scope_id().with("last_active_tab");
     let tab_id = pane.tab().id;
     let changed = ui.data_mut(|data| {
         let previous = data.get_temp::<(u64, usize)>(active_id);
@@ -46,7 +46,10 @@ pub(super) fn tab_strip(
             let scroll = egui::ScrollArea::horizontal()
                 .id_salt("tabs")
                 .max_width(available)
-                .drag_to_scroll(false)
+                .scroll_source(
+                    egui::scroll_area::ScrollSource::SCROLL_BAR
+                        | egui::scroll_area::ScrollSource::MOUSE_WHEEL,
+                )
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                 .auto_shrink([true, true])
                 .show(ui, |ui| {
@@ -86,7 +89,7 @@ pub(super) fn tab_strip(
                             };
                             let response = ui.interact(
                                 body,
-                                ui.id().with(("tab", tab.id)),
+                                ui.scope_id().with(("tab", tab.id)),
                                 Sense::click_and_drag(),
                             );
                             response.widget_info(|| {
@@ -96,7 +99,7 @@ pub(super) fn tab_strip(
                                     name.clone()
                                 };
                                 egui::WidgetInfo::selected(
-                                    egui::WidgetType::SelectableLabel,
+                                    egui::Role::Button,
                                     true,
                                     selected,
                                     label,
@@ -217,7 +220,7 @@ pub(super) fn tab_strip(
                                             .clicked()
                                         {
                                             actions.push(action);
-                                            ui.close_menu();
+                                            ui.close();
                                         }
                                     }
                                 });
@@ -230,12 +233,12 @@ pub(super) fn tab_strip(
                             } else if can_close {
                                 let close = ui.interact(
                                     close_rect,
-                                    ui.id().with(("close_tab", tab.id)),
+                                    ui.scope_id().with(("close_tab", tab.id)),
                                     Sense::click(),
                                 );
                                 close.widget_info(|| {
                                     egui::WidgetInfo::labeled(
-                                        egui::WidgetType::Button,
+                                        egui::Role::Button,
                                         true,
                                         crate::tr_format!(
                                             "Закрыть вкладку {name}",
@@ -294,7 +297,7 @@ pub(super) fn tab_strip(
                 ui.allocate_exact_size(Vec2::new(PLUS_WIDTH, HEIGHT), Sense::click());
             response.widget_info(|| {
                 egui::WidgetInfo::labeled(
-                    egui::WidgetType::Button,
+                    egui::Role::Button,
                     true,
                     crate::i18n::text("Новая вкладка"),
                 )

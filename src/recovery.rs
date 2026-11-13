@@ -137,7 +137,7 @@ impl Recovery {
             return;
         }
         egui::Window::new(crate::tr_format!("Восстановление после сбоя", "Crash recovery"))
-            .id(egui::Id::new("crash_recovery"))
+            .id(egui::Id::unique("crash_recovery"))
             .open(&mut self.open)
             .default_size([780.0, 440.0])
             .show(ctx, |ui| {

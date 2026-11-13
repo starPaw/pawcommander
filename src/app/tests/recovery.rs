@@ -122,7 +122,7 @@ fn recovery_report_suspends_existing_new_folder_dialog_enter() {
     });
     app.recovery.reopen();
     let mut frame = eframe::Frame::_new_kittest();
-    let _ = ctx.run(
+    let _ = ctx.run_test_ui(
         egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -137,7 +137,7 @@ fn recovery_report_suspends_existing_new_folder_dialog_enter() {
             }],
             ..Default::default()
         },
-        |ctx| eframe::App::update(&mut app, ctx, &mut frame),
+        |ui| eframe::App::ui(&mut app, ui, &mut frame),
     );
     assert!(app.recovery.is_open());
     assert!(matches!(app.dialog, Some(Dialog::NewFolder { .. })));

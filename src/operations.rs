@@ -285,11 +285,11 @@ impl Progress {
         {
             return;
         }
-        if let Some(view) = &self.view {
-            if let Ok(mut snapshot) = view.lock() {
-                *snapshot = self.current.clone();
-                self.last_update = Some(now);
-            }
+        if let Some(view) = &self.view
+            && let Ok(mut snapshot) = view.lock()
+        {
+            *snapshot = self.current.clone();
+            self.last_update = Some(now);
         }
     }
 

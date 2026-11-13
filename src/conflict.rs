@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::test_ui::ContextExt as _;
 use crate::vfs::Location;
 use eframe::egui;
 use std::sync::mpsc;
@@ -67,8 +69,8 @@ impl ConflictDialog {
         });
         let conflict = &self.conflict;
         let mut decision = None;
-        egui::Modal::new(egui::Id::new("transfer_conflict")).show(ctx, |ui| {
-            ui.set_width((ctx.screen_rect().width() - 32.0).clamp(1.0, 520.0));
+        egui::Modal::new(egui::Id::unique("transfer_conflict")).show(ctx, |ui| {
+            ui.set_width((ctx.content_rect().width() - 32.0).clamp(1.0, 520.0));
             ui.heading(crate::i18n::text("Совпадение имён"));
             ui.label(crate::tr_format!(
                 "Совпадение {} из {}",
@@ -173,7 +175,7 @@ mod tests {
         ctx: &egui::Context,
         events: Vec<egui::Event>,
     ) -> egui::FullOutput {
-        ctx.run(
+        ctx.run_test_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -182,7 +184,8 @@ mod tests {
                 events,
                 ..Default::default()
             },
-            |ctx| {
+            |root_ui| {
+                let ctx = &root_ui.ctx().clone();
                 dialog.show(ctx);
             },
         )
@@ -218,10 +221,10 @@ mod tests {
                 .shapes
                 .iter()
                 .find_map(|shape| {
-                    if let egui::Shape::Text(shape) = &shape.shape {
-                        if shape.galley.text().contains(text) {
-                            return Some(shape.pos + shape.galley.size() / 2.0);
-                        }
+                    if let egui::Shape::Text(shape) = &shape.shape
+                        && shape.galley.text().contains(text)
+                    {
+                        return Some(shape.pos + shape.galley.size() / 2.0);
                     }
                     None
                 })

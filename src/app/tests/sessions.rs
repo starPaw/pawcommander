@@ -299,7 +299,7 @@ fn named_workspace_dialog_rejects_duplicates_and_supports_rename_and_remove() {
             panic!("expected workspace dialog");
         };
         *field = name.into();
-        let _ = ctx.run(enter(), |ctx| app.dialogs(ctx));
+        let _ = ctx.run_test_ui(enter(), |ui| app.dialogs(ui.ctx()));
     };
 
     app.action(Action::SaveWorkspace, &ctx);
@@ -315,7 +315,8 @@ fn named_workspace_dialog_rejects_duplicates_and_supports_rename_and_remove() {
     submit(&mut app, "Archive");
     assert!(app.dialog.is_none());
 
-    let _ = ctx.run(enter(), |ctx| {
+    let _ = ctx.run_test_ui(enter(), |ui| {
+        let ctx = &ui.ctx().clone();
         app.action(Action::RenameWorkspace(0), ctx);
         app.dialogs(ctx);
     });
@@ -328,7 +329,7 @@ fn named_workspace_dialog_rejects_duplicates_and_supports_rename_and_remove() {
     submit(&mut app, " Daily ");
     assert!(app.dialog.is_none());
     app.action(Action::RenameWorkspace(0), &ctx);
-    let _ = ctx.run(egui::RawInput::default(), |ctx| app.dialogs(ctx));
+    let _ = ctx.run_test_ui(egui::RawInput::default(), |ui| app.dialogs(ui.ctx()));
     submit(&mut app, "Regular");
     assert_eq!(app.workspaces[0].name, "Regular");
     assert_eq!(app.workspaces[1].name, "Archive");

@@ -1,8 +1,10 @@
+#[cfg(test)]
+use crate::test_ui::ContextExt as _;
 use crate::{drag_drop::DragFiles, vfs::Location};
 use eframe::egui;
 use objc2::{
-    declare_class, msg_send_id, mutability, rc::Retained, runtime::ProtocolObject, ClassType,
-    DeclaredClass,
+    define_class, msg_send, rc::Retained, runtime::ProtocolObject, AnyThread, DefinedClass,
+    MainThreadOnly,
 };
 use objc2_app_kit::{
     NSApplication, NSDragOperation, NSDraggingContext, NSDraggingItem, NSDraggingSession,
@@ -38,7 +40,7 @@ impl SourceState {
                 .view
                 .convertPoint_fromView(window.convertPointFromScreen(screen_point), None);
             let bounds = self.view.bounds();
-            let scale = f64::from(self.ctx.screen_rect().width()) / bounds.size.width;
+            let scale = f64::from(self.ctx.viewport_rect().width()) / bounds.size.width;
             let y = if self.view.isFlipped() {
                 point.y - bounds.origin.y
             } else {
@@ -55,35 +57,35 @@ impl SourceState {
     }
 }
 
-declare_class!(
-    struct DragSource;
-
+define_class!(
     // SAFETY: NSObject has no subclass requirements. AppKit only calls this
     // source on the main thread, and its lifetime is held by ActiveDrag.
-    unsafe impl ClassType for DragSource {
-        type Super = NSObject;
-        type Mutability = mutability::MainThreadOnly;
-        const NAME: &'static str = "PawCommanderFileDragSource";
-    }
-    impl DeclaredClass for DragSource { type Ivars = SourceState; }
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PawCommanderFileDragSource"]
+    #[ivars = SourceState]
+    struct DragSource;
+
     unsafe impl NSObjectProtocol for DragSource {}
     unsafe impl NSDraggingSource for DragSource {
-        #[method(draggingSession:sourceOperationMaskForDraggingContext:)]
+        #[unsafe(method(draggingSession:sourceOperationMaskForDraggingContext:))]
         fn operation(&self, _: &NSDraggingSession, _: NSDraggingContext) -> NSDragOperation {
             // A receiver may copy or open/attach the files. No receiver gets
             // permission to move/delete the source through this drag.
             NSDragOperation::Copy
         }
 
-        #[method(draggingSession:movedToPoint:)]
+        #[unsafe(method(draggingSession:movedToPoint:))]
         fn moved(&self, _: &NSDraggingSession, point: NSPoint) {
             self.ivars().moved(point);
         }
 
-        #[method(draggingSession:endedAtPoint:operation:)]
+        #[unsafe(method(draggingSession:endedAtPoint:operation:))]
         fn ended(&self, _: &NSDraggingSession, point: NSPoint, operation: NSDragOperation) {
             self.ivars().moved(point);
-            self.ivars().result.store(if operation.is_empty() { 1 } else { 2 }, Ordering::Release);
+            self.ivars()
+                .result
+                .store(if operation.is_empty() { 1 } else { 2 }, Ordering::Release);
             self.ivars().ctx.request_repaint();
         }
     }
@@ -118,8 +120,9 @@ impl NativeDrag {
             return None;
         }
         let bounds = active.bounds;
+        let modifiers = active._source.ivars().ctx.input(|input| input.modifiers);
         self.active = None;
-        release_pointer(input, position, bounds);
+        release_pointer(input, position, bounds, modifiers);
         Some(result == 2)
     }
 
@@ -139,7 +142,7 @@ impl NativeDrag {
                         .any(|e| matches!(e, egui::Event::PointerGone))
                         || i.pointer
                             .latest_pos()
-                            .is_some_and(|p| !i.screen_rect().shrink(12.0).contains(p)))
+                            .is_some_and(|p| !i.viewport_rect().shrink(12.0).contains(p)))
             })
         {
             return None;
@@ -177,7 +180,7 @@ impl NativeDrag {
         ))?;
         let result = Arc::new(AtomicU8::new(0));
         let position = Arc::new(Mutex::new(None));
-        let source = mtm.alloc::<DragSource>().set_ivars(SourceState {
+        let source = DragSource::alloc(mtm).set_ivars(SourceState {
             result: result.clone(),
             ctx: ctx.clone(),
             // SAFETY: the borrowed live NSView is retained for the session.
@@ -188,7 +191,7 @@ impl NativeDrag {
         // SAFETY: init initializes the allocated NSObject subclass; all other
         // arguments below are live typed AppKit objects with valid geometry.
         unsafe {
-            let source: Retained<DragSource> = msg_send_id![super(source), init];
+            let source: Retained<DragSource> = msg_send![super(source), init];
             if NSEvent::pressedMouseButtons() & 1 == 0 {
                 return Err(
                     crate::i18n::text("Перетаскивание отменено: кнопка мыши уже отпущена").into(),
@@ -221,7 +224,7 @@ impl NativeDrag {
                 items.push(item);
             }
             let session = view.beginDraggingSessionWithItems_event_source(
-                &NSArray::from_id_slice(&items),
+                &NSArray::from_retained_slice(&items),
                 &event,
                 ProtocolObject::from_ref(&*source),
             );
@@ -230,21 +233,35 @@ impl NativeDrag {
                 _session: session,
                 result,
                 position,
-                bounds: ctx.screen_rect(),
+                bounds: ctx.viewport_rect(),
             });
         }
         Ok(())
     }
 }
 
-fn release_pointer(input: &mut egui::RawInput, position: Option<egui::Pos2>, bounds: egui::Rect) {
+fn release_pointer(
+    input: &mut egui::RawInput,
+    position: Option<egui::Pos2>,
+    bounds: egui::Rect,
+    previous_modifiers: egui::Modifiers,
+) {
     // AppKit owns mouse-up/Escape during a native session; winit may never
     // receive that mouse-up. Release egui's original press exactly once.
+    let modifiers = input
+        .events
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            egui::Event::ModifiersChanged(modifiers) => Some(*modifiers),
+            _ => None,
+        })
+        .unwrap_or(previous_modifiers);
     input.events.push(egui::Event::PointerButton {
         pos: position.unwrap_or(egui::Pos2::ZERO),
         button: egui::PointerButton::Primary,
         pressed: false,
-        modifiers: input.modifiers,
+        modifiers,
     });
     if !position.is_some_and(|p| bounds.contains(p)) {
         input.events.push(egui::Event::PointerGone);
@@ -285,6 +302,36 @@ mod tests {
     use std::{ffi::CStr, os::unix::fs::symlink};
 
     #[test]
+    fn native_completion_preserves_latest_modifiers() {
+        for (events, expected) in [
+            (vec![], egui::Modifiers::SHIFT),
+            (
+                vec![
+                    egui::Event::ModifiersChanged(egui::Modifiers::ALT),
+                    egui::Event::ModifiersChanged(egui::Modifiers::CTRL),
+                ],
+                egui::Modifiers::CTRL,
+            ),
+        ] {
+            let mut input = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            release_pointer(
+                &mut input,
+                Some(egui::Pos2::ZERO),
+                egui::Rect::EVERYTHING,
+                egui::Modifiers::SHIFT,
+            );
+            assert!(matches!(
+                input.events.last(),
+                Some(egui::Event::PointerButton { pressed: false, modifiers, .. })
+                    if *modifiers == expected
+            ));
+        }
+    }
+
+    #[test]
     fn native_completion_releases_egui_pointer_inside_and_outside() {
         let bounds = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 500.0));
         for end in [
@@ -294,7 +341,7 @@ mod tests {
         ] {
             let ctx = egui::Context::default();
             let start = egui::pos2(50.0, 50.0);
-            let _ = ctx.run(
+            let _ = ctx.run_test_ui(
                 egui::RawInput {
                     screen_rect: Some(bounds),
                     events: vec![
@@ -318,8 +365,8 @@ mod tests {
             if let Some(pos) = end {
                 input.events.push(egui::Event::PointerMoved(pos));
             }
-            release_pointer(&mut input, end, bounds);
-            let _ = ctx.run(input, |_| {});
+            release_pointer(&mut input, end, bounds, egui::Modifiers::NONE);
+            let _ = ctx.run_test_ui(input, |_| {});
             assert!(
                 !ctx.input(|i| i.pointer.primary_down()),
                 "native sessions must not leave a stuck drag"
@@ -342,7 +389,7 @@ mod tests {
         std::fs::write(&path, b"data").unwrap();
         let mut at = |pos, pressed, enabled| {
             let mut result = None;
-            let _ = ctx.run(
+            let _ = ctx.run_test_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
@@ -399,17 +446,16 @@ mod tests {
             assert_eq!(bytes, path.as_os_str().as_bytes());
             let writer: &ProtocolObject<dyn objc2_app_kit::NSPasteboardWriting> =
                 ProtocolObject::from_ref(&*url);
-            let data = unsafe {
-                writer
-                    .pasteboardPropertyListForType(objc2_foundation::ns_string!("public.file-url"))
-            };
+            let data = writer
+                .pasteboardPropertyListForType(objc2_foundation::ns_string!("public.file-url"));
             assert!(
                 data.is_some(),
                 "receivers need file URLs, not plain text paths"
             );
         }
         let link_url = file_url(&link).unwrap();
-        assert!(!unsafe { link_url.absoluteString() }
+        assert!(!link_url
+            .absoluteString()
             .unwrap()
             .to_string()
             .ends_with('/'));

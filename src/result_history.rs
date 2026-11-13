@@ -1,4 +1,6 @@
 //! Completed operation results. Disk access and serialization belong to workers.
+#[cfg(test)]
+use crate::test_ui::ContextExt as _;
 use crate::vfs::Location;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
@@ -266,20 +268,20 @@ impl Results {
     }
 
     fn finish_group(&mut self, root: usize, outcome: Outcome) {
-        if let Some((owner, range)) = self.group.take() {
-            if owner == root {
-                if self.observed_group
+        if let Some((owner, range)) = self.group.take()
+            && owner == root
+        {
+            if self.observed_group
+                && matches!(outcome, Outcome::Completed | Outcome::CompletedWithWarning)
+            {
+                self.items[root].descendants_enumerated = true;
+            }
+            for index in range {
+                if !self.observed_group
                     && matches!(outcome, Outcome::Completed | Outcome::CompletedWithWarning)
                 {
-                    self.items[root].descendants_enumerated = true;
-                }
-                for index in range {
-                    if !self.observed_group
-                        && matches!(outcome, Outcome::Completed | Outcome::CompletedWithWarning)
-                    {
-                        self.items[index].outcome = Outcome::Completed;
-                        self.reason(index, None);
-                    }
+                    self.items[index].outcome = Outcome::Completed;
+                    self.reason(index, None);
                 }
             }
         }
@@ -618,7 +620,7 @@ impl History {
 
     pub fn show(&self, ctx: &egui::Context, open: &mut bool) {
         egui::Window::new(crate::i18n::text("Журнал результатов"))
-            .id(egui::Id::new("result_history"))
+            .id(egui::Id::unique("result_history"))
             .open(open)
             .default_size([780.0, 560.0])
             .show(ctx, |ui| {
@@ -676,12 +678,21 @@ impl History {
                                 if record.details_truncated {
                                     ui.colored_label(ui.visuals().warn_fg_color, crate::i18n::text("Длинные пути или сообщения сокращены из-за лимита журнала."));
                                 }
+                                // Use the laid-out three-line height: fractional font metrics
+                                // can otherwise underestimate each virtual row and clip the end.
+                                let row_height = ui.painter().layout_no_wrap(
+                                    "\n\n".into(),
+                                    egui::TextStyle::Body.resolve(ui.style()),
+                                    ui.visuals().text_color(),
+                                ).size().y;
                                 egui::ScrollArea::both()
                                     .id_salt(("result_items", index))
+                                    // Keep rounded glyph bounds inside the clip at fractional zoom.
+                                    .content_margin(egui::Margin::same(1))
                                     .max_height(360.0)
                                     .show_rows(
                                         ui,
-                                        ui.text_style_height(&egui::TextStyle::Body) * 3.0,
+                                        row_height,
                                         record.items.len(),
                                         |ui, range| {
                                             for row in &record.items[range] {
@@ -817,85 +828,92 @@ mod tests {
 
     #[test]
     fn history_virtual_rows_keep_multiline_reasons_on_three_display_lines() {
-        let ctx = egui::Context::default();
-        let mut entry = record();
-        entry.items = (0..100)
-            .map(|index| ItemResult {
-                source: format!("source-{index:03}"),
-                target: Some("target\nwith newline".into()),
-                outcome: Outcome::Failed,
-                reason: Some("first line\nsecond line\r\nthird line".into()),
-                parent: None,
-                descendants_enumerated: false,
-            })
-            .collect();
-        let history = History {
-            records: vec![entry],
-            loaded: true,
-            ..History::default()
-        };
-        let mut open = true;
-        let mut draw = |events| {
-            ctx.run(
-                egui::RawInput {
-                    events,
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(960.0, 700.0),
-                    )),
-                    ..Default::default()
-                },
-                |ctx| history.show(ctx, &mut open),
-            )
-        };
-        draw(vec![]);
-        let output = draw(vec![]);
-        let mut item_bounds = Vec::new();
-        for clipped in &output.shapes {
-            if let egui::Shape::Text(text) = &clipped.shape {
-                if text.galley.text().contains("source-") {
+        for zoom in [1.0, 1.25, 1.5, 2.0] {
+            let ctx = egui::Context::default();
+            ctx.set_zoom_factor(zoom);
+            let mut entry = record();
+            entry.items = (0..100)
+                .map(|index| ItemResult {
+                    source: format!("source-{index:03}"),
+                    target: Some("target\nwith newline".into()),
+                    outcome: Outcome::Failed,
+                    reason: Some("first line\nsecond line\r\nthird line".into()),
+                    parent: None,
+                    descendants_enumerated: false,
+                })
+                .collect();
+            let history = History {
+                records: vec![entry],
+                loaded: true,
+                ..History::default()
+            };
+            let mut open = true;
+            let mut draw = |events| {
+                ctx.run_test_ui(
+                    egui::RawInput {
+                        events,
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(960.0, 700.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| history.show(ui.ctx(), &mut open),
+                )
+            };
+            draw(vec![]);
+            let output = draw(vec![]);
+            let mut item_bounds = Vec::new();
+            for clipped in &output.shapes {
+                if let egui::Shape::Text(text) = &clipped.shape
+                    && text.galley.text().contains("source-")
+                {
                     assert_eq!(text.galley.rows.len(), 3);
                     assert!(text.galley.text().contains("second line\\r\\nthird line"));
                     item_bounds.push(egui::Rect::from_min_size(text.pos, text.galley.size()));
                 }
             }
-        }
-        assert!(item_bounds.len() >= 3);
-        for pair in item_bounds.windows(2) {
-            assert!(
-                pair[0].bottom() <= pair[1].top(),
-                "virtual result rows overlap"
-            );
-        }
-        let pointer = item_bounds[1].center();
-        let mut output = output;
-        for _ in 0..6 {
-            output = draw(vec![
-                egui::Event::PointerMoved(pointer),
-                egui::Event::MouseWheel {
-                    unit: egui::MouseWheelUnit::Point,
-                    delta: egui::vec2(0.0, -10_000.0),
-                    modifiers: egui::Modifiers::NONE,
-                },
-            ]);
-        }
-        let last = output
-            .shapes
-            .iter()
-            .find_map(|clipped| {
-                if let egui::Shape::Text(text) = &clipped.shape {
-                    if text.galley.text().contains("source-099") {
+            assert!(item_bounds.len() >= 3);
+            for pair in item_bounds.windows(2) {
+                assert!(
+                    pair[0].bottom() <= pair[1].top(),
+                    "virtual result rows overlap"
+                );
+            }
+            let pointer = item_bounds[1].center();
+            let mut output = output;
+            for _ in 0..6 {
+                output = draw(vec![
+                    egui::Event::PointerMoved(pointer),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        phase: egui::TouchPhase::Move,
+                        source: egui::MouseWheelSource::Unknown,
+                        delta: egui::vec2(0.0, -10_000.0),
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+            }
+            let last = output
+                .shapes
+                .iter()
+                .find_map(|clipped| {
+                    if let egui::Shape::Text(text) = &clipped.shape
+                        && text.galley.text().contains("source-099")
+                    {
                         return Some((clipped.clip_rect, text));
                     }
-                }
-                None
-            })
-            .expect("last result remains reachable by scrolling");
-        assert!(
-            last.0
-                .contains_rect(egui::Rect::from_min_size(last.1.pos, last.1.galley.size())),
-            "last row is fully visible"
-        );
+                    None
+                })
+                .expect("last result remains reachable by scrolling");
+            assert!(
+                last.0
+                    .contains_rect(egui::Rect::from_min_size(last.1.pos, last.1.galley.size())),
+                "last row is fully visible: clip={:?}, text={:?}",
+                last.0,
+                egui::Rect::from_min_size(last.1.pos, last.1.galley.size())
+            );
+        }
     }
 
     #[test]

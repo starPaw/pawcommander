@@ -173,12 +173,10 @@ impl SystemClipboard {
         } else {
             return Ok(None);
         };
-        if let Some(revision) = &revision {
-            if backend.read(REVISION)? != revision.as_bytes() {
-                return Err(
-                    crate::i18n::text("Системный буфер изменился. Повторите вставку.").into(),
-                );
-            }
+        if let Some(revision) = &revision
+            && backend.read(REVISION)? != revision.as_bytes()
+        {
+            return Err(crate::i18n::text("Системный буфер изменился. Повторите вставку.").into());
         }
         FileList::new(paths, cut, revision)
     }

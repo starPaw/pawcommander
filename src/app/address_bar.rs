@@ -130,7 +130,7 @@ pub(super) fn address_bar(
                                     }
                                 });
                             });
-                        if scroll.state.offset.x > 0.5 {
+                        if scroll.state.clamped_offset().x > 0.5 {
                             let rect = scroll.inner_rect;
                             let width = rect.width().min(16.0);
                             let mut fade = egui::Mesh::default();
@@ -214,8 +214,8 @@ pub(super) fn edit_address(
         .id(field_id)
         .font(egui::TextStyle::Body)
         .hint_text(crate::i18n::text("Путь к папке или sftp://сервер/папка"))
-        .vertical_align(egui::Align::Center)
-        .frame(false)
+        .align(egui::Align2::LEFT_CENTER)
+        .frame(egui::Frame::NONE)
         .margin(margin)
         .min_size(Vec2::new(0.0, icons::COMPACT_SIZE))
         .desired_width(width)
@@ -294,19 +294,19 @@ pub(super) fn edit_address(
     let mut destination = None;
     if !cancel && !escape && !suggestions.is_empty() {
         if response.has_focus() {
-            ui.memory_mut(|memory| memory.open_popup(popup_id));
+            egui::Popup::open_id(ui.ctx(), popup_id);
         }
         let mut anchor = response.clone();
         anchor.rect = breadcrumbs
             .rect
             .union(go_button.rect)
             .expand2(Vec2::new(7.0, 4.0));
-        destination = egui::popup::popup_below_widget(
-            ui,
-            popup_id,
-            &anchor,
-            egui::popup::PopupCloseBehavior::CloseOnClickOutside,
-            |ui| {
+        destination = egui::Popup::from_response(&anchor)
+            .id(popup_id)
+            .open_memory(None)
+            .width(anchor.rect.width())
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
                 ui.set_width(ui.available_width().max(148.0));
                 ui.label(
                     egui::RichText::new(crate::i18n::text("Подсказки пути"))
@@ -327,9 +327,8 @@ pub(super) fn edit_address(
                     }
                 }
                 None
-            },
-        )
-        .flatten();
+            })
+            .and_then(|response| response.inner);
     }
     if destination.is_none() && (enter || go) && !cancel && !escape {
         let selected = tab
@@ -356,11 +355,7 @@ pub(super) fn edit_address(
         response.surrender_focus();
     }
     if !tab.edit_address || suggestions.is_empty() {
-        ui.memory_mut(|memory| {
-            if memory.is_popup_open(popup_id) {
-                memory.close_popup();
-            }
-        });
+        egui::Popup::close_id(ui.ctx(), popup_id);
     }
     if let Some(path) = destination {
         actions.push(Action::Navigate(index, path));
@@ -393,7 +388,7 @@ pub(super) fn breadcrumb(
         Vec2::new(text.size().x + icon_width + 12.0, 28.0),
         Sense::click(),
     );
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
     if response.gained_focus() {
         response.scroll_to_me(Some(egui::Align::Center));
     }

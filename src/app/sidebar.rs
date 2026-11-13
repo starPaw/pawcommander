@@ -36,12 +36,7 @@ pub(super) fn place_button(ui: &mut egui::Ui, label: &str, selected: bool) -> bo
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 31.0), Sense::click());
     response.widget_info(|| {
-        egui::WidgetInfo::selected(
-            egui::WidgetType::SelectableLabel,
-            ui.is_enabled(),
-            selected,
-            label,
-        )
+        egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, label)
     });
     if selected || response.hovered() {
         ui.painter().rect(
@@ -85,7 +80,8 @@ pub(super) fn place_button(ui: &mut egui::Ui, label: &str, selected: bool) -> bo
 }
 
 impl PawCommander {
-    pub(super) fn sidebar(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+    pub(super) fn sidebar(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let ctx = &ui.ctx().clone();
         // Rebuild this from visible menu responses every frame. The keyboard
         // guard checks the row ID too, so a removed bookmark cannot leave it set.
         self.bookmark_menu_open = None;
@@ -94,8 +90,8 @@ impl PawCommander {
             return;
         }
         let colors = Palette::from_ctx(ctx);
-        egui::SidePanel::left("places")
-            .exact_width(if ctx.screen_rect().width() < 900.0 {
+        egui::Panel::left("places")
+            .exact_size(if ctx.content_rect().width() < 900.0 {
                 148.0
             } else {
                 204.0
@@ -103,7 +99,7 @@ impl PawCommander {
             .resizable(false)
             .show_separator_line(false)
             .frame(egui::Frame::new().fill(colors.surface))
-            .show(ctx, |panel_ui| {
+            .show(ui, |panel_ui| {
                 let mut card = workspace_card(colors)
                     .inner_margin(egui::Margin::symmetric(12, 14))
                     .outer_margin(egui::Margin {
@@ -174,15 +170,14 @@ impl PawCommander {
                                     (crate::i18n::text("Видео"), dirs::video_dir()),
                                 ];
                                 for (label, path) in places {
-                                    if let Some(path) = path {
-                                        if place_button(
+                                    if let Some(path) = path
+                                        && place_button(
                                             ui,
                                             label,
                                             current.local() == Some(path.as_path()),
-                                        ) {
-                                            actions
-                                                .push(Action::Navigate(self.active, path.into()));
-                                        }
+                                        )
+                                    {
+                                        actions.push(Action::Navigate(self.active, path.into()));
                                     }
                                 }
                             });
@@ -277,7 +272,7 @@ impl PawCommander {
                                                     self.bookmark_editor = Some(
                                                         BookmarkEditor::new(&self.bookmarks[i]),
                                                     );
-                                                    ui.close_menu();
+                                                    ui.close();
                                                 }
                                                 ui.separator();
                                                 ui.menu_button(
@@ -298,7 +293,7 @@ impl PawCommander {
                                                                 None,
                                                                 &self.settings.shortcuts,
                                                             );
-                                                            ui.close_menu();
+                                                            ui.close();
                                                         }
                                                         for slot in 1..=9 {
                                                             let occupied_by_command = self
@@ -322,7 +317,7 @@ impl PawCommander {
                                                             let response = ui.add_enabled(
                                                                 !occupied_by_command
                                                                     && !occupied_by_bookmark,
-                                                                egui::SelectableLabel::new(
+                                                                egui::Button::selectable(
                                                                     self.bookmarks[i].shortcut
                                                                         == Some(slot),
                                                                     format!("Alt+{slot}"),
@@ -335,7 +330,7 @@ impl PawCommander {
                                                                     Some(slot),
                                                                     &self.settings.shortcuts,
                                                                 );
-                                                                ui.close_menu();
+                                                                ui.close();
                                                             }
                                                         }
                                                     },
@@ -355,7 +350,7 @@ impl PawCommander {
                                                     {
                                                         pending_move =
                                                             previous.map(|previous| (i, previous));
-                                                        ui.close_menu();
+                                                        ui.close();
                                                     }
                                                     let next = bookmark_peer(&self.bookmarks, i, 1);
                                                     if ui
@@ -368,7 +363,7 @@ impl PawCommander {
                                                         .clicked()
                                                     {
                                                         pending_move = next.map(|next| (i, next));
-                                                        ui.close_menu();
+                                                        ui.close();
                                                     }
                                                 });
                                                 if ui
@@ -378,7 +373,7 @@ impl PawCommander {
                                                     .clicked()
                                                 {
                                                     remove = Some(i);
-                                                    ui.close_menu();
+                                                    ui.close();
                                                 }
                                             });
                                         });
@@ -518,14 +513,14 @@ impl PawCommander {
                                     if ui.button(crate::i18n::text("Переименовать…")).clicked()
                                     {
                                         actions.push(Action::RenameWorkspace(index));
-                                        ui.close_menu();
+                                        ui.close();
                                     }
                                     if ui
                                         .button(crate::i18n::text("Удалить пространство"))
                                         .clicked()
                                     {
                                         actions.push(Action::RemoveWorkspace(index));
-                                        ui.close_menu();
+                                        ui.close();
                                     }
                                 });
                                 let label = crate::tr_format!(

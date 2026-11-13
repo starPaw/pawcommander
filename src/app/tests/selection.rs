@@ -80,7 +80,7 @@ fn selection_scan_discards_matches_if_the_visible_rows_change() {
         panic!("expected a selection rule dialog");
     }
     app.tab_mut().filter = "second".into();
-    let _ = ctx.run(egui::RawInput::default(), |ctx| app.dialogs(ctx));
+    let _ = ctx.run_test_ui(egui::RawInput::default(), |ui| app.dialogs(ui.ctx()));
     assert!(app.dialog.is_none());
     assert_eq!(app.selected(), vec![second]);
     assert!(app.tab().previous_selection.is_none());

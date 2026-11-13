@@ -158,30 +158,30 @@ pub(super) fn transfer_plan(
     if destination.is_archive() || sources.iter().any(Location::is_archive) {
         return Err(archive::readonly().into());
     }
-    if let Some(dest) = destination.local() {
-        if sources.iter().all(|p| !p.remote()) {
-            let paths = sources.iter().map(|p| p.path().into()).collect::<Vec<_>>();
-            let guard_source = cfg!(target_os = "macos") && kind == TransferKind::Move;
-            let plan = fs_ops::plan_transfer(&paths, dest, progress)?;
-            for item in &plan {
-                progress.check_cancelled()?;
-                if kind == TransferKind::Move && item.source == item.target {
-                    return Err(crate::i18n::text("Элементы уже находятся в этой папке").into());
-                }
+    if let Some(dest) = destination.local()
+        && sources.iter().all(|p| !p.remote())
+    {
+        let paths = sources.iter().map(|p| p.path().into()).collect::<Vec<_>>();
+        let guard_source = cfg!(target_os = "macos") && kind == TransferKind::Move;
+        let plan = fs_ops::plan_transfer(&paths, dest, progress)?;
+        for item in &plan {
+            progress.check_cancelled()?;
+            if kind == TransferKind::Move && item.source == item.target {
+                return Err(crate::i18n::text("Элементы уже находятся в этой папке").into());
             }
-            return Ok(plan
-                .into_iter()
-                .map(|item| TransferItem {
-                    original: item.original.into(),
-                    source: item.source.into(),
-                    target: item.target.into(),
-                    covered: item.covered,
-                    local_move_source: guard_source
-                        .then_some(EntryMetadata::Local(item.source_metadata)),
-                    replacement: None,
-                })
-                .collect());
         }
+        return Ok(plan
+            .into_iter()
+            .map(|item| TransferItem {
+                original: item.original.into(),
+                source: item.source.into(),
+                target: item.target.into(),
+                covered: item.covered,
+                local_move_source: guard_source
+                    .then_some(EntryMetadata::Local(item.source_metadata)),
+                replacement: None,
+            })
+            .collect());
     }
 
     let mut names = HashSet::new();
@@ -413,16 +413,15 @@ pub(super) fn transfer_run(
         progress.results.begin(&item.original);
         progress.item(item.source.path());
         let expected = item.replacement.as_ref().map(|(_, target)| target);
-        if let Some((expected_source, _)) = &item.replacement {
-            if !entry_metadata(&item.source)?
+        if let Some((expected_source, _)) = &item.replacement
+            && !entry_metadata(&item.source)?
                 .is_some_and(|meta| expected_source.matches_file(&meta))
-            {
-                return Err(format!(
-                    "Исходный файл {} изменился после показа диалога",
-                    item.source
-                )
-                .into());
-            }
+        {
+            return Err(format!(
+                "Исходный файл {} изменился после показа диалога",
+                item.source
+            )
+            .into());
         }
         cancel.check()?;
         let mut committed = false;
@@ -548,17 +547,16 @@ pub(super) fn move_item(
 ) -> Result<(), TransferError> {
     // The batch waits for every conflict before moving anything. Use the same
     // metadata as selection grouping, including for items with no conflict.
-    if let (true, Some(planned)) = (had_conflicts, &item.local_move_source) {
-        if !entry_metadata(&item.source)?
+    if let (true, Some(planned)) = (had_conflicts, &item.local_move_source)
+        && !entry_metadata(&item.source)?
             .is_some_and(|current| planned.matches_local_move(&current))
-        {
-            let source = &item.original;
-            return Err(crate::tr_format!(
-                "Исходный объект {source} изменился во время ожидания решения о конфликте",
-                "Source item {source} changed while waiting for a conflict decision"
-            )
-            .into());
-        }
+    {
+        let source = &item.original;
+        return Err(crate::tr_format!(
+            "Исходный объект {source} изменился во время ожидания решения о конфликте",
+            "Source item {source} changed while waiting for a conflict decision"
+        )
+        .into());
     }
     cancel.check()?;
     publish_item(&item.source, &item.target, expected, moved).map_err(Into::into)
@@ -940,10 +938,10 @@ impl TransferSourceEntry {
         cancel.check()?;
         let actual = entry_metadata(source)?.ok_or_else(|| changed_source(source))?;
         self.verify_metadata(source, &actual)?;
-        if let Some(children) = &self.children {
-            if *children != source_children(source, cancel)? {
-                return Err(changed_source(source).into());
-            }
+        if let Some(children) = &self.children
+            && *children != source_children(source, cancel)?
+        {
+            return Err(changed_source(source).into());
         }
         Ok(())
     }

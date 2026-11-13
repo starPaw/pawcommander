@@ -1,5 +1,6 @@
 //! Secrets are stored only in the OS credential store, separately from UI settings.
 use crate::vfs::Endpoint;
+use keyring::api::CredentialStoreApi;
 use serde::{Deserialize, Serialize};
 
 const SERVICE: &str = "dev.pawcommander.sftp.v1";
@@ -9,10 +10,22 @@ pub struct SavedKey {
     pub passphrase: String,
 }
 fn entry(endpoint: &Endpoint) -> Result<keyring::Entry, String> {
+    let account = account(endpoint)?;
+    // Open a store per operation: a temporarily unavailable service must be
+    // retryable without restarting the application or changing global state.
+    #[cfg(target_os = "macos")]
+    let store = apple_native_keyring_store::keychain::Store::new().map_err(vault_error)?;
+    #[cfg(target_os = "windows")]
+    let store = windows_native_keyring_store::Store::new().map_err(vault_error)?;
+    #[cfg(target_os = "linux")]
+    let store = zbus_secret_service_keyring_store::Store::new().map_err(vault_error)?;
+
+    store.build(SERVICE, &account, None).map_err(vault_error)
+}
+fn account(endpoint: &Endpoint) -> Result<String, String> {
     // Structured identity avoids delimiter collisions and isolates users, ports and keys.
-    let account = serde_json::to_string(endpoint)
-        .map_err(|_| crate::i18n::text("Не удалось определить профиль SFTP"))?;
-    keyring::Entry::new(SERVICE, &account).map_err(vault_error)
+    serde_json::to_string(endpoint)
+        .map_err(|_| crate::i18n::text("Не удалось определить профиль SFTP").into())
 }
 fn vault_error(error: keyring::Error) -> String {
     crate::tr_format!("Системное хранилище секретов недоступно: {error}. Ключ и фраза не записываются в настройки.", "System credential store unavailable: {error}. The key and passphrase are not written to settings.")
@@ -84,14 +97,17 @@ mod tests {
     }
     #[test]
     fn vault_round_trip_is_scoped_and_can_be_forgotten() {
-        keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
+        // Keep the mock local: never replace the global store used by native tests.
+        let store = keyring::mock::Store::new().unwrap();
         let endpoint = Endpoint {
             host: "test.invalid".into(),
             port: 2222,
             user: "test".into(),
             key: Some("/test/key".into()),
         };
-        let entry = entry(&endpoint).unwrap();
+        let entry = store
+            .build(SERVICE, &account(&endpoint).unwrap(), None)
+            .unwrap();
         assert!(load_entry(&entry).unwrap().is_none());
         save_entry(
             &entry,
@@ -104,9 +120,98 @@ mod tests {
         let loaded = load_entry(&entry).unwrap().unwrap();
         assert_eq!(loaded.private_key, "disposable test key");
         assert_eq!(loaded.passphrase, "test phrase");
+        let other = Endpoint {
+            port: 22,
+            ..endpoint.clone()
+        };
+        let other = store
+            .build(SERVICE, &account(&other).unwrap(), None)
+            .unwrap();
+        assert!(load_entry(&other).unwrap().is_none());
         forget_entry(&entry).unwrap();
         assert!(load_entry(&entry).unwrap().is_none());
         entry.set_password("invalid JSON").unwrap();
         assert!(load_entry(&entry).is_err());
+    }
+
+    #[test]
+    fn endpoint_fields_identify_independent_credentials() {
+        let store = keyring::mock::Store::new().unwrap();
+        let endpoint = Endpoint {
+            host: "test.invalid".into(),
+            port: 2222,
+            user: "test".into(),
+            key: Some("/test/key".into()),
+        };
+        let current = store
+            .build(SERVICE, &account(&endpoint).unwrap(), None)
+            .unwrap();
+        save_entry(
+            &current,
+            &SavedKey {
+                private_key: "saved key".into(),
+                passphrase: "saved phrase".into(),
+            },
+        )
+        .unwrap();
+        let restored = load_entry(&current).unwrap().unwrap();
+        assert_eq!(restored.private_key, "saved key");
+        assert_eq!(restored.passphrase, "saved phrase");
+        for other in [
+            Endpoint {
+                host: "other.invalid".into(),
+                ..endpoint.clone()
+            },
+            Endpoint {
+                port: 22,
+                ..endpoint.clone()
+            },
+            Endpoint {
+                user: "other".into(),
+                ..endpoint.clone()
+            },
+            Endpoint {
+                key: Some("/other/key".into()),
+                ..endpoint
+            },
+        ] {
+            let other = store
+                .build(SERVICE, &account(&other).unwrap(), None)
+                .unwrap();
+            assert!(load_entry(&other).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn temporary_vault_failure_preserves_the_secret_and_allows_retry() {
+        let store = keyring::mock::Store::new().unwrap();
+        let entry = store.build(SERVICE, "disposable-test", None).unwrap();
+        save_entry(
+            &entry,
+            &SavedKey {
+                private_key: "saved key".into(),
+                passphrase: "saved phrase".into(),
+            },
+        )
+        .unwrap();
+        let mock = entry
+            .as_any()
+            .downcast_ref::<keyring::mock::Cred>()
+            .unwrap();
+        let unavailable = || {
+            keyring::Error::NoStorageAccess(Box::new(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "test vault locked",
+            )))
+        };
+        mock.set_error(unavailable());
+        assert!(load_entry(&entry).is_err());
+        mock.set_error(unavailable());
+        assert!(forget_entry(&entry).is_err());
+        let restored = load_entry(&entry).unwrap().unwrap();
+        assert_eq!(restored.private_key, "saved key");
+        assert_eq!(restored.passphrase, "saved phrase");
+        forget_entry(&entry).unwrap();
+        assert!(load_entry(&entry).unwrap().is_none());
     }
 }

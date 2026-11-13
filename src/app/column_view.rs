@@ -82,10 +82,10 @@ impl Columns {
         if self.ancestors != ancestors {
             self.listings
                 .retain(|location, _| ancestors.contains(location));
-            if let Some(read) = &self.worker {
-                if !ancestors.contains(&read.location) {
-                    read.cancelled.store(true, Ordering::Relaxed);
-                }
+            if let Some(read) = &self.worker
+                && !ancestors.contains(&read.location)
+            {
+                read.cancelled.store(true, Ordering::Relaxed);
             }
             self.retry_at = None;
             self.ancestors = ancestors;
@@ -130,12 +130,12 @@ impl Columns {
             }
             self.worker = None;
         }
-        if let Some(at) = self.retry_at.take() {
-            if at > now {
-                self.retry_at = Some(at);
-                ctx.request_repaint_after(at - now);
-                return;
-            }
+        if let Some(at) = self.retry_at.take()
+            && at > now
+        {
+            self.retry_at = Some(at);
+            ctx.request_repaint_after(at - now);
+            return;
         }
         let Some(location) = self
             .ancestors
@@ -215,7 +215,10 @@ pub(super) fn show(
         .min_scrolled_width(0.0)
         .max_height(height)
         .auto_shrink([false, false])
-        .drag_to_scroll(false);
+        .scroll_source(
+            egui::scroll_area::ScrollSource::SCROLL_BAR
+                | egui::scroll_area::ScrollSource::MOUSE_WHEEL,
+        );
     let geometry = (tab.path.clone(), available);
     if state.scroll_geometry.as_ref() != Some(&geometry) || tab.scroll_to.is_some() {
         scroll = scroll.horizontal_scroll_offset((full_width - available).max(0.0));
@@ -347,7 +350,7 @@ fn show_ancestor(
         .auto_shrink([false, false])
         .id_salt("ancestor_files");
     // Recenter the selected branch only when it changes, leaving manual scrolling intact.
-    let branch_id = ui.id().with("shown_branch");
+    let branch_id = ui.scope_id().with("shown_branch");
     if ui
         .data(|data| data.get_temp::<Location>(branch_id))
         .as_ref()
@@ -371,7 +374,7 @@ fn show_ancestor(
             let entry = &entries[index];
             let (_, rect) =
                 ui.allocate_space(Vec2::new(ui.available_width(), COMPACT_FILE_ROW_HEIGHT));
-            let response = ui.interact(rect, ui.id().with(&entry.path), egui::Sense::click());
+            let response = ui.interact(rect, ui.scope_id().with(&entry.path), egui::Sense::click());
             let selected = &entry.path == child;
             if selected || response.hovered() {
                 ui.painter().rect_filled(
@@ -404,7 +407,7 @@ fn show_ancestor(
             }
             response.widget_info(|| {
                 egui::WidgetInfo::selected(
-                    egui::WidgetType::Button,
+                    egui::Role::Button,
                     ui.is_enabled(),
                     selected,
                     &entry.name,
@@ -466,7 +469,7 @@ fn show_current(
         .auto_shrink([false, false])
         .id_salt("current_files");
     if !ui.is_sizing_pass() {
-        let scope = ui.id();
+        let scope = ui.scope_id();
         if tab
             .file_scroll_scope
             .replace(scope)
@@ -494,38 +497,39 @@ fn show_current(
         }
     }
     let files_id = tab.file_list_id();
-    let ctx = ui.ctx().clone();
-    ctx.accesskit_node_builder(files_id, |node| {
-        node.set_role(egui::accesskit::Role::List);
-        node.set_label(format!("{}, {}", view.mode.label(), tab.path.display()));
-    });
-    let output = ctx.with_accessibility_parent(files_id, || {
-        scroll.show_rows(ui, row_height, visible.len(), |ui, range| {
-            for row in range {
-                entry_widget(
-                    ui,
-                    tab,
-                    row,
-                    &visible,
-                    EntryOptions {
-                        columns: None,
-                        thumbnails: None,
-                        pane: options.index,
-                        split: options.settings.split,
-                        grid: false,
-                        folder_columns: true,
-                        compact: true,
-                        idle: options.idle,
-                        zed_available: options.zed_available,
-                    },
-                    actions,
-                    drop_targets,
-                );
-            }
+    let list_ui = egui::UiBuilder::new()
+        .scope_id(files_id)
+        .accessibility_role(egui::Role::List)
+        .accessibility_label(format!("{}, {}", view.mode.label(), tab.path.display()));
+    let output = ui
+        .scope_builder(list_ui, |ui| {
+            scroll.show_rows(ui, row_height, visible.len(), |ui, range| {
+                for row in range {
+                    entry_widget(
+                        ui,
+                        tab,
+                        row,
+                        &visible,
+                        EntryOptions {
+                            columns: None,
+                            thumbnails: None,
+                            pane: options.index,
+                            split: options.settings.split,
+                            grid: false,
+                            folder_columns: true,
+                            compact: true,
+                            idle: options.idle,
+                            zed_available: options.zed_available,
+                        },
+                        actions,
+                        drop_targets,
+                    );
+                }
+            })
         })
-    });
+        .inner;
     if !ui.is_sizing_pass() {
-        let offset = output.state.offset.y;
+        let offset = output.state.clamped_offset().y;
         if offset > 0.0 && offset != tab.scroll_offset {
             tab.scroll_restore = None;
         }

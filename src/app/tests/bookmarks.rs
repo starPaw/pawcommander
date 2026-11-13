@@ -25,7 +25,10 @@ fn favorites_menu_blocks_alt_digit_and_releases_after_escape() {
             ..Default::default()
         };
         eframe::App::raw_input_hook(app, &ctx, &mut input);
-        ctx.run(input, |ctx| eframe::App::update(app, ctx, &mut frame))
+        ctx.run_test_ui(input, |ui| {
+            eframe::App::logic(app, ui.ctx(), &mut frame);
+            eframe::App::ui(app, ui, &mut frame);
+        })
     };
     let output = run(&mut app, vec![]);
     let menu_position = output

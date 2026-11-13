@@ -314,7 +314,7 @@ pub(super) fn entry_widget(
             "Файл"
         });
         egui::WidgetInfo::selected(
-            egui::WidgetType::Checkbox,
+            egui::Role::CheckBox,
             ui.is_enabled(),
             tab.selected.contains(&path),
             format!("{}, {kind}", entry.name),
@@ -325,13 +325,13 @@ pub(super) fn entry_widget(
         .context_menu(|ui| {
             if (!archive_member || is_dir) && ui.button(crate::i18n::text("Открыть")).clicked() {
                 actions.push(open());
-                ui.close_menu();
+                ui.close();
             }
             if archive_member {
                 if ui.button(crate::i18n::text("Копировать путь")).clicked() {
                     actions.push(Action::Focus(pane));
                     actions.push(Action::CopyPath);
-                    ui.close_menu();
+                    ui.close();
                 }
                 return;
             }
@@ -339,7 +339,7 @@ pub(super) fn entry_widget(
                 .on_disabled_hover_text(crate::i18n::text("Zed не найден. Установите редактор и выберите Настройки → Инструменты → Проверить снова."))
                 .clicked() {
                 actions.push(Action::OpenInZed(pane, path.clone()));
-                ui.close_menu();
+                ui.close();
             }
             ui.separator();
             if split {
@@ -348,7 +348,7 @@ pub(super) fn entry_widget(
                     if ui.add_enabled(idle, egui::Button::new(label)).clicked() {
                         actions.push(Action::Focus(pane));
                         actions.push(Action::Transfer(kind));
-                        ui.close_menu();
+                        ui.close();
                     }
                 }
             });
@@ -379,7 +379,7 @@ pub(super) fn entry_widget(
                 if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
                     actions.push(Action::Focus(pane));
                     actions.push(action);
-                    ui.close_menu();
+                    ui.close();
                 }
             }
         });

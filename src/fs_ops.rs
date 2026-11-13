@@ -735,15 +735,15 @@ impl SourceEntry {
         let actual = fs::symlink_metadata(path)
             .map_err(|e| io::Error::other(format!("{}: {e}", source_changed(path))))?;
         self.verify_metadata(path, &actual)?;
-        if let Some(names) = &self.children {
-            if *names != directory_names(path, cancel)? {
-                return Err(source_changed(path));
-            }
+        if let Some(names) = &self.children
+            && *names != directory_names(path, cancel)?
+        {
+            return Err(source_changed(path));
         }
-        if let Some(link) = &self.link {
-            if *link != fs::read_link(path)? {
-                return Err(source_changed(path));
-            }
+        if let Some(link) = &self.link
+            && *link != fs::read_link(path)?
+        {
+            return Err(source_changed(path));
         }
         Ok(())
     }

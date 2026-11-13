@@ -1,4 +1,6 @@
 //! Live name and content search in folders, plus indexed path search.
+#[cfg(test)]
+use crate::test_ui::ContextExt as _;
 mod content;
 mod directory;
 mod filters;
@@ -411,13 +413,13 @@ impl Search {
         let mut reveal = None;
         let mut dock_results = false;
         // egui closes an open popup while drawing it, leaving Escape unconsumed.
-        let popup_was_open = ctx.memory(egui::Memory::any_popup_open);
+        let popup_was_open = egui::Popup::is_any_open(ctx);
         let window = egui::Window::new(crate::i18n::text("Поиск файлов"))
-            .id(egui::Id::new("file_search"))
+            .id(egui::Id::unique("file_search"))
             .open(&mut visible)
             .default_width(720.0)
             .vscroll(true)
-            .drag_to_scroll(false)
+            .drag_to_scroll(egui::scroll_area::DragScroll::Never)
             .show(ctx, |ui| {
                 let previous_mode = self.mode;
                 ui.horizontal(|ui| {
@@ -577,7 +579,7 @@ impl Search {
                     };
                     egui::ScrollArea::vertical()
                         .id_salt("search_results")
-                        .max_height((ctx.screen_rect().height() * 0.45).min(340.0))
+                        .max_height((ctx.content_rect().height() * 0.45).min(340.0))
                         .show_rows(ui, row_height, results.matches.len(), |ui, rows| {
                             for index in rows {
                                 let hit = &results.matches[index];
@@ -626,21 +628,22 @@ impl Search {
             });
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
             if popup_was_open {
-                ctx.memory_mut(egui::Memory::close_popup);
+                egui::Popup::close_all(ctx);
             } else if self.saved_edit.take().is_none() {
                 visible = false;
             }
         }
-        if visible && dock_results {
-            if let Some(results) = self.results.take() {
-                let matching_lines =
-                    self.mode == Mode::Folder && self.folder_target != FolderTarget::Name;
-                self.panel
-                    .replace(results, matching_lines, self.query.clone());
-                self.selected = None;
-                visible = false;
-                ctx.request_repaint();
-            }
+        if visible
+            && dock_results
+            && let Some(results) = self.results.take()
+        {
+            let matching_lines =
+                self.mode == Mode::Folder && self.folder_target != FolderTarget::Name;
+            self.panel
+                .replace(results, matching_lines, self.query.clone());
+            self.selected = None;
+            visible = false;
+            ctx.request_repaint();
         }
         if !visible {
             self.cancel_index_reveal();
@@ -738,17 +741,17 @@ impl<'a> FolderSearch<'a> {
         {
             return Ok(false);
         }
-        if let FolderMatcher::Name { query, mask } = &self.matcher {
-            if !query.is_empty() {
-                let name = entry.name.to_string_lossy();
-                let normalized = normalize(&name);
-                let found = match mask {
-                    Some(mask) => mask.matches(&normalized),
-                    None => normalized.contains(query.as_str()),
-                };
-                if !found {
-                    return Ok(false);
-                }
+        if let FolderMatcher::Name { query, mask } = &self.matcher
+            && !query.is_empty()
+        {
+            let name = entry.name.to_string_lossy();
+            let normalized = normalize(&name);
+            let found = match mask {
+                Some(mask) => mask.matches(&normalized),
+                None => normalized.contains(query.as_str()),
+            };
+            if !found {
+                return Ok(false);
             }
         }
         if self.filters.needs_metadata() {
@@ -1080,7 +1083,7 @@ mod tests {
 
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
-        ctx.style_mut(|style| style.animation_time = 0.0);
+        ctx.global_style_mut(|style| style.animation_time = 0.0);
         let root = tempfile::tempdir().unwrap();
         let mut search = Search::default();
         search.open(Some(root.path()));
@@ -1094,7 +1097,8 @@ mod tests {
                 events,
                 ..Default::default()
             };
-            ctx.run(input, |ctx| {
+            ctx.run_test_ui(input, |root_ui| {
+                let ctx = &root_ui.ctx().clone();
                 search.show(ctx, None);
             })
         };
@@ -1108,7 +1112,8 @@ mod tests {
                 .expect("accessible search control");
             vec![egui::Event::AccessKitActionRequest(ActionRequest {
                 action: Action::Click,
-                target,
+                target_node: target,
+                target_tree: egui::accesskit::TreeId::ROOT,
                 data: None,
             })]
         };
@@ -1117,7 +1122,7 @@ mod tests {
         let filters = draw(open_filters);
         let open_type_menu = click(filters, crate::i18n::text("Тип объекта"));
         let _ = draw(open_type_menu);
-        assert!(ctx.memory(egui::Memory::any_popup_open));
+        assert!(egui::Popup::is_any_open(&ctx));
 
         let escape = |pressed| egui::Event::Key {
             key: egui::Key::Escape,
@@ -1127,12 +1132,12 @@ mod tests {
             modifiers: egui::Modifiers::NONE,
         };
         let after_popup = draw(vec![escape(true), escape(false)]);
-        assert!(!ctx.memory(egui::Memory::any_popup_open));
+        assert!(!egui::Popup::is_any_open(&ctx));
         let _ = click(after_popup, crate::i18n::text("Тип объекта"));
         // Changing the search target can remove a combo box before it processes Escape.
-        ctx.memory_mut(|memory| memory.open_popup(egui::Id::new("removed_filter_popup")));
+        egui::Popup::open_id(&ctx, egui::Id::unique("removed_filter_popup"));
         let after_removed_popup = draw(vec![escape(true), escape(false)]);
-        assert!(!ctx.memory(egui::Memory::any_popup_open));
+        assert!(!egui::Popup::is_any_open(&ctx));
         let _ = click(after_removed_popup, crate::i18n::text("Тип объекта"));
         let _ = draw(vec![escape(true)]);
         assert!(!search.visible);
@@ -1147,7 +1152,8 @@ mod tests {
             ..Default::default()
         };
         search.open(None);
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        let _ = ctx.run_test_ui(egui::RawInput::default(), |root_ui| {
+            let ctx = &root_ui.ctx().clone();
             search.show(ctx, None);
         });
         assert!(search.visible);
@@ -1168,7 +1174,8 @@ mod tests {
             }],
             ..Default::default()
         };
-        let _ = ctx.run(input, |ctx| {
+        let _ = ctx.run_test_ui(input, |root_ui| {
+            let ctx = &root_ui.ctx().clone();
             search.show(ctx, None);
         });
         assert!(!search.visible);

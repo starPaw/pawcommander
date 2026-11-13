@@ -1,5 +1,7 @@
 //! Docked search results and asynchronous validation for their actions.
 use super::{Job, Results};
+#[cfg(test)]
+use crate::test_ui::ContextExt as _;
 use crate::{i18n::text, theme::paint_focus, vfs::Location};
 use eframe::egui;
 use std::{
@@ -338,7 +340,7 @@ impl Panel {
 
     pub(crate) fn show(
         &mut self,
-        ctx: &egui::Context,
+        root_ui: &mut egui::Ui,
         target: TabTarget,
         destination: Option<Location>,
         enabled: bool,
@@ -347,15 +349,16 @@ impl Panel {
         let Some(snapshot) = &mut self.snapshot else {
             return;
         };
-        let max_height = (ctx.screen_rect().height() * 0.44).max(150.0);
+        let ctx = &root_ui.ctx().clone();
+        let max_height = (ctx.content_rect().height() * 0.44).max(150.0);
         let action_enabled = enabled && self.check.is_none();
         let mut close = false;
         let mut action = None;
-        egui::TopBottomPanel::bottom("docked_search_results")
+        egui::Panel::bottom("docked_search_results")
             .resizable(true)
-            .default_height(210.0_f32.min(max_height))
-            .height_range(150.0..=max_height)
-            .show(ctx, |ui| {
+            .default_size(210.0_f32.min(max_height))
+            .size_range(150.0..=max_height)
+            .show(root_ui, |ui| {
                 ui.add_enabled_ui(enabled, |ui| {
                     ui.horizontal(|ui| {
                         ui.strong(text("Результаты поиска"));
@@ -399,10 +402,9 @@ impl Panel {
                                 egui::Button::new(text("Открыть")),
                             )
                             .clicked()
+                            && let Some(path) = single
                         {
-                            if let Some(path) = single {
-                                action = Some(Action::Open(path.clone(), target.clone()));
-                            }
+                            action = Some(Action::Open(path.clone(), target.clone()));
                         }
                         if ui
                             .add_enabled(
@@ -410,10 +412,9 @@ impl Panel {
                                 egui::Button::new(text("Показать в активной панели")),
                             )
                             .clicked()
+                            && let Some(path) = single
                         {
-                            if let Some(path) = single {
-                                action = Some(Action::Reveal(path.clone(), target.clone()));
-                            }
+                            action = Some(Action::Reveal(path.clone(), target.clone()));
                         }
                         let copy = ui.add_enabled(
                             action_enabled
@@ -756,7 +757,7 @@ mod tests {
         let mut panel = Panel::default();
         panel.replace(results(&[&path, &path]), true, "match".into());
         let mut draw = |events| {
-            ctx.run(
+            ctx.run_test_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
@@ -765,9 +766,9 @@ mod tests {
                     events,
                     ..Default::default()
                 },
-                |ctx| {
+                |root_ui| {
                     panel.show(
-                        ctx,
+                        root_ui,
                         TabTarget {
                             pane: 0,
                             tab: 0,
@@ -802,7 +803,8 @@ mod tests {
         let target = unselected[0].0;
         let _ = draw(vec![egui::Event::AccessKitActionRequest(ActionRequest {
             action: Action::Click,
-            target,
+            target_node: target,
+            target_tree: egui::accesskit::TreeId::ROOT,
             data: None,
         })]);
         let update = draw(Vec::new());

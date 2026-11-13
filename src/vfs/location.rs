@@ -119,12 +119,12 @@ impl Location {
         self.with_path(path.into())
     }
     pub fn parent(&self) -> Option<Self> {
-        if let Self::Archive { archive, path } = self {
-            if path.as_os_str().is_empty() {
-                return archive
-                    .parent()
-                    .map(|parent| Self::Local(parent.to_owned()));
-            }
+        if let Self::Archive { archive, path } = self
+            && path.as_os_str().is_empty()
+        {
+            return archive
+                .parent()
+                .map(|parent| Self::Local(parent.to_owned()));
         }
         self.path().parent().map(|p| self.with_path(p.into()))
     }
@@ -268,10 +268,9 @@ pub fn resolve(address: &str, current: &Location) -> Result<Location, String> {
         if let Location::Sftp {
             endpoint: existing, ..
         } = current
+            && endpoint.same_authority(existing)
         {
-            if endpoint.same_authority(existing) {
-                endpoint.key = existing.key.clone();
-            }
+            endpoint.key = existing.key.clone();
         }
         let path = percent_decode_str(url.path())
             .decode_utf8()

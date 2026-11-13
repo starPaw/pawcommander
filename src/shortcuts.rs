@@ -1,4 +1,6 @@
 use crate::i18n::text;
+#[cfg(test)]
+use crate::test_ui::ContextExt as _;
 use eframe::egui::{self, Event, Key, KeyboardShortcut as Chord, Modifiers};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -265,18 +267,17 @@ impl Shortcuts {
         }
         // Reject inconsistent saved overrides without discarding other app settings.
         for command in Command::ALL {
-            if let Some(chord) = self.overrides.get(&command).copied().flatten() {
-                if reserved(chord)
+            if let Some(chord) = self.overrides.get(&command).copied().flatten()
+                && (reserved(chord)
                     || chord.modifiers != normalized(chord.modifiers)
                     || Command::ALL.into_iter().any(|other| {
                         other != command
                             && (self.chord(other) == Some(chord)
                                 || self.alternate(other) == Some(chord))
-                    })
-                {
-                    self.overrides.clear();
-                    break;
-                }
+                    }))
+            {
+                self.overrides.clear();
+                break;
             }
         }
     }
@@ -430,7 +431,7 @@ impl ShortcutEditor {
     pub fn show(&mut self, ctx: &egui::Context, shortcuts: &mut Shortcuts) -> bool {
         let mut save = false;
         let mut cancel = false;
-        let modal = egui::Modal::new(egui::Id::new("shortcut_editor")).show(ctx, |ui| {
+        let modal = egui::Modal::new(egui::Id::unique("shortcut_editor")).show(ctx, |ui| {
             ui.set_width(490.0);
             ui.heading(text("Горячие клавиши"));
             ui.horizontal(|ui| {
@@ -464,7 +465,7 @@ impl ShortcutEditor {
             }
             ui.separator();
             egui::ScrollArea::vertical()
-                .max_height((ctx.screen_rect().height() - 300.0).max(140.0))
+                .max_height((ctx.content_rect().height() - 300.0).max(140.0))
                 .show(ui, |ui| {
                     egui::Grid::new("shortcut_bindings")
                         .striped(true)
@@ -627,7 +628,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut editor = ShortcutEditor::new(&Shortcuts::default());
         let run = |editor: &mut ShortcutEditor, key, modifiers| {
-            let _ = ctx.run(
+            let _ = ctx.run_test_ui(
                 egui::RawInput {
                     events: vec![
                         Event::Key {
@@ -641,7 +642,8 @@ mod tests {
                     ],
                     ..Default::default()
                 },
-                |ctx| {
+                |root_ui| {
+                    let ctx = &root_ui.ctx().clone();
                     editor.capture(ctx);
                     assert!(ctx.input(|input| input.events.is_empty()));
                 },
@@ -703,7 +705,8 @@ mod tests {
                 shortcuts.validate();
                 let ctx = egui::Context::default();
                 assert_eq!(shortcuts.command(custom), Some(command));
-                let _ = ctx.run(Default::default(), |ctx| {
+                let _ = ctx.run_test_ui(Default::default(), |root_ui| {
+                    let ctx = &root_ui.ctx().clone();
                     assert_eq!(shortcuts.keys(ctx, command), ctx.format_shortcut(&custom));
                 });
             }

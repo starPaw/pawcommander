@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::test_ui::ContextExt as _;
 mod code;
 mod markup;
 
@@ -285,23 +287,21 @@ impl Preview {
 
     fn upload_texture(&mut self, ctx: &egui::Context) {
         // Upload once; subsequent frames reuse the texture.
-        if self.texture.is_none() {
-            if let Some(Ok(Loaded {
+        if self.texture.is_none()
+            && let Some(Ok(Loaded {
                 content: Content::Image { size, rgba, .. },
                 ..
             })) = &mut self.result
-            {
-                if !rgba.is_empty() {
-                    let image = egui::ColorImage::from_rgba_unmultiplied(*size, rgba);
-                    self.texture = Some(ctx.load_texture(
-                        format!("file-preview-{}", self.generation),
-                        image,
-                        egui::TextureOptions::LINEAR,
-                    ));
-                    // The texture owns its pixels now; keep only the small metadata.
-                    *rgba = Vec::new();
-                }
-            }
+            && !rgba.is_empty()
+        {
+            let image = egui::ColorImage::from_rgba_unmultiplied(*size, rgba);
+            self.texture = Some(ctx.load_texture(
+                format!("file-preview-{}", self.generation),
+                image,
+                egui::TextureOptions::LINEAR,
+            ));
+            // The texture owns its pixels now; keep only the small metadata.
+            *rgba = Vec::new();
         }
     }
 
@@ -740,8 +740,8 @@ mod tests {
         let ctx = egui::Context::default();
         let mut preview = Preview::new();
         let render = |preview: &mut Preview, size| {
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            let _ = ctx.run_test_ui(egui::RawInput::default(), |root_ui| {
+                egui::CentralPanel::default().show(root_ui, |ui| {
                     preview.show(ui, Some(&location), Some((size, None)));
                 });
             });

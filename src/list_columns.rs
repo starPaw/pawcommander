@@ -166,11 +166,11 @@ impl ListColumns {
     }
 
     pub(crate) fn dialog(&mut self, ctx: &egui::Context, focus: &mut bool) -> bool {
-        let response = egui::Modal::new(egui::Id::new("list_columns")).show(ctx, |ui| {
-            ui.set_width((ctx.screen_rect().width() - 28.0).clamp(1.0, 340.0));
+        let response = egui::Modal::new(egui::Id::unique("list_columns")).show(ctx, |ui| {
+            ui.set_width((ctx.content_rect().width() - 28.0).clamp(1.0, 340.0));
             ui.heading(text("Столбцы списка"));
             egui::ScrollArea::both()
-                .max_height((ctx.screen_rect().height() - 125.0).max(40.0))
+                .max_height((ctx.content_rect().height() - 125.0).max(40.0))
                 .show(ui, |ui| self.controls(ui, focus));
             ui.separator();
             let close = ui.button(text("Закрыть"));
