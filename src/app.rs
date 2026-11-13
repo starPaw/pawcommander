@@ -7,6 +7,8 @@ mod clipboard;
 mod column_view;
 mod dialogs;
 mod directory;
+#[cfg(any(target_os = "windows", test))]
+mod drives;
 mod entry_widget;
 mod footer;
 mod jobs;
@@ -63,6 +65,9 @@ pub struct PawCommander {
     settings: Settings,
     folder_views: FolderViews,
     directory_tree: DirectoryTree,
+    #[cfg(any(target_os = "windows", test))]
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    windows_drives: drives::WindowsDrives,
     bookmarks: Vec<Bookmark>,
     bookmark_menu_open: Option<u64>,
     bookmark_editor: Option<BookmarkEditor>,
@@ -151,6 +156,8 @@ impl eframe::App for PawCommander {
         // queue without requiring a visible frame or painting any widgets.
         self.history.poll();
         self.recovery.poll(ctx);
+        #[cfg(target_os = "windows")]
+        self.windows_drives.poll(ctx);
         self.poll(ctx);
         // Hidden windows receive close requests through logic-only ticks too.
         if (self.job.is_some() || !self.pending_jobs.is_empty())

@@ -437,20 +437,18 @@ impl PawCommander {
                                     ));
                                 }
                                 #[cfg(target_os = "windows")]
-                                for drive in b'A'..=b'Z' {
-                                    let path = PathBuf::from(format!("{}:\\", drive as char));
-                                    if path.exists()
-                                        && place_button(
-                                            ui,
-                                            &crate::tr_format!(
-                                                "Диск {}:",
-                                                "Drive {}:",
-                                                drive as char
-                                            ),
-                                            current.local() == Some(path.as_path()),
-                                        )
-                                    {
-                                        actions.push(Action::Navigate(self.active, path.into()));
+                                for path in self.windows_drives.paths() {
+                                    let drive =
+                                        path.to_string_lossy().chars().next().unwrap_or('?');
+                                    if place_button(
+                                        ui,
+                                        &crate::tr_format!("Диск {}:", "Drive {}:", drive),
+                                        current.local() == Some(path.as_path()),
+                                    ) {
+                                        actions.push(Action::Navigate(
+                                            self.active,
+                                            path.clone().into(),
+                                        ));
                                     }
                                 }
                             });

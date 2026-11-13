@@ -164,6 +164,8 @@ impl PawCommander {
             show_help: false,
             history: History::new(&cc.egui_ctx),
             recovery: crate::recovery::Recovery::new(&cc.egui_ctx),
+            #[cfg(any(target_os = "windows", test))]
+            windows_drives: super::drives::WindowsDrives::default(),
             show_history: false,
             shortcut_editor: None,
             command_palette: None,
