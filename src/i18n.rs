@@ -23,6 +23,66 @@ pub fn text(russian: &'static str) -> &'static str {
     translate(is_english(), russian)
 }
 
+pub(crate) fn transfer_finished(
+    completed: usize,
+    skipped: usize,
+    remaining: &[String],
+    preparing: bool,
+    cancelled: bool,
+    destination: &str,
+) -> String {
+    format_transfer_finished(
+        is_english(),
+        (completed, skipped),
+        remaining,
+        preparing,
+        cancelled,
+        destination,
+    )
+}
+
+fn format_transfer_finished(
+    english: bool,
+    counts: (usize, usize),
+    remaining: &[String],
+    preparing: bool,
+    cancelled: bool,
+    destination: &str,
+) -> String {
+    let (completed, skipped) = counts;
+    let mut message = match (english, preparing, cancelled) {
+        (true, true, _) => "Cancelled while preparing; selected paths left unchanged.".to_owned(),
+        (false, true, _) => "Отменено при подготовке; выбранные пути не изменены.".to_owned(),
+        (true, false, true) => format!(
+            "Stopped. Completed: {completed}. Skipped: {skipped}. Remaining: {}.",
+            remaining.len()
+        ),
+        (false, false, true) => format!(
+            "Остановлено. Готово: {completed}. Пропущено: {skipped}. Осталось: {}.",
+            remaining.len()
+        ),
+        (true, false, false) => {
+            format!("Completed: {completed}. Skipped: {skipped}. {destination}")
+        }
+        (false, false, false) => {
+            format!("Готово: {completed}. Пропущено: {skipped}. {destination}")
+        }
+    };
+    if !remaining.is_empty() {
+        message.push_str(match (english, preparing) {
+            (true, true) => "\nSelected paths:",
+            (false, true) => "\nВыбранные пути:",
+            (true, false) => "\nRemaining paths:",
+            (false, false) => "\nОставшиеся пути:",
+        });
+        for path in remaining {
+            message.push('\n');
+            message.push_str(path);
+        }
+    }
+    message
+}
+
 pub(crate) fn source_changed_during_copy(source: impl std::fmt::Display) -> String {
     format_source_changed(is_english(), source)
 }
@@ -357,8 +417,9 @@ fn translate(english: bool, russian: &'static str) -> &'static str {
         "Не удалось прочитать папку: фоновая задача завершилась" => "Could not read folder: background task ended",
         "Не удалось запустить операцию: {error}" => "Could not start operation: {error}",
         "Диалог конфликта закрыт" => "Conflict dialog closed",
-        "Операция отменена до переноса файлов" => "Operation cancelled before transferring files",
-        "Готово: {completed}. Пропущено: {skipped}. {}" => "Completed: {completed}. Skipped: {skipped}. {}",
+        "Остановить" => "Stop",
+        "Остановка…" => "Stopping…",
+        "Остановить перенос · Shift+Esc" => "Stop transfer · Shift+Esc",
         "Перемещение файлов" => "Moving files",
         "Копирование файлов" => "Copying files",
         "Открытие файла в Zed…" => "Opening file in Zed…",
@@ -636,6 +697,51 @@ macro_rules! tr_format {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transfer_outcomes_preserve_counts_and_full_paths_in_both_languages() {
+        let paths = vec![
+            "/tmp/Документы {second}/file.txt".into(),
+            "/tmp/third/file.txt".into(),
+        ];
+        for english in [true, false] {
+            let stopped =
+                format_transfer_finished(english, (1, 2), &paths, false, true, "/destination");
+            assert!(stopped.contains(if english {
+                "Stopped. Completed: 1. Skipped: 2. Remaining: 2."
+            } else {
+                "Остановлено. Готово: 1. Пропущено: 2. Осталось: 2."
+            }));
+            for path in &paths {
+                assert!(stopped.contains(path));
+            }
+            let preparing =
+                format_transfer_finished(english, (0, 0), &paths, true, true, "/destination");
+            assert!(preparing.contains(if english {
+                "selected paths left unchanged"
+            } else {
+                "выбранные пути не изменены"
+            }));
+            assert!(!preparing.contains(if english {
+                "Remaining: 2"
+            } else {
+                "Осталось: 2"
+            }));
+            for path in &paths {
+                assert!(preparing.contains(path));
+            }
+            let success =
+                format_transfer_finished(english, (3, 2), &[], false, false, "/destination");
+            assert_eq!(
+                success,
+                if english {
+                    "Completed: 3. Skipped: 2. /destination"
+                } else {
+                    "Готово: 3. Пропущено: 2. /destination"
+                }
+            );
+        }
+    }
 
     #[test]
     fn rollback_guidance_distinguishes_local_failure_and_unknown_sftp_outcome_in_both_languages() {

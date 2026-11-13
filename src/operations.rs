@@ -4,10 +4,113 @@
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const UPDATE_INTERVAL: Duration = Duration::from_millis(100);
+
+#[cfg(test)]
+type CancellationCheckpoint = Arc<Mutex<Option<Box<dyn FnMut() -> bool + Send>>>>;
+
+/// A request is independent of progress publication and remains valid without a view.
+#[derive(Clone, Default)]
+pub(crate) struct Cancellation {
+    requested: Arc<AtomicBool>,
+    #[cfg(test)]
+    checkpoint: CancellationCheckpoint,
+}
+
+#[derive(Debug)]
+struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("transfer cancelled")
+    }
+}
+impl std::error::Error for Cancelled {}
+
+impl Cancellation {
+    pub fn request(&self) {
+        self.requested.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_requested(&self) -> bool {
+        self.requested.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub fn at_checkpoint(checkpoint: impl FnMut() -> bool + Send + 'static) -> Self {
+        Self {
+            checkpoint: Arc::new(Mutex::new(Some(Box::new(checkpoint)))),
+            ..Self::default()
+        }
+    }
+
+    pub fn check(&self) -> io::Result<()> {
+        #[cfg(test)]
+        if self
+            .checkpoint
+            .lock()
+            .unwrap()
+            .as_mut()
+            .is_some_and(|check| check())
+        {
+            self.request();
+        }
+        if self.is_requested() {
+            Err(io::Error::other(Cancelled))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Keep cancellation typed until private staging has been cleaned. String
+/// errors always represent real failures, including cancellation cleanup errors.
+#[derive(Debug)]
+pub(crate) enum TransferError {
+    Cancelled,
+    Failed(String),
+}
+
+impl TransferError {
+    pub fn io(error: io::Error, context: impl FnOnce(io::Error) -> String) -> Self {
+        if error.get_ref().is_some_and(|e| e.is::<Cancelled>()) {
+            Self::Cancelled
+        } else {
+            Self::Failed(context(error))
+        }
+    }
+}
+
+impl From<io::Error> for TransferError {
+    fn from(error: io::Error) -> Self {
+        Self::io(error, |error| error.to_string())
+    }
+}
+impl From<String> for TransferError {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
+}
+impl From<&str> for TransferError {
+    fn from(error: &str) -> Self {
+        Self::Failed(error.into())
+    }
+}
+impl std::fmt::Display for TransferError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cancelled => f.write_str(&crate::tr_format!(
+                "Операция отменена",
+                "Operation cancelled"
+            )),
+            Self::Failed(error) => f.write_str(error),
+        }
+    }
+}
 
 #[derive(Clone, Default)]
 pub(crate) struct Snapshot {
@@ -46,6 +149,7 @@ impl Transfer {
 }
 
 pub(crate) struct ProgressView {
+    pub cancel: Cancellation,
     shared: Arc<Mutex<Snapshot>>,
     latest: Snapshot,
 }
@@ -61,6 +165,7 @@ impl ProgressView {
 
 #[derive(Default)]
 pub(crate) struct Progress {
+    cancel: Cancellation,
     view: Option<Arc<Mutex<Snapshot>>>,
     current: Snapshot,
     last_update: Option<Instant>,
@@ -69,16 +174,35 @@ pub(crate) struct Progress {
 impl Progress {
     pub fn tracked() -> (Self, ProgressView) {
         let view = Arc::new(Mutex::new(Snapshot::default()));
+        let cancel = Cancellation::default();
         (
             Self {
                 view: Some(view.clone()),
+                cancel: cancel.clone(),
                 ..Self::default()
             },
             ProgressView {
+                cancel,
                 shared: view,
                 latest: Snapshot::default(),
             },
         )
+    }
+
+    #[cfg(test)]
+    pub fn with_cancellation(cancel: Cancellation) -> Self {
+        Self {
+            cancel,
+            ..Self::default()
+        }
+    }
+
+    pub fn cancellation(&self) -> Cancellation {
+        self.cancel.clone()
+    }
+
+    pub fn check_cancelled(&self) -> io::Result<()> {
+        self.cancel.check()
     }
 
     pub fn item(&mut self, path: &Path) {
@@ -121,11 +245,34 @@ impl Progress {
         input: &mut R,
         output: &mut W,
     ) -> io::Result<u64> {
-        if self.view.is_none() {
-            return io::copy(input, output);
-        }
         self.copy_tracked(path, expected, |progress| {
-            io::copy(input, &mut ObservedWriter { output, progress })
+            let mut buffer = [0; 64 * 1024];
+            let mut written = 0;
+            loop {
+                progress.check_cancelled()?;
+                let read = match input.read(&mut buffer) {
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    result => result?,
+                };
+                progress.check_cancelled()?;
+                if read == 0 {
+                    return Ok(written);
+                }
+                let mut pending = &buffer[..read];
+                while !pending.is_empty() {
+                    progress.check_cancelled()?;
+                    let count = match output.write(pending) {
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                        result => result?,
+                    };
+                    if count == 0 {
+                        return Err(io::ErrorKind::WriteZero.into());
+                    }
+                    written += count as u64;
+                    progress.wrote(count as u64);
+                    pending = &pending[count..];
+                }
+            }
         })
     }
 
@@ -136,19 +283,19 @@ impl Progress {
         input: &mut File,
         output: &mut File,
     ) -> io::Result<u64> {
-        if self.view.is_none() {
-            return io::copy(&mut input.take(expected), output);
-        }
         // Keep std's file-to-file fast path available (e.g. copy_file_range on
         // Linux), while still publishing progress during large local copies.
         const CHUNK: u64 = 1024 * 1024;
         self.copy_tracked(path, Some(expected), |progress| {
             let mut written = 0;
+            progress.check_cancelled()?;
             while written < expected {
+                progress.check_cancelled()?;
                 let limit = CHUNK.min(expected - written);
                 let chunk = io::copy(&mut (&mut *input).take(limit), output)?;
                 written += chunk;
                 progress.wrote(chunk);
+                progress.check_cancelled()?;
                 if chunk < limit {
                     return Ok(written);
                 }
@@ -200,26 +347,193 @@ impl Progress {
     }
 }
 
-struct ObservedWriter<'a, W> {
-    output: &'a mut W,
-    progress: &'a mut Progress,
-}
-
-impl<W: Write> Write for ObservedWriter<'_, W> {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let n = self.output.write(bytes)?;
-        self.progress.wrote(n as u64);
-        Ok(n)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.output.flush()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stream_cancellation_checks_reads_and_writes_without_a_progress_observer() {
+        use std::io::Cursor;
+        struct RequestOnRead {
+            cancel: Cancellation,
+            reads: usize,
+        }
+        impl Read for RequestOnRead {
+            fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+                self.reads += 1;
+                bytes[0] = 7;
+                self.cancel.request();
+                Ok(1)
+            }
+        }
+        struct RequestOnWrite {
+            cancel: Cancellation,
+            writes: usize,
+        }
+        impl Write for RequestOnWrite {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                self.writes += 1;
+                self.cancel.request();
+                Ok(1)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        for tracked in [false, true] {
+            let mut progress = if tracked {
+                Progress::tracked().0
+            } else {
+                Progress::default()
+            };
+            let cancel = progress.cancellation();
+            let mut input = RequestOnRead { cancel, reads: 0 };
+            let mut output = Vec::new();
+            let error = progress
+                .copy(Path::new("input"), None, &mut input, &mut output)
+                .unwrap_err();
+            assert!(matches!(
+                TransferError::from(error),
+                TransferError::Cancelled
+            ));
+            assert_eq!(input.reads, 1);
+            assert!(
+                output.is_empty(),
+                "Stop during read prevents the next write"
+            );
+
+            let mut progress = if tracked {
+                Progress::tracked().0
+            } else {
+                Progress::default()
+            };
+            let mut output = RequestOnWrite {
+                cancel: progress.cancellation(),
+                writes: 0,
+            };
+            let mut input = Cursor::new(vec![1; 128 * 1024]);
+            let error = progress
+                .copy(Path::new("input"), None, &mut input, &mut output)
+                .unwrap_err();
+            assert!(matches!(
+                TransferError::from(error),
+                TransferError::Cancelled
+            ));
+            assert_eq!(
+                output.writes, 1,
+                "Stop during partial write prevents the next write"
+            );
+            assert_eq!(input.position(), 64 * 1024);
+        }
+    }
+
+    #[test]
+    fn stream_retries_real_interrupted_errors_and_observes_stop_before_retry() {
+        struct Reader {
+            attempts: usize,
+            cancel: Option<Cancellation>,
+        }
+        impl Read for Reader {
+            fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+                self.attempts += 1;
+                if self.attempts == 1 {
+                    if let Some(cancel) = &self.cancel {
+                        cancel.request();
+                    }
+                    return Err(io::ErrorKind::Interrupted.into());
+                }
+                if self.attempts == 2 {
+                    bytes[0] = 9;
+                    Ok(1)
+                } else {
+                    Ok(0)
+                }
+            }
+        }
+        let mut progress = Progress::default();
+        let mut reader = Reader {
+            attempts: 0,
+            cancel: None,
+        };
+        let mut output = Vec::new();
+        assert_eq!(
+            progress
+                .copy(Path::new("source"), None, &mut reader, &mut output)
+                .unwrap(),
+            1
+        );
+        assert_eq!(output, vec![9]);
+        let mut reader = Reader {
+            attempts: 0,
+            cancel: Some(progress.cancellation()),
+        };
+        let error = progress
+            .copy(Path::new("source"), None, &mut reader, &mut Vec::new())
+            .unwrap_err();
+        assert!(matches!(
+            TransferError::from(error),
+            TransferError::Cancelled
+        ));
+        assert_eq!(reader.attempts, 1);
+    }
+
+    #[test]
+    fn cancelled_stream_never_starts_even_for_empty_inputs() {
+        for tracked in [false, true] {
+            let mut progress = if tracked {
+                Progress::tracked().0
+            } else {
+                Progress::default()
+            };
+            progress.cancellation().request();
+            let mut input = std::io::Cursor::new(Vec::<u8>::new());
+            let mut output = Vec::new();
+            let error = progress
+                .copy(Path::new("empty"), Some(0), &mut input, &mut output)
+                .unwrap_err();
+            assert!(matches!(
+                TransferError::from(error),
+                TransferError::Cancelled
+            ));
+            let mut source = tempfile::tempfile().unwrap();
+            let mut target = tempfile::tempfile().unwrap();
+            let error = progress
+                .copy_local(Path::new("empty"), 0, &mut source, &mut target)
+                .unwrap_err();
+            assert!(matches!(
+                TransferError::from(error),
+                TransferError::Cancelled
+            ));
+            assert!(output.is_empty());
+        }
+    }
+
+    #[test]
+    fn local_stream_checks_between_fast_path_chunks() {
+        use std::io::{Seek, Write};
+        let mut source = tempfile::tempfile().unwrap();
+        source.write_all(&vec![42; 3 * 1024 * 1024]).unwrap();
+        source.rewind().unwrap();
+        let mut target = tempfile::tempfile().unwrap();
+        let observed_target = target.try_clone().unwrap();
+        let cancel =
+            Cancellation::at_checkpoint(move || observed_target.metadata().unwrap().len() != 0);
+        let mut progress = Progress::with_cancellation(cancel);
+        let error = progress
+            .copy_local(
+                Path::new("source"),
+                3 * 1024 * 1024,
+                &mut source,
+                &mut target,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            TransferError::from(error),
+            TransferError::Cancelled
+        ));
+        assert_eq!(target.metadata().unwrap().len(), 1024 * 1024);
+        assert_eq!(source.stream_position().unwrap(), 1024 * 1024);
+    }
 
     #[test]
     fn local_copy_stops_at_captured_length_even_if_source_has_grown() {

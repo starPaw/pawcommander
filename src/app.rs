@@ -11,7 +11,7 @@ use crate::folder_jump::{FolderHistory, FolderJump, JumpOutcome};
 use crate::fs_ops::TransferKind;
 use crate::icons::{self, Icon};
 use crate::list_columns::{Column, ColumnLayout, ListColumns};
-use crate::operations::{Progress, ProgressView};
+use crate::operations::{Cancellation, Progress, ProgressView};
 use crate::preview::Preview;
 use crate::search::panel::{ReadyAction, TabTarget};
 use crate::shortcuts::{self, Command, ShortcutEditor, Shortcuts};
@@ -2244,6 +2244,7 @@ impl PawCommander {
         let (events, rx) = mpsc::channel();
         let worker_ctx = ctx.clone();
         self.start_progress_job(ctx, label, move |progress| {
+            let cancellation = progress.cancellation();
             let summary = fs_ops::transfer_with_conflicts(
                 &sources,
                 &destination,
@@ -2256,10 +2257,7 @@ impl PawCommander {
                         .send(TransferEvent::Conflict(Box::new(dialog)))
                         .map_err(|_| crate::i18n::text("Диалог конфликта закрыт"))?;
                     worker_ctx.request_repaint();
-                    Ok(answer.recv().unwrap_or(Answer {
-                        decision: Decision::Cancel,
-                        apply_to_group: false,
-                    }))
+                    Ok(wait_for_conflict_answer(&answer, &cancellation))
                 },
                 |location, covered| {
                     if cut_generation.is_some() {
@@ -2269,14 +2267,17 @@ impl PawCommander {
                     }
                 },
             )?;
-            if summary.cancelled {
-                return Ok(crate::i18n::text("Операция отменена до переноса файлов").into());
-            }
-            let (completed, skipped) = (summary.completed, summary.skipped);
-            Ok(crate::tr_format!(
-                "Готово: {completed}. Пропущено: {skipped}. {}",
-                "Completed: {completed}. Skipped: {skipped}. {}",
-                destination.display()
+            Ok(crate::i18n::transfer_finished(
+                summary.completed,
+                summary.skipped,
+                &summary
+                    .remaining
+                    .iter()
+                    .map(Location::display)
+                    .collect::<Vec<_>>(),
+                summary.preparing,
+                summary.cancelled,
+                &destination.display(),
             ))
         });
         if self.job.is_some() {
@@ -2291,15 +2292,52 @@ impl PawCommander {
     fn poll_transfer(&mut self) {
         while let Some(transfer) = &mut self.transfer {
             match transfer.events.try_recv() {
-                Ok(TransferEvent::Conflict(dialog)) => transfer.conflict = Some(dialog),
+                Ok(TransferEvent::Conflict(dialog)) => {
+                    if !self
+                        .job
+                        .as_ref()
+                        .is_some_and(|job| job.progress.cancel.is_requested())
+                    {
+                        transfer.conflict = Some(dialog);
+                    }
+                }
                 Ok(TransferEvent::Moved(location, covered)) => {
                     if let Some(generation) = transfer.cut_generation {
                         self.consume_cut_source(&location, &covered, generation);
                     }
                 }
-                Err(mpsc::TryRecvError::Disconnected) => self.transfer = None,
+                // The worker drops its event sender before publishing its result. Keep
+                // ownership (and Stop state) until that terminal result is consumed.
+                Err(mpsc::TryRecvError::Disconnected) => break,
                 Err(mpsc::TryRecvError::Empty) => break,
             }
+        }
+    }
+
+    fn request_transfer_stop(&mut self, ctx: &egui::Context) {
+        if self.transfer.is_none() {
+            return;
+        }
+        if let Some(job) = &self.job {
+            if job.progress.cancel.is_requested() {
+                return;
+            }
+            job.progress.cancel.request();
+            if let Some(transfer) = &mut self.transfer {
+                // Dropping a dialog releases its answer sender too. The worker also
+                // observes the token if a conflict event is still in flight.
+                transfer.conflict = None;
+            }
+            ctx.request_repaint();
+        }
+    }
+
+    fn transfer_stop_shortcut(&mut self, ctx: &egui::Context) {
+        if self.transfer.is_some()
+            && self.job.is_some()
+            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, egui::Key::Escape))
+        {
+            self.request_transfer_stop(ctx);
         }
     }
 
@@ -2483,6 +2521,10 @@ impl PawCommander {
                     Ok(s) => (s, false),
                     Err(s) => (s, true),
                 });
+                // Moved events can arrive between the first event poll and the
+                // result. Consume them before releasing transfer ownership.
+                self.poll_transfer();
+                self.transfer = None;
                 self.job = None;
                 self.refresh(ctx);
             }
@@ -4490,6 +4532,7 @@ impl PawCommander {
     }
     fn footer(&mut self, ctx: &egui::Context) {
         let colors = Palette::from_ctx(ctx);
+        let mut stop_requested = false;
         egui::TopBottomPanel::bottom("status")
             .frame(
                 egui::Frame::new()
@@ -4506,20 +4549,50 @@ impl PawCommander {
                             job.label,
                             job.started.elapsed().as_secs()
                         ));
+                        if self.transfer.is_some() {
+                            let stopping = job.progress.cancel.is_requested();
+                            let response = ui
+                                .add_enabled(
+                                    !stopping,
+                                    egui::Button::new(if stopping {
+                                        crate::i18n::text("Остановка…")
+                                    } else {
+                                        crate::i18n::text("Остановить")
+                                    }),
+                                )
+                                .on_hover_text(crate::i18n::text("Остановить перенос · Shift+Esc"));
+                            paint_focus(ui, &response, 5);
+                            stop_requested = response.clicked();
+                        }
                     });
                     operation_details(ui, job.progress.snapshot());
                     if let Some((message, _)) = &self.notice {
                         ui.label(RichText::new(message).color(colors.muted));
                     }
                 } else if let Some((message, error)) = self.notice.clone() {
-                    ui.horizontal_wrapped(|ui| {
+                    ui.horizontal_top(|ui| {
                         if ui.small_button("×").clicked() {
                             self.notice = None;
                         }
-                        ui.colored_label(
-                            if error { colors.error } else { colors.success },
-                            message,
-                        );
+                        egui::ScrollArea::vertical()
+                            .id_salt("operation_notice")
+                            .max_height(160.0)
+                            .show(ui, |ui| {
+                                // Scroll content must use ordinary vertical layout. A
+                                // wrapped horizontal layout gives the first text row
+                                // the viewport's height and clips subsequent paths.
+                                ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                                    ui.add(
+                                        egui::Label::new(RichText::new(message).color(if error {
+                                            colors.error
+                                        } else {
+                                            colors.success
+                                        }))
+                                        .wrap()
+                                        .selectable(true),
+                                    );
+                                });
+                            });
                     });
                 } else {
                     ui.horizontal(|ui| {
@@ -4547,7 +4620,11 @@ impl PawCommander {
                     });
                 }
             });
+        if stop_requested {
+            self.request_transfer_stop(ctx);
+        }
     }
+
     fn workspace_places(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         egui::CollapsingHeader::new(crate::i18n::text("Пространства"))
             .id_salt("workspaces_group")
@@ -5153,6 +5230,7 @@ impl eframe::App for PawCommander {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let colors = Palette::from_ctx(ctx);
         self.poll(ctx);
+        self.transfer_stop_shortcut(ctx);
         if self.job.is_some() && ctx.input(|i| i.viewport().close_requested()) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.notice = Some((
@@ -7199,6 +7277,23 @@ fn entry_widget(
 fn file_name(path: &Location) -> String {
     path.name()
 }
+fn wait_for_conflict_answer(answer: &Receiver<Answer>, cancellation: &Cancellation) -> Answer {
+    loop {
+        if cancellation.is_requested() {
+            break;
+        }
+        match answer.recv_timeout(Duration::from_millis(30)) {
+            Ok(answer) if !cancellation.is_requested() => return answer,
+            Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    }
+    Answer {
+        decision: Decision::Cancel,
+        apply_to_group: false,
+    }
+}
+
 fn operation_details(ui: &mut egui::Ui, progress: &crate::operations::Snapshot) {
     if let Some(item) = &progress.item {
         let name = item.file_name().map_or_else(
@@ -8818,6 +8913,370 @@ mod tests {
             self.0.insert(key.into(), value);
         }
         fn flush(&mut self) {}
+    }
+
+    fn operation_footer_frame(
+        app: &mut PawCommander,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 600.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                app.transfer_stop_shortcut(ctx);
+                app.footer(ctx);
+            },
+        )
+    }
+
+    fn operation_footer_text(output: &egui::FullOutput) -> String {
+        output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) => Some(text.galley.text()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn transfer_notice_shows_remaining_paths_and_bounds_long_lists() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        let path = "/disposable/source/remaining-tree".to_owned();
+        app.notice = Some((
+            crate::i18n::transfer_finished(
+                0,
+                0,
+                std::slice::from_ref(&path),
+                false,
+                true,
+                "/target",
+            ),
+            false,
+        ));
+        operation_footer_frame(&mut app, &ctx, vec![]);
+        let output = operation_footer_frame(&mut app, &ctx, vec![]);
+        let label = output
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) if text.galley.text().contains(&path) => {
+                    Some((clipped.clip_rect, text))
+                }
+                _ => None,
+            })
+            .expect("terminal notice includes the full remaining path");
+        for row in &label.1.galley.rows {
+            let rect = row.rect.translate(label.1.pos.to_vec2());
+            assert!(
+                label.0.contains_rect(rect),
+                "notice row {rect:?} clipped by {:?}",
+                label.0
+            );
+        }
+
+        let paths = (0..100)
+            .map(|index| format!("/disposable/source/remaining-{index:03}"))
+            .collect::<Vec<_>>();
+        app.notice = Some((
+            crate::i18n::transfer_finished(1, 2, &paths, false, true, "/target"),
+            false,
+        ));
+        operation_footer_frame(&mut app, &ctx, vec![]);
+        let output = operation_footer_frame(&mut app, &ctx, vec![]);
+        let clip = output
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) if text.galley.text().contains("remaining-099") => {
+                    Some(clipped.clip_rect)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            clip.height() <= 166.0,
+            "long notices must preserve room for navigation: {clip:?}"
+        );
+        assert!(
+            clip.top() > 350.0,
+            "footer remains bounded at a 600px window height"
+        );
+        let mut scrolled = output;
+        for _ in 0..10 {
+            scrolled = operation_footer_frame(
+                &mut app,
+                &ctx,
+                vec![
+                    egui::Event::PointerMoved(egui::pos2(100.0, clip.center().y)),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, -10_000.0),
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        let (clip, text) = scrolled
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) if text.galley.text().contains("remaining-099") => {
+                    Some((clipped.clip_rect, text))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let last = text
+            .galley
+            .rows
+            .last()
+            .unwrap()
+            .rect
+            .translate(text.pos.to_vec2());
+        assert!(
+            clip.contains_rect(last),
+            "last remaining path must become visible after scrolling: {last:?} clipped by {clip:?}"
+        );
+    }
+
+    #[test]
+    fn transfer_stop_button_keeps_pending_ownership_and_navigation_until_result() {
+        let root = tempfile::tempdir().unwrap();
+        let other = root.path().join("another folder");
+        std::fs::create_dir(&other).unwrap();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        let (result, receiver) = mpsc::channel();
+        let (reporter, progress) = Progress::tracked();
+        app.job = Some(Job {
+            label: "test operation".into(),
+            started: Instant::now(),
+            result: receiver,
+            progress,
+        });
+        let ordinary = operation_footer_frame(&mut app, &ctx, vec![]);
+        assert!(!operation_footer_text(&ordinary).contains("Stop"));
+        app.request_transfer_stop(&ctx);
+        assert!(
+            !reporter.cancellation().is_requested(),
+            "generic jobs have no Stop"
+        );
+
+        let (events, receiver) = mpsc::channel();
+        app.transfer = Some(TransferInteraction {
+            events: receiver,
+            cut_generation: None,
+            conflict: None,
+        });
+        // A disconnected events channel precedes terminal-result publication.
+        drop(events);
+        app.poll(&ctx);
+        assert!(app.transfer.is_some());
+        let focus = ctx.memory(|memory| memory.focused());
+        operation_footer_frame(&mut app, &ctx, vec![]);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            focus,
+            "Stop must not take initial keyboard focus"
+        );
+        let output = operation_footer_frame(&mut app, &ctx, vec![]);
+        let stop = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == "Stop" => {
+                    Some(text.pos + text.galley.size() * 0.5)
+                }
+                _ => None,
+            })
+            .expect("active transfer exposes Stop");
+        for pressed in [true, false] {
+            operation_footer_frame(
+                &mut app,
+                &ctx,
+                vec![
+                    egui::Event::PointerMoved(stop),
+                    egui::Event::PointerButton {
+                        pos: stop,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        assert!(reporter.cancellation().is_requested());
+        let pending = operation_footer_frame(&mut app, &ctx, vec![]);
+        assert!(operation_footer_text(&pending).contains("Stopping…"));
+        app.request_transfer_stop(&ctx);
+        app.action(Action::Navigate(0, other.clone().into()), &ctx);
+        assert_eq!(app.tab().path.path(), other);
+        app.poll(&ctx);
+        assert!(app.job.is_some() && app.transfer.is_some());
+        assert!(!app.drop_enabled());
+
+        // Errors after Stop preserve recovery guidance rather than becoming success.
+        result
+            .send(Err("cleanup failed: /retained/private-staging".into()))
+            .unwrap();
+        app.poll(&ctx);
+        assert!(app.job.is_none() && app.transfer.is_none());
+        assert_eq!(
+            app.notice,
+            Some(("cleanup failed: /retained/private-staging".into(), true))
+        );
+    }
+
+    #[test]
+    fn shift_escape_stops_a_conflict_without_starting_the_batch() {
+        let root = tempfile::tempdir().unwrap();
+        let source_dir = root.path().join("source");
+        let target_dir = root.path().join("target");
+        std::fs::create_dir(&source_dir).unwrap();
+        std::fs::create_dir(&target_dir).unwrap();
+        let source = source_dir.join("conflict.txt");
+        let target = target_dir.join("conflict.txt");
+        std::fs::write(&source, "source").unwrap();
+        std::fs::write(&target, "old destination").unwrap();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        app.start_transfer(
+            &ctx,
+            "test copy",
+            vec![source.clone().into()],
+            target_dir.into(),
+            TransferKind::Copy,
+            false,
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !app.conflict_open() && Instant::now() < deadline {
+            app.poll(&ctx);
+            std::thread::yield_now();
+        }
+        assert!(app.conflict_open());
+        operation_footer_frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::SHIFT,
+            }],
+        );
+        assert!(!app.conflict_open());
+        assert!(app.job.as_ref().unwrap().progress.cancel.is_requested());
+        while app.job.is_some() && Instant::now() < deadline {
+            app.poll(&ctx);
+            std::thread::yield_now();
+        }
+        assert!(
+            app.job.is_none() && app.transfer.is_none(),
+            "conflict worker must return"
+        );
+        let (notice, error) = app.notice.as_ref().unwrap();
+        assert!(!error);
+        assert!(
+            notice.contains("Completed: 0. Skipped: 0. Remaining: 1."),
+            "{notice}"
+        );
+        assert!(notice.contains(&source.display().to_string()));
+        assert_eq!(std::fs::read_to_string(source).unwrap(), "source");
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "old destination");
+    }
+
+    #[test]
+    fn conflict_answer_wait_observes_stop_and_rejects_a_racing_replace() {
+        let (reply, answer) = mpsc::channel();
+        let cancellation = Progress::default().cancellation();
+        reply
+            .send(Answer {
+                decision: Decision::Replace,
+                apply_to_group: true,
+            })
+            .unwrap();
+        cancellation.request();
+        let result = wait_for_conflict_answer(&answer, &cancellation);
+        assert_eq!(result.decision, Decision::Cancel);
+        assert!(!result.apply_to_group);
+
+        let (reply, answer) = mpsc::channel();
+        let cancellation = Progress::default().cancellation();
+        let worker_cancel = cancellation.clone();
+        let (finished, result) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            finished
+                .send(wait_for_conflict_answer(&answer, &worker_cancel))
+                .unwrap();
+        });
+        cancellation.request();
+        assert_eq!(
+            result
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .decision,
+            Decision::Cancel
+        );
+        worker.join().unwrap();
+        drop(reply);
+    }
+
+    #[test]
+    fn late_stop_keeps_final_success_and_consumes_committed_cut_events() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        let committed: Location = root.path().join("committed").into();
+        let pending: Location = root.path().join("pending").into();
+        let clipboard = Clipboard::new(
+            vec![committed.clone(), pending.clone()],
+            true,
+            ClipboardOrigin::App(None),
+        );
+        let generation = clipboard.generation;
+        app.clipboard = Some(clipboard);
+        let (result, receiver) = mpsc::channel();
+        let (_, progress) = Progress::tracked();
+        app.job = Some(Job {
+            label: "test move".into(),
+            started: Instant::now(),
+            result: receiver,
+            progress,
+        });
+        let (events, receiver) = mpsc::channel();
+        app.transfer = Some(TransferInteraction {
+            events: receiver,
+            cut_generation: Some(generation),
+            conflict: None,
+        });
+        let success = crate::i18n::transfer_finished(1, 0, &[], false, false, "/destination");
+        events
+            .send(TransferEvent::Moved(committed, vec![]))
+            .unwrap();
+        result.send(Ok(success.clone())).unwrap();
+        // A token request never rewrites the worker's already finalized outcome.
+        app.request_transfer_stop(&ctx);
+        app.poll(&ctx);
+        assert_eq!(app.notice, Some((success, false)));
+        assert_eq!(app.clipboard.as_ref().unwrap().paths, vec![pending]);
+        assert!(app.job.is_none() && app.transfer.is_none());
     }
 
     #[test]

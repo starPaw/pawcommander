@@ -1,7 +1,7 @@
 //! Local filesystem operations. Copies are staged privately on the destination
 //! volume before publication. This does not snapshot a changing filesystem.
 
-use crate::operations::Progress;
+use crate::operations::{Cancellation, Progress, TransferError};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
@@ -143,7 +143,7 @@ pub fn visit_directory(
                     crate::i18n::text("Не удалось получить сведения об элементе"),
                     &path,
                     e,
-                ))
+                ));
             }
         };
         if cancelled() {
@@ -218,7 +218,8 @@ pub(crate) fn plan_transfer(
     sources: &[PathBuf],
     destination: &Path,
     progress: &mut Progress,
-) -> Result<Vec<LocalTransfer>, String> {
+) -> Result<Vec<LocalTransfer>, TransferError> {
+    progress.check_cancelled()?;
     progress.item(destination);
     let destination = directory_path(destination)?;
     let sources = normalize_selection(sources, progress)?;
@@ -231,6 +232,7 @@ pub(crate) fn plan_transfer(
         metadata,
     } in sources
     {
+        progress.check_cancelled()?;
         progress.item(&original);
         let current = fs::symlink_metadata(&source).map_err(|e| {
             at(
@@ -244,7 +246,8 @@ pub(crate) fn plan_transfer(
                 "Нельзя скопировать или переместить «{}» в себя или во вложенную папку",
                 "Cannot copy or move “{}” into itself or a subfolder",
                 source.display()
-            ));
+            )
+            .into());
         }
         let name = source.file_name().ok_or(crate::i18n::text(
             "Нельзя скопировать или переместить корень файловой системы",
@@ -254,7 +257,8 @@ pub(crate) fn plan_transfer(
                 "Несколько выбранных элементов называются «{}»; перенесите их по отдельности",
                 "Multiple selected items are named “{}”; transfer them separately",
                 name.to_string_lossy()
-            ));
+            )
+            .into());
         }
         let target = destination.join(name);
         plan.push(LocalTransfer {
@@ -275,7 +279,7 @@ fn transfer(sources: &[PathBuf], destination: &Path, kind: TransferKind) -> Resu
 }
 
 pub fn trash_entries(paths: &[PathBuf], progress: &mut Progress) -> Result<usize, String> {
-    let paths = normalize_selection(paths, progress)?;
+    let paths = normalize_selection(paths, progress).map_err(|error| error.to_string())?;
     for (completed, entry) in paths.iter().enumerate() {
         let path = &entry.source;
         progress.item(path);
@@ -351,9 +355,10 @@ struct LocalSelection {
 fn normalize_selection(
     paths: &[PathBuf],
     progress: &mut Progress,
-) -> Result<Vec<LocalSelection>, String> {
+) -> Result<Vec<LocalSelection>, TransferError> {
     let mut entries = Vec::with_capacity(paths.len());
     for original in paths {
+        progress.check_cancelled()?;
         progress.item(original);
         let path = entry_path(original)?;
         let metadata = fs::symlink_metadata(&path)
@@ -362,11 +367,13 @@ fn normalize_selection(
     }
     let mut first = HashMap::with_capacity(entries.len());
     for (index, (path, _)) in entries.iter().enumerate() {
+        progress.check_cancelled()?;
         first.entry(path.as_path()).or_insert(index);
     }
     let mut retained = vec![false; entries.len()];
     let mut covered = vec![Vec::new(); entries.len()];
     for (index, (path, _)) in entries.iter().enumerate() {
+        progress.check_cancelled()?;
         // The outermost selected directory covers all selected entries in
         // its tree, including paths spelled through other parent aliases.
         let representative = path
@@ -397,7 +404,10 @@ fn normalize_selection(
 
 fn ensure_absent(path: &Path) -> Result<(), String> {
     match fs::symlink_metadata(path) {
-        Ok(_) => Err(format!("«{}» уже существует. Выберите другое имя или папку; существующие элементы не перезаписываются", path.display())),
+        Ok(_) => Err(format!(
+            "«{}» уже существует. Выберите другое имя или папку; существующие элементы не перезаписываются",
+            path.display()
+        )),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(at("Не удалось проверить место назначения", path, e)),
     }
@@ -430,7 +440,7 @@ fn create_staging_directory(parent: &Path) -> Result<PathBuf, String> {
             Err(e) => {
                 return Err(copy_space_error(parent, &e).unwrap_or_else(|| {
                     at("Не удалось подготовить копирование в папку", parent, e)
-                }))
+                }));
             }
         }
     }
@@ -455,6 +465,7 @@ fn copy_atomically(source: &Path, destination: &Path) -> Result<(), String> {
     )
 }
 
+#[cfg(test)]
 pub(crate) fn copy_atomically_with_progress(
     source: &Path,
     destination: &Path,
@@ -464,6 +475,7 @@ pub(crate) fn copy_atomically_with_progress(
     copy_atomically_checked(source, destination, progress, publish, &mut |_| Ok(()))
 }
 
+#[cfg(test)]
 fn copy_atomically_checked(
     source: &Path,
     destination: &Path,
@@ -471,13 +483,28 @@ fn copy_atomically_checked(
     publish: impl FnOnce(&Path, &Path) -> Result<(), String>,
     after_entry: &mut impl FnMut(&Path) -> io::Result<()>,
 ) -> Result<(), String> {
+    copy_atomically_cancellable(source, destination, progress, publish, after_entry)
+        .map_err(|error| error.to_string())
+}
+
+pub(crate) fn copy_atomically_cancellable(
+    source: &Path,
+    destination: &Path,
+    progress: &mut Progress,
+    publish: impl FnOnce(&Path, &Path) -> Result<(), String>,
+    after_entry: &mut impl FnMut(&Path) -> io::Result<()>,
+) -> Result<(), TransferError> {
+    progress.check_cancelled()?;
     progress.item(source);
-    let manifest = SourceManifest::capture(source).map_err(|e| {
-        at(
-            crate::i18n::text("Не удалось проверить источник"),
-            source,
-            e,
-        )
+    let cancel = progress.cancellation();
+    let manifest = SourceManifest::capture_cancellable(source, &cancel).map_err(|e| {
+        TransferError::io(e, |e| {
+            at(
+                crate::i18n::text("Не удалось проверить источник"),
+                source,
+                e,
+            )
+        })
     })?;
     let parent = destination
         .parent()
@@ -487,19 +514,21 @@ fn copy_atomically_checked(
         available_copy_space(parent)?,
         parent.display(),
     )?;
+    progress.check_cancelled()?;
     let staging = create_staging_directory(parent)?;
     let payload = staging.join("payload");
     let result = copy_tree(source, &payload, progress, &manifest, after_entry)
-        // Revisit *every* entry: an early file can change while a later file is
-        // being copied without changing the parent directory's metadata.
-        .and_then(|()| manifest.verify())
+        // Revisit every entry, including early files after later files copied.
+        .and_then(|()| manifest.verify(&cancel))
+        .and_then(|()| cancel.check())
         .map_err(|e| {
-            copy_space_error(parent, &e)
-                .unwrap_or_else(|| at(crate::i18n::text("Не удалось скопировать"), source, e))
+            TransferError::io(e, |e| {
+                copy_space_error(parent, &e)
+                    .unwrap_or_else(|| at(crate::i18n::text("Не удалось скопировать"), source, e))
+            })
         })
-        .and_then(|()| publish(&payload, destination));
-    // Only remove our own staging area, never a user's existing destination.
-    // Cleanup restores owner permissions on staged directories as necessary.
+        // No cancellation inside publication, rollback, or staging cleanup.
+        .and_then(|()| publish(&payload, destination).map_err(Into::into));
     match (result, remove_staging(&staging)) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), Ok(())) => Err(error),
@@ -507,13 +536,12 @@ fn copy_atomically_checked(
             "{error}. Осталась временная копия «{}»: {cleanup}",
             "{error}. Temporary copy remains at “{}”: {cleanup}",
             staging.display()
-        )),
+        ).into()),
         (Ok(()), Err(cleanup)) => Err(crate::tr_format!(
             "Копия «{}» готова, но не удалось удалить её пустую временную папку «{}»: {cleanup}",
             "Copy “{}” is ready, but its empty temporary folder “{}” could not be removed: {cleanup}",
-            destination.display(),
-            staging.display()
-        )),
+            destination.display(), staging.display()
+        ).into()),
     }
 }
 
@@ -626,11 +654,16 @@ fn source_changed(path: &Path) -> io::Error {
     io::Error::other(crate::i18n::source_changed_during_copy(path.display()))
 }
 
-fn directory_names(path: &Path) -> io::Result<Vec<OsString>> {
-    let mut names = fs::read_dir(path)?
-        .map(|entry| entry.map(|entry| entry.file_name()))
-        .collect::<io::Result<Vec<_>>>()?;
+fn directory_names(path: &Path, cancel: &Cancellation) -> io::Result<Vec<OsString>> {
+    let mut names = Vec::new();
+    cancel.check()?;
+    for entry in fs::read_dir(path)? {
+        cancel.check()?;
+        names.push(entry?.file_name());
+    }
+    cancel.check()?;
     names.sort();
+    cancel.check()?;
     Ok(names)
 }
 
@@ -666,12 +699,13 @@ impl SourceEntry {
         }
     }
 
-    fn verify(&self, path: &Path) -> io::Result<()> {
+    fn verify(&self, path: &Path, cancel: &Cancellation) -> io::Result<()> {
+        cancel.check()?;
         let actual = fs::symlink_metadata(path)
             .map_err(|e| io::Error::other(format!("{}: {e}", source_changed(path))))?;
         self.verify_metadata(path, &actual)?;
         if let Some(names) = &self.children {
-            if *names != directory_names(path)? {
+            if *names != directory_names(path, cancel)? {
                 return Err(source_changed(path));
             }
         }
@@ -685,16 +719,27 @@ impl SourceEntry {
 }
 
 impl SourceManifest {
+    #[cfg(test)]
     fn capture(path: &Path) -> io::Result<Self> {
+        Self::capture_cancellable(path, &Cancellation::default())
+    }
+
+    fn capture_cancellable(path: &Path, cancel: &Cancellation) -> io::Result<Self> {
         let mut manifest = Self {
             entries: BTreeMap::new(),
             bytes: 0,
         };
-        manifest.capture_entry(path, 0)?;
+        manifest.capture_entry(path, 0, cancel)?;
         Ok(manifest)
     }
 
-    fn capture_entry(&mut self, path: &Path, depth: usize) -> io::Result<()> {
+    fn capture_entry(
+        &mut self,
+        path: &Path,
+        depth: usize,
+        cancel: &Cancellation,
+    ) -> io::Result<()> {
+        cancel.check()?;
         if depth > 128 {
             return Err(io::Error::other("слишком большая глубина папок"));
         }
@@ -703,7 +748,7 @@ impl SourceManifest {
         // supply the modification time.
         metadata.modified()?;
         let children = if metadata.is_dir() {
-            Some(directory_names(path)?)
+            Some(directory_names(path, cancel)?)
         } else {
             None
         };
@@ -725,7 +770,7 @@ impl SourceManifest {
         }
         if let Some(names) = &children {
             for name in names {
-                self.capture_entry(&path.join(name), depth + 1)?;
+                self.capture_entry(&path.join(name), depth + 1, cancel)?;
             }
         }
         let entry = SourceEntry {
@@ -733,14 +778,14 @@ impl SourceManifest {
             children,
             link,
         };
-        entry.verify(path)?;
+        entry.verify(path, cancel)?;
         self.entries.insert(path.to_path_buf(), entry);
         Ok(())
     }
 
-    fn verify(&self) -> io::Result<()> {
+    fn verify(&self, cancel: &Cancellation) -> io::Result<()> {
         for (path, entry) in &self.entries {
-            entry.verify(path)?;
+            entry.verify(path, cancel)?;
         }
         Ok(())
     }
@@ -753,12 +798,14 @@ fn copy_tree(
     manifest: &SourceManifest,
     after_entry: &mut impl FnMut(&Path) -> io::Result<()>,
 ) -> io::Result<()> {
+    progress.check_cancelled()?;
     progress.item(source);
+    let cancel = progress.cancellation();
     let entry = manifest
         .entries
         .get(source)
         .ok_or_else(|| source_changed(source))?;
-    entry.verify(source)?;
+    entry.verify(source, &cancel)?;
     let metadata = &entry.metadata;
     if metadata.file_type().is_symlink() {
         copy_symlink(source, destination, metadata)?;
@@ -773,10 +820,12 @@ fn copy_tree(
                 after_entry,
             )?;
         }
+        cancel.check()?;
         fs::set_permissions(destination, metadata.permissions())?;
     } else if metadata.is_file() {
         let mut input = open_regular_source(source)?;
         entry.verify_metadata(source, &input.metadata()?)?;
+        cancel.check()?;
         let mut output = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -786,14 +835,21 @@ fn copy_tree(
             return Err(source_changed(source));
         }
         entry.verify_metadata(source, &input.metadata()?)?;
-        entry.verify(source)?;
+        entry.verify(source, &cancel)?;
+        cancel.check()?;
         output.sync_all()?;
         if let Ok(modified) = metadata.modified() {
             output.set_times(fs::FileTimes::new().set_modified(modified))?;
         }
         output.set_permissions(metadata.permissions())?;
     } else {
-        return Err(io::Error::new(io::ErrorKind::Unsupported, format!("«{}» — специальный файл (сокет, устройство или канал). Можно копировать обычные файлы, папки и символические ссылки", source.display())));
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "«{}» — специальный файл (сокет, устройство или канал). Можно копировать обычные файлы, папки и символические ссылки",
+                source.display()
+            ),
+        ));
     }
     after_entry(source)
 }
@@ -928,7 +984,9 @@ pub(crate) fn rename_error(source: &Path, destination: &Path, error: io::Error) 
     #[cfg(not(any(unix, windows)))]
     let cross_volume = false;
     if cross_volume {
-        return format!("Перемещение между дисками пока не поддерживается: {error}. Скопируйте элемент, проверьте копию, затем переместите оригинал в корзину");
+        return format!(
+            "Перемещение между дисками пока не поддерживается: {error}. Скопируйте элемент, проверьте копию, затем переместите оригинал в корзину"
+        );
     }
     format!(
         "Не удалось переместить «{}» в «{}» без замены существующих элементов: {error}",
@@ -1015,6 +1073,138 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cancellation_during_local_stream_preserves_replacement_and_removes_staging() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        let bytes = vec![0x5a; 3 * 1024 * 1024];
+        fs::write(&source, &bytes).unwrap();
+        fs::write(&target, b"previous destination").unwrap();
+        let directory = root.path().to_path_buf();
+        let cancel = Cancellation::at_checkpoint(move || {
+            fs::read_dir(&directory)
+                .unwrap()
+                .filter_map(Result::ok)
+                .any(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".pawcommander-copy-")
+                        && fs::metadata(entry.path().join("payload"))
+                            .is_ok_and(|meta| meta.len() >= 1024 * 1024)
+                })
+        });
+        let mut progress = Progress::with_cancellation(cancel);
+        let error = copy_atomically_cancellable(
+            &source,
+            &target,
+            &mut progress,
+            |_, _| panic!("cancelled staging must not publish"),
+            &mut |_| Ok(()),
+        )
+        .unwrap_err();
+        assert!(matches!(error, TransferError::Cancelled));
+        assert_eq!(fs::read(&source).unwrap(), bytes);
+        assert_eq!(fs::read(&target).unwrap(), b"previous destination");
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn cancellation_in_source_capture_and_final_verification_prevents_publication() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        fs::create_dir(&source).unwrap();
+        for index in 0..32 {
+            fs::write(source.join(format!("file-{index:02}")), b"data").unwrap();
+        }
+        let mut checks = 0;
+        let cancel = Cancellation::at_checkpoint(move || {
+            checks += 1;
+            checks == 12
+        });
+        let error = SourceManifest::capture_cancellable(&source, &cancel)
+            .err()
+            .unwrap();
+        assert!(matches!(
+            TransferError::from(error),
+            TransferError::Cancelled
+        ));
+
+        let copied = Arc::new(AtomicBool::new(false));
+        let checkpoint_copied = copied.clone();
+        let mut verification_checks = 0;
+        let cancel = Cancellation::at_checkpoint(move || {
+            if checkpoint_copied.load(Ordering::Relaxed) {
+                verification_checks += 1;
+            }
+            verification_checks == 5
+        });
+        let mut progress = Progress::with_cancellation(cancel);
+        let error = copy_atomically_cancellable(
+            &source,
+            &target,
+            &mut progress,
+            |_, _| panic!("final verification cancellation must not publish"),
+            &mut |path| {
+                if path == source {
+                    copied.store(true, Ordering::Relaxed);
+                }
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(
+            copied.load(Ordering::Relaxed),
+            "the complete tree was staged first"
+        );
+        assert!(matches!(error, TransferError::Cancelled));
+        assert!(!target.exists());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_cleans_readonly_staged_tree_without_following_links() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        let outside = root.path().join("outside");
+        fs::create_dir(&source).unwrap();
+        fs::write(&outside, b"outside sentinel").unwrap();
+        fs::write(source.join("data"), b"content").unwrap();
+        symlink(&outside, source.join("external")).unwrap();
+        symlink(root.path().join("missing"), source.join("broken")).unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o500)).unwrap();
+        let mut progress = Progress::default();
+        let cancel = progress.cancellation();
+        let result = copy_atomically_cancellable(
+            &source,
+            &target,
+            &mut progress,
+            |_, _| panic!("stopped before publication"),
+            &mut |path| {
+                if path == source {
+                    cancel.request();
+                }
+                Ok(())
+            },
+        );
+        assert!(matches!(result, Err(TransferError::Cancelled)));
+        assert_eq!(fs::read(&outside).unwrap(), b"outside sentinel");
+        assert_eq!(
+            fs::metadata(&source).unwrap().permissions().mode() & 0o777,
+            0o500
+        );
+        assert!(!target.exists());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[test]
     fn source_file_changes_abort_before_publication_and_clean_staging() {
         for mutation in ["append", "truncate", "rewrite", "remove", "directory"] {
             let root = tempfile::tempdir().unwrap();
@@ -1061,11 +1251,13 @@ mod tests {
             );
             assert!(!published, "{mutation}");
             assert_eq!(fs::read(&destination).unwrap(), b"previous target");
-            assert!(!fs::read_dir(root.path()).unwrap().any(|entry| entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".pawcommander-copy-")));
+            assert!(!fs::read_dir(root.path()).unwrap().any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".pawcommander-copy-")
+            }));
             match mutation {
                 "append" => assert_eq!(fs::read(source).unwrap(), b"original with extra bytes"),
                 "truncate" => assert_eq!(fs::read(source).unwrap(), b"short"),
@@ -1144,7 +1336,7 @@ mod tests {
         assert!(entry
             .verify_metadata(&source, &opened.metadata().unwrap())
             .is_err());
-        assert!(manifest.verify().is_err());
+        assert!(manifest.verify(&Cancellation::default()).is_err());
         assert_eq!(fs::read(source).unwrap(), b"replaced");
     }
 

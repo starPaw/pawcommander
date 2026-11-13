@@ -3,7 +3,7 @@
 use crate::archive;
 use crate::conflict::{Answer, Conflict, Decision, EntryDetails};
 use crate::fs_ops::{self, TransferKind};
-use crate::operations::Progress;
+use crate::operations::{Cancellation, Progress, TransferError};
 use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use ssh2::{
@@ -947,6 +947,8 @@ pub struct TransferSummary {
     pub completed: usize,
     pub skipped: usize,
     pub cancelled: bool,
+    pub remaining: Vec<Location>,
+    pub preparing: bool,
 }
 
 fn transfer_plan(
@@ -954,7 +956,7 @@ fn transfer_plan(
     destination: &Location,
     kind: TransferKind,
     progress: &mut Progress,
-) -> Result<Vec<TransferItem>, String> {
+) -> Result<Vec<TransferItem>, TransferError> {
     if destination.is_archive() || sources.iter().any(Location::is_archive) {
         return Err(archive::readonly().into());
     }
@@ -962,25 +964,32 @@ fn transfer_plan(
         if sources.iter().all(|p| !p.remote()) {
             let paths = sources.iter().map(|p| p.path().into()).collect::<Vec<_>>();
             let guard_source = cfg!(target_os = "macos") && kind == TransferKind::Move;
-            return fs_ops::plan_transfer(&paths, dest, progress).map(|plan| {
-                plan.into_iter()
-                    .map(|item| TransferItem {
-                        original: item.original.into(),
-                        source: item.source.into(),
-                        target: item.target.into(),
-                        covered: item.covered,
-                        local_move_source: guard_source
-                            .then_some(EntryMetadata::Local(item.source_metadata)),
-                        replacement: None,
-                    })
-                    .collect()
-            });
+            let plan = fs_ops::plan_transfer(&paths, dest, progress)?;
+            for item in &plan {
+                progress.check_cancelled()?;
+                if kind == TransferKind::Move && item.source == item.target {
+                    return Err(crate::i18n::text("Элементы уже находятся в этой папке").into());
+                }
+            }
+            return Ok(plan
+                .into_iter()
+                .map(|item| TransferItem {
+                    original: item.original.into(),
+                    source: item.source.into(),
+                    target: item.target.into(),
+                    covered: item.covered,
+                    local_move_source: guard_source
+                        .then_some(EntryMetadata::Local(item.source_metadata)),
+                    replacement: None,
+                })
+                .collect());
         }
     }
 
     let mut names = HashSet::new();
     let mut plan = Vec::new();
     for source in sources {
+        progress.check_cancelled()?;
         progress.item(source.path());
         let name = source
             .path()
@@ -1019,10 +1028,15 @@ fn transfer_plan(
     Ok(plan)
 }
 
-fn keep_both_name(target: &Location, reserved: &HashSet<Location>) -> Result<Location, String> {
+fn keep_both_name(
+    target: &Location,
+    reserved: &HashSet<Location>,
+    cancel: &Cancellation,
+) -> Result<Location, TransferError> {
     let parent = target.parent().ok_or("Недопустимое назначение")?;
     let stem = target.path().file_stem().ok_or("Нет имени объекта")?;
     for index in 2..=10_000 {
+        cancel.check()?;
         let mut name = stem.to_os_string();
         name.push(format!(" ({index})"));
         if let Some(ext) = target.path().extension() {
@@ -1034,7 +1048,7 @@ fn keep_both_name(target: &Location, reserved: &HashSet<Location>) -> Result<Loc
             return Ok(candidate);
         }
     }
-    Err(format!("Не удалось подобрать свободное имя для {target}"))
+    Err(format!("Не удалось подобрать свободное имя для {target}").into())
 }
 
 pub fn transfer_with_conflicts(
@@ -1042,30 +1056,78 @@ pub fn transfer_with_conflicts(
     destination: &Location,
     kind: TransferKind,
     progress: &mut Progress,
+    decide: impl FnMut(Conflict) -> Result<Answer, String>,
+    moved: impl FnMut(&Location, &[PathBuf]),
+) -> Result<TransferSummary, String> {
+    let mut summary = TransferSummary {
+        remaining: sources.to_vec(),
+        preparing: true,
+        ..TransferSummary::default()
+    };
+    match transfer_run(
+        sources,
+        destination,
+        kind,
+        progress,
+        decide,
+        moved,
+        &mut summary,
+    ) {
+        Ok(()) => Ok(summary),
+        Err(TransferError::Cancelled) => {
+            summary.cancelled = true;
+            Ok(summary)
+        }
+        Err(TransferError::Failed(error)) if summary.preparing => Err(error),
+        Err(TransferError::Failed(error)) => {
+            let (completed, skipped, remaining) =
+                (summary.completed, summary.skipped, summary.remaining.len());
+            let paths = summary
+                .remaining
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ");
+            Err(crate::tr_format!(
+                "{error}. Завершено: {completed}. Пропущено: {skipped}. Осталось: {remaining}: {paths}. Обновите обе папки перед повтором; проверьте сообщения о восстановлении.",
+                "{error}. Completed: {completed}. Skipped: {skipped}. Remaining: {remaining}: {paths}. Refresh both folders before retrying; check any recovery instructions."
+            ))
+        }
+    }
+}
+
+fn transfer_run(
+    sources: &[Location],
+    destination: &Location,
+    kind: TransferKind,
+    progress: &mut Progress,
     mut decide: impl FnMut(Conflict) -> Result<Answer, String>,
     mut moved: impl FnMut(&Location, &[PathBuf]),
-) -> Result<TransferSummary, String> {
+    summary: &mut TransferSummary,
+) -> Result<(), TransferError> {
+    progress.check_cancelled()?;
     let plan = transfer_plan(sources, destination, kind, progress)?;
+    summary.remaining = plan.iter().map(|item| item.original.clone()).collect();
+    summary.preparing = false;
+    let cancel = progress.cancellation();
     let mut reserved: HashSet<_> = plan.iter().map(|item| item.target.clone()).collect();
     let targets = plan
         .iter()
         .map(|item| {
+            cancel.check()?;
             progress.item(item.original.path());
-            // The local plan resolves parent aliases. A same-folder move
-            // with Keep both would only rename the existing item.
             if kind == TransferKind::Move && item.source == item.target {
                 return Err(crate::i18n::text("Элементы уже находятся в этой папке").into());
             }
-            entry_metadata(&item.target)
+            entry_metadata(&item.target).map_err(Into::into)
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, TransferError>>()?;
     let count = targets.iter().flatten().count();
     let mut index = 0;
     let mut group = None;
     let mut ready = Vec::with_capacity(plan.len());
-    let mut summary = TransferSummary::default();
-
     for (mut item, target_meta) in plan.into_iter().zip(targets) {
+        cancel.check()?;
         if let Some(target_meta) = target_meta {
             progress.item(item.original.path());
             index += 1;
@@ -1078,10 +1140,8 @@ pub fn transfer_with_conflicts(
                     || canonical(&item.source)? != canonical(&item.target)?);
             #[cfg(windows)]
             let can_replace = can_replace
-                && !matches!(
-                    (item.source.local(), item.target.local()),
-                    (Some(source), Some(target)) if fs_ops::same_windows_file(source, target)
-                );
+                && !matches!((item.source.local(), item.target.local()),
+                    (Some(source), Some(target)) if fs_ops::same_windows_file(source, target));
             let decision = match group {
                 Some(Decision::Replace) if !can_replace => None,
                 saved => saved,
@@ -1097,6 +1157,8 @@ pub fn transfer_with_conflicts(
                     index,
                     count,
                 })?;
+                // A simultaneous Replace must not override a Stop request.
+                cancel.check()?;
                 progress.item(item.source.path());
                 if answer.apply_to_group {
                     group = Some(answer.decision);
@@ -1104,20 +1166,18 @@ pub fn transfer_with_conflicts(
                 answer.decision
             };
             match decision {
-                Decision::Cancel => {
-                    summary.cancelled = true;
-                    return Ok(summary);
-                }
+                Decision::Cancel => return Err(TransferError::Cancelled),
                 Decision::Skip => {
                     summary.skipped += 1;
+                    remove_pending(summary, &item.original);
                     continue;
                 }
                 Decision::KeepBoth => {
-                    item.target = keep_both_name(&item.target, &reserved)?;
+                    item.target = keep_both_name(&item.target, &reserved, &cancel)?;
                     reserved.insert(item.target.clone());
                 }
                 Decision::Replace if can_replace => {
-                    item.replacement = Some((source_meta, target_meta));
+                    item.replacement = Some((source_meta, target_meta))
                 }
                 Decision::Replace => {
                     return Err("Замена доступна только для двух разных обычных файлов".into());
@@ -1126,8 +1186,8 @@ pub fn transfer_with_conflicts(
         }
         ready.push(item);
     }
-
     for item in ready {
+        cancel.check()?;
         progress.item(item.source.path());
         let expected = item.replacement.as_ref().map(|(_, target)| target);
         if let Some((expected_source, _)) = &item.replacement {
@@ -1135,27 +1195,49 @@ pub fn transfer_with_conflicts(
                 .is_some_and(|meta| expected_source.matches_file(&meta))
             {
                 return Err(format!(
-                    "Исходный файл {} изменился после показа диалога. Завершено объектов: {}.",
-                    item.source, summary.completed
-                ));
+                    "Исходный файл {} изменился после показа диалога",
+                    item.source
+                )
+                .into());
             }
         }
-        let result = match kind {
-            TransferKind::Copy => copy_item(&item, expected, progress),
-            TransferKind::Move => move_item(&item, expected, count != 0, || {
+        cancel.check()?;
+        let mut committed = false;
+        let published = || {
+            committed = true;
+            if kind == TransferKind::Move {
                 moved(&item.original, &item.covered);
-            }),
+            }
         };
-        if let Err(error) = result {
-            let completed = summary.completed;
-            return Err(crate::tr_format!(
-                "{error}. До текущего элемента завершено: {completed}. Обновите обе папки перед повтором.",
-                "{error}. Items completed before this one: {completed}. Refresh both folders before retrying."
-            ));
-        }
-        summary.completed += 1;
+        let result = match kind {
+            TransferKind::Copy => copy_item_cancellable(&item, expected, progress, published),
+            TransferKind::Move => move_item(&item, expected, count != 0, &cancel, published),
+        };
+        // Publication precedes cleanup: a committed item stays completed even
+        // when cleanup fails, and must not appear in the retryable remainder.
+        record_item_result(summary, &item.original, committed, result)?;
     }
-    Ok(summary)
+    // Do not observe a late request after the final successful publication.
+    Ok(())
+}
+
+fn record_item_result(
+    summary: &mut TransferSummary,
+    original: &Location,
+    committed: bool,
+    result: Result<(), TransferError>,
+) -> Result<(), TransferError> {
+    if committed {
+        summary.completed += 1;
+        remove_pending(summary, original);
+    }
+    result
+}
+
+fn remove_pending(summary: &mut TransferSummary, original: &Location) {
+    if let Some(index) = summary.remaining.iter().position(|path| path == original) {
+        summary.remaining.remove(index);
+    }
 }
 
 #[cfg(test)]
@@ -1187,25 +1269,47 @@ fn canonical(location: &Location) -> Result<PathBuf, String> {
         remote(location)?.realpath(location.path()).map_err(err)
     }
 }
+#[cfg(test)]
 fn copy_item(
     item: &TransferItem,
     expected: Option<&EntryMetadata>,
     progress: &mut Progress,
 ) -> Result<(), String> {
+    copy_item_cancellable(item, expected, progress, || {}).map_err(|e| e.to_string())
+}
+
+fn copy_item_cancellable(
+    item: &TransferItem,
+    expected: Option<&EntryMetadata>,
+    progress: &mut Progress,
+    published: impl FnOnce(),
+) -> Result<(), TransferError> {
     if let (Some(source), Some(target)) = (item.source.local(), item.target.local()) {
-        return fs_ops::copy_atomically_with_progress(source, target, progress, |payload, _| {
-            publish_item(&payload.to_path_buf().into(), &item.target, expected, || {})
-        });
+        return fs_ops::copy_atomically_cancellable(
+            source,
+            target,
+            progress,
+            |payload, _| {
+                publish_item(
+                    &payload.to_path_buf().into(),
+                    &item.target,
+                    expected,
+                    published,
+                )
+            },
+            &mut |_| Ok(()),
+        );
     }
-    copy_transfer_checked(item, expected, progress, &mut |_, _| Ok(()))
+    copy_transfer_cancellable(item, expected, progress, &mut |_, _| Ok(()), published)
 }
 
 fn move_item(
     item: &TransferItem,
     expected: Option<&EntryMetadata>,
     had_conflicts: bool,
+    cancel: &Cancellation,
     moved: impl FnOnce(),
-) -> Result<(), String> {
+) -> Result<(), TransferError> {
     // The batch waits for every conflict before moving anything. Use the same
     // metadata as selection grouping, including for items with no conflict.
     if let (true, Some(planned)) = (had_conflicts, &item.local_move_source) {
@@ -1216,10 +1320,12 @@ fn move_item(
             return Err(crate::tr_format!(
                 "Исходный объект {source} изменился во время ожидания решения о конфликте",
                 "Source item {source} changed while waiting for a conflict decision"
-            ));
+            )
+            .into());
         }
     }
-    publish_item(&item.source, &item.target, expected, moved)
+    cancel.check()?;
+    publish_item(&item.source, &item.target, expected, moved).map_err(Into::into)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1229,15 +1335,31 @@ enum CopyPhase {
     EntryCopied,
 }
 
+#[cfg(test)]
 fn copy_transfer_checked(
     item: &TransferItem,
     expected: Option<&EntryMetadata>,
     progress: &mut Progress,
     observe: &mut impl FnMut(&Location, CopyPhase) -> Result<(), String>,
 ) -> Result<(), String> {
-    let manifest = TransferSourceManifest::capture(&item.source)?;
-    with_staging(&item.target, |staging, preserve| {
+    copy_transfer_cancellable(item, expected, progress, observe, || {}).map_err(|e| e.to_string())
+}
+
+fn copy_transfer_cancellable(
+    item: &TransferItem,
+    expected: Option<&EntryMetadata>,
+    progress: &mut Progress,
+    observe: &mut impl FnMut(&Location, CopyPhase) -> Result<(), String>,
+    published: impl FnOnce(),
+) -> Result<(), TransferError> {
+    progress.check_cancelled()?;
+    let cancel = progress.cancellation();
+    let manifest = TransferSourceManifest::capture_cancellable(&item.source, &cancel)?;
+    cancel.check()?;
+    with_staging_typed(&item.target, Some(&cancel), |staging, preserve| {
+        // Finish the probe handle lifecycle before checking cancellation.
         check_copy_space(manifest.bytes, &item.target, staging)?;
+        cancel.check()?;
         let payload = staging.join("payload");
         copy_tree(
             &item.source,
@@ -1247,12 +1369,15 @@ fn copy_transfer_checked(
             &manifest,
             observe,
         )?;
-        manifest.verify()?;
+        manifest.verify(&cancel)?;
+        cancel.check()?;
         if let Some(expected) = expected {
-            publish_replacement(&payload, &item.target, staging, expected, preserve)
+            publish_replacement(&payload, &item.target, staging, expected, preserve)?;
         } else {
-            rename_without_replacing(&payload, &item.target)
+            rename_without_replacing(&payload, &item.target)?;
         }
+        published();
+        Ok(())
     })
 }
 
@@ -1393,6 +1518,31 @@ fn with_staging(
     target: &Location,
     work: impl FnOnce(&Location, &mut bool) -> Result<(), String>,
 ) -> Result<(), String> {
+    with_staging_typed(target, None, |staging, preserve| {
+        work(staging, preserve).map_err(Into::into)
+    })
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+fn staging_result(
+    result: Result<(), String>,
+    cleanup: Result<(), String>,
+    staging: &Location,
+    target: &Location,
+) -> Result<(), String> {
+    staging_result_typed(result.map_err(Into::into), cleanup, staging, target)
+        .map_err(|error| error.to_string())
+}
+
+fn with_staging_typed(
+    target: &Location,
+    cancel: Option<&Cancellation>,
+    work: impl FnOnce(&Location, &mut bool) -> Result<(), TransferError>,
+) -> Result<(), TransferError> {
+    if let Some(cancel) = cancel {
+        cancel.check()?;
+    }
     let parent = target.parent().ok_or("Недопустимое назначение")?;
     let mut preserve = false;
     if let Some(parent) = parent.local() {
@@ -1412,12 +1562,15 @@ fn with_staging(
             let _ = staging.keep();
             return result;
         }
-        return staging_result(result, staging.close().map_err(err), &location, target);
+        return staging_result_typed(result, staging.close().map_err(err), &location, target);
     }
 
     let sftp = remote(target)?;
     let mut staging = None;
     for counter in 0..100 {
+        if let Some(cancel) = cancel {
+            cancel.check()?;
+        }
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -1431,7 +1584,7 @@ fn with_staging(
                 staging = Some(candidate);
                 break;
             }
-            Err(e) if sftp.lstat(candidate.path()).is_err() => return Err(err(e)),
+            Err(e) if sftp.lstat(candidate.path()).is_err() => return Err(err(e).into()),
             Err(_) => {}
         }
     }
@@ -1448,25 +1601,29 @@ fn with_staging(
         MAX_TREE_DEPTH + 1,
         &mut Progress::default(),
     );
-    staging_result(result, cleanup, &staging, target)
+    staging_result_typed(result, cleanup, &staging, target)
 }
 
-fn staging_result(
-    result: Result<(), String>,
+fn staging_result_typed(
+    result: Result<(), TransferError>,
     cleanup: Result<(), String>,
     staging: &Location,
     target: &Location,
-) -> Result<(), String> {
+) -> Result<(), TransferError> {
     match cleanup {
         Ok(()) => result,
         Err(e) => {
-            let outcome = result.err().unwrap_or_else(|| {
-                crate::tr_format!("Объект {target} опубликован", "Item {target} was published")
-            });
+            let outcome = result
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_else(|| {
+                    crate::tr_format!("Объект {target} опубликован", "Item {target} was published")
+                });
             Err(crate::tr_format!(
                 "{outcome}. Осталась временная папка {staging}: {e}",
                 "{outcome}. Temporary folder remains at {staging}: {e}"
-            ))
+            )
+            .into())
         }
     }
 }
@@ -1519,12 +1676,13 @@ impl TransferSourceEntry {
         }
     }
 
-    fn verify(&self, source: &Location) -> Result<(), String> {
+    fn verify(&self, source: &Location, cancel: &Cancellation) -> Result<(), TransferError> {
+        cancel.check()?;
         let actual = entry_metadata(source)?.ok_or_else(|| changed_source(source))?;
         self.verify_metadata(source, &actual)?;
         if let Some(children) = &self.children {
-            if *children != source_children(source)? {
-                return Err(changed_source(source));
+            if *children != source_children(source, cancel)? {
+                return Err(changed_source(source).into());
             }
         }
         Ok(())
@@ -1546,39 +1704,37 @@ fn validate_source_child_name(source: &Location, name: &OsStr) -> Result<(), Str
         .map_err(|error| format!("Неподдерживаемое имя для передачи SFTP в {source}: {error}"))
 }
 
-fn source_children(source: &Location) -> Result<Vec<OsString>, String> {
-    let mut names = if let Some(path) = source.local() {
-        fs::read_dir(path)
-            .map_err(err)?
-            .map(|entry| entry.map(|entry| entry.file_name()).map_err(err))
-            .collect::<Result<Vec<_>, _>>()?
+fn source_children(
+    source: &Location,
+    cancel: &Cancellation,
+) -> Result<Vec<OsString>, TransferError> {
+    cancel.check()?;
+    let mut names = Vec::new();
+    if let Some(path) = source.local() {
+        for entry in fs::read_dir(path).map_err(err)? {
+            cancel.check()?;
+            names.push(entry.map_err(err)?.file_name());
+        }
     } else {
-        remote(source)?
-            .readdir(source.path())
-            .map_err(err)?
-            .into_iter()
-            .map(|(path, _)| {
-                // Use raw names, not the UI's lossy UTF-8 display names. Refuse
-                // unexpected server paths instead of traversing outside source.
-                let name = path.strip_prefix(source.path()).map_err(err)?;
-                let mut parts = name.components();
-                match (parts.next(), parts.next()) {
-                    (Some(Component::Normal(name)), None) => Ok(name.to_os_string()),
-                    _ => Err(format!("Недопустимое имя SFTP: {}", path.display())),
-                }
-            })
-            .collect::<Result<Vec<_>, String>>()?
-    };
-    // All SFTP transfer directions share the UI/cleanup name contract. Keep
-    // raw names for comparison, but reject unsupported names before staging;
-    // otherwise we could create a tree that neither listing nor cleanup reads.
-    // Local -> local copies use fs_ops and retain their native name support.
+        for (path, _) in remote(source)?.readdir(source.path()).map_err(err)? {
+            cancel.check()?;
+            let name = path.strip_prefix(source.path()).map_err(err)?;
+            let mut parts = name.components();
+            match (parts.next(), parts.next()) {
+                (Some(Component::Normal(name)), None) => names.push(name.to_os_string()),
+                _ => return Err(format!("Недопустимое имя SFTP: {}", path.display()).into()),
+            }
+        }
+    }
     for name in &names {
+        cancel.check()?;
         validate_source_child_name(source, name)?;
     }
+    cancel.check()?;
     names.sort();
+    cancel.check()?;
     if names.windows(2).any(|pair| pair[0] == pair[1]) {
-        return Err(format!("Повторяющиеся имена в источнике {source}"));
+        return Err(format!("Повторяющиеся имена в источнике {source}").into());
     }
     Ok(names)
 }
@@ -1588,16 +1744,30 @@ struct TransferSourceManifest {
     bytes: u64,
 }
 impl TransferSourceManifest {
-    fn capture(source: &Location) -> Result<Self, String> {
+    #[cfg(test)]
+    fn capture(source: &Location) -> Result<Self, TransferError> {
+        Self::capture_cancellable(source, &Cancellation::default())
+    }
+
+    fn capture_cancellable(
+        source: &Location,
+        cancel: &Cancellation,
+    ) -> Result<Self, TransferError> {
         let mut manifest = Self {
             entries: BTreeMap::new(),
             bytes: 0,
         };
-        manifest.capture_entry(source, 0)?;
+        manifest.capture_entry(source, 0, cancel)?;
         Ok(manifest)
     }
 
-    fn capture_entry(&mut self, source: &Location, depth: usize) -> Result<(), String> {
+    fn capture_entry(
+        &mut self,
+        source: &Location,
+        depth: usize,
+        cancel: &Cancellation,
+    ) -> Result<(), TransferError> {
+        cancel.check()?;
         if depth > MAX_TREE_DEPTH {
             return Err("Слишком большая глубина папок (более 128)".into());
         }
@@ -1611,7 +1781,7 @@ impl TransferSourceManifest {
                 if stat.perm.is_none()
                     || (stat.is_file() && (stat.size.is_none() || stat.mtime.is_none()))
                 {
-                    return Err(format!("Сервер не сообщил тип, размер или время изменения {source}; безопасная проверка источника недоступна"));
+                    return Err(format!("Сервер не сообщил тип, размер или время изменения {source}; безопасная проверка источника недоступна").into());
                 }
                 (stat.is_dir(), stat.is_file())
             }
@@ -1619,10 +1789,11 @@ impl TransferSourceManifest {
         if !is_dir && !is_file {
             return Err(format!(
                 "SFTP-копирование ссылок и специальных файлов пока недоступно: {source}"
-            ));
+            )
+            .into());
         }
         let children = if is_dir {
-            Some(source_children(source)?)
+            Some(source_children(source, cancel)?)
         } else {
             None
         };
@@ -1635,18 +1806,18 @@ impl TransferSourceManifest {
         }
         if let Some(children) = &entry.children {
             for name in children {
-                self.capture_entry(&source.join(name), depth + 1)?;
+                self.capture_entry(&source.join(name), depth + 1, cancel)?;
             }
         }
-        entry.verify(source)?;
+        entry.verify(source, cancel)?;
         self.entries.insert(source.clone(), entry);
         Ok(())
     }
 
-    fn verify(&self) -> Result<(), String> {
+    fn verify(&self, cancel: &Cancellation) -> Result<(), TransferError> {
         // Revisit early files too; parent mtime does not track child contents.
         for (source, entry) in &self.entries {
-            entry.verify(source)?;
+            entry.verify(source, cancel)?;
         }
         Ok(())
     }
@@ -1682,13 +1853,15 @@ fn copy_tree(
     progress: &mut Progress,
     manifest: &TransferSourceManifest,
     observe: &mut impl FnMut(&Location, CopyPhase) -> Result<(), String>,
-) -> Result<(), String> {
+) -> Result<(), TransferError> {
+    progress.check_cancelled()?;
     progress.item(source.path());
+    let cancel = progress.cancellation();
     let entry = manifest
         .entries
         .get(source)
         .ok_or_else(|| changed_source(source))?;
-    entry.verify(source)?;
+    entry.verify(source, &cancel)?;
     let local_write_error = |e| {
         local_parent
             .and_then(|parent| fs_ops::copy_space_error(parent, &e))
@@ -1710,8 +1883,10 @@ fn copy_tree(
                 observe,
             )?;
         }
-        return observe(source, CopyPhase::EntryCopied);
+        cancel.check()?;
+        return observe(source, CopyPhase::EntryCopied).map_err(Into::into);
     }
+    cancel.check()?;
     let mut input = if let Some(path) = source.local() {
         SourceReader::Local(fs_ops::open_regular_source(path).map_err(err)?)
     } else {
@@ -1723,6 +1898,7 @@ fn copy_tree(
     // turn a copy into an unbounded stream. Handle/path checks detect growth.
     let expected_size = entry.size();
     let mut bounded = (&mut input).take(expected_size);
+    cancel.check()?;
     let written = if let Some(path) = target.local() {
         let mut output = fs::OpenOptions::new()
             .write(true)
@@ -1736,7 +1912,8 @@ fn copy_tree(
                 &mut bounded,
                 &mut output,
             )
-            .map_err(local_write_error)?;
+            .map_err(|error| TransferError::io(error, local_write_error))?;
+        cancel.check()?;
         output.sync_all().map_err(local_write_error)?;
         written
     } else {
@@ -1755,18 +1932,20 @@ fn copy_tree(
                 &mut bounded,
                 &mut output,
             )
-            .map_err(err)?;
+            .map_err(|error| TransferError::io(error, err))?;
+        cancel.check()?;
         output.flush().map_err(err)?;
         output.close().map_err(err)?;
         written
     };
     observe(source, CopyPhase::Read)?;
     if written != expected_size {
-        return Err(changed_source(source));
+        return Err(changed_source(source).into());
     }
     entry.verify_metadata(source, &input.metadata()?)?;
-    entry.verify(source)?;
-    observe(source, CopyPhase::EntryCopied)
+    entry.verify(source, &cancel)?;
+    cancel.check()?;
+    observe(source, CopyPhase::EntryCopied).map_err(Into::into)
 }
 
 fn remove_remote_tree(
@@ -1855,6 +2034,244 @@ pub fn preview_data(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancellation_reports_normalized_batch_remainder_and_skips() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root: Location = fixture.path().to_path_buf().into();
+        let destination = create_directory(&root, "destination").unwrap();
+        let first = root.join("first");
+        let skipped = root.join("skipped");
+        let tree = create_directory(&root, "tree").unwrap();
+        let third = root.join("third");
+        fs::write(first.path(), b"first payload").unwrap();
+        fs::write(skipped.path(), b"skip source").unwrap();
+        fs::write(destination.join("skipped").path(), b"old destination").unwrap();
+        fs::write(tree.join("large.bin").path(), vec![0x5a; 3 * 1024 * 1024]).unwrap();
+        fs::write(third.path(), b"third payload").unwrap();
+        let inspect_destination = destination.clone();
+        let cancel = Cancellation::at_checkpoint(move || {
+            inspect_destination.join("first").path().exists()
+                && fs::read_dir(inspect_destination.path())
+                    .unwrap()
+                    .filter_map(Result::ok)
+                    .any(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with(".pawcommander-copy-")
+                            && fs::metadata(entry.path().join("payload/large.bin"))
+                                .is_ok_and(|meta| meta.len() >= 1024 * 1024)
+                    })
+        });
+        let mut progress = Progress::with_cancellation(cancel);
+        let report = transfer_with_conflicts(
+            &[
+                first.clone(),
+                skipped.clone(),
+                tree.clone(),
+                tree.join("large.bin"),
+                tree.clone(),
+                third.clone(),
+            ],
+            &destination,
+            TransferKind::Copy,
+            &mut progress,
+            |_| {
+                Ok(Answer {
+                    decision: Decision::Skip,
+                    apply_to_group: false,
+                })
+            },
+            |_, _| panic!("copy"),
+        )
+        .unwrap();
+        assert!(report.cancelled);
+        assert!(!report.preparing);
+        assert_eq!((report.completed, report.skipped), (1, 1));
+        assert_eq!(report.remaining, vec![tree.clone(), third.clone()]);
+        assert_eq!(
+            fs::read(destination.join("first").path()).unwrap(),
+            b"first payload"
+        );
+        assert_eq!(
+            fs::read(destination.join("skipped").path()).unwrap(),
+            b"old destination"
+        );
+        assert!(!destination.join("tree").path().exists());
+        assert!(!destination.join("third").path().exists());
+        assert_eq!(
+            fs::read(tree.join("large.bin").path()).unwrap(),
+            vec![0x5a; 3 * 1024 * 1024]
+        );
+        assert_eq!(fs::read_dir(destination.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn preparation_and_conflict_cancellation_keep_pending_identities() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root: Location = fixture.path().to_path_buf().into();
+        let destination = create_directory(&root, "destination").unwrap();
+        let source = root.join("source");
+        fs::write(source.path(), b"new").unwrap();
+        fs::write(destination.join("source").path(), b"old").unwrap();
+        let mut progress = Progress::default();
+        progress.cancellation().request();
+        let report = transfer_with_conflicts(
+            &[source.clone(), source.clone()],
+            &destination,
+            TransferKind::Copy,
+            &mut progress,
+            |_| panic!("preparing"),
+            |_, _| panic!("copy"),
+        )
+        .unwrap();
+        assert!(report.preparing && report.cancelled);
+        assert_eq!(report.remaining, vec![source.clone(), source.clone()]);
+        let mut progress = Progress::default();
+        let cancel = progress.cancellation();
+        let report = transfer_with_conflicts(
+            std::slice::from_ref(&source),
+            &destination,
+            TransferKind::Copy,
+            &mut progress,
+            |_| {
+                cancel.request();
+                Ok(Answer {
+                    decision: Decision::Replace,
+                    apply_to_group: false,
+                })
+            },
+            |_, _| panic!("copy"),
+        )
+        .unwrap();
+        assert!(report.cancelled && !report.preparing);
+        assert_eq!(report.remaining, vec![source]);
+        assert_eq!(fs::read(destination.join("source").path()).unwrap(), b"old");
+        assert_eq!(report.completed, 0);
+    }
+
+    #[test]
+    fn move_cancellation_preserves_committed_events_and_late_final_stop_is_success() {
+        for count in [1, 3] {
+            let fixture = tempfile::tempdir().unwrap();
+            let root: Location = fixture.path().to_path_buf().into();
+            let destination = create_directory(&root, "destination").unwrap();
+            let sources: Vec<_> = (0..count)
+                .map(|index| root.join(format!("file-{index}")))
+                .collect();
+            for source in &sources {
+                fs::write(source.path(), b"payload").unwrap();
+            }
+            let mut progress = Progress::default();
+            let cancel = progress.cancellation();
+            let mut moved = Vec::new();
+            let report = transfer_with_conflicts(
+                &sources,
+                &destination,
+                TransferKind::Move,
+                &mut progress,
+                |_| panic!("no conflicts"),
+                |source, _| {
+                    moved.push(source.clone());
+                    cancel.request();
+                },
+            )
+            .unwrap();
+            assert_eq!(moved, vec![sources[0].clone()]);
+            assert_eq!(report.completed, 1);
+            assert_eq!(report.cancelled, count != 1);
+            assert_eq!(report.remaining, sources[1..]);
+            assert!(!sources[0].path().exists());
+            assert_eq!(
+                fs::read(destination.join("file-0").path()).unwrap(),
+                b"payload"
+            );
+            for source in &sources[1..] {
+                assert!(source.path().exists());
+            }
+        }
+    }
+
+    #[test]
+    fn cancellation_and_committed_cleanup_failures_are_real_errors_with_truthful_accounting() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root: Location = fixture.path().to_path_buf().into();
+        let source = root.join("source");
+        let target = root.join("target");
+        let pending = root.join("pending");
+        fs::write(source.path(), b"payload").unwrap();
+        let mut committed = false;
+        let mut retained = None;
+        let result = fs_ops::copy_atomically_cancellable(
+            source.path(),
+            target.path(),
+            &mut Progress::default(),
+            |payload, destination| {
+                fs::rename(payload, destination).unwrap();
+                committed = true;
+                let staging = payload.parent().unwrap();
+                fs::remove_dir(staging).unwrap();
+                // Deterministic cleanup failure independent of uid/permissions.
+                fs::write(staging, b"cleanup obstacle").unwrap();
+                retained = Some(staging.to_path_buf());
+                Ok(())
+            },
+            &mut |_| Ok(()),
+        );
+        let mut summary = TransferSummary {
+            remaining: vec![source.clone(), pending.clone()],
+            ..TransferSummary::default()
+        };
+        let error = record_item_result(&mut summary, &source, committed, result).unwrap_err();
+        assert!(matches!(error, TransferError::Failed(_)));
+        assert_eq!(summary.completed, 1);
+        assert_eq!(summary.remaining, vec![pending]);
+        let retained = retained.unwrap();
+        assert!(error.to_string().contains(&retained.display().to_string()));
+        assert_eq!(fs::read(&retained).unwrap(), b"cleanup obstacle");
+        assert_eq!(fs::read(target.path()).unwrap(), b"payload");
+        let cancelled_error = staging_result_typed(
+            Err(TransferError::Cancelled),
+            Err("cleanup denied".into()),
+            &root,
+            &target,
+        )
+        .unwrap_err();
+        assert!(matches!(cancelled_error, TransferError::Failed(_)));
+        assert!(cancelled_error.to_string().contains("cleanup denied"));
+    }
+
+    #[test]
+    fn replacement_critical_section_defers_cancellation_through_publication_and_cleanup() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root: Location = fixture.path().to_path_buf().into();
+        let source = root.join("source");
+        let target = root.join("target");
+        fs::write(source.path(), b"new payload").unwrap();
+        fs::write(target.path(), b"old payload").unwrap();
+        let expected = entry_metadata(&target).unwrap().unwrap();
+        let cancel = Cancellation::default();
+        with_staging(&target, |staging, preserve| {
+            publish_replacement_with_backup_rename(
+                &source,
+                &target,
+                staging,
+                &expected,
+                preserve,
+                |from, to| {
+                    rename_without_replacing(from, to)?;
+                    cancel.request();
+                    Ok(())
+                },
+            )
+        })
+        .unwrap();
+        assert!(cancel.is_requested());
+        assert_eq!(fs::read(target.path()).unwrap(), b"new payload");
+        assert!(!source.path().exists());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    }
 
     #[test]
     fn remote_source_comparison_requires_observable_metadata_and_ignores_atime() {
@@ -2123,11 +2540,13 @@ mod tests {
                         b"original"
                     }
                 );
-                assert!(fs::read_dir(remote_root.path()).unwrap().all(|entry| !entry
-                    .unwrap()
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(".pawcommander-sftp-")));
+                assert!(fs::read_dir(remote_root.path()).unwrap().all(|entry| {
+                    !entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".pawcommander-sftp-")
+                }));
                 if direction == "remote-copy" {
                     // The extra staging allowance must not expand the depth
                     // supported by ordinary user-requested remote deletion.
@@ -2976,6 +3395,123 @@ mod tests {
         assert!(fs::read_dir(destination.path()).unwrap().next().is_none());
     }
 
+    fn check_sftp_cancellation(local_root: &Location, remote_root: &Location) {
+        let bytes = vec![0x6a; 3 * 64 * 1024];
+        for (direction, from_root, to_root) in [
+            ("upload", local_root, remote_root),
+            ("download", remote_root, local_root),
+            ("remote-copy", remote_root, remote_root),
+        ] {
+            for replace in [false, true] {
+                let name = format!("cancel-{direction}-{replace}");
+                let from = create_directory(from_root, &format!("{name}-from")).unwrap();
+                let to = create_directory(to_root, &format!("{name}-to")).unwrap();
+                let source = from.join("payload");
+                let target = to.join("payload");
+                fs::write(source.path(), &bytes).unwrap();
+                if replace {
+                    fs::write(target.path(), b"previous target").unwrap();
+                }
+                let inspect = to.path().to_path_buf();
+                let cancel = Cancellation::at_checkpoint(move || {
+                    fs::read_dir(&inspect)
+                        .unwrap()
+                        .filter_map(Result::ok)
+                        .any(|entry| {
+                            let name = entry.file_name();
+                            let name = name.to_string_lossy();
+                            (name.starts_with(".pawcommander-sftp-")
+                                || name.starts_with(".pawcommander-transfer-"))
+                                && fs::metadata(entry.path().join("payload"))
+                                    .is_ok_and(|meta| meta.len() > 0)
+                        })
+                });
+                let mut progress = Progress::with_cancellation(cancel);
+                let report = transfer_with_conflicts(
+                    std::slice::from_ref(&source),
+                    &to,
+                    TransferKind::Copy,
+                    &mut progress,
+                    |_| {
+                        Ok(Answer {
+                            decision: Decision::Replace,
+                            apply_to_group: false,
+                        })
+                    },
+                    |_, _| panic!("copy"),
+                )
+                .unwrap();
+                assert!(report.cancelled && !report.preparing, "{name}");
+                assert_eq!((report.completed, report.skipped), (0, 0), "{name}");
+                assert_eq!(report.remaining, vec![source.clone()], "{name}");
+                assert_eq!(fs::read(source.path()).unwrap(), bytes, "{name}");
+                if replace {
+                    assert_eq!(
+                        fs::read(target.path()).unwrap(),
+                        b"previous target",
+                        "{name}"
+                    );
+                } else {
+                    assert!(!target.path().exists(), "{name}");
+                }
+                assert_eq!(
+                    fs::read_dir(to.path()).unwrap().count(),
+                    usize::from(replace),
+                    "{name}: staging removed"
+                );
+                eprintln!("cancellation {name}: source/target/remainder/cleanup passed");
+            }
+        }
+        for count in [1, 2] {
+            let from = create_directory(remote_root, &format!("cancel-move-{count}-from")).unwrap();
+            let to = create_directory(remote_root, &format!("cancel-move-{count}-to")).unwrap();
+            let sources: Vec<_> = (0..count)
+                .map(|index| from.join(format!("file-{index}")))
+                .collect();
+            for source in &sources {
+                fs::write(source.path(), &bytes).unwrap();
+            }
+            fs::write(to.join("file-0").path(), b"previous target").unwrap();
+            let mut progress = Progress::default();
+            let cancel = progress.cancellation();
+            let mut moved = Vec::new();
+            let report = transfer_with_conflicts(
+                &sources,
+                &to,
+                TransferKind::Move,
+                &mut progress,
+                |_| {
+                    Ok(Answer {
+                        decision: Decision::Replace,
+                        apply_to_group: false,
+                    })
+                },
+                |source, _| {
+                    moved.push(source.clone());
+                    cancel.request();
+                },
+            )
+            .unwrap();
+            assert_eq!(report.completed, 1);
+            assert_eq!(report.cancelled, count != 1);
+            assert_eq!(report.remaining, sources[1..]);
+            assert_eq!(moved, vec![sources[0].clone()]);
+            assert!(!sources[0].path().exists());
+            assert_eq!(fs::read(to.join("file-0").path()).unwrap(), bytes);
+            assert_eq!(
+                fs::read_dir(to.path()).unwrap().count(),
+                1,
+                "remote move cleanup"
+            );
+            for source in &sources[1..] {
+                assert_eq!(fs::read(source.path()).unwrap(), bytes);
+            }
+            eprintln!(
+                "cancellation remote move {count}: commit/event/remainder/late-stop/cleanup passed"
+            );
+        }
+    }
+
     // Run with scripts/test-sftp.sh: a disposable loopback-only OpenSSH server
     // and generated keys, without using the user's real known_hosts or keys.
     #[test]
@@ -3387,16 +3923,19 @@ mod tests {
             .is_err());
             assert!(!remote_root.join(source.name()).path().exists());
         }
-        assert!(fs::read_dir(remote_root.path()).unwrap().all(|e| !e
-            .unwrap()
-            .file_name()
-            .to_string_lossy()
-            .starts_with(".pawcommander-sftp-")));
-        assert!(fs::read_dir(downloads.path()).unwrap().all(|e| !e
-            .unwrap()
-            .file_name()
-            .to_string_lossy()
-            .starts_with(".pawcommander-transfer-")));
+        assert!(fs::read_dir(remote_root.path()).unwrap().all(|e| {
+            !e.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".pawcommander-sftp-")
+        }));
+        assert!(fs::read_dir(downloads.path()).unwrap().all(|e| {
+            !e.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".pawcommander-transfer-")
+        }));
+        check_sftp_cancellation(&local_root, &remote_root);
         check_sftp_source_changes(&local_root, &remote_root);
         check_sftp_source_change_cleanup_at_depth_limit(&local_root, &remote_root);
         #[cfg(unix)]
