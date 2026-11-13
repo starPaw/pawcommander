@@ -322,7 +322,7 @@ fn reserved(chord: Chord) -> bool {
         logical_key: key,
         modifiers: m,
     } = chord;
-    // egui-winit consumes clipboard presses before they reach egui.
+    // Clipboard shortcuts belong to the platform/app clipboard integration.
     if matches!(key, Key::Copy | Key::Cut | Key::Paste)
         || (m.command && matches!(key, Key::C | Key::X | Key::V))
         || (cfg!(target_os = "windows")

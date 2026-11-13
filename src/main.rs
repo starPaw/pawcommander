@@ -51,6 +51,9 @@ fn main() -> eframe::Result {
         .with_title_shown(false);
     let options = eframe::NativeOptions {
         viewport,
+        // macOS file paste needs the modifiers from the press, including Option.
+        // The app restores text clipboard events in the root and Quick Look viewports.
+        clipboard_shortcuts: !cfg!(target_os = "macos"),
         ..Default::default()
     };
     eframe::run_native(

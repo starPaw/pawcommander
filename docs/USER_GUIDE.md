@@ -42,6 +42,8 @@ Copy and cut local files to the system clipboard with `Cmd/Ctrl+C` / `X`; paste 
 - **Windows:** Explorer and PawCommander exchange local file paths and copy/move intent. Virtual items without local paths are not supported.
 - **Linux:** Nautilus and Dolphin clipboard formats are supported. X11/XWayland needs an accessible clipboard; Wayland requires `ext-data-control` or `wlr-data-control`. Keep PawCommander open until the receiving app has pasted.
 
+On macOS, file paste starts when `V` is pressed; you can release `Cmd` and `Option` in any order. Text fields keep the usual `Cmd+C`, `Cmd+X`, and `Cmd+V` behavior.
+
 Drag a selection onto a folder, pane, tab, or breadcrumb. Internal drops copy by default; holding `Shift` moves local items or items within the same SFTP connection. Cross-connection and local/remote drops copy only. `Esc` cancels an internal drag.
 
 Incoming drops from a system file manager always copy. To drag local files into another application, drag the selection across the window edge. Outgoing native drags offer copy on macOS, Windows, Linux X11 and Wayland; the receiving app may copy, open or attach the files. Shift does not authorize an external move. Press Esc to cancel. Returning an outgoing Windows/Linux drag to PawCommander cancels that handoff; start a new internal drag to transfer between panes. The receiving app handles its own conflicts and copy progress. Remote items must first be copied locally; remote file promises are not implemented.

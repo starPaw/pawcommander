@@ -215,13 +215,19 @@ impl PawCommander {
         let mut actions = Vec::new();
         let mut pane = self.active;
         ctx.input_mut(|input| {
+            let clipboard_enabled = !focused && input.focused;
             if !focused {
                 for (index, event) in pane_key_presses {
                     input.events.insert(index.min(input.events.len()), event);
                 }
             }
             input.events.retain(|event| {
-                let action = if let egui::Event::Key {
+                let action = if let Some(action) = clipboard_enabled
+                    .then(|| file_clipboard_action(event))
+                    .flatten()
+                {
+                    Some(action)
+                } else if let egui::Event::Key {
                     key,
                     physical_key,
                     modifiers,
@@ -303,8 +309,6 @@ impl PawCommander {
                             Some(Action::Shortcut(command))
                         }
                     }
-                } else if !focused {
-                    file_clipboard_action(event)
                 } else {
                     None
                 };

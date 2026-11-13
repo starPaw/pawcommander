@@ -1,7 +1,7 @@
 use super::{local_file_url, FileList};
 use objc2::rc::{autoreleasepool, Retained};
 use objc2::runtime::ProtocolObject;
-use objc2_app_kit::{NSPasteboard, NSPasteboardTypeFileURL};
+use objc2_app_kit::{NSPasteboard, NSPasteboardTypeFileURL, NSPasteboardTypeString};
 use objc2_foundation::{NSArray, NSString, NSURL};
 use std::collections::HashSet;
 use std::ffi::{CStr, CString, OsStr};
@@ -24,6 +24,14 @@ struct Selection {
 impl SystemClipboard {
     pub fn new(_: &eframe::CreationContext<'_>) -> Self {
         Self::default()
+    }
+
+    pub fn read_text() -> Option<String> {
+        autoreleasepool(|_| unsafe {
+            NSPasteboard::generalPasteboard()
+                .stringForType(NSPasteboardTypeString)
+                .map(|text| text.to_string())
+        })
     }
 
     pub fn write(&mut self, paths: &[PathBuf], cut: bool) -> Result<(), String> {

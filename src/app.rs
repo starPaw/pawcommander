@@ -181,6 +181,8 @@ impl eframe::App for PawCommander {
             self.palette_release_key = None;
             return;
         }
+        #[cfg(target_os = "macos")]
+        clipboard::macos_clipboard_events(&mut input.events);
         // A held key that closed the palette must not activate a control behind it.
         input.events.retain(|event| match *event {
             egui::Event::Key { key, pressed, .. } if self.palette_release_key == Some(key) => {

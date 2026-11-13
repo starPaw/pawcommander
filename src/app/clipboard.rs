@@ -45,21 +45,69 @@ pub(super) fn file_clipboard_action(event: &egui::Event) -> Option<Action> {
     match event {
         egui::Event::Copy => Some(Action::Copy(false)),
         egui::Event::Cut => Some(Action::Copy(true)),
-        // egui-winit intercepts the press and emits Event::Paste only if the OS buffer
-        // holds text. The release also arrives for a buffer containing just file URLs.
+        // macOS receives presses directly; the other backends still intercept them.
         egui::Event::Key {
             key: egui::Key::V,
             modifiers,
-            pressed: false,
+            pressed,
+            repeat: false,
             ..
-        } if modifiers.command
+        } if *pressed == cfg!(target_os = "macos")
+            && modifiers.command
             && !modifiers.shift
             && (!modifiers.alt || cfg!(target_os = "macos")) =>
         {
             Some(Action::Paste(modifiers.alt))
         }
+        #[cfg(target_os = "macos")]
+        egui::Event::Key {
+            key: egui::Key::Paste,
+            pressed: true,
+            repeat: false,
+            ..
+        } => Some(Action::Paste(false)),
         _ => None,
     }
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn macos_clipboard_events(events: &mut Vec<egui::Event>) {
+    translate_macos_clipboard_events(events, crate::file_clipboard::SystemClipboard::read_text);
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn translate_macos_clipboard_events(
+    events: &mut Vec<egui::Event>,
+    mut read_text: impl FnMut() -> Option<String>,
+) {
+    let mut translated = Vec::with_capacity(events.len());
+    for event in std::mem::take(events) {
+        if let egui::Event::Key {
+            key,
+            modifiers,
+            pressed: true,
+            ..
+        } = event
+        {
+            if key == egui::Key::Copy || (key == egui::Key::C && modifiers.command_only()) {
+                translated.push(egui::Event::Copy);
+                continue;
+            }
+            if key == egui::Key::Cut || (key == egui::Key::X && modifiers.command_only()) {
+                translated.push(egui::Event::Cut);
+                continue;
+            }
+            if (key == egui::Key::Paste || (key == egui::Key::V && modifiers.command_only()))
+                && let Some(text) = read_text().filter(|text| !text.is_empty())
+            {
+                translated.push(egui::Event::Paste(text.replace("\r\n", "\n")));
+            }
+        }
+        // Keep V/Paste for file dispatch after egui has determined repeat and focus.
+        // TextEdit consumes Paste; pane dispatch ignores it and uses this press.
+        translated.push(event);
+    }
+    *events = translated;
 }
 
 impl PawCommander {

@@ -570,6 +570,7 @@ fn translate(english: bool, russian: &'static str) -> &'static str {
         "Нет подходящих видимых объектов" => "No matching visible items",
         "В корзину с подтверждением" => "Move to trash with confirmation",
         "Для локальных файлов используется системный буфер, если он доступен. Для SFTP используется буфер PawCommander." => "Local files use the system clipboard when available. SFTP files use the PawCommander clipboard.",
+        "Вставка файлов срабатывает при нажатии V. Отпускайте Cmd и Option в любом порядке. В текстовых полях работают обычные Cmd+C, Cmd+X и Cmd+V." => "File paste starts when V is pressed. Release Cmd and Option in any order. Text fields keep the usual Cmd+C, Cmd+X and Cmd+V shortcuts.",
         "При совпадении имён выберите действие в диалоге. Удаление SFTP — навсегда с подтверждением; локальные файлы отправляются в корзину." => "Choose an action in the name conflict dialog. SFTP deletion is permanent and requires confirmation; local files go to the trash.",
         "Новая папка" => "New folder",
         "Переименовать" => "Rename",
