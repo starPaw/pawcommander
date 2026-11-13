@@ -76,8 +76,12 @@ pub(crate) enum TransferError {
 }
 
 impl TransferError {
+    pub fn is_cancelled_io(error: &io::Error) -> bool {
+        error.get_ref().is_some_and(|e| e.is::<Cancelled>())
+    }
+
     pub fn io(error: io::Error, context: impl FnOnce(io::Error) -> String) -> Self {
-        if error.get_ref().is_some_and(|e| e.is::<Cancelled>()) {
+        if Self::is_cancelled_io(&error) {
             Self::Cancelled
         } else {
             Self::Failed(context(error))

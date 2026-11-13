@@ -1059,18 +1059,13 @@ pub fn transfer_with_conflicts(
     decide: impl FnMut(Conflict) -> Result<Answer, String>,
     moved: impl FnMut(&Location, &[PathBuf]),
 ) -> Result<TransferSummary, String> {
-    progress.results.plan(
-        sources
-            .iter()
-            .map(|source| {
-                let target = source
-                    .path()
-                    .file_name()
-                    .map(|name| destination.join(name).display());
-                (source.clone(), target)
-            })
-            .collect(),
-    );
+    progress.results.plan(sources.iter().map(|source| {
+        let target = source
+            .path()
+            .file_name()
+            .map(|name| destination.join(name).display());
+        (source.clone(), target)
+    }));
     let mut summary = TransferSummary {
         remaining: sources.to_vec(),
         preparing: true,
@@ -1122,8 +1117,7 @@ fn transfer_run(
     let plan = transfer_plan(sources, destination, kind, progress)?;
     progress.results.plan(
         plan.iter()
-            .map(|item| (item.original.clone(), Some(item.target.display())))
-            .collect(),
+            .map(|item| (item.original.clone(), Some(item.target.display()))),
     );
     summary.remaining = plan.iter().map(|item| item.original.clone()).collect();
     summary.preparing = false;
@@ -1398,6 +1392,9 @@ fn copy_transfer_cancellable(
     progress.check_cancelled()?;
     let cancel = progress.cancellation();
     let manifest = TransferSourceManifest::capture_cancellable(&item.source, &cancel)?;
+    progress
+        .results
+        .descendants(&item.source, &item.target, manifest.entries.keys().cloned());
     cancel.check()?;
     with_staging_typed(&item.target, Some(&cancel), |staging, preserve| {
         // Finish the probe handle lifecycle before checking cancellation.
@@ -1412,7 +1409,13 @@ fn copy_transfer_cancellable(
             &manifest,
             observe,
         )?;
-        manifest.verify(&cancel)?;
+        manifest.verify(&cancel, |source, error| {
+            progress.results.staged(
+                source,
+                Some(error.to_string()),
+                matches!(error, TransferError::Cancelled),
+            )
+        })?;
         cancel.check()?;
         if let Some(expected) = expected {
             publish_replacement(&payload, &item.target, staging, expected, preserve)?;
@@ -1857,10 +1860,17 @@ impl TransferSourceManifest {
         Ok(())
     }
 
-    fn verify(&self, cancel: &Cancellation) -> Result<(), TransferError> {
+    fn verify(
+        &self,
+        cancel: &Cancellation,
+        mut failed: impl FnMut(&Location, &TransferError),
+    ) -> Result<(), TransferError> {
         // Revisit early files too; parent mtime does not track child contents.
         for (source, entry) in &self.entries {
-            entry.verify(source, cancel)?;
+            if let Err(error) = entry.verify(source, cancel) {
+                failed(source, &error);
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -1890,6 +1900,23 @@ impl Read for SourceReader {
 }
 
 fn copy_tree(
+    source: &Location,
+    target: &Location,
+    local_parent: Option<&Path>,
+    progress: &mut Progress,
+    manifest: &TransferSourceManifest,
+    observe: &mut impl FnMut(&Location, CopyPhase) -> Result<(), String>,
+) -> Result<(), TransferError> {
+    let result = copy_tree_entry(source, target, local_parent, progress, manifest, observe);
+    progress.results.staged(
+        source,
+        result.as_ref().err().map(ToString::to_string),
+        matches!(result, Err(TransferError::Cancelled)),
+    );
+    result
+}
+
+fn copy_tree_entry(
     source: &Location,
     target: &Location,
     local_parent: Option<&Path>,
@@ -2028,7 +2055,7 @@ pub fn trash_entries_with_progress(
 ) -> Result<usize, String> {
     progress
         .results
-        .plan(paths.iter().map(|path| (path.clone(), None)).collect());
+        .plan(paths.iter().map(|path| (path.clone(), None)));
     if paths.iter().any(Location::is_archive) {
         return Err(archive::readonly().into());
     }
@@ -2146,6 +2173,7 @@ mod tests {
                 .results
                 .items
                 .iter()
+                .filter(|row| row.parent.is_none())
                 .map(|row| row.outcome)
                 .collect::<Vec<_>>(),
             [
@@ -2159,6 +2187,16 @@ mod tests {
             .finish("copy".into(), 0, &Ok("Stopped".into()))
             .unwrap();
         assert!(record.items[3].reason.is_some());
+        let child = record
+            .items
+            .iter()
+            .find(|row| row.source == tree.join("large.bin").display())
+            .unwrap();
+        assert_eq!(child.outcome, Outcome::Cancelled);
+        assert_eq!(
+            child.target,
+            Some(destination.join("tree/large.bin").display())
+        );
         assert_eq!(
             fs::read(destination.join("first").path()).unwrap(),
             b"first payload"
@@ -2174,6 +2212,354 @@ mod tests {
             vec![0x5a; 3 * 1024 * 1024]
         );
         assert_eq!(fs::read_dir(destination.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn nested_result_history_publishes_entire_manifest_at_actual_keep_both_target() {
+        use crate::result_history::Outcome;
+        let fixture = tempfile::tempdir().unwrap();
+        let root: Location = fixture.path().to_path_buf().into();
+        let source = create_directory(&root, "tree").unwrap();
+        create_directory(&source, "nested").unwrap();
+        create_directory(&source, "empty").unwrap();
+        fs::write(source.join("a").path(), b"first").unwrap();
+        fs::write(source.join("nested/b").path(), b"second").unwrap();
+        let destination = create_directory(&root, "destination").unwrap();
+        create_directory(&destination, "tree").unwrap();
+        fs::write(destination.join("tree/old").path(), b"old folder").unwrap();
+        let mut progress = Progress::default();
+        let summary = transfer_with_conflicts(
+            std::slice::from_ref(&source),
+            &destination,
+            TransferKind::Copy,
+            &mut progress,
+            |_| {
+                Ok(Answer {
+                    decision: Decision::KeepBoth,
+                    apply_to_group: false,
+                })
+            },
+            |_, _| panic!("copy"),
+        )
+        .unwrap();
+        assert_eq!(summary.completed, 1);
+        assert_eq!(progress.results.items.len(), 5);
+        assert!(progress.results.items[0].descendants_enumerated);
+        let expected_sources = [
+            source.clone(),
+            source.join("a"),
+            source.join("empty"),
+            source.join("nested"),
+            source.join("nested/b"),
+        ];
+        for row in &progress.results.items {
+            assert_eq!(row.outcome, Outcome::Completed);
+            let original = expected_sources
+                .iter()
+                .find(|path| path.display() == row.source)
+                .unwrap();
+            let relative = original.path().strip_prefix(source.path()).unwrap();
+            let final_root = destination.join("tree (2)");
+            let expected_target = if relative.as_os_str().is_empty() {
+                final_root
+            } else {
+                final_root.join(relative)
+            };
+            assert_eq!(row.target, Some(expected_target.display()));
+            if row.parent.is_some() {
+                assert_eq!(row.parent, Some(0));
+            }
+        }
+        assert_eq!(
+            fs::read(destination.join("tree (2)/nested/b").path()).unwrap(),
+            b"second"
+        );
+        assert_eq!(
+            fs::read(destination.join("tree/old").path()).unwrap(),
+            b"old folder"
+        );
+        assert_eq!(fs::read(source.join("nested/b").path()).unwrap(), b"second");
+        let record = std::mem::take(&mut progress.results)
+            .finish("copy".into(), 0, &Ok("Copied".into()))
+            .unwrap();
+        let encoded = serde_json::to_vec(&record).unwrap();
+        let reopened: crate::result_history::Record = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(reopened.items.len(), 5);
+        assert!(reopened
+            .items
+            .iter()
+            .all(|row| row.outcome == Outcome::Completed));
+    }
+
+    #[test]
+    fn result_history_keeps_atomic_directory_moves_explicitly_grouped() {
+        use crate::result_history::Outcome;
+        let fixture = tempfile::tempdir().unwrap();
+        let root: Location = fixture.path().to_path_buf().into();
+        let source = create_directory(&root, "tree").unwrap();
+        create_directory(&source, "nested").unwrap();
+        fs::write(source.join("nested/a").path(), b"original").unwrap();
+        let destination = create_directory(&root, "destination").unwrap();
+        let mut progress = Progress::default();
+        let summary = transfer_with_conflicts(
+            std::slice::from_ref(&source),
+            &destination,
+            TransferKind::Move,
+            &mut progress,
+            |_| panic!("no conflict"),
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(summary.completed, 1);
+        assert_eq!(progress.results.items.len(), 1);
+        assert_eq!(progress.results.items[0].outcome, Outcome::Completed);
+        assert!(!progress.results.items[0].descendants_enumerated);
+        assert!(progress.results.items[0].parent.is_none());
+        assert!(!source.path().exists());
+        assert_eq!(
+            fs::read(destination.join("tree/nested/a").path()).unwrap(),
+            b"original"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn result_history_failed_manifest_never_claims_descendant_coverage() {
+        use std::os::unix::fs::symlink;
+        let fixture = tempfile::tempdir().unwrap();
+        let root: Location = fixture.path().to_path_buf().into();
+        let source = create_directory(&root, "tree").unwrap();
+        let outside = root.join("outside");
+        fs::write(outside.path(), b"untouched").unwrap();
+        symlink(outside.path(), source.join("link").path()).unwrap();
+        let target = root.join("target");
+        let mut progress = Progress::default();
+        progress
+            .results
+            .plan([(source.clone(), Some(target.display()))]);
+        progress.results.begin(&source);
+        let result = copy_transfer_cancellable(
+            &TransferItem::new(source.clone(), source.clone(), target.clone()),
+            None,
+            &mut progress,
+            &mut |_, _| Ok(()),
+            || panic!("unsupported source must not publish"),
+        );
+        assert!(result.is_err());
+        let record = std::mem::take(&mut progress.results)
+            .finish(
+                "copy".into(),
+                0,
+                &result
+                    .map(|_| "Copied".into())
+                    .map_err(|error| error.to_string()),
+            )
+            .unwrap();
+        assert_eq!(record.items.len(), 1);
+        assert!(!record.items[0].descendants_enumerated);
+        assert!(record.items[0].parent.is_none());
+        assert_eq!(
+            record.items[0].outcome,
+            crate::result_history::Outcome::Failed
+        );
+        assert!(!target.path().exists());
+        assert_eq!(fs::read(outside.path()).unwrap(), b"untouched");
+    }
+
+    #[test]
+    fn nested_result_history_keeps_private_copies_unconfirmed_after_later_failure() {
+        use crate::result_history::Outcome;
+        let fixture = tempfile::tempdir().unwrap();
+        let root: Location = fixture.path().to_path_buf().into();
+        let source = create_directory(&root, "tree").unwrap();
+        let destination = create_directory(&root, "destination").unwrap();
+        for name in ["a", "b", "c"] {
+            fs::write(source.join(name).path(), name).unwrap();
+        }
+        let inspect_destination = destination.clone();
+        let change = source.join("b");
+        let mut changed = false;
+        let cancellation = Cancellation::at_checkpoint(move || {
+            if !changed
+                && fs::read_dir(inspect_destination.path())
+                    .unwrap()
+                    .filter_map(Result::ok)
+                    .any(|entry| entry.path().join("payload/a").is_file())
+            {
+                fs::write(change.path(), b"changed after capture").unwrap();
+                changed = true;
+            }
+            false
+        });
+        let mut progress = Progress::with_cancellation(cancellation);
+        let result = transfer_with_conflicts(
+            std::slice::from_ref(&source),
+            &destination,
+            TransferKind::Copy,
+            &mut progress,
+            |_| panic!("no conflict"),
+            |_, _| panic!("copy"),
+        );
+        assert!(result.is_err());
+        let record = std::mem::take(&mut progress.results)
+            .finish("copy".into(), 0, &result.map(|_| "Copied".into()))
+            .unwrap();
+        let row = |name: &str| {
+            record
+                .items
+                .iter()
+                .find(|row| row.source == source.join(name).display())
+                .unwrap()
+        };
+        assert_eq!(record.items[0].outcome, Outcome::Failed);
+        assert_eq!(row("a").outcome, Outcome::PublicationUnconfirmed);
+        assert_eq!(row("b").outcome, Outcome::Failed);
+        assert!(row("b").reason.is_some());
+        assert_eq!(row("c").outcome, Outcome::NotStarted);
+        assert!(!record.items.iter().any(|row| matches!(
+            row.outcome,
+            Outcome::Completed | Outcome::CompletedWithWarning
+        )));
+        assert_eq!(fs::read_dir(destination.path()).unwrap().count(), 0);
+        assert_eq!(fs::read(source.join("a").path()).unwrap(), b"a");
+        assert_eq!(fs::read(source.join("c").path()).unwrap(), b"c");
+    }
+
+    #[test]
+    fn nested_result_history_preserves_child_cancellation_when_cleanup_fails() {
+        use crate::result_history::Outcome;
+        let fixture = tempfile::tempdir().unwrap();
+        let root: Location = fixture.path().to_path_buf().into();
+        let source = create_directory(&root, "tree").unwrap();
+        for name in ["a", "b", "c"] {
+            fs::write(source.join(name).path(), name).unwrap();
+        }
+        let target = create_directory(&root, "target").unwrap();
+        fs::write(target.join("precious").path(), b"old destination").unwrap();
+        let mut progress = Progress::default();
+        progress
+            .results
+            .plan([(source.clone(), Some(target.display()))]);
+        progress.results.begin(&source);
+        let cancellation = progress.cancellation();
+        let mut obstacle = None;
+        let result = copy_transfer_cancellable(
+            &TransferItem::new(source.clone(), source.clone(), target.clone()),
+            None,
+            &mut progress,
+            &mut |entry, phase| {
+                if *entry == source.join("a") && phase == CopyPhase::EntryCopied {
+                    let staging = fs::read_dir(root.path())
+                        .unwrap()
+                        .filter_map(Result::ok)
+                        .find(|entry| {
+                            entry
+                                .file_name()
+                                .to_string_lossy()
+                                .starts_with(".pawcommander-transfer-")
+                        })
+                        .unwrap()
+                        .path();
+                    fs::remove_dir_all(&staging).unwrap();
+                    fs::write(&staging, b"cleanup obstacle").unwrap();
+                    obstacle = Some(staging);
+                    cancellation.request();
+                }
+                Ok(())
+            },
+            || panic!("cancelled tree must not publish"),
+        );
+        assert!(
+            matches!(&result, Err(TransferError::Failed(_))),
+            "cleanup failure remains a root failure"
+        );
+        let record = std::mem::take(&mut progress.results)
+            .finish(
+                "copy".into(),
+                0,
+                &result
+                    .map(|_| "Copied".into())
+                    .map_err(|error| error.to_string()),
+            )
+            .unwrap();
+        let child = |name: &str| {
+            record
+                .items
+                .iter()
+                .find(|row| row.source == source.join(name).display())
+                .unwrap()
+        };
+        assert_eq!(record.items[0].outcome, Outcome::Failed);
+        assert_eq!(child("a").outcome, Outcome::PublicationUnconfirmed);
+        assert_eq!(child("b").outcome, Outcome::Cancelled);
+        assert_eq!(child("c").outcome, Outcome::NotStarted);
+        assert!(child("b").reason.is_some());
+        assert_eq!(
+            fs::read(target.join("precious").path()).unwrap(),
+            b"old destination"
+        );
+        for name in ["a", "b", "c"] {
+            assert_eq!(fs::read(source.join(name).path()).unwrap(), name.as_bytes());
+        }
+        assert_eq!(fs::read(obstacle.unwrap()).unwrap(), b"cleanup obstacle");
+    }
+
+    #[test]
+    fn nested_result_history_generic_transfer_checks_final_source_verification() {
+        use crate::result_history::Outcome;
+        let fixture = tempfile::tempdir().unwrap();
+        let root: Location = fixture.path().to_path_buf().into();
+        let source = create_directory(&root, "tree").unwrap();
+        fs::write(source.join("a").path(), b"first").unwrap();
+        fs::write(source.join("b").path(), b"second").unwrap();
+        let target = root.join("target");
+        let mut progress = Progress::default();
+        progress
+            .results
+            .plan(vec![(source.clone(), Some(target.display()))]);
+        progress.results.begin(&source);
+        let result = copy_transfer_cancellable(
+            &TransferItem::new(source.clone(), source.clone(), target.clone()),
+            None,
+            &mut progress,
+            &mut |entry, phase| {
+                if *entry == source.join("b") && phase == CopyPhase::EntryCopied {
+                    fs::write(source.join("a").path(), b"changed").unwrap();
+                }
+                Ok(())
+            },
+            || panic!("changed tree must not publish"),
+        );
+        assert!(result.is_err());
+        let record = std::mem::take(&mut progress.results)
+            .finish(
+                "copy".into(),
+                0,
+                &result
+                    .map(|_| "Copied".into())
+                    .map_err(|error| error.to_string()),
+            )
+            .unwrap();
+        assert_eq!(
+            record
+                .items
+                .iter()
+                .find(|row| row.source == source.join("a").display())
+                .unwrap()
+                .outcome,
+            Outcome::Failed
+        );
+        assert_eq!(
+            record
+                .items
+                .iter()
+                .find(|row| row.source == source.join("b").display())
+                .unwrap()
+                .outcome,
+            Outcome::PublicationUnconfirmed
+        );
+        assert!(!target.path().exists());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
     }
 
     #[test]

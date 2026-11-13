@@ -283,8 +283,7 @@ pub fn trash_entries(paths: &[PathBuf], progress: &mut Progress) -> Result<usize
     progress.results.plan(
         paths
             .iter()
-            .map(|entry| (crate::vfs::Location::Local(entry.original.clone()), None))
-            .collect(),
+            .map(|entry| (crate::vfs::Location::Local(entry.original.clone()), None)),
     );
     for (completed, entry) in paths.iter().enumerate() {
         progress
@@ -521,6 +520,15 @@ pub(crate) fn copy_atomically_cancellable(
             )
         })
     })?;
+    progress.results.descendants(
+        &crate::vfs::Location::Local(source.to_path_buf()),
+        &crate::vfs::Location::Local(destination.to_path_buf()),
+        manifest
+            .entries
+            .keys()
+            .cloned()
+            .map(crate::vfs::Location::Local),
+    );
     let parent = destination
         .parent()
         .ok_or("Недопустимое место назначения копии")?;
@@ -534,7 +542,15 @@ pub(crate) fn copy_atomically_cancellable(
     let payload = staging.join("payload");
     let result = copy_tree(source, &payload, progress, &manifest, after_entry)
         // Revisit every entry, including early files after later files copied.
-        .and_then(|()| manifest.verify(&cancel))
+        .and_then(|()| {
+            manifest.verify(&cancel, |source, error| {
+                progress.results.staged(
+                    &crate::vfs::Location::Local(source.to_path_buf()),
+                    Some(error.to_string()),
+                    TransferError::is_cancelled_io(error),
+                );
+            })
+        })
         .and_then(|()| cancel.check())
         .map_err(|e| {
             TransferError::io(e, |e| {
@@ -798,15 +814,38 @@ impl SourceManifest {
         Ok(())
     }
 
-    fn verify(&self, cancel: &Cancellation) -> io::Result<()> {
+    fn verify(
+        &self,
+        cancel: &Cancellation,
+        mut failed: impl FnMut(&Path, &io::Error),
+    ) -> io::Result<()> {
         for (path, entry) in &self.entries {
-            entry.verify(path, cancel)?;
+            if let Err(error) = entry.verify(path, cancel) {
+                failed(path, &error);
+                return Err(error);
+            }
         }
         Ok(())
     }
 }
 
 fn copy_tree(
+    source: &Path,
+    destination: &Path,
+    progress: &mut Progress,
+    manifest: &SourceManifest,
+    after_entry: &mut impl FnMut(&Path) -> io::Result<()>,
+) -> io::Result<()> {
+    let result = copy_tree_entry(source, destination, progress, manifest, after_entry);
+    progress.results.staged(
+        &crate::vfs::Location::Local(source.to_path_buf()),
+        result.as_ref().err().map(ToString::to_string),
+        result.as_ref().is_err_and(TransferError::is_cancelled_io),
+    );
+    result
+}
+
+fn copy_tree_entry(
     source: &Path,
     destination: &Path,
     progress: &mut Progress,
@@ -1351,7 +1390,9 @@ mod tests {
         assert!(entry
             .verify_metadata(&source, &opened.metadata().unwrap())
             .is_err());
-        assert!(manifest.verify(&Cancellation::default()).is_err());
+        assert!(manifest
+            .verify(&Cancellation::default(), |_, _| {})
+            .is_err());
         assert_eq!(fs::read(source).unwrap(), b"replaced");
     }
 

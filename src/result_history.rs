@@ -13,6 +13,9 @@ const VERSION: u32 = 1;
 const KEEP_OPERATIONS: usize = 100;
 const KEEP_ROWS: usize = 100_000;
 const MAX_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_RECORD_WEIGHT: usize = MAX_BYTES as usize / 2;
+const MAX_TEXT_BYTES: usize = 64 * 1024;
+const ROW_WEIGHT: usize = 256;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Outcome {
@@ -21,6 +24,7 @@ pub(crate) enum Outcome {
     Skipped,
     Failed,
     Cancelled,
+    PublicationUnconfirmed,
     #[default]
     NotStarted,
 }
@@ -33,6 +37,7 @@ impl Outcome {
             Self::Skipped => "Пропущено",
             Self::Failed => "Ошибка",
             Self::Cancelled => "Отменено",
+            Self::PublicationUnconfirmed => "Публикация не подтверждена",
             Self::NotStarted => "Не начато",
         })
     }
@@ -44,6 +49,10 @@ pub(crate) struct ItemResult {
     pub target: Option<String>,
     pub outcome: Outcome,
     pub reason: Option<String>,
+    #[serde(default)]
+    pub parent: Option<usize>,
+    #[serde(default)]
+    pub descendants_enumerated: bool,
 }
 
 impl ItemResult {
@@ -53,6 +62,8 @@ impl ItemResult {
             target,
             outcome: Outcome::NotStarted,
             reason: None,
+            parent: None,
+            descendants_enumerated: false,
         }
     }
 }
@@ -63,31 +74,163 @@ pub(crate) struct Results {
     pub items: Vec<ItemResult>,
     active: Option<usize>,
     index: HashMap<Location, usize>,
+    active_source: Option<Location>,
+    nested_index: HashMap<Location, usize>,
+    group: Option<(usize, std::ops::Range<usize>)>,
+    weight: usize,
+    omitted: usize,
+    details_truncated: bool,
     pub cancelled: bool,
 }
 
 impl Results {
-    pub fn plan(&mut self, items: Vec<(Location, Option<String>)>) {
+    pub fn plan(&mut self, items: impl IntoIterator<Item = (Location, Option<String>)>) {
         self.items.clear();
         self.index.clear();
+        self.nested_index.clear();
+        self.group = None;
+        self.weight = 0;
+        self.omitted = 0;
+        self.details_truncated = false;
         for (source, target) in items {
-            self.index.insert(source.clone(), self.items.len());
-            self.items.push(ItemResult::new(source.display(), target));
+            if let Some(index) = self.add_row(&source, target, None) {
+                self.index.insert(source, index);
+            }
         }
         self.active = None;
+        self.active_source = None;
     }
 
     pub fn begin(&mut self, source: &Location) {
         self.active = self.index.get(source).copied();
+        self.active_source = self.active.map(|_| source.clone());
     }
 
     pub fn clear_active(&mut self) {
         self.active = None;
+        self.active_source = None;
+    }
+
+    fn add_row(
+        &mut self,
+        source: &Location,
+        target: Option<String>,
+        parent: Option<usize>,
+    ) -> Option<usize> {
+        if self.items.len() >= KEEP_ROWS {
+            self.omitted = self.omitted.saturating_add(1);
+            return None;
+        }
+        let mut row = ItemResult::new(
+            limited_text(
+                &source.display(),
+                MAX_TEXT_BYTES,
+                &mut self.details_truncated,
+            ),
+            target.map(|text| limited_text(&text, MAX_TEXT_BYTES, &mut self.details_truncated)),
+        );
+        row.parent = parent;
+        let weight = row.weight();
+        if self.weight.saturating_add(weight) > MAX_RECORD_WEIGHT {
+            self.omitted = self.omitted.saturating_add(1);
+            return None;
+        }
+        self.weight += weight;
+        let index = self.items.len();
+        self.items.push(row);
+        Some(index)
+    }
+
+    /// Expand only an already captured copy manifest; never perform extra I/O.
+    pub fn descendants(
+        &mut self,
+        source: &Location,
+        target: &Location,
+        entries: impl Iterator<Item = Location>,
+    ) {
+        let (Some(root), Some(original)) = (self.active, self.active_source.clone()) else {
+            return;
+        };
+        self.items[root].descendants_enumerated = true;
+        self.nested_index.clear();
+        let start = self.items.len();
+        for entry in entries {
+            let Ok(relative) = entry.path().strip_prefix(source.path()) else {
+                continue;
+            };
+            if relative.as_os_str().is_empty() {
+                continue;
+            }
+            let display_source = original.join(relative);
+            if let Some(index) = self.add_row(
+                &display_source,
+                Some(target.join(relative).display()),
+                Some(root),
+            ) {
+                self.nested_index.insert(entry, index);
+            }
+        }
+        self.group = Some((root, start..self.items.len()));
+    }
+
+    /// A successful private write remains unconfirmed until the root publishes.
+    pub fn staged(&mut self, source: &Location, error: Option<String>, cancelled: bool) {
+        if let Some(&index) = self.nested_index.get(source) {
+            self.items[index].outcome = if cancelled {
+                Outcome::Cancelled
+            } else if error.is_some() {
+                Outcome::Failed
+            } else {
+                Outcome::PublicationUnconfirmed
+            };
+            self.reason(index, error.as_deref());
+        }
+    }
+
+    fn field(&mut self, text: &str, old: Option<String>) -> String {
+        self.weight = self
+            .weight
+            .saturating_sub(old.as_deref().map_or(0, json_weight));
+        let available = MAX_RECORD_WEIGHT.saturating_sub(self.weight);
+        let mut value = limited_text(text, MAX_TEXT_BYTES, &mut self.details_truncated);
+        if json_weight(&value) > available {
+            value = limited_text(text, available / 6, &mut self.details_truncated);
+        }
+        self.weight += json_weight(&value);
+        value
+    }
+
+    fn reason(&mut self, index: usize, text: Option<&str>) {
+        let old = self.items[index].reason.take();
+        self.items[index].reason = match text {
+            Some(text) => Some(self.field(text, old)),
+            None => {
+                self.weight = self
+                    .weight
+                    .saturating_sub(old.as_deref().map_or(0, json_weight));
+                None
+            }
+        };
+    }
+
+    fn finish_group(&mut self, root: usize, outcome: Outcome) {
+        if let Some((owner, range)) = self.group.take() {
+            if owner == root {
+                for index in range {
+                    if matches!(outcome, Outcome::Completed | Outcome::CompletedWithWarning) {
+                        self.items[index].outcome = Outcome::Completed;
+                        self.reason(index, None);
+                    }
+                }
+            }
+        }
+        self.nested_index.clear();
     }
 
     pub fn target(&mut self, source: &Location, target: String) {
         if let Some(&index) = self.index.get(source) {
-            self.items[index].target = Some(target);
+            let old = self.items[index].target.take();
+            self.items[index].target = Some(self.field(&target, old));
         }
     }
 
@@ -98,12 +241,15 @@ impl Results {
         outcome: Outcome,
         reason: Option<String>,
     ) {
-        if let Some(row) = self.index.get(source).map(|&index| &mut self.items[index]) {
-            row.target = target.or_else(|| row.target.take());
-            row.outcome = outcome;
-            row.reason = reason;
+        if let Some(&index) = self.index.get(source) {
+            if let Some(target) = target {
+                self.target(source, target);
+            }
+            self.items[index].outcome = outcome;
+            self.reason(index, reason.as_deref());
+            self.finish_group(index, outcome);
         }
-        self.active = None;
+        self.clear_active();
     }
 
     pub fn finish(
@@ -115,45 +261,50 @@ impl Results {
         if self.items.is_empty() {
             return None;
         }
-        let reason = result.as_ref().err().cloned().or_else(|| {
+        let reason = result.as_ref().err().map(String::as_str).or_else(|| {
             self.cancelled
-                .then(|| crate::i18n::text("Операция остановлена пользователем").into())
+                .then(|| crate::i18n::text("Операция остановлена пользователем"))
         });
         if let Some(index) = self.active {
-            let row = &mut self.items[index];
-            row.outcome = if result.is_err() {
+            let outcome = if result.is_err() {
                 Outcome::Failed
             } else if self.cancelled {
                 Outcome::Cancelled
             } else {
                 Outcome::Completed
             };
-            row.reason.clone_from(&reason);
+            self.items[index].outcome = outcome;
+            self.reason(index, reason);
+            self.finish_group(index, outcome);
         }
-        for row in &mut self.items {
-            if row.outcome == Outcome::NotStarted {
-                row.reason = if result.is_err() {
-                    Some(
-                        crate::i18n::text(
-                            "Не начато после ошибки; причина указана в итоге операции",
-                        )
-                        .into(),
-                    )
+        for index in 0..self.items.len() {
+            if self.items[index].outcome == Outcome::NotStarted {
+                let reason = if result.is_err() {
+                    Some(crate::i18n::text(
+                        "Не начато после ошибки; причина указана в итоге операции",
+                    ))
                 } else if self.cancelled {
-                    reason.clone()
+                    reason
                 } else {
                     None
                 };
+                self.reason(index, reason);
             }
         }
         Some(Record {
-            label,
+            label: limited_text(&label, MAX_TEXT_BYTES, &mut self.details_truncated),
             started,
             finished: now(),
             failed: result.is_err(),
             cancelled: self.cancelled,
-            message: result.as_ref().unwrap_or_else(|error| error).clone(),
+            message: limited_text(
+                result.as_ref().unwrap_or_else(|error| error),
+                MAX_TEXT_BYTES,
+                &mut self.details_truncated,
+            ),
             items: self.items,
+            omitted: self.omitted,
+            details_truncated: self.details_truncated,
         })
     }
 }
@@ -174,6 +325,69 @@ pub(crate) struct Record {
     cancelled: bool,
     message: String,
     pub items: Vec<ItemResult>,
+    #[serde(default)]
+    omitted: usize,
+    #[serde(default)]
+    details_truncated: bool,
+}
+
+impl ItemResult {
+    fn weight(&self) -> usize {
+        ROW_WEIGHT
+            + json_weight(&self.source)
+            + self.target.as_deref().map_or(0, json_weight)
+            + self.reason.as_deref().map_or(0, json_weight)
+    }
+}
+
+impl Record {
+    fn weight(&self) -> usize {
+        4096 + json_weight(&self.label)
+            + json_weight(&self.message)
+            + self.items.iter().map(ItemResult::weight).sum::<usize>()
+    }
+
+    fn limit(&mut self) {
+        self.label = limited_text(&self.label, MAX_TEXT_BYTES, &mut self.details_truncated);
+        self.message = limited_text(&self.message, MAX_TEXT_BYTES, &mut self.details_truncated);
+        let mut weight = 4096 + json_weight(&self.label) + json_weight(&self.message);
+        let mut keep = 0;
+        for row in &self.items {
+            if keep == KEEP_ROWS || weight.saturating_add(row.weight()) > MAX_RECORD_WEIGHT {
+                break;
+            }
+            weight += row.weight();
+            keep += 1;
+        }
+        self.omitted = self.omitted.saturating_add(self.items.len() - keep);
+        self.items.truncate(keep);
+    }
+}
+
+fn json_weight(text: &str) -> usize {
+    text.bytes()
+        .map(|byte| match byte {
+            b'"' | b'\\' => 2,
+            0..=31 => 6,
+            _ => 1,
+        })
+        .sum()
+}
+
+fn limited_text(text: &str, maximum: usize, truncated: &mut bool) -> String {
+    if text.len() <= maximum {
+        return text.to_owned();
+    }
+    *truncated = true;
+    let suffix = "…";
+    if maximum < suffix.len() {
+        return String::new();
+    }
+    let mut end = maximum - suffix.len();
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{suffix}", &text[..end])
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -183,15 +397,21 @@ struct Saved {
 }
 
 impl Saved {
-    fn push(&mut self, record: Record) {
+    fn push(&mut self, mut record: Record) {
+        record.limit();
         self.records.push(record);
         let mut rows = 0;
+        let mut weight: usize = 0;
         let mut retain = self.records.len();
         for record in self.records.iter().rev().take(KEEP_OPERATIONS) {
-            if retain < self.records.len() && rows + record.items.len() > KEEP_ROWS {
+            if retain < self.records.len()
+                && (rows + record.items.len() > KEEP_ROWS
+                    || weight.saturating_add(record.weight()) > MAX_BYTES as usize - 4096)
+            {
                 break;
             }
             rows += record.items.len();
+            weight += record.weight();
             retain -= 1;
         }
         self.records.drain(..retain);
@@ -336,10 +556,10 @@ impl History {
             .default_size([780.0, 560.0])
             .show(ctx, |ui| {
                 ui.label(crate::i18n::text(
-                    "Результаты выбранных объектов; папки показаны целиком.",
+                    "Копии раскрываются по манифесту; остальные результаты могут относиться только к выбранному объекту.",
                 ));
                 ui.label(crate::i18n::text(
-                    "Последние 100 операций; старые записи удаляются при достижении 100 000 строк.",
+                    "До 100 операций и 100 000 строк; объём истории ограничен. Неполные записи помечены.",
                 ));
                 if let Some(path) = &self.path {
                     ui.add(egui::Label::new(path.display().to_string()).selectable(true));
@@ -380,6 +600,14 @@ impl History {
                             .default_open(index + 1 == self.records.len())
                             .show(ui, |ui| {
                                 ui.add(egui::Label::new(&record.message).selectable(true).wrap());
+                                if record.omitted != 0 {
+                                    ui.colored_label(ui.visuals().warn_fg_color, crate::tr_format!(
+                                        "Из-за лимита журнала не показано строк: {}. Это не меняет результат передачи.",
+                                        "Rows omitted by history limits: {}. This does not change the transfer outcome.", record.omitted));
+                                }
+                                if record.details_truncated {
+                                    ui.colored_label(ui.visuals().warn_fg_color, crate::i18n::text("Длинные пути или сообщения сокращены из-за лимита журнала."));
+                                }
                                 egui::ScrollArea::both()
                                     .id_salt(("result_items", index))
                                     .max_height(360.0)
@@ -393,7 +621,7 @@ impl History {
                                                 ui.add(
                                                     egui::Label::new(format!(
                                                         "{}\n{} → {}\n{}",
-                                                        row.outcome.label(),
+                                                        if row.parent.is_none() && !row.descendants_enumerated { format!("{} · {}", row.outcome.label(), crate::i18n::text("Только выбранный объект; потомки не перечислены")) } else { row.outcome.label().to_owned() },
                                                         single_line(&row.source),
                                                         single_line(target),
                                                         single_line(
@@ -452,7 +680,14 @@ fn open_store(path: &Path) -> io::Result<(Saved, File)> {
         },
         Err(error) => return Err(error),
     };
-    Ok((saved, lock))
+    let mut bounded = Saved {
+        version: VERSION,
+        records: Vec::new(),
+    };
+    for record in saved.records {
+        bounded.push(record);
+    }
+    Ok((bounded, lock))
 }
 
 fn save(path: &Path, saved: &Saved) -> io::Result<()> {
@@ -519,6 +754,8 @@ mod tests {
                 target: Some("target\nwith newline".into()),
                 outcome: Outcome::Failed,
                 reason: Some("first line\nsecond line\r\nthird line".into()),
+                parent: None,
+                descendants_enumerated: false,
             })
             .collect();
         let history = History {
@@ -610,6 +847,8 @@ mod tests {
                 reason: Some(
                     "Check original target and staging /private/recovery\nsecond line".into(),
                 ),
+                parent: None,
+                descendants_enumerated: false,
             });
         }
         saved.push(item);
@@ -702,7 +941,7 @@ mod tests {
     }
 
     #[test]
-    fn retention_keeps_newest_operation_whole_and_bounds_older_records() {
+    fn retention_bounds_rows_and_storage_and_marks_omitted_tail() {
         let mut saved = Saved {
             version: VERSION,
             records: Vec::new(),
@@ -717,19 +956,36 @@ mod tests {
         let mut large = record();
         large.items = vec![large.items[0].clone(); KEEP_ROWS + 1];
         saved.push(large);
-        assert_eq!(saved.records.len(), 1);
-        assert_eq!(saved.records[0].items.len(), KEEP_ROWS + 1);
+        assert!(saved.records.len() <= KEEP_OPERATIONS);
+        assert!(
+            saved
+                .records
+                .iter()
+                .map(|record| record.items.len())
+                .sum::<usize>()
+                <= KEEP_ROWS
+        );
+        assert!(
+            saved.records.iter().map(Record::weight).sum::<usize>() <= MAX_BYTES as usize - 4096
+        );
+        assert!(saved.records.last().unwrap().omitted > 0);
+        assert!(saved.records.last().unwrap().weight() <= MAX_RECORD_WEIGHT);
         saved.push(record());
-        assert_eq!(saved.records.len(), 1);
+        assert!(
+            saved
+                .records
+                .iter()
+                .map(|record| record.items.len())
+                .sum::<usize>()
+                <= KEEP_ROWS
+        );
     }
 
     #[test]
     fn terminal_failure_does_not_reclassify_published_or_skipped_items() {
         let mut results = Results::default();
         results.plan(
-            ["published", "skipped", "failed", "pending"]
-                .map(|source| (local(source), None))
-                .into(),
+            ["published", "skipped", "failed", "pending"].map(|source| (local(source), None)),
         );
         results.record(
             &local("published"),
@@ -770,5 +1026,93 @@ mod tests {
                 "Не начато после ошибки; причина указана в итоге операции"
             ))
         );
+    }
+
+    #[test]
+    fn nested_collection_is_bounded_and_omissions_do_not_change_publication() {
+        let selected = local("/selected-tree");
+        let physical = local("/physical-tree");
+        let target = local("/target");
+        let mut results = Results::default();
+        results.plan([(selected.clone(), Some(target.display()))]);
+        results.begin(&selected);
+        let count = KEEP_ROWS + 50;
+        results.descendants(
+            &physical,
+            &target,
+            (0..count).map(|index| physical.join(format!("file-{index:06}"))),
+        );
+        assert!(results.items.len() <= KEEP_ROWS);
+        assert!(results.weight <= MAX_RECORD_WEIGHT);
+        assert_eq!(results.omitted + results.items.len(), count + 1);
+        assert!(results.omitted > 0);
+        assert_eq!(
+            results.items[1].source,
+            selected.join("file-000000").display()
+        );
+        results.staged(&physical.join("file-000000"), None, false);
+        results.record(&selected, None, Outcome::Completed, None);
+        let record = results
+            .finish("copy".into(), 0, &Ok("Copied".into()))
+            .unwrap();
+        assert!(record
+            .items
+            .iter()
+            .all(|row| row.outcome == Outcome::Completed));
+        let mut saved = Saved {
+            version: VERSION,
+            records: Vec::new(),
+        };
+        saved.push(record);
+        assert!(saved.records[0].omitted > 0);
+        assert!(saved.records[0].items[0].descendants_enumerated);
+        assert_eq!(saved.records[0].items[0].outcome, Outcome::Completed);
+        assert!(serde_json::to_vec(&saved).unwrap().len() <= MAX_BYTES as usize);
+    }
+
+    #[test]
+    fn nested_publication_is_acknowledged_despite_later_root_cleanup_warning() {
+        let root = local("/source");
+        let child = root.join("nested/file");
+        let mut results = Results::default();
+        results.plan([(root.clone(), Some("/target".into()))]);
+        results.begin(&root);
+        results.descendants(&root, &local("/target"), [child.clone()].into_iter());
+        results.staged(&child, None, false);
+        assert_eq!(results.items[1].outcome, Outcome::PublicationUnconfirmed);
+        results.record(
+            &root,
+            None,
+            Outcome::CompletedWithWarning,
+            Some("cleanup failed; inspect staging".into()),
+        );
+        let record = results
+            .finish("copy".into(), 0, &Err("cleanup failed".into()))
+            .unwrap();
+        assert_eq!(record.items[0].outcome, Outcome::CompletedWithWarning);
+        assert_eq!(record.items[1].outcome, Outcome::Completed);
+        assert!(record.items[1].reason.is_none());
+    }
+
+    #[test]
+    fn old_v1_history_decodes_with_selected_item_scope() {
+        let mut value = serde_json::to_value(Saved {
+            version: VERSION,
+            records: vec![record()],
+        })
+        .unwrap();
+        let record = value["records"][0].as_object_mut().unwrap();
+        record.remove("omitted");
+        record.remove("details_truncated");
+        for row in record["items"].as_array_mut().unwrap() {
+            let row = row.as_object_mut().unwrap();
+            row.remove("parent");
+            row.remove("descendants_enumerated");
+        }
+        let reopened: Saved = serde_json::from_value(value).unwrap();
+        assert_eq!(reopened.records[0].omitted, 0);
+        assert!(!reopened.records[0].details_truncated);
+        assert!(!reopened.records[0].items[0].descendants_enumerated);
+        assert!(reopened.records[0].items[0].parent.is_none());
     }
 }
