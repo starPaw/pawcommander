@@ -180,8 +180,16 @@ impl PawCommander {
                         return;
                     }
                 };
-                let outcome =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&mut reporter)));
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if let Some(pending) = pending.as_ref() {
+                        pending.run(|| work(&mut reporter)).map_err(|error| crate::tr_format!(
+                            "Операция не начата: не удалось активировать запись восстановления: {error}",
+                            "Operation not started: could not activate recovery record: {error}"
+                        ))?
+                    } else {
+                        work(&mut reporter)
+                    }
+                }));
                 let panicked = outcome.is_err();
                 let mut result = outcome.unwrap_or_else(|_| {
                     Err(crate::i18n::text(

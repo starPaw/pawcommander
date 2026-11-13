@@ -654,6 +654,35 @@ fn openssh_round_trip_and_host_verification() {
     fs::write(source.path().join("empty"), "").unwrap();
     fs::create_dir(source.path().join("sub")).unwrap();
     fs::write(source.path().join("sub/large.bin"), vec![0xab; 512 * 1024]).unwrap();
+    // A stopped worker reports its own remote staging path without scanning
+    // or deleting unrelated SFTP entries.
+    let recovery_dir = local_root.path().join("recovery");
+    let pending = crate::recovery::begin(&recovery_dir, "upload", "fixture", 1).unwrap();
+    let mut interrupted_staging = None;
+    let interrupted = pending
+        .run(|| {
+            with_staging(&remote_root.join("unpublished"), |staging, preserve| {
+                *preserve = true;
+                fs::write(staging.path().join("payload"), b"partial upload").unwrap();
+                interrupted_staging = Some(staging.clone());
+                Err("injected interruption".into())
+            })
+        })
+        .unwrap();
+    assert!(interrupted.is_err());
+    drop(pending);
+    let report = crate::recovery::scan(&recovery_dir);
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(report.unfinished.len(), 1);
+    assert_eq!(report.unfinished[0].staging.len(), 1);
+    let staged = interrupted_staging.unwrap();
+    assert_eq!(report.unfinished[0].staging[0].location, staged.display());
+    assert!(report.unfinished[0].staging[0].identity.is_none());
+    assert_eq!(
+        fs::read(staged.path().join("payload")).unwrap(),
+        b"partial upload"
+    );
+    fs::remove_dir_all(staged.path()).unwrap();
     if std::env::var("PAWCOMMANDER_TEST_DISABLE_STATVFS").as_deref() == Ok("1") {
         let target = remote_root.join(source.name());
         let error = staged_copy(&source, &target).unwrap_err();
