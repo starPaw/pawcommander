@@ -3,7 +3,7 @@
 use crate::archive;
 use crate::conflict::{Answer, Conflict, Decision, EntryDetails};
 use crate::fs_ops::{self, TransferKind};
-use crate::operations::{Cancellation, Progress, TransferError};
+use crate::operations::{Cancellation, CopyReader, Progress, TransferError};
 use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use ssh2::{
@@ -1369,6 +1369,7 @@ fn move_item(
 enum CopyPhase {
     Opened,
     Read,
+    Verifying,
     EntryCopied,
 }
 
@@ -1967,7 +1968,10 @@ fn copy_tree_entry(
     // Bound reads to the captured size: a continuously growing source cannot
     // turn a copy into an unbounded stream. Handle/path checks detect growth.
     let expected_size = entry.size();
-    let mut bounded = (&mut input).take(expected_size);
+    let mut bounded = CopyReader::new(
+        (&mut input).take(expected_size),
+        progress.copy_verification(),
+    );
     cancel.check()?;
     let written = if let Some(path) = target.local() {
         let mut output = fs::OpenOptions::new()
@@ -2008,6 +2012,7 @@ fn copy_tree_entry(
         output.close().map_err(err)?;
         written
     };
+    let source_hash = bounded.finish();
     observe(source, CopyPhase::Read)?;
     if written != expected_size {
         return Err(changed_source(source).into());
@@ -2015,6 +2020,23 @@ fn copy_tree_entry(
     entry.verify_metadata(source, &input.metadata()?)?;
     entry.verify(source, &cancel)?;
     cancel.check()?;
+    if let Some(source_hash) = source_hash {
+        let mut copied = if let Some(path) = target.local() {
+            SourceReader::Local(fs_ops::open_regular_source(path).map_err(err)?)
+        } else {
+            SourceReader::Remote(remote(target)?.open(target.path()).map_err(err)?)
+        };
+        if !copied.metadata()?.is_file() {
+            return Err(crate::tr_format!(
+                "Не удалось проверить копию {source}: временный объект больше не является обычным файлом",
+                "Could not verify copy of {source}: staged item is no longer a regular file"
+            ).into());
+        }
+        observe(source, CopyPhase::Verifying)?;
+        progress
+            .verify_copy(source.path(), expected_size, source_hash, &mut copied)
+            .map_err(|error| TransferError::io(error, err))?;
+    }
     observe(source, CopyPhase::EntryCopied).map_err(Into::into)
 }
 
@@ -2111,6 +2133,81 @@ pub fn preview_data(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copy_hash_failure_keeps_partial_batch_and_nested_history_truthful() {
+        use crate::result_history::Outcome;
+        let fixture = tempfile::tempdir().unwrap();
+        let root: Location = fixture.path().to_path_buf().into();
+        let published = root.join("published");
+        let source = create_directory(&root, "tree").unwrap();
+        let pending = root.join("pending");
+        let destination = create_directory(&root, "destination").unwrap();
+        fs::write(published.path(), b"already copied").unwrap();
+        fs::write(pending.path(), b"not started").unwrap();
+        for name in ["a", "b", "c"] {
+            fs::write(source.join(name).path(), name).unwrap();
+        }
+        let inspect = destination.clone();
+        let mut corrupted = false;
+        let cancel = Cancellation::at_checkpoint(move || {
+            if !corrupted {
+                for entry in fs::read_dir(inspect.path()).unwrap().map(Result::unwrap) {
+                    let path = entry.path().join("payload/b");
+                    if path.is_file() && path.metadata().unwrap().len() == 1 {
+                        fs::write(path, b"x").unwrap();
+                        corrupted = true;
+                        break;
+                    }
+                }
+            }
+            false
+        });
+        let mut progress = Progress::with_cancellation(cancel);
+        progress.set_copy_verification(true);
+        let result = transfer_with_conflicts(
+            &[published.clone(), source.clone(), pending.clone()],
+            &destination,
+            TransferKind::Copy,
+            &mut progress,
+            |_| panic!("no conflict"),
+            |_, _| panic!("a copy must not consume cut sources"),
+        );
+        assert!(result.as_ref().unwrap_err().contains("SHA-256"));
+        let record = std::mem::take(&mut progress.results)
+            .finish("copy".into(), 0, &result.map(|_| "Copied".into()))
+            .unwrap();
+        let row = |source: &Location| {
+            record
+                .items
+                .iter()
+                .find(|row| row.source == source.display())
+                .unwrap()
+        };
+        assert_eq!(row(&published).outcome, Outcome::Completed);
+        assert_eq!(row(&source).outcome, Outcome::Failed);
+        assert_eq!(
+            row(&source.join("a")).outcome,
+            Outcome::PublicationUnconfirmed
+        );
+        assert_eq!(row(&source.join("b")).outcome, Outcome::Failed);
+        assert!(row(&source.join("b"))
+            .reason
+            .as_ref()
+            .unwrap()
+            .contains("SHA-256"));
+        assert_eq!(row(&source.join("c")).outcome, Outcome::NotStarted);
+        assert_eq!(row(&pending).outcome, Outcome::NotStarted);
+        assert_eq!(
+            fs::read(destination.join("published").path()).unwrap(),
+            b"already copied"
+        );
+        assert_eq!(fs::read_dir(destination.path()).unwrap().count(), 1);
+        for name in ["a", "b", "c"] {
+            assert_eq!(fs::read(source.join(name).path()).unwrap(), name.as_bytes());
+        }
+        assert_eq!(fs::read(pending.path()).unwrap(), b"not started");
+    }
 
     #[test]
     fn cancellation_reports_normalized_batch_remainder_and_skips() {
@@ -4073,6 +4170,93 @@ mod tests {
         }
     }
 
+    fn check_sftp_copy_hash_verification(local_root: &Location, remote_root: &Location) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let local = create_directory(local_root, "hash-local").unwrap();
+        let remote_dir = create_directory(remote_root, "hash-remote").unwrap();
+        let bytes = vec![0x5a; 256 * 1024];
+        for directory in [&local, &remote_dir] {
+            fs::write(directory.join("source").path(), &bytes).unwrap();
+        }
+        for (name, source, parent) in [
+            ("upload", local.join("source"), &remote_dir),
+            ("download", remote_dir.join("source"), &local),
+            ("remote", remote_dir.join("source"), &remote_dir),
+        ] {
+            for stop in [false, true] {
+                let target = parent.join(format!("{name}-{stop}"));
+                fs::write(target.path(), b"old destination").unwrap();
+                let expected = entry_metadata(&target).unwrap().unwrap();
+                let armed = Arc::new(AtomicBool::new(false));
+                let watch = armed.clone();
+                let mut checks = 0;
+                let cancel = Cancellation::at_checkpoint(move || {
+                    if watch.load(Ordering::Relaxed) {
+                        checks += 1;
+                    }
+                    // Verifying is armed immediately before readback: check1
+                    // precedes the first read, check2 follows that actual read.
+                    stop && checks == 2
+                });
+                let mut progress = Progress::with_cancellation(cancel);
+                progress.set_copy_verification(true);
+                let result = copy_transfer_cancellable(
+                    &TransferItem::new(source.clone(), source.clone(), target.clone()),
+                    Some(&expected),
+                    &mut progress,
+                    &mut |_, phase| {
+                        if phase == CopyPhase::Verifying {
+                            armed.store(true, Ordering::Relaxed);
+                            if !stop {
+                                let stage = fs::read_dir(parent.path())
+                                    .unwrap()
+                                    .map(Result::unwrap)
+                                    .find(|entry| {
+                                        entry
+                                            .file_name()
+                                            .to_string_lossy()
+                                            .starts_with(".pawcommander-")
+                                    })
+                                    .unwrap();
+                                fs::write(stage.path().join("payload"), vec![0x42; bytes.len()])
+                                    .unwrap();
+                            }
+                        }
+                        Ok(())
+                    },
+                    || panic!("failed verification must not publish"),
+                );
+                if stop {
+                    assert!(
+                        matches!(result, Err(TransferError::Cancelled)),
+                        "{name}: {result:?}"
+                    );
+                } else {
+                    assert!(
+                        result.unwrap_err().to_string().contains("SHA-256"),
+                        "{name}"
+                    );
+                }
+                assert_eq!(fs::read(source.path()).unwrap(), bytes, "{name}: source");
+                assert_eq!(
+                    fs::read(target.path()).unwrap(),
+                    b"old destination",
+                    "{name}: target"
+                );
+                assert!(
+                    fs::read_dir(parent.path())
+                        .unwrap()
+                        .map(Result::unwrap)
+                        .all(|entry| !entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with(".pawcommander-")),
+                    "{name}: staging"
+                );
+            }
+        }
+    }
+
     // Run with scripts/test-sftp.sh: a disposable loopback-only OpenSSH server
     // and generated keys, without using the user's real known_hosts or keys.
     #[test]
@@ -4284,6 +4468,7 @@ mod tests {
         })
         .unwrap();
         let (mut progress, mut view) = Progress::tracked();
+        progress.set_copy_verification(true);
         assert_eq!(
             transfer_with_conflicts(
                 std::slice::from_ref(&source),
@@ -4324,10 +4509,15 @@ mod tests {
         )
         .is_err());
         let downloads = create_directory(&local_root, "downloads").unwrap();
-        transfer(
+        let mut verified_download = Progress::default();
+        verified_download.set_copy_verification(true);
+        transfer_with_conflicts(
             std::slice::from_ref(&uploaded),
             &downloads,
             TransferKind::Copy,
+            &mut verified_download,
+            |_| panic!("unexpected conflict"),
+            |_, _| panic!("copy"),
         )
         .unwrap();
         assert_eq!(
@@ -4464,7 +4654,17 @@ mod tests {
         )
         .is_err());
         // Remote -> remote copy and refusal to follow symlinks in transfer trees.
-        transfer(std::slice::from_ref(&moved), &conflict, TransferKind::Copy).unwrap();
+        let mut verified_remote = Progress::default();
+        verified_remote.set_copy_verification(true);
+        transfer_with_conflicts(
+            std::slice::from_ref(&moved),
+            &conflict,
+            TransferKind::Copy,
+            &mut verified_remote,
+            |_| panic!("unexpected conflict"),
+            |_, _| panic!("copy"),
+        )
+        .unwrap();
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(source.path(), remote_root.path().join("alias")).unwrap();
@@ -4497,6 +4697,7 @@ mod tests {
                 .starts_with(".pawcommander-transfer-")
         }));
         check_sftp_cancellation(&local_root, &remote_root);
+        check_sftp_copy_hash_verification(&local_root, &remote_root);
         check_sftp_source_changes(&local_root, &remote_root);
         check_sftp_source_change_cleanup_at_depth_limit(&local_root, &remote_root);
         #[cfg(unix)]

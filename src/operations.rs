@@ -1,6 +1,7 @@
 //! A worker publishes only the latest progress snapshot. The UI never waits
 //! for I/O or drains a queue of progress messages.
 
+use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -121,7 +122,44 @@ pub(crate) struct Snapshot {
     pub item: Option<PathBuf>,
     pub waiting_for_conflict: bool,
     pub transfer: Option<Transfer>,
+    pub verification: Option<Verification>,
     pub total_written: u64,
+}
+
+#[derive(Clone)]
+pub(crate) struct Verification {
+    pub read: u64,
+    pub expected: u64,
+}
+
+/// Hash the exact bounded source stream consumed by the copy. Disabled copies
+/// avoid hashing, and local copies retain their separate file-to-file fast path.
+pub(crate) struct CopyReader<R> {
+    inner: R,
+    hash: Option<Sha256>,
+}
+
+impl<R> CopyReader<R> {
+    pub fn new(inner: R, verify: bool) -> Self {
+        Self {
+            inner,
+            hash: verify.then(Sha256::new),
+        }
+    }
+
+    pub fn finish(self) -> Option<[u8; 32]> {
+        self.hash.map(|hash| hash.finalize().into())
+    }
+}
+
+impl<R: Read> Read for CopyReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let read = self.inner.read(buffer)?;
+        if let Some(hash) = &mut self.hash {
+            hash.update(&buffer[..read]);
+        }
+        Ok(read)
+    }
 }
 
 #[derive(Clone)]
@@ -174,6 +212,7 @@ pub(crate) struct Progress {
     view: Option<Arc<Mutex<Snapshot>>>,
     current: Snapshot,
     last_update: Option<Instant>,
+    verify_copies: bool,
 }
 
 impl Progress {
@@ -206,6 +245,16 @@ impl Progress {
         self.cancel.clone()
     }
 
+    /// Capture a submitted transfer's option once, before any queued work runs.
+    /// Rename-only moves do not consume this option or claim verification.
+    pub fn set_copy_verification(&mut self, enabled: bool) {
+        self.verify_copies = enabled;
+    }
+
+    pub fn copy_verification(&self) -> bool {
+        self.verify_copies
+    }
+
     pub fn check_cancelled(&self) -> io::Result<()> {
         self.cancel.check()
     }
@@ -223,6 +272,7 @@ impl Progress {
             self.current.item = Some(path.to_owned());
             self.current.waiting_for_conflict = waiting_for_conflict;
             self.current.transfer = None;
+            self.current.verification = None;
             self.publish(Instant::now(), true);
         }
     }
@@ -311,6 +361,52 @@ impl Progress {
         })
     }
 
+    /// Independently read back an unpublished regular file. The expected length
+    /// bounds work even if it grows; one extra byte detects an appended tail.
+    /// Verification reads never count as destination writes.
+    pub fn verify_copy(
+        &mut self,
+        path: &Path,
+        expected: u64,
+        source_hash: [u8; 32],
+        input: &mut impl Read,
+    ) -> io::Result<()> {
+        self.current.item = Some(path.to_owned());
+        self.current.waiting_for_conflict = false;
+        self.current.transfer = None;
+        self.current.verification = Some(Verification { read: 0, expected });
+        self.publish(Instant::now(), true);
+        let mut hash = Sha256::new();
+        let mut read = 0_u64;
+        let mut buffer = [0; 64 * 1024];
+        loop {
+            self.check_cancelled()?;
+            let limit = (expected - read).min(buffer.len() as u64) as usize;
+            let size = if limit == 0 { 1 } else { limit };
+            let count = match input.read(&mut buffer[..size]) {
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                result => result?,
+            };
+            self.check_cancelled()?;
+            if count == 0 {
+                break;
+            }
+            if limit == 0 {
+                return Err(copy_hash_mismatch(path));
+            }
+            hash.update(&buffer[..count]);
+            read += count as u64;
+            self.current.verification.as_mut().unwrap().read = read;
+            self.publish(Instant::now(), read == count as u64);
+        }
+        self.check_cancelled()?;
+        if read != expected || <[u8; 32]>::from(hash.finalize()) != source_hash {
+            return Err(copy_hash_mismatch(path));
+        }
+        self.publish(Instant::now(), true);
+        Ok(())
+    }
+
     fn copy_tracked(
         &mut self,
         path: &Path,
@@ -320,6 +416,7 @@ impl Progress {
         let now = Instant::now();
         self.current.item = Some(path.to_owned());
         self.current.waiting_for_conflict = false;
+        self.current.verification = None;
         self.current.transfer = Some(Transfer {
             written: 0,
             expected,
@@ -352,9 +449,86 @@ impl Progress {
     }
 }
 
+fn copy_hash_mismatch(path: &Path) -> io::Error {
+    io::Error::other(crate::tr_format!(
+        "Проверка SHA-256 не пройдена для {}. Копия не опубликована; источник сохранён",
+        "SHA-256 verification failed for {}. Copy was not published; source was preserved",
+        path.display()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copy_hash_verification_checks_content_length_errors_and_write_accounting() {
+        use std::io::Cursor;
+        let known_abc = [
+            0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae,
+            0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61,
+            0xf2, 0x00, 0x15, 0xad,
+        ];
+        let path = Path::new("source");
+        let (mut progress, mut view) = Progress::tracked();
+        let mut source = CopyReader::new(Cursor::new(b"abc"), true);
+        let mut destination = Vec::new();
+        progress
+            .copy(path, Some(3), &mut source, &mut destination)
+            .unwrap();
+        assert_eq!(source.finish(), Some(known_abc));
+        progress
+            .verify_copy(path, 3, known_abc, &mut Cursor::new(&destination))
+            .unwrap();
+        let snapshot = view.snapshot();
+        assert_eq!(snapshot.total_written, 3);
+        assert!(snapshot.transfer.is_none());
+        assert_eq!(snapshot.verification.as_ref().unwrap().read, 3);
+        for changed in [b"abd".as_slice(), b"ab", b"abcd"] {
+            assert!(progress
+                .verify_copy(path, 3, known_abc, &mut Cursor::new(changed))
+                .is_err());
+        }
+        progress
+            .verify_copy(path, 0, Sha256::digest([]).into(), &mut Cursor::new([]))
+            .unwrap();
+        struct FailedRead;
+        impl Read for FailedRead {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::ErrorKind::PermissionDenied.into())
+            }
+        }
+        assert_eq!(
+            progress
+                .verify_copy(path, 3, known_abc, &mut FailedRead)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn copy_hash_verification_observes_stop_after_reads_without_an_observer() {
+        struct StopOnRead(Cancellation, usize);
+        impl Read for StopOnRead {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                self.1 += 1;
+                self.0.request();
+                buffer[0] = 1;
+                Ok(1)
+            }
+        }
+        let mut progress = Progress::default();
+        let mut input = StopOnRead(progress.cancellation(), 0);
+        let error = progress
+            .verify_copy(Path::new("source"), 1024, [0; 32], &mut input)
+            .unwrap_err();
+        assert!(matches!(
+            TransferError::from(error),
+            TransferError::Cancelled
+        ));
+        assert_eq!(input.1, 1);
+    }
 
     #[test]
     fn stream_cancellation_checks_reads_and_writes_without_a_progress_observer() {

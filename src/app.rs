@@ -46,6 +46,7 @@ struct Settings {
     split: bool,
     pane_layout: PaneLayout,
     preview: bool,
+    verify_copies: bool,
     hidden: bool,
     grid: bool,
     pane_grid: Option<[bool; 2]>,
@@ -416,6 +417,7 @@ impl Default for Settings {
             split: true,
             pane_layout: PaneLayout::default(),
             preview: true,
+            verify_copies: false,
             hidden: false,
             grid: false,
             pane_grid: None,
@@ -2386,16 +2388,21 @@ impl PawCommander {
                 return;
             }
         }
-        let description = format!(
+        let verify_copies = kind == TransferKind::Copy && self.settings.verify_copies;
+        let mut description = format!(
             "{} ({}): {} → {}",
             label,
             sources.len(),
             sources.first().unwrap().display(),
             destination.display()
         );
+        if verify_copies {
+            description.push_str(" · SHA-256");
+        }
         let (events, rx) = mpsc::channel();
         let worker_ctx = ctx.clone();
         let work = move |progress: &mut Progress| {
+            progress.set_copy_verification(verify_copies);
             let cancellation = progress.cancellation();
             let summary = fs_ops::transfer_with_conflicts(
                 &sources,
@@ -4185,6 +4192,12 @@ impl PawCommander {
                                 }
                             });
                             paint_focus(ui, &language_menu.response, 5);
+                            ui.separator();
+                            let verification = ui.checkbox(
+                                &mut self.settings.verify_copies,
+                                crate::i18n::text("Проверять копии (SHA-256)"),
+                            ).on_hover_text(crate::i18n::text("Повторно читает временные файлы перед публикацией. Применяется к новым заданиям копирования; перемещение использует переименование."));
+                            paint_focus(ui, &verification, 5);
                             ui.separator();
                             appearance_menu(ui, &mut self.settings.theme, self.settings.high_contrast);
                             ui.separator();
@@ -7576,11 +7589,21 @@ fn operation_details(ui: &mut egui::Ui, progress: &crate::operations::Snapshot) 
         );
         let phase = if progress.waiting_for_conflict {
             crate::i18n::text("Ожидается решение")
+        } else if progress.verification.is_some() {
+            crate::i18n::text("Проверка SHA-256")
         } else {
             crate::i18n::text("Текущий объект")
         };
         ui.add(egui::Label::new(format!("{phase}: {name}")).truncate())
             .on_hover_text(item.display().to_string());
+    }
+    if let Some(verification) = &progress.verification {
+        ui.label(crate::tr_format!(
+            "Прочитано для проверки: {} / {}",
+            "Read for verification: {} / {}",
+            human_size(verification.read),
+            human_size(verification.expected)
+        ));
     }
     if let Some(transfer) = &progress.transfer {
         let written = human_size(transfer.written);
@@ -7747,6 +7770,88 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn copy_verification_defaults_off_persists_and_is_captured_per_queued_job() {
+        let mut settings: Settings = serde_json::from_str("{}").unwrap();
+        assert!(!settings.verify_copies);
+        settings.verify_copies = true;
+        let restored: Settings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert!(restored.verify_copies);
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("destination");
+        std::fs::create_dir(&destination).unwrap();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        let _held = hold_queue(&mut app);
+        for (name, verify, kind) in [
+            ("verified", true, TransferKind::Copy),
+            ("ordinary", false, TransferKind::Copy),
+            ("moved", true, TransferKind::Move),
+        ] {
+            let source = root.path().join(name);
+            std::fs::write(&source, name).unwrap();
+            app.settings.verify_copies = verify;
+            app.start_transfer(
+                &ctx,
+                name,
+                vec![source.into()],
+                destination.clone().into(),
+                kind,
+                false,
+            );
+        }
+        app.settings.verify_copies = true;
+        for (name, verify) in [("verified", true), ("ordinary", false), ("moved", false)] {
+            let job = app.pending_jobs.pop_front().unwrap();
+            assert_eq!(job.description.contains("SHA-256"), verify);
+            let mut progress = Progress::default();
+            (job.work)(&mut progress).unwrap();
+            assert_eq!(
+                progress.copy_verification(),
+                verify,
+                "queued job owns its setting"
+            );
+            assert_eq!(
+                std::fs::read(destination.join(name)).unwrap(),
+                name.as_bytes()
+            );
+        }
+        assert!(!root.path().join("moved").exists());
+    }
+
+    #[test]
+    fn copy_verification_footer_distinguishes_reads_from_writes() {
+        let ctx = egui::Context::default();
+        let progress = crate::operations::Snapshot {
+            item: Some(PathBuf::from("/disposable/source/file")),
+            verification: Some(crate::operations::Verification {
+                read: 1024,
+                expected: 2048,
+            }),
+            total_written: 2048,
+            ..Default::default()
+        };
+        let mut output = None;
+        for _ in 0..2 {
+            output = Some(ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| operation_details(ui, &progress));
+            }));
+        }
+        let text = operation_footer_text(&output.unwrap());
+        assert!(
+            text.contains(crate::i18n::text("Проверка SHA-256")),
+            "{text}"
+        );
+        assert!(text.contains("1.0 KB / 2.0 KB"), "{text}");
+        assert!(text.contains("2.0 KB"), "{text}");
+        assert!(
+            !text.contains("3.0 KB"),
+            "read bytes must not inflate writes: {text}"
+        );
+    }
 
     #[test]
     fn unrevisioned_file_clipboard_uses_observed_contents() {

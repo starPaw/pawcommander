@@ -152,6 +152,7 @@ See the [user guide](docs/USER_GUIDE.md) for SFTP setup, clipboard behavior, dra
 ## Know the edges
 
 - **Transfers are not backups.** Local copying does not preserve every OS-specific attribute, ACL, Finder tag, or hard-link relationship. SFTP copying supports regular files and folders, with more limited metadata preservation.
+- **Optional copy verification.** Enable **Settings → Verify copies (SHA-256)** to read back staged regular files before publication. It is off by default and captured per queued copy. Verification failure preserves the source and existing destination. Rename moves do not use this check.
 - **Remote deletion is permanent.** Local deletion uses the system trash; SFTP deletion requires a separate permanent-delete confirmation.
 - **Name search is local.** Folder search reads the filesystem directly. The optional `locate` mode uses an external index whose results can be stale.
 - **SFTP is deliberately explicit.** Verify server keys with OpenSSH first. ProxyJump, interactive MFA, and SSH-config-based connection setup are not supported. Transfers require server free-space reporting.

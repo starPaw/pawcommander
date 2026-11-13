@@ -1,11 +1,11 @@
 //! Local filesystem operations. Copies are staged privately on the destination
 //! volume before publication. This does not snapshot a changing filesystem.
 
-use crate::operations::{Cancellation, Progress, TransferError};
+use crate::operations::{Cancellation, CopyReader, Progress, TransferError};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
-use std::io;
+use std::io::{self, Read, Seek};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -881,10 +881,20 @@ fn copy_tree_entry(
         entry.verify_metadata(source, &input.metadata()?)?;
         cancel.check()?;
         let mut output = OpenOptions::new()
+            .read(progress.copy_verification())
             .write(true)
             .create_new(true)
             .open(destination)?;
-        let written = progress.copy_local(source, metadata.len(), &mut input, &mut output)?;
+        let (written, source_hash) = if progress.copy_verification() {
+            let mut reader = CopyReader::new((&mut input).take(metadata.len()), true);
+            let written = progress.copy(source, Some(metadata.len()), &mut reader, &mut output)?;
+            (written, reader.finish())
+        } else {
+            (
+                progress.copy_local(source, metadata.len(), &mut input, &mut output)?,
+                None,
+            )
+        };
         if written != metadata.len() {
             return Err(source_changed(source));
         }
@@ -892,10 +902,16 @@ fn copy_tree_entry(
         entry.verify(source, &cancel)?;
         cancel.check()?;
         output.sync_all()?;
+        after_entry(source)?;
+        if let Some(source_hash) = source_hash {
+            output.rewind()?;
+            progress.verify_copy(source, metadata.len(), source_hash, &mut output)?;
+        }
         if let Ok(modified) = metadata.modified() {
             output.set_times(fs::FileTimes::new().set_modified(modified))?;
         }
         output.set_permissions(metadata.permissions())?;
+        return Ok(());
     } else {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -1125,6 +1141,118 @@ pub(crate) fn rename_no_replace(_: &Path, _: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copy_hash_mismatch_preserves_source_old_target_and_cleans_staging() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        fs::write(&source, b"source bytes").unwrap();
+        fs::write(&target, b"old destination").unwrap();
+        let mut progress = Progress::default();
+        progress.set_copy_verification(true);
+        let result = copy_atomically_cancellable(
+            &source,
+            &target,
+            &mut progress,
+            |_, _| panic!("hash mismatch must not publish"),
+            &mut |_| {
+                let staging = fs::read_dir(root.path())
+                    .unwrap()
+                    .map(Result::unwrap)
+                    .find(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with(".pawcommander-copy-")
+                    })
+                    .unwrap();
+                fs::write(staging.path().join("payload"), b"broken bytes")
+            },
+        );
+        assert!(result.unwrap_err().to_string().contains("SHA-256"));
+        assert_eq!(fs::read(&source).unwrap(), b"source bytes");
+        assert_eq!(fs::read(&target).unwrap(), b"old destination");
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn stop_during_copy_hash_verification_preserves_existing_destination() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        let bytes = vec![0x5a; 256 * 1024];
+        fs::write(&source, &bytes).unwrap();
+        fs::write(&target, b"old destination").unwrap();
+        let armed = Arc::new(AtomicBool::new(false));
+        let watch = armed.clone();
+        let mut verification_checks = 0;
+        let cancel = Cancellation::at_checkpoint(move || {
+            if watch.load(Ordering::Relaxed) {
+                verification_checks += 1;
+            }
+            verification_checks == 3
+        });
+        let mut progress = Progress::with_cancellation(cancel);
+        progress.set_copy_verification(true);
+        let result = copy_atomically_cancellable(
+            &source,
+            &target,
+            &mut progress,
+            |_, _| panic!("stopped verification must not publish"),
+            &mut |_| {
+                armed.store(true, Ordering::Relaxed);
+                Ok(())
+            },
+        );
+        assert!(matches!(result, Err(TransferError::Cancelled)));
+        assert_eq!(fs::read(source).unwrap(), bytes);
+        assert_eq!(fs::read(target).unwrap(), b"old destination");
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_hash_verification_precedes_restrictive_destination_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("readonly"), b"read only bytes").unwrap();
+        fs::write(source.join("empty"), []).unwrap();
+        std::os::unix::fs::symlink("missing", source.join("link")).unwrap();
+        fs::set_permissions(source.join("readonly"), fs::Permissions::from_mode(0o400)).unwrap();
+        let mut progress = Progress::default();
+        progress.set_copy_verification(true);
+        copy_atomically_cancellable(
+            &source,
+            &target,
+            &mut progress,
+            |payload, target| fs::rename(payload, target).map_err(|e| e.to_string()),
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(target.join("readonly")).unwrap(),
+            b"read only bytes"
+        );
+        assert_eq!(
+            fs::metadata(target.join("readonly"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o400
+        );
+        assert_eq!(fs::metadata(target.join("empty")).unwrap().len(), 0);
+        assert_eq!(
+            fs::read_link(target.join("link")).unwrap(),
+            PathBuf::from("missing")
+        );
+    }
 
     #[test]
     fn cancellation_during_local_stream_preserves_replacement_and_removes_staging() {
