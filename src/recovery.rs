@@ -645,7 +645,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
     #[ignore = "subprocess entry point for killed_worker_is_recovered"]
     fn crash_process_helper() {
         let directory =
@@ -666,7 +665,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
     fn killed_worker_is_recovered() {
         struct ChildGuard(std::process::Child);
         impl Drop for ChildGuard {
