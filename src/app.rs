@@ -1941,6 +1941,7 @@ pub struct PawCommander {
     transfer: Option<TransferInteraction>,
     notice: Option<(String, bool)>,
     history: History,
+    recovery: crate::recovery::Recovery,
     show_history: bool,
     show_help: bool,
     shortcut_editor: Option<ShortcutEditor>,
@@ -2108,6 +2109,7 @@ impl PawCommander {
             }),
             show_help: false,
             history: History::new(&cc.egui_ctx),
+            recovery: crate::recovery::Recovery::new(&cc.egui_ctx),
             show_history: false,
             shortcut_editor: None,
             command_palette: None,
@@ -2261,6 +2263,8 @@ impl PawCommander {
             let started = Instant::now();
             let history = self.history.sender();
             let history_label = label.clone();
+            let recovery_directory = self.recovery.directory();
+            let recovery_description = description.clone();
             // A failed OS spawn consumes its closure. Retain the work separately
             // so failure cannot discard this job or the jobs behind it.
             let work = Arc::new(Mutex::new(Some(work)));
@@ -2268,20 +2272,68 @@ impl PawCommander {
             let worker = move || {
                 let work = worker_work.lock().unwrap().take().unwrap();
                 let history_started = crate::result_history::now();
-                let result =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&mut reporter)))
-                        .unwrap_or_else(|_| {
-                            Err(crate::i18n::text(
+                if recovery_directory.is_none() && !cfg!(test) {
+                    let _ = tx.send(Err(crate::tr_format!(
+                        "Операция не начата: папка данных приложения для восстановления недоступна.",
+                        "Operation not started: application data directory for recovery is unavailable."
+                    )));
+                    worker_ctx.request_repaint();
+                    return;
+                }
+                let pending = match recovery_directory
+                    .as_deref()
+                    .map(|directory| {
+                        crate::recovery::begin(
+                            directory,
+                            &history_label,
+                            &recovery_description,
+                            history_started,
+                        )
+                    })
+                    .transpose()
+                {
+                    Ok(pending) => pending,
+                    Err(error) => {
+                        let _ = tx.send(Err(crate::tr_format!(
+                            "Операция не начата: не удалось сохранить запись восстановления: {error}",
+                            "Operation not started: could not save recovery record: {error}"
+                        )));
+                        worker_ctx.request_repaint();
+                        return;
+                    }
+                };
+                let outcome =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&mut reporter)));
+                let panicked = outcome.is_err();
+                let mut result = outcome.unwrap_or_else(|_| {
+                    Err(crate::i18n::text(
                         "Фоновая операция неожиданно завершилась. Проверьте файлы в обеих папках.",
                     )
                     .into())
-                        });
-                if let Some(record) = std::mem::take(&mut reporter.results).finish(
+                });
+                let persisted = if let Some(record) = std::mem::take(&mut reporter.results).finish(
                     history_label,
                     history_started,
                     &result,
                 ) {
-                    history.append(record);
+                    history.append(record)
+                } else {
+                    true
+                };
+                if !panicked && persisted {
+                    if let Some(pending) = pending {
+                        if let Err(error) = pending.complete() {
+                            result = Err(crate::tr_format!(
+                                "Операция завершилась, но очистка записи восстановления не подтверждена: {error}. Проверьте журнал результатов.",
+                                "Operation finished, but recovery record cleanup could not be confirmed: {error}. Check result history."
+                            ));
+                        }
+                    }
+                } else if !persisted && recovery_directory.is_some() {
+                    result = Err(crate::tr_format!(
+                        "Операция завершилась, но журнал результатов не сохранён. Проверьте файлы в обеих папках; запись восстановления сохранена, если была создана.",
+                        "Operation finished, but result history was not saved. Check files in both folders; the recovery record was retained if created."
+                    ));
                 }
                 let _ = tx.send(result);
                 worker_ctx.request_repaint();
@@ -2332,6 +2384,7 @@ impl PawCommander {
             && self.sftp_form.is_none()
             && !self.show_help
             && !self.show_history
+            && !self.recovery.is_open()
             && self.shortcut_editor.is_none()
             && self.command_palette.is_none()
             && self.folder_jump.is_none()
@@ -3619,6 +3672,7 @@ impl PawCommander {
             || self.sftp_form.is_some()
             || self.show_help
             || self.show_history
+            || self.recovery.is_open()
             || self.shortcut_editor.is_some()
             || self.bookmark_editor.is_some()
             || self.bookmark_menu_open.is_some_and(|id| {
@@ -4212,6 +4266,11 @@ impl PawCommander {
                                     paint_focus(ui, &response, 5);
                                 }
                             });
+                            ui.separator();
+                            if ui.button(crate::tr_format!("Восстановление после сбоя", "Crash recovery")).clicked() {
+                                self.recovery.reopen();
+                                ui.close_menu();
+                            }
                             ui.separator();
                             ui.label(crate::i18n::text("Вид текущей папки"));
                             let view = self.folder_view(self.active);
@@ -5505,6 +5564,7 @@ impl eframe::App for PawCommander {
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.history.poll();
+        self.recovery.poll(ctx);
         let colors = Palette::from_ctx(ctx);
         self.poll(ctx);
         self.transfer_stop_shortcut(ctx);
@@ -5517,6 +5577,18 @@ impl eframe::App for PawCommander {
                     .into(),
                 false,
             ));
+        }
+        // Startup findings may arrive while another dialog or picker is open.
+        // Suspend those handlers so Enter cannot submit an unrelated operation.
+        if self.recovery.is_open() && !self.conflict_open() {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.label(crate::tr_format!(
+                    "Закройте отчёт восстановления, чтобы продолжить работу.",
+                    "Close the recovery report to continue."
+                ));
+            });
+            self.recovery.show(ctx);
+            return;
         }
         if !self.conflict_open() {
             if let Some(editor) = &mut self.shortcut_editor {
@@ -5624,6 +5696,7 @@ impl eframe::App for PawCommander {
             && self.sftp_form.is_none()
             && !self.show_help
             && !self.show_history
+            && !self.recovery.is_open()
             && self.shortcut_editor.is_none()
             && self.command_palette.is_none()
             && self.quick_look.is_none()
@@ -9350,6 +9423,151 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         assert!(condition(app), "queue did not reach expected state");
+    }
+
+    #[test]
+    fn recovery_worker_tracks_active_operation_and_clears_known_completion() {
+        for fail in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let directory = root.path().join("recovery");
+            let ctx = egui::Context::default();
+            let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+            let mut app = PawCommander::new(&cc, Some(root.path().into()));
+            app.recovery = crate::recovery::Recovery::for_test(directory.clone(), &ctx);
+            app.history = History::for_test(root.path().join("history.json"), &ctx);
+            let (started, observed) = mpsc::channel();
+            let (release, held) = mpsc::channel();
+            app.start_progress_job(&ctx, "tracked job", move |progress| {
+                let source = Location::Local(PathBuf::from("tracked source"));
+                progress.results.plan([(source.clone(), None)]);
+                progress.results.begin(&source);
+                started.send(()).unwrap();
+                held.recv().unwrap();
+                if fail {
+                    Err("known operation failure".into())
+                } else {
+                    progress.results.record(
+                        &source,
+                        None,
+                        crate::result_history::Outcome::Completed,
+                        None,
+                    );
+                    Ok("done".into())
+                }
+            });
+            observed.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+            assert!(crate::recovery::scan(&directory).unfinished.is_empty());
+            release.send(()).unwrap();
+            poll_queue_until(&mut app, &ctx, |app| app.job.is_none());
+            assert!(crate::recovery::scan(&directory).unfinished.is_empty());
+            assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+            assert_eq!(app.notice.as_ref().unwrap().1, fail);
+        }
+    }
+
+    #[test]
+    fn recovery_worker_preserves_marker_after_caught_panic() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("recovery");
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        app.recovery = crate::recovery::Recovery::for_test(directory.clone(), &ctx);
+        app.start_progress_job(&ctx, "panicked job", |_| panic!("injected worker panic"));
+        poll_queue_until(&mut app, &ctx, |app| app.job.is_none());
+        let report = crate::recovery::scan(&directory);
+        assert!(report.errors.is_empty());
+        assert_eq!(report.unfinished.len(), 1);
+        assert_eq!(report.unfinished[0].label, "panicked job");
+        assert!(app.notice.as_ref().unwrap().1);
+    }
+
+    #[test]
+    fn recovery_worker_refuses_to_start_without_persisted_marker() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("blocked-recovery");
+        std::fs::write(&directory, b"foreign file").unwrap();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        app.recovery = crate::recovery::Recovery::for_test(directory.clone(), &ctx);
+        let changed = root.path().join("must-not-exist");
+        let worker_changed = changed.clone();
+        app.start_progress_job(&ctx, "blocked job", move |_| {
+            std::fs::write(worker_changed, b"unexpected work").unwrap();
+            Ok("done".into())
+        });
+        poll_queue_until(&mut app, &ctx, |app| app.job.is_none());
+        assert!(!changed.exists());
+        assert_eq!(std::fs::read(directory).unwrap(), b"foreign file");
+        assert!(app.notice.as_ref().unwrap().1);
+    }
+
+    #[test]
+    fn recovery_worker_retains_marker_when_history_cannot_be_saved() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("recovery");
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        app.recovery = crate::recovery::Recovery::for_test(directory.clone(), &ctx);
+        // The default test history has no disk worker and cannot acknowledge persistence.
+        app.start_progress_job(&ctx, "history failure", |progress| {
+            progress
+                .results
+                .plan([(Location::Local(PathBuf::from("source")), None)]);
+            Ok("finished operation".into())
+        });
+        poll_queue_until(&mut app, &ctx, |app| app.job.is_none());
+        assert_eq!(crate::recovery::scan(&directory).unfinished.len(), 1);
+        assert!(app.notice.as_ref().unwrap().1);
+    }
+
+    #[test]
+    fn recovery_window_blocks_file_shortcuts_and_drops() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        app.recovery.reopen();
+        assert!(app.keyboard_blocked(&ctx));
+        assert!(!app.drop_enabled());
+    }
+
+    #[test]
+    fn recovery_report_suspends_existing_new_folder_dialog_enter() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        app.dialog = Some(Dialog::NewFolder {
+            parent: root.path().to_path_buf().into(),
+            name: "must-not-be-created".into(),
+        });
+        app.recovery.reopen();
+        let mut frame = eframe::Frame::_new_kittest();
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(1000.0, 700.0),
+                )),
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ctx| eframe::App::update(&mut app, ctx, &mut frame),
+        );
+        assert!(app.recovery.is_open());
+        assert!(matches!(app.dialog, Some(Dialog::NewFolder { .. })));
+        assert!(app.job.is_none());
+        assert!(!root.path().join("must-not-be-created").exists());
     }
 
     fn answer_queue_conflict(app: &mut PawCommander, ctx: &egui::Context, label: &str) {

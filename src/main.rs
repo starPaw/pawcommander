@@ -21,6 +21,7 @@ mod native_drag;
 mod operations;
 mod preview;
 mod properties;
+mod recovery;
 mod result_history;
 mod search;
 mod shortcuts;

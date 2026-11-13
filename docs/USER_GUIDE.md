@@ -76,13 +76,23 @@ Local copies preserve file contents, symlink targets, ordinary permissions, and 
 
 Local delete sends items to the OS trash after confirmation. Restore them using the system file manager. Remote delete is permanent and uses a separate explicit confirmation.
 
+### Crash recovery
+
+Before a job starts, PawCommander saves a small description in `PawCommander/recovery` under the local application-data directory. If this record cannot be saved, the job does not run. After a process crash or forced termination, the next launch reports jobs without confirmed completion. Open **Settings → Crash recovery** to view that startup report again. Close the report before continuing; any dialog already open remains pending.
+
+A report does not prove that every source is unchanged or that nothing reached the destination. Inspect both folders and **Result history** before repeating an operation. Live jobs in another running instance are omitted. Normal completion clears the marker after the result-history save is acknowledged; a caught worker panic or failed history save retains it. Corrupt or unreadable records are reported and preserved.
+
+This first recovery stage tracks started job descriptions. It does not restore queued jobs, locate leftover staging copies, retry work, or remove source/destination data. Markers remain available for manual review and can therefore appear again on later launches. It does not guarantee recovery after power loss. Windows and Linux native recovery acceptance is pending.
+
 ### Result history
 
 Choose **Result history** in the footer to review completed copy, move, rename, create-folder, and delete operations, including earlier sessions. Expand an operation for source and destination paths, each selected item's outcome, and its failure or warning reason. Text can be selected and copied; scroll horizontally for long paths and errors. Embedded line breaks appear as `\n` and `\r`; the saved file retains the original text. **Completed with warning** means the item was published but a later step, such as temporary-folder cleanup, failed. Check the recorded recovery guidance before retrying. **Failed** does not prove that a remote server made no changes when its reply was lost.
 
 Folder copies include the files, links, and directories from the source manifest, with their final destination paths. A nested item becomes **Completed** only after the whole selected folder is published. If a later child or final source check fails, previously prepared private copies show **Publication unconfirmed**; this also covers a lost SFTP publication reply. Inspect the selected folder's error and recovery paths before retrying. The failed or stopped child has its own outcome, and **Not started** distinguishes children not yet processed. A cleanup warning after acknowledged publication leaves the nested copies completed.
 
-Moves, renames, deletion, skipped items, unstarted folders, and copies whose source manifest could not be completed retain a **Selected item only; descendants not enumerated** scope. Moving a folder uses an atomic rename without walking its children. A failed permanent remote deletion may have removed part of the recorded folder. Missing descendant rows in these cases are not evidence that those files were individually checked or left unchanged.
+Permanent SFTP deletion records each file, link, or directory actually visited. A confirmed deletion stays **Completed** if a later sibling or parent fails; failed entries have their own reasons. An interrupted traversal shows **Descendants were not fully listed** on the selected root. Unvisited children are absent, so missing rows do not prove those files were checked or left unchanged.
+
+Moves, renames, local trash, skipped items, unstarted folders, and copies whose source manifest could not be completed also show **Descendants were not fully listed**. Moving a folder uses an atomic rename without walking its children.
 
 History is saved in `PawCommander/operation-history.json` under the OS local application-data directory; its full path appears in the history window. It retains up to 100 recent operations and 100,000 rows within a 32 MiB storage budget, dropping older operations when needed. Collection for one operation also has a conservative 16 MiB budget; individual paths and messages are limited to 64 KiB. Records explicitly show omitted row counts and shortened text. Reaching a journal limit does not stop or change the file operation. The background worker attempts an atomic save before announcing operation completion. A save failure remains visible and preserves the previous file. This is a results log, not a crash-recovery journal: an operation interrupted by process termination or power loss may be missing.
 
