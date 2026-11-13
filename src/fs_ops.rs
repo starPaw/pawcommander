@@ -1375,6 +1375,35 @@ mod tests {
         assert!(!destination.exists());
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_cleanup_preserves_replaced_staging_directory() {
+        use std::os::windows::fs::MetadataExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let staging = create_staging_directory(root.path()).unwrap();
+        let displaced = root.path().join("displaced-staging");
+        let original_volume = staging
+            .original
+            .volume_serial_number()
+            .expect("NTFS volume ID");
+        let original_file = staging.original.file_index().expect("NTFS file ID");
+        fs::write(staging.path.join("payload"), b"owned copy").unwrap();
+        fs::rename(&staging.path, &displaced).unwrap();
+        fs::create_dir(&staging.path).unwrap();
+        fs::write(staging.path.join("foreign"), b"not owned by the copy").unwrap();
+        let replacement = fs::symlink_metadata(&staging.path).unwrap();
+        assert_eq!(replacement.volume_serial_number(), Some(original_volume));
+        assert_ne!(replacement.file_index(), Some(original_file));
+
+        assert!(remove_staging(&staging).is_err());
+        assert_eq!(
+            fs::read(staging.path.join("foreign")).unwrap(),
+            b"not owned by the copy"
+        );
+        assert_eq!(fs::read(displaced.join("payload")).unwrap(), b"owned copy");
+    }
+
     #[test]
     fn stop_during_copy_hash_verification_preserves_existing_destination() {
         use std::sync::atomic::AtomicBool;
