@@ -119,6 +119,8 @@ Account passwords are not saved. If you opt to save a key and passphrase after c
 
 UI settings contain connection profiles and key-file paths, but not passwords or private-key contents. These profiles, tabs, and bookmarks can still reveal hostnames, usernames, and local paths; do not share settings files without reviewing them. Removing a saved secret leaves the profile, original key file, and existing sessions intact. A locked or unavailable credential store causes an error rather than a plaintext fallback.
 
+On Linux, a Secret Service provider must be running on the desktop session bus. On Windows, each saved key and passphrase must fit within Credential Manager's [2,560-byte limit](https://learn.microsoft.com/windows/win32/api/wincred/ns-wincred-credentiala), including UTF-8 JSON serialization. An oversized entry is rejected without replacing the existing saved entry; connect using the key file or SSH agent without saving it.
+
 ### Transfers and recovery
 
 Regular files and folders can be copied recursively in either direction and between connections. Rename and move are supported within one connection. Cross-connection moves are not supported; copy and verify separately. SFTP copying rejects symbolic links and special files and does not preserve source ownership, ACLs, permissions, or dates.

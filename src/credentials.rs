@@ -28,27 +28,54 @@ fn account(endpoint: &Endpoint) -> Result<String, String> {
         .map_err(|_| crate::i18n::text("Не удалось определить профиль SFTP").into())
 }
 fn vault_error(error: keyring::Error) -> String {
+    if let keyring::Error::TooLong(field, limit) = &error
+        && field == "secret"
+    {
+        return crate::tr_format!(
+            "Ключ и фраза превышают ограничение системного хранилища ({limit} байт). Подключитесь через файл ключа или SSH-агент без сохранения.",
+            "The key and passphrase exceed the system credential store limit ({limit} bytes). Connect using the key file or SSH agent without saving."
+        );
+    }
     crate::tr_format!("Системное хранилище секретов недоступно: {error}. Ключ и фраза не записываются в настройки.", "System credential store unavailable: {error}. The key and passphrase are not written to settings.")
 }
 pub fn load(endpoint: &Endpoint) -> Result<Option<SavedKey>, String> {
     load_entry(&entry(endpoint)?)
 }
 fn load_entry(entry: &keyring::Entry) -> Result<Option<SavedKey>, String> {
-    match entry.get_password() {
-        Ok(secret) => serde_json::from_str(&secret).map(Some).map_err(|_| {
+    match entry.get_secret() {
+        Ok(secret) => decode_saved_key(&secret).map(Some).map_err(|_| {
             crate::i18n::text("Сохранённый ключ повреждён; удалите его и сохраните заново").into()
         }),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(error) => Err(vault_error(error)),
     }
 }
+fn decode_saved_key(secret: &[u8]) -> Result<SavedKey, serde_json::Error> {
+    serde_json::from_slice(secret).or_else(|error| {
+        // Previous Windows entries used the password API's UTF-16LE encoding.
+        // Decode the same read so a concurrent update cannot mix two values.
+        if !secret.starts_with(b"{\0") || !secret.len().is_multiple_of(2) {
+            return Err(error);
+        }
+        let words: Vec<_> = secret
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair))
+            .collect();
+        let text = String::from_utf16(&words).map_err(|_| error)?;
+        serde_json::from_str(&text)
+    })
+}
 pub fn save(endpoint: &Endpoint, secret: &SavedKey) -> Result<(), String> {
     save_entry(&entry(endpoint)?, secret)
 }
 fn save_entry(entry: &keyring::Entry, secret: &SavedKey) -> Result<(), String> {
-    let encoded = serde_json::to_string(secret)
+    // Keep JSON as UTF-8 bytes: Windows doubles ASCII password strings to
+    // UTF-16, unnecessarily exceeding its credential-blob limit for RSA keys.
+    let encoded = serde_json::to_vec(secret)
         .map_err(|_| crate::i18n::text("Не удалось подготовить ключ к сохранению"))?;
-    entry.set_password(&encoded).map_err(vault_error)
+    entry.set_secret(&encoded).map_err(vault_error)
 }
 pub fn forget(endpoint: &Endpoint) -> Result<(), String> {
     forget_entry(&entry(endpoint)?)
@@ -65,6 +92,15 @@ mod tests {
     #[test]
     #[ignore = "uses a disposable entry in the real OS credential store"]
     fn os_vault_round_trip() {
+        fn check_saved(endpoint: &Endpoint, expected: &SavedKey) -> Result<(), String> {
+            let restored = load(endpoint)?.ok_or("Secret missing")?;
+            if restored.private_key != expected.private_key
+                || restored.passphrase != expected.passphrase
+            {
+                return Err("Saved secret did not round trip".into());
+            }
+            Ok(())
+        }
         let root = tempfile::tempdir().unwrap();
         let endpoint = Endpoint {
             host: "pawcommander-test.invalid".into(),
@@ -73,27 +109,89 @@ mod tests {
             key: Some(root.path().join("generated-test-key")),
         };
         let result = (|| -> Result<(), String> {
-            save(
-                &endpoint,
-                &SavedKey {
-                    private_key: "disposable test material".into(),
-                    passphrase: "disposable test phrase".into(),
-                },
-            )?;
-            let restored = load(&endpoint)?.ok_or("Secret missing")?;
-            assert_eq!(restored.private_key, "disposable test material");
-            assert_eq!(restored.passphrase, "disposable test phrase");
+            let small = SavedKey {
+                private_key: "disposable test material".into(),
+                passphrase: "disposable test phrase".into(),
+            };
+            save(&endpoint, &small)?;
+            check_saved(&endpoint, &small)?;
+            #[cfg(target_os = "windows")]
+            {
+                let previous = serde_json::to_string(&small).unwrap();
+                entry(&endpoint)?
+                    .set_password(&previous)
+                    .map_err(vault_error)?;
+                check_saved(&endpoint, &small)?;
+            }
+            // Exercise a key-sized payload as well as the small smoke entry.
+            // Some native stores encode password strings differently from bytes.
+            let large = SavedKey {
+                private_key: "disposable test key material\n".repeat(64),
+                passphrase: "одноразовая тестовая фраза".into(),
+            };
+            save(&endpoint, &large)?;
+            check_saved(&endpoint, &large)?;
+            #[cfg(target_os = "windows")]
+            {
+                // The same payload fits as UTF-8 but exceeds the Windows limit
+                // when the previous password API expands it to UTF-16.
+                let previous = serde_json::to_string(&large).unwrap();
+                if !matches!(
+                    entry(&endpoint)?.set_password(&previous),
+                    Err(keyring::Error::TooLong(..))
+                ) {
+                    return Err("Expected the previous UTF-16 size failure".into());
+                }
+                check_saved(&endpoint, &large)?;
+                let oversized = SavedKey {
+                    private_key: "disposable oversized material".repeat(256),
+                    passphrase: String::new(),
+                };
+                if save(&endpoint, &oversized).is_ok() {
+                    return Err("Expected the Windows credential size limit".into());
+                }
+                check_saved(&endpoint, &large)?;
+            }
             let other = Endpoint {
                 port: 22,
                 ..endpoint.clone()
             };
-            assert!(load(&other)?.is_none());
+            if load(&other)?.is_some() {
+                return Err("Secret leaked between endpoint identities".into());
+            }
             Ok(())
         })();
         let cleanup = forget(&endpoint);
         result.unwrap();
         cleanup.unwrap();
         assert!(load(&endpoint).unwrap().is_none());
+    }
+
+    #[test]
+    fn previous_windows_utf16_json_remains_readable_and_corruption_is_preserved() {
+        let store = keyring::mock::Store::new().unwrap();
+        let entry = store.build(SERVICE, "previous-format-test", None).unwrap();
+        let previous = SavedKey {
+            private_key: "previous key\nwith lines".into(),
+            passphrase: "фраза 🔑".into(),
+        };
+        let mut encoded: Vec<_> = serde_json::to_string(&previous)
+            .unwrap()
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        entry.set_secret(&encoded).unwrap();
+        let loaded = load_entry(&entry).unwrap().unwrap();
+        assert_eq!(loaded.private_key, previous.private_key);
+        assert_eq!(loaded.passphrase, previous.passphrase);
+        encoded.pop();
+        entry.set_secret(&encoded).unwrap();
+        assert!(load_entry(&entry).is_err());
+        assert_eq!(entry.get_secret().unwrap(), encoded);
+        save_entry(&entry, &previous).unwrap();
+        let loaded = load_entry(&entry).unwrap().unwrap();
+        assert_eq!(loaded.private_key, previous.private_key);
+        assert_eq!(loaded.passphrase, previous.passphrase);
     }
     #[test]
     fn vault_round_trip_is_scoped_and_can_be_forgotten() {
