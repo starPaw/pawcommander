@@ -1,0 +1,355 @@
+use super::err;
+use crate::archive;
+use percent_encoding::percent_decode_str;
+use serde::{Deserialize, Serialize};
+#[cfg(unix)]
+use std::ffi::OsString;
+use std::fmt;
+use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct Endpoint {
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub key: Option<PathBuf>,
+}
+
+impl Endpoint {
+    pub(super) fn same_authority(&self, other: &Self) -> bool {
+        self.host == other.host && self.port == other.port && self.user == other.user
+    }
+}
+
+// Untagged keeps persisted local paths compatible with the original settings.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Location {
+    Local(PathBuf),
+    Sftp {
+        endpoint: Endpoint,
+        path: PathBuf,
+    },
+    Archive {
+        archive: Arc<PathBuf>,
+        path: PathBuf,
+    },
+}
+
+impl From<PathBuf> for Location {
+    fn from(path: PathBuf) -> Self {
+        Self::Local(path)
+    }
+}
+
+impl Location {
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Local(p) | Self::Sftp { path: p, .. } | Self::Archive { path: p, .. } => p,
+        }
+    }
+    pub fn local(&self) -> Option<&Path> {
+        match self {
+            Self::Local(p) => Some(p),
+            _ => None,
+        }
+    }
+    pub fn remote(&self) -> bool {
+        matches!(self, Self::Sftp { .. })
+    }
+    pub(crate) fn archive_source(&self) -> Option<&Path> {
+        match self {
+            Self::Archive { archive, .. } => Some(archive),
+            _ => None,
+        }
+    }
+    pub(crate) fn is_archive(&self) -> bool {
+        self.archive_source().is_some()
+    }
+    pub(crate) fn browse_archive(&self) -> Option<Self> {
+        let path = self.local()?;
+        archive::Format::from_path(path)?;
+        Some(Self::Archive {
+            archive: Arc::new(path.to_owned()),
+            path: PathBuf::new(),
+        })
+    }
+    pub(crate) fn has_utf8_paths(&self) -> bool {
+        self.path().to_str().is_some()
+            && match self {
+                Self::Local(_) => true,
+                Self::Archive { archive, .. } => archive.to_str().is_some(),
+                Self::Sftp { endpoint, .. } => endpoint
+                    .key
+                    .as_deref()
+                    .is_none_or(|key| key.to_str().is_some()),
+            }
+    }
+    pub fn with_path(&self, path: PathBuf) -> Self {
+        match self {
+            Self::Local(_) => Self::Local(path),
+            Self::Archive { archive, .. } => Self::Archive {
+                archive: Arc::clone(archive),
+                path,
+            },
+            Self::Sftp { endpoint, .. } => Self::Sftp {
+                endpoint: endpoint.clone(),
+                path,
+            },
+        }
+    }
+    pub fn join(&self, name: impl AsRef<Path>) -> Self {
+        let name = name.as_ref();
+        if !self.remote() {
+            return self.with_path(self.path().join(name));
+        }
+        // Remote paths use POSIX separators even when the client runs on Windows.
+        // Preserve the supplied name so validation can still reject backslashes.
+        if name.as_os_str().as_encoded_bytes().starts_with(b"/") {
+            return self.with_path(name.into());
+        }
+        let mut path = self.path().as_os_str().to_owned();
+        if !name.as_os_str().is_empty() {
+            if !path.as_encoded_bytes().ends_with(b"/") {
+                path.push("/");
+            }
+            path.push(name);
+        }
+        self.with_path(path.into())
+    }
+    pub fn parent(&self) -> Option<Self> {
+        if let Self::Archive { archive, path } = self {
+            if path.as_os_str().is_empty() {
+                return archive
+                    .parent()
+                    .map(|parent| Self::Local(parent.to_owned()));
+            }
+        }
+        self.path().parent().map(|p| self.with_path(p.into()))
+    }
+    pub fn ancestors(&self) -> impl Iterator<Item = Self> + '_ {
+        std::iter::successors(Some(self.clone()), Self::parent)
+    }
+    pub fn display(&self) -> String {
+        self.to_string()
+    }
+    pub fn name(&self) -> String {
+        let name = self
+            .path()
+            .file_name()
+            .or_else(|| self.archive_source()?.file_name());
+        name.map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.to_string())
+    }
+    pub(crate) fn same_backend(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Local(_), Self::Local(_)) => true,
+            (Self::Sftp { endpoint: a, .. }, Self::Sftp { endpoint: b, .. }) => a == b,
+            (Self::Archive { archive: a, .. }, Self::Archive { archive: b, .. }) => a == b,
+            _ => false,
+        }
+    }
+    pub(crate) fn same_sftp_authority(&self, other: &Self) -> bool {
+        matches!((self, other), (Self::Sftp { endpoint: a, .. }, Self::Sftp { endpoint: b, .. }) if a.same_authority(b))
+    }
+}
+
+impl fmt::Display for Location {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Local(p) => write!(f, "{}", p.display()),
+            Self::Archive { archive, path } => {
+                let archive = percent_encoding::percent_encode(
+                    archive.as_os_str().as_encoded_bytes(),
+                    ARCHIVE_ADDRESS_ESCAPE,
+                );
+                let member = if cfg!(windows) {
+                    path.to_string_lossy()
+                        .replace('\\', "/")
+                        .into_bytes()
+                        .into()
+                } else {
+                    std::borrow::Cow::Borrowed(path.as_os_str().as_encoded_bytes())
+                };
+                let member = percent_encoding::percent_encode(&member, ARCHIVE_ADDRESS_ESCAPE);
+                write!(f, "archive:{archive}!/{member}")
+            }
+            Self::Sftp { endpoint, path } => {
+                let mut url = url::Url::parse("sftp://localhost/").map_err(|_| fmt::Error)?;
+                let host = endpoint.host.trim_matches(['[', ']']);
+                let host = if host.contains(':') {
+                    format!("[{host}]")
+                } else {
+                    host.to_owned()
+                };
+                url.set_host(Some(&host)).map_err(|_| fmt::Error)?;
+                let user = percent_encoding::utf8_percent_encode(
+                    &endpoint.user,
+                    percent_encoding::NON_ALPHANUMERIC,
+                )
+                .to_string();
+                url.set_username(&user).map_err(|_| fmt::Error)?;
+                if endpoint.port != 22 {
+                    url.set_port(Some(endpoint.port)).map_err(|_| fmt::Error)?;
+                }
+                let path = path.to_string_lossy().replace('\\', "/");
+                url.path_segments_mut()
+                    .map_err(|_| fmt::Error)?
+                    .clear()
+                    .extend(path.split('/').skip(1));
+                write!(f, "{url}")
+            }
+        }
+    }
+}
+
+pub(super) const ARCHIVE_ADDRESS_ESCAPE: &percent_encoding::AsciiSet =
+    &percent_encoding::CONTROLS.add(b'%').add(b'!');
+
+pub fn resolve(address: &str, current: &Location) -> Result<Location, String> {
+    if let Some(address) = address.strip_prefix("archive:") {
+        let invalid = || crate::i18n::text("Недопустимый адрес архива").to_owned();
+        let (file, member) = address.split_once("!/").ok_or_else(invalid)?;
+        let file = percent_decode_str(file).collect::<Vec<_>>();
+        if file.contains(&0) {
+            return Err(invalid());
+        }
+        #[cfg(unix)]
+        let file = {
+            use std::os::unix::ffi::OsStringExt;
+            PathBuf::from(OsString::from_vec(file))
+        };
+        #[cfg(not(unix))]
+        let file = PathBuf::from(String::from_utf8(file).map_err(|_| invalid())?);
+        if !file.is_absolute() || archive::Format::from_path(&file).is_none() {
+            return Err(invalid());
+        }
+        let path =
+            archive::member_path(&percent_decode_str(member).collect::<Vec<_>>()).map_err(err)?;
+        return Ok(Location::Archive {
+            archive: Arc::new(file),
+            path,
+        });
+    }
+    if address.starts_with("sftp:") {
+        let url = url::Url::parse(address).map_err(|e| {
+            crate::tr_format!("Некорректный адрес SFTP: {e}", "Invalid SFTP address: {e}")
+        })?;
+        if url.scheme() != "sftp"
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(crate::i18n::text(
+                "Используйте sftp://пользователь@сервер:22/путь без пароля, query и fragment",
+            )
+            .into());
+        }
+        let host = url
+            .host_str()
+            .ok_or(crate::i18n::text("Укажите сервер SFTP"))?
+            .to_owned();
+        let user = percent_decode_str(url.username())
+            .decode_utf8()
+            .map_err(|_| crate::i18n::text("Имя пользователя должно быть UTF-8"))?
+            .into_owned();
+        if user.is_empty() {
+            return Err(
+                crate::i18n::text("Укажите пользователя: sftp://пользователь@сервер/путь").into(),
+            );
+        }
+        let mut endpoint = Endpoint {
+            host,
+            port: url.port().unwrap_or(22),
+            user,
+            key: None,
+        };
+        if let Location::Sftp {
+            endpoint: existing, ..
+        } = current
+        {
+            if endpoint.same_authority(existing) {
+                endpoint.key = existing.key.clone();
+            }
+        }
+        let path = percent_decode_str(url.path())
+            .decode_utf8()
+            .map_err(|_| crate::i18n::text("Путь должен быть UTF-8"))?;
+        if path.contains('\0') {
+            return Err(crate::i18n::text("Недопустимый путь").into());
+        }
+        return Ok(Location::Sftp {
+            endpoint,
+            path: normalize_remote(Path::new(if path.is_empty() { "/" } else { &path }))?,
+        });
+    }
+    if current.remote() {
+        if address == "~" || address.starts_with("~/") {
+            return Err(crate::i18n::text(
+                "Для домашней папки сервера используйте кнопку SFTP и начальный путь «.»",
+            )
+            .into());
+        }
+        let path = if address.starts_with('/') {
+            PathBuf::from(address)
+        } else {
+            current.join(address).path().to_owned()
+        };
+        return Ok(current.with_path(normalize_remote(&path)?));
+    }
+    if let Some(parent) = current.archive_source().and_then(Path::parent) {
+        return resolve(address, &Location::Local(parent.to_owned()));
+    }
+    let path = if address == "~" {
+        dirs::home_dir().unwrap_or_else(|| current.path().into())
+    } else if let Some(rest) = address.strip_prefix("~/") {
+        dirs::home_dir()
+            .unwrap_or_else(|| current.path().into())
+            .join(rest)
+    } else {
+        PathBuf::from(address)
+    };
+    Ok(if path.is_absolute() {
+        Location::Local(path)
+    } else {
+        current.join(path)
+    })
+}
+
+pub(super) fn normalize_remote(path: &Path) -> Result<PathBuf, String> {
+    let text = path
+        .to_str()
+        .ok_or(crate::i18n::text("Путь SFTP должен быть UTF-8"))?;
+    if !text.starts_with('/') || text.contains(['\0', '\\']) {
+        return Err(crate::i18n::text(
+            "Используйте абсолютный POSIX-путь SFTP без обратных слешей",
+        )
+        .into());
+    }
+    let mut parts = Vec::new();
+    for part in text.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            _ => parts.push(part),
+        }
+    }
+    Ok(PathBuf::from(format!("/{}", parts.join("/"))))
+}
+
+pub(super) fn validate_name(name: &str) -> Result<(), String> {
+    let mut components = Path::new(name).components();
+    if name.trim().is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains(['/', '\\', '\0'])
+        || !matches!(components.next(), Some(Component::Normal(_)))
+        || components.next().is_some()
+    {
+        return Err("Введите имя без /, \\, NUL, . и ..".into());
+    }
+    Ok(())
+}
