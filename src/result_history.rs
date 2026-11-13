@@ -620,6 +620,7 @@ pub(crate) struct History {
     pub error: Option<String>,
     path: Option<PathBuf>,
     loaded: bool,
+    detail: Option<ItemResult>,
 }
 
 impl History {
@@ -723,7 +724,8 @@ impl History {
         }
     }
 
-    pub fn show(&self, ctx: &egui::Context, open: &mut bool) {
+    pub fn show(&mut self, ctx: &egui::Context, open: &mut bool) {
+        let mut selected = None;
         egui::Window::new(crate::i18n::text("Журнал результатов"))
             .id(egui::Id::unique("result_history"))
             .open(open)
@@ -737,8 +739,8 @@ impl History {
                     "До 100 операций и 100 000 строк; объём истории ограничен. Неполные записи помечены.",
                 ));
                 ui.label(crate::tr_format!(
-                    "Наведите на строку, чтобы прочитать длинные пути и причину целиком.",
-                    "Hover over a row to read long paths and the full reason."
+                    "Нажмите «Подробнее», чтобы прочитать пути и причину целиком.",
+                    "Choose Details to read the complete paths and reason."
                 ));
                 if let Some(path) = &self.path {
                     ui.add(egui::Label::new(path.display().to_string()).selectable(true));
@@ -805,6 +807,10 @@ impl History {
                                         record.items.len(),
                                         |ui, range| {
                                             for row in &record.items[range] {
+                                                ui.horizontal(|ui| {
+                                                if ui.small_button(crate::tr_format!("Подробнее", "Details")).clicked() {
+                                                    selected = Some(row.clone());
+                                                }
                                                 let target = row.target.as_deref().unwrap_or("—");
                                                 ui.add(
                                                     egui::Label::new(format!(
@@ -823,24 +829,8 @@ impl History {
                                                     ui.set_max_width(640.0);
                                                     egui::ScrollArea::vertical()
                                                         .max_height(320.0)
-                                                        .show(ui, |ui| {
-                                                            ui.label(row.outcome.label());
-                                                            ui.add(egui::Label::new(crate::tr_format!(
-                                                                "Источник: {}",
-                                                                "Source: {}",
-                                                                row.source
-                                                            )).selectable(true).wrap());
-                                                            ui.add(egui::Label::new(crate::tr_format!(
-                                                                "Назначение: {}",
-                                                                "Destination: {}",
-                                                                target
-                                                            )).selectable(true).wrap());
-                                                            ui.add(egui::Label::new(crate::tr_format!(
-                                                                "Причина: {}",
-                                                                "Reason: {}",
-                                                                row.reason.as_deref().unwrap_or("—")
-                                                            )).selectable(true).wrap());
-                                                        });
+                                                        .show(ui, |ui| show_item_details(ui, row));
+                                                });
                                                 });
                                             }
                                         },
@@ -849,7 +839,53 @@ impl History {
                         }
                     });
             });
+        if let Some(row) = selected {
+            self.detail = Some(row);
+        }
+        if !*open {
+            self.detail = None;
+        }
+        if let Some(row) = &self.detail {
+            let mut detail_open = true;
+            egui::Window::new(crate::tr_format!("Результат файла", "File result"))
+                .id(egui::Id::unique("result_history_detail"))
+                .open(&mut detail_open)
+                .default_size([640.0, 360.0])
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| show_item_details(ui, row));
+                });
+            if !detail_open {
+                self.detail = None;
+            }
+        }
     }
+}
+
+fn show_item_details(ui: &mut egui::Ui, row: &ItemResult) {
+    ui.label(row.outcome.label());
+    ui.add(
+        egui::Label::new(crate::tr_format!("Источник: {}", "Source: {}", row.source))
+            .selectable(true)
+            .wrap(),
+    );
+    ui.add(
+        egui::Label::new(crate::tr_format!(
+            "Назначение: {}",
+            "Destination: {}",
+            row.target.as_deref().unwrap_or("—")
+        ))
+        .selectable(true)
+        .wrap(),
+    );
+    ui.add(
+        egui::Label::new(crate::tr_format!(
+            "Причина: {}",
+            "Reason: {}",
+            row.reason.as_deref().unwrap_or("—")
+        ))
+        .selectable(true)
+        .wrap(),
+    );
 }
 
 fn single_line(text: &str) -> String {
@@ -974,7 +1010,7 @@ mod tests {
                     descendants_enumerated: false,
                 })
                 .collect();
-            let history = History {
+            let mut history = History {
                 records: vec![entry],
                 loaded: true,
                 ..History::default()
