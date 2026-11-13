@@ -861,6 +861,12 @@ fn openssh_round_trip_and_host_verification() {
     // Direct no-replace publication must also reject an existing target.
     let file = renamed.join("hello world.txt");
     assert!(staged_copy(&file, &renamed.join(".hidden")).is_err());
+    let ambiguous = super::super::transfer::rename_for_publication(&file, &renamed.join(".hidden"));
+    assert!(matches!(
+        ambiguous,
+        Err(TransferError::PublicationUnconfirmed(_))
+    ));
+    assert_eq!(fs::read_to_string(file.path()).unwrap(), "replacement");
     assert_eq!(
         fs::read_to_string(renamed.path().join(".hidden")).unwrap(),
         "hidden"

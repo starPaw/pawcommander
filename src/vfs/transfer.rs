@@ -284,6 +284,14 @@ pub fn transfer_with_conflicts(
             summary.cancelled = true;
             Ok(summary)
         }
+        Err(TransferError::PublicationUnconfirmed(error)) => {
+            let (completed, skipped, remaining) =
+                (summary.completed, summary.skipped, summary.remaining.len());
+            Err(crate::tr_format!(
+                "{error}. Исход публикации на сервере не подтверждён. Завершено: {completed}. Пропущено: {skipped}. Осталось: {remaining}. Проверьте источник и назначение перед повтором.",
+                "{error}. Server publication is unconfirmed. Completed: {completed}. Skipped: {skipped}. Remaining: {remaining}. Inspect the source and destination before retrying."
+            ))
+        }
         Err(TransferError::Failed(error)) if summary.preparing => Err(error),
         Err(TransferError::Failed(error)) => {
             let (completed, skipped, remaining) =
@@ -440,6 +448,9 @@ pub(super) fn transfer_run(
             (Ok(()), true) => crate::result_history::Outcome::Completed,
             (Err(_), true) => crate::result_history::Outcome::CompletedWithWarning,
             (Err(TransferError::Cancelled), false) => crate::result_history::Outcome::Cancelled,
+            (Err(TransferError::PublicationUnconfirmed(_)), false) => {
+                crate::result_history::Outcome::PublicationUnconfirmed
+            }
             _ => crate::result_history::Outcome::Failed,
         };
         progress.results.record(
@@ -558,7 +569,7 @@ pub(super) fn move_item(
         .into());
     }
     cancel.check()?;
-    publish_item(&item.source, &item.target, expected, moved).map_err(Into::into)
+    publish_item_typed(&item.source, &item.target, expected, moved)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -626,9 +637,19 @@ pub(super) fn copy_transfer_cancellable(
         })?;
         cancel.check()?;
         if let Some(expected) = expected {
-            publish_replacement(&payload, &item.target, staging, expected, preserve)?;
+            let mut attempted = false;
+            publish_replacement_with_backup_rename(
+                &payload,
+                &item.target,
+                staging,
+                expected,
+                preserve,
+                &mut attempted,
+                rename_without_replacing,
+            )
+            .map_err(|error| publication_error(&item.target, attempted, error))?;
         } else {
-            rename_without_replacing(&payload, &item.target)?;
+            rename_for_publication(&payload, &item.target)?;
         }
         published();
         Ok(())
@@ -682,6 +703,21 @@ pub(super) fn rename_without_replacing(source: &Location, target: &Location) -> 
     }
 }
 
+pub(super) fn rename_for_publication(
+    source: &Location,
+    target: &Location,
+) -> Result<(), TransferError> {
+    if target.remote() {
+        // A failed session lookup occurs before any mutation and remains a
+        // definite failure. Only an issued rename can lose its server reply.
+        remote(source)?
+            .rename(source.path(), target.path(), Some(RenameFlags::empty()))
+            .map_err(|error| TransferError::PublicationUnconfirmed(err(error)))
+    } else {
+        rename_without_replacing(source, target).map_err(TransferError::Failed)
+    }
+}
+
 pub(super) fn publish_item(
     payload: &Location,
     target: &Location,
@@ -701,6 +737,43 @@ pub(super) fn publish_item(
     }
 }
 
+fn publication_error(target: &Location, attempted: bool, error: String) -> TransferError {
+    if target.remote() && attempted {
+        TransferError::PublicationUnconfirmed(error)
+    } else {
+        TransferError::Failed(error)
+    }
+}
+
+fn publish_item_typed(
+    payload: &Location,
+    target: &Location,
+    expected: Option<&EntryMetadata>,
+    published: impl FnOnce(),
+) -> Result<(), TransferError> {
+    if let Some(expected) = expected {
+        with_staging_typed(target, None, |staging, preserve| {
+            let mut attempted = false;
+            publish_replacement_with_backup_rename(
+                payload,
+                target,
+                staging,
+                expected,
+                preserve,
+                &mut attempted,
+                rename_without_replacing,
+            )
+            .map_err(|error| publication_error(target, attempted, error))?;
+            published();
+            Ok(())
+        })
+    } else {
+        rename_for_publication(payload, target)?;
+        published();
+        Ok(())
+    }
+}
+
 pub(super) fn publish_replacement(
     payload: &Location,
     target: &Location,
@@ -708,12 +781,14 @@ pub(super) fn publish_replacement(
     expected: &EntryMetadata,
     preserve: &mut bool,
 ) -> Result<(), String> {
+    let mut attempted = false;
     publish_replacement_with_backup_rename(
         payload,
         target,
         staging,
         expected,
         preserve,
+        &mut attempted,
         rename_without_replacing,
     )
 }
@@ -724,6 +799,7 @@ pub(super) fn publish_replacement_with_backup_rename(
     staging: &Location,
     expected: &EntryMetadata,
     preserve: &mut bool,
+    attempted: &mut bool,
     backup_rename: impl FnOnce(&Location, &Location) -> Result<(), String>,
 ) -> Result<(), String> {
     let target_changed = || {
@@ -739,6 +815,7 @@ pub(super) fn publish_replacement_with_backup_rename(
     // A lost SFTP reply can hide a successful rename. Preserve the staging
     // directory until the old file is either restored or safely replaced.
     *preserve = target.remote();
+    *attempted = true;
     backup_rename(target, &backup).map_err(|e| {
         crate::i18n::initial_backup_rename_failed(&e, target, &backup, target.remote())
     })?;
@@ -753,9 +830,11 @@ pub(super) fn publish_replacement_with_backup_rename(
                 "Source item {payload} is no longer a regular file"
             ));
         }
+        *attempted = true;
         rename_without_replacing(payload, target)
     })();
     if let Err(error) = result {
+        *attempted = true;
         if let Err(rollback) = rename_without_replacing(&backup, target) {
             return Err(crate::i18n::replacement_rollback_failed(
                 &error,
@@ -872,17 +951,22 @@ pub(super) fn staging_result_typed(
     match cleanup {
         Ok(()) => result,
         Err(e) => {
+            let unconfirmed = matches!(result, Err(TransferError::PublicationUnconfirmed(_)));
             let outcome = result
                 .err()
                 .map(|error| error.to_string())
                 .unwrap_or_else(|| {
                     crate::tr_format!("Объект {target} опубликован", "Item {target} was published")
                 });
-            Err(crate::tr_format!(
+            let message = crate::tr_format!(
                 "{outcome}. Осталась временная папка {staging}: {e}",
                 "{outcome}. Temporary folder remains at {staging}: {e}"
-            )
-            .into())
+            );
+            Err(if unconfirmed {
+                TransferError::PublicationUnconfirmed(message)
+            } else {
+                TransferError::Failed(message)
+            })
         }
     }
 }

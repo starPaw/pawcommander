@@ -254,6 +254,7 @@ fn replacement_critical_section_defers_cancellation_through_publication_and_clea
             staging,
             &expected,
             preserve,
+            &mut false,
             |from, to| {
                 rename_without_replacing(from, to)?;
                 cancel.request();
