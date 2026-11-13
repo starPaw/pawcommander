@@ -50,9 +50,17 @@ pub(crate) struct LocalIdentity {
     #[cfg(unix)]
     inode: u64,
     #[cfg(windows)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     volume: Option<u32>,
     #[cfg(windows)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     file_index: Option<u64>,
+    #[cfg(windows)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    volume_id: Option<u64>,
+    #[cfg(windows)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    file_id_128: Option<[u8; 16]>,
 }
 
 impl LocalIdentity {
@@ -71,10 +79,12 @@ impl LocalIdentity {
         }
         #[cfg(windows)]
         {
-            use std::os::windows::fs::MetadataExt;
+            let identity = crate::windows_file_id::from_path(path)?;
             Ok(Self {
-                volume: metadata.volume_serial_number(),
-                file_index: metadata.file_index(),
+                volume: None,
+                file_index: None,
+                volume_id: identity.map(|id| id.volume),
+                file_id_128: identity.map(|id| id.id),
             })
         }
         #[cfg(not(any(unix, windows)))]
@@ -622,6 +632,17 @@ fn sync_directory(directory: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn legacy_windows_staging_identity_remains_readable() {
+        let old = r#"{"volume":42,"file_index":7}"#;
+        let identity: LocalIdentity = serde_json::from_str(old).unwrap();
+        assert_eq!(identity.volume, Some(42));
+        assert_eq!(identity.file_index, Some(7));
+        assert_eq!(identity.volume_id, None);
+        assert_eq!(identity.file_id_128, None);
+    }
 
     #[test]
     #[cfg(unix)]
