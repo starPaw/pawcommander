@@ -1,0 +1,75 @@
+use super::*;
+
+#[test]
+fn remote_addresses_round_trip_and_keep_connection_and_posix_history() {
+    let local = Location::Local(PathBuf::from("/tmp"));
+    let location = resolve("sftp://alice@example.com:2222/папка/two%20words", &local).unwrap();
+    assert_eq!(location.path(), Path::new("/папка/two words"));
+    assert_eq!(resolve(&location.display(), &local).unwrap(), location);
+    assert_eq!(
+        resolve("../next", &location).unwrap().path(),
+        Path::new("/папка/next")
+    );
+    assert_eq!(
+        resolve("/../../", &location).unwrap().path(),
+        Path::new("/")
+    );
+    assert!(location.ancestors().all(|p| p.remote()));
+    assert!(location.ancestors().last().unwrap().parent().is_none());
+    let ipv6 = resolve("sftp://alice@[::1]:2222/a", &local).unwrap();
+    assert_eq!(resolve(&ipv6.display(), &local).unwrap(), ipv6);
+    let special = location.with_path(PathBuf::from("/literal%20/100% #?.txt"));
+    assert_eq!(resolve(&special.display(), &local).unwrap(), special);
+    let form_ipv6 = Location::Sftp {
+        endpoint: Endpoint {
+            host: "::1".into(),
+            port: 2222,
+            user: "a%40b".into(),
+            key: None,
+        },
+        path: "/".into(),
+    };
+    let parsed_ipv6 = resolve(&form_ipv6.display(), &local).unwrap();
+    assert_eq!(parsed_ipv6.path(), form_ipv6.path());
+    if let Location::Sftp { endpoint, .. } = parsed_ipv6 {
+        assert_eq!(endpoint.user, "a%40b");
+    }
+    assert!(resolve("sftp://alice:secret@example.com/", &local).is_err());
+    assert!(resolve("sftp://example.com/", &local).is_err());
+    assert!(resolve("sftp://alice@example.com/%00", &local).is_err());
+    assert!(resolve("sftp://alice@example.com/?q=1", &local).is_err());
+}
+
+#[test]
+fn remote_key_path_survives_address_edits() {
+    let current = Location::Sftp {
+        endpoint: Endpoint {
+            host: "example.com".into(),
+            port: 22,
+            user: "alice".into(),
+            key: Some(PathBuf::from("/keys/id")),
+        },
+        path: "/".into(),
+    };
+    assert_eq!(
+        resolve("sftp://alice@example.com/sub", &current).unwrap(),
+        current.join("sub")
+    );
+}
+
+#[test]
+fn remote_join_keeps_literal_posix_separators_on_every_client_os() {
+    let local = Location::Local(PathBuf::from("/tmp"));
+    let root = resolve("sftp://alice@example.com/", &local).unwrap();
+    let child = root.join("folder").join("two words");
+    assert_eq!(child.path().to_str(), Some("/folder/two words"));
+    assert_eq!(child.join("").path().to_str(), Some("/folder/two words"));
+    assert_eq!(child.join("/other").path().to_str(), Some("/other"));
+    assert_eq!(
+        resolve("../next", &child).unwrap().path().to_str(),
+        Some("/folder/next")
+    );
+    assert!(resolve("..\\next", &child).is_err());
+    assert!(resolve("sftp://alice@example.com/a%5Cb", &local).is_err());
+    assert_eq!(local.join("folder").path(), local.path().join("folder"));
+}
