@@ -135,6 +135,13 @@ impl QuickLook {
         } else {
             ctx.show_viewport_immediate(viewport, Self::window_builder(), |ui, class| {
                 let viewport_ctx = ui.ctx().clone();
+                // Immediate viewports bypass App::raw_input_hook.
+                #[cfg(target_os = "macos")]
+                if class != egui::ViewportClass::EmbeddedWindow {
+                    viewport_ctx.input_mut(|input| {
+                        super::clipboard::macos_clipboard_events(&mut input.events);
+                    });
+                }
                 let keys = self.take_keys(&viewport_ctx, preview.text_input(&viewport_ctx));
                 let buttons = egui::CentralPanel::default()
                     .show(ui, |ui| {
