@@ -65,6 +65,40 @@ fn format_initial_backup_rename_failed(
     }
 }
 
+pub(crate) fn replacement_rollback_failed(
+    error: &str,
+    rollback: &str,
+    target: impl std::fmt::Display,
+    backup: impl std::fmt::Display,
+    remote: bool,
+) -> String {
+    format_replacement_rollback_failed(is_english(), error, rollback, target, backup, remote)
+}
+
+fn format_replacement_rollback_failed(
+    english: bool,
+    error: &str,
+    rollback: &str,
+    target: impl std::fmt::Display,
+    backup: impl std::fmt::Display,
+    remote: bool,
+) -> String {
+    match (english, remote) {
+        (true, false) => format!(
+            "{error}. Could not restore the previous file: {rollback}. Check the saved version at {backup} before retrying"
+        ),
+        (false, false) => format!(
+            "{error}. Не удалось восстановить прежний файл: {rollback}. Перед повтором проверьте сохранённую версию в {backup}"
+        ),
+        (true, true) => format!(
+            "{error}. Could not confirm restoration of the previous file: {rollback}. Check the original destination {target} and the possible backup {backup} before retrying"
+        ),
+        (false, true) => format!(
+            "{error}. Не удалось подтвердить восстановление прежнего файла: {rollback}. Перед повтором проверьте исходное назначение {target} и возможную резервную копию {backup}"
+        ),
+    }
+}
+
 fn translate(english: bool, russian: &'static str) -> &'static str {
     if !english {
         return russian;
@@ -602,6 +636,35 @@ macro_rules! tr_format {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rollback_guidance_distinguishes_local_failure_and_unknown_sftp_outcome_in_both_languages() {
+        let target = "/Документы/original {name}.txt";
+        let backup = "/Документы/.staging/previous";
+        for (english, local_guidance, remote_guidance) in [
+            (
+                true,
+                format!("publish error. Could not restore the previous file: rollback error. Check the saved version at {backup} before retrying"),
+                format!("publish error. Could not confirm restoration of the previous file: rollback error. Check the original destination {target} and the possible backup {backup} before retrying"),
+            ),
+            (
+                false,
+                format!("publish error. Не удалось восстановить прежний файл: rollback error. Перед повтором проверьте сохранённую версию в {backup}"),
+                format!("publish error. Не удалось подтвердить восстановление прежнего файла: rollback error. Перед повтором проверьте исходное назначение {target} и возможную резервную копию {backup}"),
+            ),
+        ] {
+            let local = format_replacement_rollback_failed(
+                english, "publish error", "rollback error", target, backup, false,
+            );
+            let remote = format_replacement_rollback_failed(
+                english, "publish error", "rollback error", target, backup, true,
+            );
+            assert_eq!(local, local_guidance);
+            assert_eq!(remote, remote_guidance);
+            assert!(!local.contains(target));
+            assert!(remote.contains(target) && remote.contains(backup));
+        }
+    }
 
     #[test]
     fn initial_backup_rename_guidance_distinguishes_local_and_ambiguous_sftp_in_both_languages() {

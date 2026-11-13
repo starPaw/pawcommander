@@ -89,6 +89,8 @@ The server must support `fstatvfs@openssh.com` free-space reporting and provide 
 
 A lost connection may leave a `.pawcommander-sftp-*` staging directory; the error identifies its path. Inspect the destination and staging directory before retrying. Reconnect with the SFTP dialog. There is no transfer resume. SSH operations use a 20-second timeout; TCP connection attempts use 10 seconds per address. DNS resolution is handled by the OS.
 
+If a connection fails during replacement or restoration, the server may have completed the rename before its reply was lost. Check both the original destination and the possible backup named in the error before retrying.
+
 Remote deletion recursively removes directories without a trash. Symlinks are removed without following them. An interrupted or failed deletion may already have removed part of the selection. Visible remote folders refresh automatically through an existing connection; use `F5` for an immediate refresh.
 
 ## Previews and properties

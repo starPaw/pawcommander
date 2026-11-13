@@ -503,12 +503,14 @@ fn copy_atomically_checked(
     match (result, remove_staging(&staging)) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), Ok(())) => Err(error),
-        (Err(error), Err(cleanup)) => Err(format!(
+        (Err(error), Err(cleanup)) => Err(crate::tr_format!(
             "{error}. Осталась временная копия «{}»: {cleanup}",
+            "{error}. Temporary copy remains at “{}”: {cleanup}",
             staging.display()
         )),
-        (Ok(()), Err(cleanup)) => Err(format!(
+        (Ok(()), Err(cleanup)) => Err(crate::tr_format!(
             "Копия «{}» готова, но не удалось удалить её пустую временную папку «{}»: {cleanup}",
+            "Copy “{}” is ready, but its empty temporary folder “{}” could not be removed: {cleanup}",
             destination.display(),
             staging.display()
         )),
