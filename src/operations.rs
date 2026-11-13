@@ -74,6 +74,8 @@ impl Cancellation {
 pub(crate) enum TransferError {
     Cancelled,
     Failed(String),
+    /// The server may have published the item before its reply was lost.
+    PublicationUnconfirmed(String),
 }
 
 impl TransferError {
@@ -113,6 +115,7 @@ impl std::fmt::Display for TransferError {
                 "Operation cancelled"
             )),
             Self::Failed(error) => f.write_str(error),
+            Self::PublicationUnconfirmed(error) => f.write_str(error),
         }
     }
 }

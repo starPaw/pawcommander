@@ -1,6 +1,40 @@
 use super::*;
 
 #[test]
+fn local_rename_denial_is_definite_and_preserves_both_files() {
+    let fixture = tempfile::tempdir().unwrap();
+    let source: Location = fixture.path().join("source").into();
+    let target: Location = fixture.path().join("target").into();
+    fs::write(source.path(), b"source").unwrap();
+    fs::write(target.path(), b"old target").unwrap();
+
+    let result = super::super::transfer::rename_for_publication(&source, &target);
+    assert!(matches!(result, Err(TransferError::Failed(_))));
+    assert_eq!(fs::read(source.path()).unwrap(), b"source");
+    assert_eq!(fs::read(target.path()).unwrap(), b"old target");
+}
+
+#[test]
+fn unknown_publication_survives_staging_cleanup_failure() {
+    let staging: Location = PathBuf::from("/private-staging").into();
+    let target: Location = PathBuf::from("/destination").into();
+    let result = staging_result_typed(
+        Err(TransferError::PublicationUnconfirmed("reply lost".into())),
+        Err("cleanup refused".into()),
+        &staging,
+        &target,
+    );
+    match result {
+        Err(TransferError::PublicationUnconfirmed(message)) => {
+            assert!(message.contains("reply lost"));
+            assert!(message.contains("cleanup refused"));
+            assert!(message.contains("private-staging"));
+        }
+        other => panic!("uncertain publication became retryable: {other:?}"),
+    }
+}
+
+#[test]
 fn failed_initial_backup_rename_retains_original_destination_and_cleans_staging() {
     let fixture = tempfile::tempdir().unwrap();
     let root: Location = fixture.path().to_path_buf().into();
@@ -26,6 +60,7 @@ fn failed_initial_backup_rename_retains_original_destination_and_cleans_staging(
                     staging,
                     &expected,
                     preserve,
+                    &mut false,
                     |from, to| {
                         rename_calls += 1;
                         assert_eq!(from, &target);
@@ -78,6 +113,7 @@ fn replacement_rollback_preserves_backup_when_target_is_recreated() {
                     staging,
                     &expected,
                     preserve,
+                    &mut false,
                     |from, to| {
                         rename_without_replacing(from, to)?;
                         backup_path = Some(to.clone());
