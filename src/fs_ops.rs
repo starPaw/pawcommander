@@ -291,6 +291,26 @@ pub fn trash_entries(paths: &[PathBuf], progress: &mut Progress) -> Result<usize
             .begin(&crate::vfs::Location::Local(entry.original.clone()));
         let path = &entry.source;
         progress.item(path);
+        let cancel = progress.cancellation();
+        let captured = SourceManifest::capture_observed(path, &cancel, &mut |observed, _| {
+            if let Ok(relative) = observed.strip_prefix(path) {
+                progress
+                    .results
+                    .removing(&crate::vfs::Location::Local(entry.original.join(relative)));
+            }
+        });
+        let captured = captured.and_then(|manifest| {
+            manifest.verify(&cancel, |_, _| {})?;
+            Ok(manifest)
+        });
+        let captured_ok = captured.is_ok();
+        match captured {
+            Ok(_) => {}
+            Err(error) if TransferError::is_cancelled_io(&error) => {
+                return Err(error.to_string());
+            }
+            Err(_) => progress.results.abandon_group(),
+        }
         // Use the operating system's trash. There is deliberately no permanent
         // deletion fallback when trash is unavailable for a volume.
         if let Err(error) = trash::delete(path) {
@@ -298,6 +318,9 @@ pub fn trash_entries(paths: &[PathBuf], progress: &mut Progress) -> Result<usize
                 "Не удалось переместить «{}» в корзину: {error}. Уже перемещено в корзину: {completed}.",
                 path.display()
             ));
+        }
+        if captured_ok {
+            progress.results.trash_descendants_unconfirmed();
         }
         progress.results.record(
             &crate::vfs::Location::Local(entry.original.clone()),
