@@ -589,10 +589,21 @@ pub(super) fn copy_transfer_cancellable(
 ) -> Result<(), TransferError> {
     progress.check_cancelled()?;
     let cancel = progress.cancellation();
-    let manifest = TransferSourceManifest::capture_cancellable(&item.source, &cancel)?;
-    progress
-        .results
-        .descendants(&item.source, &item.target, manifest.entries.keys().cloned());
+    let manifest =
+        TransferSourceManifest::capture_observed(&item.source, &cancel, &mut |source, error| {
+            if let Some(error) = error {
+                progress.results.staged(
+                    source,
+                    Some(error.to_string()),
+                    matches!(error, TransferError::Cancelled),
+                );
+            } else {
+                progress
+                    .results
+                    .capturing(&item.source, &item.target, source);
+            }
+        })?;
+    progress.results.captured();
     cancel.check()?;
     with_staging_typed(&item.target, Some(&cancel), |staging, preserve| {
         // Finish the probe handle lifecycle before checking cancellation.
@@ -1008,15 +1019,24 @@ impl TransferSourceManifest {
         Self::capture_cancellable(source, &Cancellation::default())
     }
 
+    #[cfg(test)]
     pub(super) fn capture_cancellable(
         source: &Location,
         cancel: &Cancellation,
+    ) -> Result<Self, TransferError> {
+        Self::capture_observed(source, cancel, &mut |_, _| {})
+    }
+
+    fn capture_observed(
+        source: &Location,
+        cancel: &Cancellation,
+        observe: &mut impl FnMut(&Location, Option<&TransferError>),
     ) -> Result<Self, TransferError> {
         let mut manifest = Self {
             entries: BTreeMap::new(),
             bytes: 0,
         };
-        manifest.capture_entry(source, 0, cancel)?;
+        manifest.capture_entry(source, 0, cancel, observe)?;
         Ok(manifest)
     }
 
@@ -1025,6 +1045,22 @@ impl TransferSourceManifest {
         source: &Location,
         depth: usize,
         cancel: &Cancellation,
+        observe: &mut impl FnMut(&Location, Option<&TransferError>),
+    ) -> Result<(), TransferError> {
+        observe(source, None);
+        let result = self.capture_entry_inner(source, depth, cancel, observe);
+        if let Err(error) = &result {
+            observe(source, Some(error));
+        }
+        result
+    }
+
+    fn capture_entry_inner(
+        &mut self,
+        source: &Location,
+        depth: usize,
+        cancel: &Cancellation,
+        observe: &mut impl FnMut(&Location, Option<&TransferError>),
     ) -> Result<(), TransferError> {
         cancel.check()?;
         if depth > MAX_TREE_DEPTH {
@@ -1065,7 +1101,7 @@ impl TransferSourceManifest {
         }
         if let Some(children) = &entry.children {
             for name in children {
-                self.capture_entry(&source.join(name), depth + 1, cancel)?;
+                self.capture_entry(&source.join(name), depth + 1, cancel, observe)?;
             }
         }
         entry.verify(source, cancel)?;

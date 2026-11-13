@@ -186,45 +186,151 @@ fn result_history_keeps_atomic_directory_moves_explicitly_grouped() {
 #[test]
 #[cfg(unix)]
 fn result_history_failed_manifest_never_claims_descendant_coverage() {
-    use std::os::unix::fs::symlink;
-    let fixture = tempfile::tempdir().unwrap();
-    let root: Location = fixture.path().to_path_buf().into();
-    let source = create_directory(&root, "tree").unwrap();
-    let outside = root.join("outside");
-    fs::write(outside.path(), b"untouched").unwrap();
-    symlink(outside.path(), source.join("link").path()).unwrap();
-    let target = root.join("target");
-    let mut progress = Progress::default();
-    progress
-        .results
-        .plan([(source.clone(), Some(target.display()))]);
-    progress.results.begin(&source);
-    let result = copy_transfer_cancellable(
-        &TransferItem::new(source.clone(), source.clone(), target.clone()),
-        None,
-        &mut progress,
-        &mut |_, _| Ok(()),
-        || panic!("unsupported source must not publish"),
-    );
-    assert!(result.is_err());
-    let record = std::mem::take(&mut progress.results)
-        .finish(
-            "copy".into(),
-            0,
-            &result
-                .map(|_| "Copied".into())
-                .map_err(|error| error.to_string()),
-        )
-        .unwrap();
-    assert_eq!(record.items.len(), 1);
-    assert!(!record.items[0].descendants_enumerated);
-    assert!(record.items[0].parent.is_none());
-    assert_eq!(
-        record.items[0].outcome,
-        crate::result_history::Outcome::Failed
-    );
-    assert!(!target.path().exists());
-    assert_eq!(fs::read(outside.path()).unwrap(), b"untouched");
+    use crate::result_history::Outcome;
+    use std::os::unix::ffi::OsStrExt;
+    for generic in [false, true] {
+        let fixture = tempfile::tempdir().unwrap();
+        let root: Location = fixture.path().to_path_buf().into();
+        let source = create_directory(&root, "tree").unwrap();
+        let checked = source.join("a-checked");
+        let failed = source.join("b-fifo");
+        let unvisited = source.join("c-unvisited");
+        fs::write(checked.path(), b"checked but never copied").unwrap();
+        fs::write(unvisited.path(), b"untouched").unwrap();
+        let name = std::ffi::CString::new(failed.path().as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let target = root.join("target");
+        let mut progress = Progress::default();
+        progress
+            .results
+            .plan([(source.clone(), Some(target.display()))]);
+        progress.results.begin(&source);
+        let result = if generic {
+            copy_transfer_cancellable(
+                &TransferItem::new(source.clone(), source.clone(), target.clone()),
+                None,
+                &mut progress,
+                &mut |_, _| Ok(()),
+                || panic!("unsupported source must not publish"),
+            )
+        } else {
+            crate::fs_ops::copy_atomically_cancellable(
+                source.path(),
+                target.path(),
+                &mut progress,
+                |_, _| panic!("unsupported source must not publish"),
+                &mut |_| Ok(()),
+            )
+        };
+        assert!(result.is_err());
+        let record = std::mem::take(&mut progress.results)
+            .finish(
+                "copy".into(),
+                0,
+                &result.map(|_| "Copied".into()).map_err(|e| e.to_string()),
+            )
+            .unwrap();
+        assert_eq!(record.items.len(), 3);
+        assert!(!record.items[0].descendants_enumerated);
+        assert_eq!(record.items[0].outcome, Outcome::Failed);
+        let row = |path: &Location| {
+            record
+                .items
+                .iter()
+                .find(|r| r.source == path.display())
+                .unwrap()
+        };
+        assert_eq!(row(&checked).outcome, Outcome::NotStarted);
+        assert_eq!(row(&failed).outcome, Outcome::Failed);
+        assert!(row(&failed).reason.as_ref().is_some_and(|s| !s.is_empty()));
+        assert_eq!(row(&failed).target, Some(target.join("b-fifo").display()));
+        assert_eq!(row(&failed).parent, Some(0));
+        assert!(!record.items.iter().any(|r| r.source == unvisited.display()));
+        let reopened: crate::result_history::Record =
+            serde_json::from_slice(&serde_json::to_vec(&record).unwrap()).unwrap();
+        assert_eq!(reopened.items.len(), 3);
+        assert!(!reopened.items[0].descendants_enumerated);
+        assert_eq!(reopened.items[2].outcome, Outcome::Failed);
+        assert!(!target.path().exists());
+        assert_eq!(
+            fs::read(checked.path()).unwrap(),
+            b"checked but never copied"
+        );
+        assert_eq!(fs::read(unvisited.path()).unwrap(), b"untouched");
+        assert_eq!(
+            fs::read_dir(root.path()).unwrap().count(),
+            1,
+            "no staging is created"
+        );
+    }
+}
+
+#[test]
+fn result_history_cancelled_manifest_retains_only_observed_unpublished_entries() {
+    use crate::result_history::Outcome;
+    for generic in [false, true] {
+        let fixture = tempfile::tempdir().unwrap();
+        let root: Location = fixture.path().to_path_buf().into();
+        let source = create_directory(&root, "tree").unwrap();
+        for index in 0..32 {
+            fs::write(source.join(format!("file-{index:02}")).path(), b"untouched").unwrap();
+        }
+        let target = root.join("target");
+        let mut checks = 0;
+        let cancel = Cancellation::at_checkpoint(move || {
+            checks += 1;
+            checks == if generic { 100 } else { 55 }
+        });
+        let mut progress = Progress::with_cancellation(cancel);
+        progress
+            .results
+            .plan([(source.clone(), Some(target.display()))]);
+        progress.results.begin(&source);
+        let result = if generic {
+            copy_transfer_cancellable(
+                &TransferItem::new(source.clone(), source.clone(), target.clone()),
+                None,
+                &mut progress,
+                &mut |_, _| Ok(()),
+                || panic!("cancelled manifest must not publish"),
+            )
+        } else {
+            crate::fs_ops::copy_atomically_cancellable(
+                source.path(),
+                target.path(),
+                &mut progress,
+                |_, _| panic!("cancelled manifest must not publish"),
+                &mut |_| Ok(()),
+            )
+        };
+        assert!(matches!(result, Err(TransferError::Cancelled)));
+        progress.results.cancelled = true;
+        let record = std::mem::take(&mut progress.results)
+            .finish("copy".into(), 0, &Ok("Stopped".into()))
+            .unwrap();
+        assert!(!record.items[0].descendants_enumerated);
+        assert_eq!(record.items[0].outcome, Outcome::Cancelled);
+        assert!(record.items.len() > 1 && record.items.len() < 33);
+        assert!(record.items[1..]
+            .iter()
+            .any(|r| r.outcome == Outcome::Cancelled));
+        assert!(record
+            .items
+            .iter()
+            .all(|r| matches!(r.outcome, Outcome::NotStarted | Outcome::Cancelled)));
+        assert!(!record
+            .items
+            .iter()
+            .any(|r| r.source == source.join("file-31").display()));
+        assert!(!target.path().exists());
+        for index in 0..32 {
+            assert_eq!(
+                fs::read(source.join(format!("file-{index:02}")).path()).unwrap(),
+                b"untouched"
+            );
+        }
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    }
 }
 
 #[test]

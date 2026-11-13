@@ -94,7 +94,9 @@ Folder copies include the files, links, and directories from the source manifest
 
 Permanent SFTP deletion records each file, link, or directory actually visited. A confirmed deletion stays **Completed** if a later sibling or parent fails; failed entries have their own reasons. An interrupted traversal shows **Descendants were not fully listed** on the selected root. Unvisited children are absent, so missing rows do not prove those files were checked or left unchanged.
 
-Moves, renames, local trash, skipped items, unstarted folders, and copies whose source manifest could not be completed also show **Descendants were not fully listed**. Moving a folder uses an atomic rename without walking its children.
+If source-manifest validation fails or is stopped, copy history retains only the entries already visited by that validation. The failed or stopped entry has its own outcome and reason; entries checked before copying remain **Not started**. No private copy has been published at this stage. Unvisited descendants are absent and the selected folder shows **Descendants were not fully listed**.
+
+Moves, renames, local trash, skipped items, and unstarted folders also show **Descendants were not fully listed**. Moving a folder uses an atomic rename without walking its children.
 
 History is saved in `PawCommander/operation-history.json` under the OS local application-data directory; its full path appears in the history window. It retains up to 100 recent operations and 100,000 rows within a 32 MiB storage budget, dropping older operations when needed. Collection for one operation also has a conservative 16 MiB budget; individual paths and messages are limited to 64 KiB. Records explicitly show omitted row counts and shortened text. Reaching a journal limit does not stop or change the file operation. The background worker attempts an atomic save before announcing operation completion. A save failure remains visible and preserves the previous file. This is a results log, not a crash-recovery journal: an operation interrupted by process termination or power loss may be missing.
 
