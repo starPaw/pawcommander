@@ -19,7 +19,7 @@ PawCommander is a single Rust binary using eframe/egui. Start at the module that
 | Search and result actions | [`search.rs`](../src/search.rs), [`search/panel.rs`](../src/search/panel.rs), [`app/search.rs`](../src/app/search.rs) | `search/{content,directory,filters,index,saved}.rs`, `name_match.rs` |
 | Read-only ZIP/TAR browsing | [`archive.rs`](../src/archive.rs) | `vfs/location.rs`, `app/tabs.rs` |
 | Recovery and operation history | [`recovery.rs`](../src/recovery.rs), [`result_history.rs`](../src/result_history.rs) | `app/jobs.rs` |
-| Native integrations and file properties | [`native_drag.rs`](../src/native_drag.rs), [`properties.rs`](../src/properties.rs) | `native_drag/macos.rs`, `properties/{unix,windows}.rs`, `macos_about.rs`, `tools.rs`, `zed.rs` |
+| Native integrations and file properties | [`native_drag.rs`](../src/native_drag.rs), [`properties.rs`](../src/properties.rs) | `native_drag/{macos,desktop,windows,linux}.rs`, `native_drag/linux/`, `properties/{unix,windows}.rs`, `macos_about.rs`, `tools.rs`, `zed.rs` |
 | UI text, colors and icons | [`i18n.rs`](../src/i18n.rs), [`theme.rs`](../src/theme.rs), [`icons.rs`](../src/icons.rs) | Keep English and Russian text synchronized |
 
 Some application modules import `vfs as fs_ops`. Follow that alias when tracing calls: it is the VFS facade, not the local-only `src/fs_ops.rs` module.
@@ -55,7 +55,7 @@ Directory reads use bounded channels and progressive batches. Dropping a directo
 
 `Location` represents local, SFTP and archive paths. Archives are read-only. Copies can cross local/SFTP boundaries; moves between local and SFTP or between different SFTP backends are rejected. Saved locations contain connection coordinates and key paths; secrets belong in credential storage and authenticated sessions, not serialized settings.
 
-OS adapters are selected with `cfg`: file clipboard implementations cover macOS, Windows and Linux; native drag-out currently has a macOS implementation and a no-op adapter elsewhere. Shared tests cannot establish native clipboard, drag, accessibility or window behavior on another OS.
+OS adapters are selected with `cfg`: file clipboard and native drag-out implementations cover macOS, Windows and Linux. Native drag-out keeps egui's internal targets until the pointer reaches the window boundary, then exports local files with copy permission. Windows uses OLE file-drop data; Linux uses a separate XDND worker for X11 or a private Wayland event queue on the existing display, observing the actual pointer-press serial. Linux protocol handling and data-pipe writes run outside the UI thread. The drag source never removes files; the receiver owns conflicts and transfer progress. Shared tests cannot establish native clipboard, drag, accessibility or window behavior on another OS.
 
 ## Focused verification
 
