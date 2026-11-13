@@ -1,0 +1,279 @@
+use super::PawCommander;
+use crate::theme::{paint_focus, Palette};
+use eframe::egui;
+use eframe::egui::RichText;
+use std::time::Instant;
+
+pub(super) fn operation_details(ui: &mut egui::Ui, progress: &crate::operations::Snapshot) {
+    if let Some(item) = &progress.item {
+        let name = item.file_name().map_or_else(
+            || item.display().to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        let phase = if progress.waiting_for_conflict {
+            crate::i18n::text("Ожидается решение")
+        } else if progress.verification.is_some() {
+            crate::i18n::text("Проверка SHA-256")
+        } else {
+            crate::i18n::text("Текущий объект")
+        };
+        ui.add(egui::Label::new(format!("{phase}: {name}")).truncate())
+            .on_hover_text(item.display().to_string());
+    }
+    if let Some(verification) = &progress.verification {
+        ui.label(crate::tr_format!(
+            "Прочитано для проверки: {} / {}",
+            "Read for verification: {} / {}",
+            human_size(verification.read),
+            human_size(verification.expected)
+        ));
+    }
+    if let Some(transfer) = &progress.transfer {
+        let written = human_size(transfer.written);
+        let now = Instant::now();
+        ui.horizontal_wrapped(|ui| {
+            if let Some(expected) = transfer.expected.filter(|size| transfer.written <= *size) {
+                ui.label(format!("{written} / {}", human_size(expected)));
+                let fraction = if expected == 0 {
+                    if transfer.stream_finished {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                } else {
+                    (transfer.written as f64 / expected as f64) as f32
+                };
+                ui.add(
+                    egui::ProgressBar::new(fraction)
+                        .desired_width(100.0)
+                        .show_percentage(),
+                );
+            } else {
+                ui.label(crate::tr_format!(
+                    "Записано: {written}",
+                    "Written: {written}"
+                ));
+            }
+            if let Some(speed) = transfer.bytes_per_second(now) {
+                ui.label(crate::tr_format!(
+                    "{}/с",
+                    "{}/s",
+                    human_size(speed.round() as u64)
+                ));
+            }
+            if let Some(seconds) = transfer.remaining_seconds(now) {
+                let time = if seconds < 60 {
+                    crate::tr_format!("{seconds} с", "{seconds} s")
+                } else {
+                    crate::tr_format!(
+                        "{} мин {:02} с",
+                        "{} min {:02} s",
+                        seconds / 60,
+                        seconds % 60
+                    )
+                };
+                ui.label(crate::tr_format!(
+                    "До конца файла: ≈ {time}",
+                    "File remaining: ≈ {time}"
+                ));
+            }
+            if transfer.stream_finished {
+                ui.label(crate::i18n::text("Завершение записи…"));
+            }
+        });
+    }
+    if progress.total_written > 0 {
+        ui.label(crate::tr_format!(
+            "Записано за операцию: {}",
+            "Total written: {}",
+            human_size(progress.total_written)
+        ));
+    }
+}
+
+pub(super) fn human_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        crate::tr_format!("{bytes} Б", "{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        crate::tr_format!("{:.1} КБ", "{:.1} KB", bytes as f64 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        crate::tr_format!("{:.1} МБ", "{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        crate::tr_format!(
+            "{:.1} ГБ",
+            "{:.1} GB",
+            bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+        )
+    }
+}
+
+impl PawCommander {
+    pub(super) fn footer(&mut self, ctx: &egui::Context) {
+        let colors = Palette::from_ctx(ctx);
+        let mut stop_requested = false;
+        let history_error = self.history.error.is_some();
+        let history_button = |ui: &mut egui::Ui| {
+            let response = ui.button(crate::i18n::text("Журнал результатов"));
+            paint_focus(ui, &response, 5);
+            if history_error {
+                ui.colored_label(colors.error, crate::i18n::text("История не сохранена"));
+            }
+            response.clicked()
+        };
+        egui::TopBottomPanel::bottom("status")
+            .frame(
+                egui::Frame::new()
+                    .fill(colors.bg)
+                    .inner_margin(egui::Margin::symmetric(18, 10)),
+            )
+            .show(ctx, |ui| {
+                if let Some(job) = &mut self.job {
+                    ui.horizontal(|ui| {
+                        self.show_history |= history_button(ui);
+                        ui.spinner();
+                        ui.label(crate::tr_format!(
+                            "Файловые операции: {} · {} с",
+                            "File operations: {} · {} s",
+                            job.label,
+                            job.started.elapsed().as_secs()
+                        ));
+                        if self.transfer.is_some() {
+                            let stopping = job.progress.cancel.is_requested();
+                            let response = ui
+                                .add_enabled(
+                                    !stopping,
+                                    egui::Button::new(if stopping {
+                                        crate::i18n::text("Остановка…")
+                                    } else {
+                                        crate::i18n::text("Остановить")
+                                    }),
+                                )
+                                .on_hover_text(crate::i18n::text("Остановить перенос · Shift+Esc"));
+                            paint_focus(ui, &response, 5);
+                            stop_requested = response.clicked();
+                        }
+                    });
+                    operation_details(ui, job.progress.snapshot());
+                    if let Some((message, _)) = &self.notice {
+                        egui::ScrollArea::vertical()
+                            .id_salt("active_operation_notice")
+                            .max_height(80.0)
+                            .show(ui, |ui| {
+                                ui.add(
+                                    egui::Label::new(RichText::new(message).color(colors.muted))
+                                        .wrap()
+                                        .selectable(true),
+                                );
+                            });
+                    }
+                } else if let Some((message, error)) = self.notice.clone() {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                        self.show_history |= history_button(ui);
+                        if ui.small_button("×").clicked() {
+                            self.notice = None;
+                        }
+                        egui::ScrollArea::vertical()
+                            .id_salt("operation_notice")
+                            .max_height(160.0)
+                            .show(ui, |ui| {
+                                // Scroll content must use ordinary vertical layout. A
+                                // wrapped horizontal layout gives the first text row
+                                // the viewport's height and clips subsequent paths.
+                                ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                                    ui.add(
+                                        egui::Label::new(RichText::new(message).color(if error {
+                                            colors.error
+                                        } else {
+                                            colors.success
+                                        }))
+                                        .wrap()
+                                        .selectable(true),
+                                    );
+                                });
+                            });
+                    });
+                } else {
+                    ui.horizontal(|ui| {
+                        self.show_history |= history_button(ui);
+                        let visible = self.tab().visible(self.folder_view(self.active)).len();
+                        ui.label(
+                            RichText::new(crate::tr_format!(
+                                "{} объектов  ·  Выбрано: {}",
+                                "{} items  ·  Selected: {}",
+                                visible,
+                                self.tab().selected.len()
+                            ))
+                            .color(colors.muted),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                RichText::new(if self.tab().path.is_archive() {
+                                    crate::archive::readonly()
+                                } else {
+                                    crate::i18n::text("Двойной щелчок — открыть")
+                                })
+                                .size(11.0)
+                                .color(colors.muted),
+                            );
+                        });
+                    });
+                }
+                self.pending_queue_ui(ui);
+            });
+        if stop_requested {
+            self.request_transfer_stop(ctx);
+        }
+    }
+
+    pub(super) fn pending_queue_ui(&mut self, ui: &mut egui::Ui) {
+        if self.pending_jobs.is_empty() {
+            self.queue_start_failed = false;
+            return;
+        }
+        if self.queue_start_failed {
+            let retry = ui.button(crate::i18n::text("Повторить запуск очереди"));
+            paint_focus(ui, &retry, 5);
+            if retry.clicked() {
+                self.queue_start_failed = false;
+                self.start_next_job(ui.ctx());
+            }
+        }
+        let mut remove = None;
+        let mut reorder = None;
+        egui::CollapsingHeader::new(crate::tr_format!(
+            "Очередь: {} · одновременно: 1",
+            "Queued: {} · concurrency: 1",
+            self.pending_jobs.len()
+        ))
+        .id_salt("pending_file_jobs")
+        .show(ui, |ui| {
+            ui.label(crate::i18n::text("Остановка действует только на текущее задание. Ожидающие задания хранятся до закрытия приложения."));
+            egui::ScrollArea::vertical().id_salt("pending_jobs_scroll").max_height(120.0).show(ui, |ui| {
+                for (index, job) in self.pending_jobs.iter().enumerate() {
+                    ui.push_id(index, |ui| {
+                        ui.horizontal(|ui| {
+                            let up = ui.add_enabled(index > 0, egui::Button::new("↑")).on_hover_text(crate::i18n::text("Раньше"));
+                            paint_focus(ui, &up, 5);
+                            if up.clicked() { reorder = Some((index, -1)); }
+                            let down = ui.add_enabled(index + 1 < self.pending_jobs.len(), egui::Button::new("↓")).on_hover_text(crate::i18n::text("Позже"));
+                            paint_focus(ui, &down, 5);
+                            if down.clicked() { reorder = Some((index, 1)); }
+                            let cancel = ui.button(crate::i18n::text("Удалить из очереди"));
+                            paint_focus(ui, &cancel, 5);
+                            if cancel.clicked() { remove = Some(index); }
+                            ui.add(egui::Label::new(format!("{}. {}", index + 1, job.description)).truncate()).on_hover_text(&job.description);
+                        });
+                    });
+                }
+            });
+        });
+        if let Some(index) = remove {
+            self.pending_jobs.remove(index);
+            if self.pending_jobs.is_empty() {
+                self.queue_start_failed = false;
+            }
+        } else if let Some((index, direction)) = reorder {
+            self.move_pending_job(index, direction);
+        }
+    }
+}
