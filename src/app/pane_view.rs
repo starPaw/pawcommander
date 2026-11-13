@@ -56,7 +56,7 @@ pub(super) fn sort_controls(ui: &mut egui::Ui, order: FileOrder, mut choose: imp
         paint_focus(ui, &response, 4);
         if response.clicked() {
             choose(sort);
-            ui.close_menu();
+            ui.close();
         }
     }
 }
@@ -93,10 +93,10 @@ pub(super) fn list_header(
             _ => None,
         };
         let response = sort.map(|sort| {
-            let response = ui.interact(rect, ui.id().with(column as u8), Sense::click());
+            let response = ui.interact(rect, ui.scope_id().with(column as u8), Sense::click());
             response.widget_info(|| {
                 egui::WidgetInfo::labeled(
-                    egui::WidgetType::Button,
+                    egui::Role::Button,
                     ui.is_enabled(),
                     crate::tr_format!("Сортировка: {label}", "Sort: {label}"),
                 )
@@ -256,7 +256,7 @@ pub(super) fn render_pane(
                     let response = ui.add_sized(
                         [filter_width, icons::COMPACT_SIZE],
                         egui::TextEdit::singleline(&mut tab.filter)
-                            .vertical_align(egui::Align::Center)
+                            .align(egui::Align2::LEFT_CENTER)
                             .margin(egui::Margin::symmetric(5, 0))
                             .hint_text(crate::i18n::text("Фильтр по имени…")),
                     );
@@ -379,7 +379,7 @@ pub(super) fn render_pane(
                 };
                 let files_height = (ui.available_height() - reserved_status_height).max(0.0);
                 let mut scroll = egui::ScrollArea::vertical();
-                let scope = ui.id();
+                let scope = ui.scope_id();
                 let previous_scope = tab.file_scroll_scope;
                 let row_pitch = row_height + spacing;
                 if !ui.is_sizing_pass() {
@@ -418,9 +418,7 @@ pub(super) fn render_pane(
                     }
                 }
                 let files_id = tab.file_list_id();
-                let ctx = ui.ctx().clone();
-                ctx.accesskit_node_builder(files_id, |node| {
-                    node.set_role(egui::accesskit::Role::List);
+                let files_label = {
                     let pane = crate::i18n::text(
                         match (
                             settings.split.then_some(settings.pane_layout.orientation),
@@ -437,72 +435,78 @@ pub(super) fn render_pane(
                     } else {
                         crate::i18n::text("Список")
                     };
-                    node.set_label(format!("{pane}, {view}, {}", tab.path.display()));
-                });
-                let file_scroll = ctx.with_accessibility_parent(files_id, || {
-                    scroll
-                        .max_height(files_height)
-                        .min_scrolled_height(files_height)
-                        .id_salt((tab.id, &tab.path, "files"))
-                        .auto_shrink([false, false])
-                        .show_rows(ui, row_height, rows, |ui, range| {
-                            if grid && compact_rows {
-                                ui.spacing_mut().interact_size.y = row_height;
-                            }
-                            for row in range {
-                                if grid {
-                                    ui.horizontal(|ui| {
-                                        for col in 0..columns {
-                                            let position = row * columns + col;
-                                            if position < visible.len() {
-                                                entry_widget(
-                                                    ui,
-                                                    tab,
-                                                    position,
-                                                    &visible,
-                                                    EntryOptions {
-                                                        columns: None,
-                                                        thumbnails: thumbnails.as_deref_mut(),
-                                                        pane: pane_index,
-                                                        split: settings.split,
-                                                        grid: true,
-                                                        folder_columns: false,
-                                                        compact: compact_rows,
-                                                        idle,
-                                                        zed_available,
-                                                    },
-                                                    actions,
-                                                    drop_targets,
-                                                );
-                                            }
-                                        }
-                                    });
-                                } else if row < visible.len() {
-                                    entry_widget(
-                                        ui,
-                                        tab,
-                                        row,
-                                        &visible,
-                                        EntryOptions {
-                                            columns: Some(&layout),
-                                            thumbnails: None,
-                                            pane: pane_index,
-                                            split: settings.split,
-                                            grid: false,
-                                            folder_columns: false,
-                                            compact: compact_rows,
-                                            idle,
-                                            zed_available,
-                                        },
-                                        actions,
-                                        drop_targets,
-                                    );
+                    format!("{pane}, {view}, {}", tab.path.display())
+                };
+                let list_ui = egui::UiBuilder::new()
+                    .scope_id(files_id)
+                    .accessibility_role(egui::Role::List)
+                    .accessibility_label(files_label);
+                let file_scroll = ui
+                    .scope_builder(list_ui, |ui| {
+                        scroll
+                            .max_height(files_height)
+                            .min_scrolled_height(files_height)
+                            .id_salt((tab.id, &tab.path, "files"))
+                            .auto_shrink([false, false])
+                            .show_rows(ui, row_height, rows, |ui, range| {
+                                if grid && compact_rows {
+                                    ui.spacing_mut().interact_size.y = row_height;
                                 }
-                            }
-                        })
-                });
+                                for row in range {
+                                    if grid {
+                                        ui.horizontal(|ui| {
+                                            for col in 0..columns {
+                                                let position = row * columns + col;
+                                                if position < visible.len() {
+                                                    entry_widget(
+                                                        ui,
+                                                        tab,
+                                                        position,
+                                                        &visible,
+                                                        EntryOptions {
+                                                            columns: None,
+                                                            thumbnails: thumbnails.as_deref_mut(),
+                                                            pane: pane_index,
+                                                            split: settings.split,
+                                                            grid: true,
+                                                            folder_columns: false,
+                                                            compact: compact_rows,
+                                                            idle,
+                                                            zed_available,
+                                                        },
+                                                        actions,
+                                                        drop_targets,
+                                                    );
+                                                }
+                                            }
+                                        });
+                                    } else if row < visible.len() {
+                                        entry_widget(
+                                            ui,
+                                            tab,
+                                            row,
+                                            &visible,
+                                            EntryOptions {
+                                                columns: Some(&layout),
+                                                thumbnails: None,
+                                                pane: pane_index,
+                                                split: settings.split,
+                                                grid: false,
+                                                folder_columns: false,
+                                                compact: compact_rows,
+                                                idle,
+                                                zed_available,
+                                            },
+                                            actions,
+                                            drop_targets,
+                                        );
+                                    }
+                                }
+                            })
+                    })
+                    .inner;
                 if !ui.is_sizing_pass() {
-                    let offset = file_scroll.state.offset.y;
+                    let offset = file_scroll.state.clamped_offset().y;
                     if previous_scope == Some(scope) && offset > 0.0 && offset != tab.scroll_offset
                     {
                         // User scrolling in a partial listing takes precedence.
@@ -529,7 +533,10 @@ pub(super) fn render_pane(
                     .min_scrolled_width(0.0)
                     .max_height(height)
                     .auto_shrink([false, false])
-                    .drag_to_scroll(false)
+                    .scroll_source(
+                        egui::scroll_area::ScrollSource::SCROLL_BAR
+                            | egui::scroll_area::ScrollSource::MOUSE_WHEEL,
+                    )
                     .show(ui, |ui| {
                         ui.set_width(layout.width);
                         ui.style_mut().always_scroll_the_only_direction = false;

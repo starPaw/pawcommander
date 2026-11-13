@@ -27,7 +27,7 @@ impl Theme {
 
     pub fn apply(self, ctx: &egui::Context, high_contrast: bool) {
         ctx.data_mut(|data| {
-            data.insert_temp(egui::Id::new("catppuccin.theme"), (self, high_contrast));
+            data.insert_temp(egui::Id::unique("catppuccin.theme"), (self, high_contrast));
         });
         ctx.set_theme(match self {
             Self::Latte | Self::Light => egui::ThemePreference::Light,
@@ -121,9 +121,9 @@ pub struct Palette {
 impl Palette {
     pub fn from_ctx(ctx: &egui::Context) -> Self {
         let (theme, high_contrast) = ctx
-            .data(|d| d.get_temp::<(Theme, bool)>(egui::Id::new("catppuccin.theme")))
+            .data(|d| d.get_temp::<(Theme, bool)>(egui::Id::unique("catppuccin.theme")))
             .unwrap_or_default();
-        let dark = ctx.style().visuals.dark_mode;
+        let dark = ctx.global_style().visuals.dark_mode;
         if high_contrast {
             Self::high_contrast(dark)
         } else {
@@ -261,10 +261,10 @@ mod tests {
         for theme in [Theme::Latte, Theme::Frappe, Theme::Macchiato, Theme::Mocha] {
             theme.apply(&ctx, false);
             let p = Palette::from_ctx(&ctx);
-            assert_eq!(ctx.style().visuals.panel_fill, p.bg);
-            assert_eq!(ctx.style().visuals.override_text_color, Some(p.ink));
-            assert_eq!(ctx.style().visuals.dark_mode, theme != Theme::Latte);
-            assert_eq!(ctx.style().visuals.selection.bg_fill, p.selection);
+            assert_eq!(ctx.global_style().visuals.panel_fill, p.bg);
+            assert_eq!(ctx.global_style().visuals.override_text_color, Some(p.ink));
+            assert_eq!(ctx.global_style().visuals.dark_mode, theme != Theme::Latte);
+            assert_eq!(ctx.global_style().visuals.selection.bg_fill, p.selection);
             assert_ne!(p.selection, p.bg);
             assert_eq!(
                 serde_json::from_str::<Theme>(&serde_json::to_string(&theme).unwrap()).unwrap(),

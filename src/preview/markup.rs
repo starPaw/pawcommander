@@ -181,11 +181,7 @@ fn markdown(body: &str) -> Document {
                         b.flush();
                         b.style.strong = true;
                     }
-                    Tag::TableCell => {
-                        if !b.current.runs.is_empty() {
-                            b.append(" | ");
-                        }
-                    }
+                    Tag::TableCell if !b.current.runs.is_empty() => b.append(" | "),
                     _ => {}
                 }
             }
@@ -381,10 +377,9 @@ impl TokenSink for HtmlSink {
                         | "title"
                         | "noscript"
                         | "template"
-                ) {
-                    if let Some(index) = stack.iter().rposition(|(n, _)| n == "head") {
-                        close_html(b, stack, lists, index);
-                    }
+                ) && let Some(index) = stack.iter().rposition(|(n, _)| n == "head")
+                {
+                    close_html(b, stack, lists, index);
                 }
                 let implied = match name {
                     "li" => stack
@@ -404,10 +399,10 @@ impl TokenSink for HtmlSink {
                 if let Some(index) = implied {
                     close_html(b, stack, lists, index);
                 }
-                if is_block(name) {
-                    if let Some(index) = stack.iter().rposition(|(n, _)| n == "p") {
-                        close_html(b, stack, lists, index);
-                    }
+                if is_block(name)
+                    && let Some(index) = stack.iter().rposition(|(n, _)| n == "p")
+                {
+                    close_html(b, stack, lists, index);
                 }
                 if !b.style.hidden {
                     if is_block(name) {

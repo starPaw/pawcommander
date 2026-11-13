@@ -29,10 +29,11 @@ fn dragging_rows_and_tiles_preserves_visible_group_and_transfers_files() {
                 events,
                 ..Default::default()
             };
-            let _ = ctx.run(input, |ctx| {
+            let _ = ctx.run_test_ui(input, |ui| {
+                let ctx = &ui.ctx().clone();
                 let mut targets = DropTargets::default();
                 let mut actions = vec![];
-                egui::CentralPanel::default().show(ctx, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
                     ui.columns(2, |cols| {
                         let target_rect = cols[0].available_rect_before_wrap();
                         target_pos = target_rect.center();

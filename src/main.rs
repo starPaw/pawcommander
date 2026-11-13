@@ -26,6 +26,8 @@ mod result_history;
 mod search;
 mod shortcuts;
 mod tab_drag;
+#[cfg(test)]
+mod test_ui;
 mod theme;
 mod thumbnails;
 mod tools;
@@ -56,7 +58,7 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             #[cfg(target_os = "macos")]
-            macos_about::install();
+            macos_about::install(&cc.egui_ctx);
             Ok(Box::new(app::PawCommander::new(cc, start)))
         }),
     )

@@ -261,16 +261,14 @@ fn zip_name<'a>(entry: &'a rawzip::ZipFileHeaderRecord<'_>) -> io::Result<Cow<'a
             .map_err(|_| invalid_path());
     }
     for (kind, data) in entry.extra_fields() {
-        if kind == rawzip::extra_fields::ExtraFieldId::INFO_ZIP_UNICODE_PATH {
-            if let Some((1, crc)) = data.split_first() {
-                if let Some((checksum, utf8)) = crc.split_first_chunk::<4>() {
-                    if u32::from_le_bytes(*checksum) == rawzip::crc32(raw) {
-                        return std::str::from_utf8(utf8)
-                            .map(Cow::Borrowed)
-                            .map_err(|_| invalid_path());
-                    }
-                }
-            }
+        if kind == rawzip::extra_fields::ExtraFieldId::INFO_ZIP_UNICODE_PATH
+            && let Some((1, crc)) = data.split_first()
+            && let Some((checksum, utf8)) = crc.split_first_chunk::<4>()
+            && u32::from_le_bytes(*checksum) == rawzip::crc32(raw)
+        {
+            return std::str::from_utf8(utf8)
+                .map(Cow::Borrowed)
+                .map_err(|_| invalid_path());
         }
     }
     if raw.is_ascii() {

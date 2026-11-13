@@ -16,7 +16,7 @@ fn address_editor_submits_typed_paths_completes_folders_and_cancels() {
     let mut render = |tab: &mut Tab, events| {
         time += 0.1;
         let mut actions = vec![];
-        let output = ctx.run(
+        let output = ctx.run_test_ui(
             egui::RawInput {
                 time: Some(time),
                 events,
@@ -26,17 +26,17 @@ fn address_editor_submits_typed_paths_completes_folders_and_cancels() {
                 )),
                 ..Default::default()
             },
-            |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
                     address_bar(ui, tab, 1, &mut actions, &mut DropTargets::default());
                 });
             },
         );
         suggestion_position.set(output.shapes.iter().find_map(|shape| {
-            if let egui::Shape::Text(text) = &shape.shape {
-                if text.galley.text() == "Nested folder" {
-                    return Some(text.visual_bounding_rect().center());
-                }
+            if let egui::Shape::Text(text) = &shape.shape
+                && text.galley.text() == "Nested folder"
+            {
+                return Some(text.visual_bounding_rect().center());
             }
             None
         }));
@@ -63,7 +63,7 @@ fn address_editor_submits_typed_paths_completes_folders_and_cancels() {
 
     let wait_for_suggestions = |tab: &mut Tab, render: &mut dyn FnMut(&mut Tab, Vec<_>) -> _| {
         let deadline = Instant::now() + Duration::from_secs(3);
-        while !ctx.memory(|memory| memory.any_popup_open()) {
+        while !egui::Popup::is_any_open(&ctx) {
             assert!(Instant::now() < deadline, "expected folder suggestions");
             std::thread::sleep(Duration::from_millis(5));
             render(tab, vec![]);

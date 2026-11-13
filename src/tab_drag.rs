@@ -111,7 +111,7 @@ impl TabDropTargets {
                 && (s.rect.contains(pos) || (s.pane != drag.pane && s.pane_rect.contains(pos)))
         });
         let colors = Palette::from_ctx(ctx);
-        let painter = ctx.layer_painter(LayerId::new(egui::Order::Tooltip, Id::new("tab_drop")));
+        let painter = ctx.layer_painter(LayerId::new(egui::Order::Tooltip, Id::unique("tab_drop")));
         let target = strip.map(|strip| {
             let slot = if strip.rect.contains(pos) {
                 let (slot, x) = strip.slot(pos);
@@ -160,8 +160,8 @@ impl TabDropTargets {
                 text.size() + egui::vec2(18.0, 10.0),
             );
             let rect = rect.translate(egui::vec2(
-                (ctx.screen_rect().right() - rect.right()).min(0.0),
-                (ctx.screen_rect().bottom() - rect.bottom()).min(0.0),
+                (ctx.content_rect().right() - rect.right()).min(0.0),
+                (ctx.content_rect().bottom() - rect.bottom()).min(0.0),
             ));
             painter.rect(
                 rect,

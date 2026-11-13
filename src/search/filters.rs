@@ -290,12 +290,10 @@ fn parse_date(input: &str) -> Result<Option<NaiveDate>, String> {
             4 | 7 => byte == b'-',
             _ => byte.is_ascii_digit(),
         })
+        && let Ok(date) = NaiveDate::parse_from_str(input, "%Y-%m-%d")
+        && date.year() > 0
     {
-        if let Ok(date) = NaiveDate::parse_from_str(input, "%Y-%m-%d") {
-            if date.year() > 0 {
-                return Ok(Some(date));
-            }
-        }
+        return Ok(Some(date));
     }
     Err(crate::tr_format!(
         "Введите действительную дату в формате ГГГГ-ММ-ДД.",

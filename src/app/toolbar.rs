@@ -10,11 +10,12 @@ use eframe::egui;
 use eframe::egui::{Sense, Vec2};
 
 impl PawCommander {
-    pub(super) fn toolbar(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+    pub(super) fn toolbar(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let ctx = &ui.ctx().clone();
         let colors = Palette::from_ctx(ctx);
-        egui::TopBottomPanel::top("toolbar")
+        egui::Panel::top("toolbar")
             .frame(egui::Frame::new().fill(colors.surface).inner_margin(egui::Margin::symmetric(12, 4)))
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 5.0;
                     if cfg!(target_os = "macos") {
@@ -62,8 +63,8 @@ impl PawCommander {
                         }
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let menu_id = ui.id().with("settings_menu");
-                        let settings_label = if ctx.screen_rect().width() >= 760.0 {
+                        let menu_id = ui.scope_id().with("settings_menu");
+                        let settings_label = if ctx.content_rect().width() >= 760.0 {
                             crate::i18n::text("Настройки")
                         } else {
                             ""
@@ -74,15 +75,15 @@ impl PawCommander {
                             paint_focus(ui, &button, 8);
                             self.focus_toolbar = false;
                         }
-                        let mut menu = egui::menu::BarState::load(ctx, menu_id);
-                        let opened = button.clicked() && menu.is_none();
+                        let menu_was_open = egui::Popup::is_id_open(ctx, menu_id);
+                        let opened = button.clicked() && !menu_was_open;
                         let focus_entry = ui.data_mut(|data| {
                             if opened {
                                 data.insert_temp(menu_id.with("focus_entry"), true);
                             }
                             data.get_temp::<bool>(menu_id.with("focus_entry")).unwrap_or(false)
                         });
-                        let shown = menu.bar_menu(&button, |ui| {
+                        let shown = egui::Popup::menu(&button).id(menu_id).show(|ui| {
                             let response = ui.button(crate::i18n::text("Доступность"));
                             if focus_entry && !ui.is_sizing_pass() {
                                 response.request_focus();
@@ -92,7 +93,7 @@ impl PawCommander {
                             if response.clicked() {
                                 self.show_accessibility = true;
                                 self.accessibility_focus = true;
-                                ui.close_menu();
+                                ui.close();
                             }
                             let shortcuts = ui.button(crate::i18n::text("Горячие клавиши"));
                             paint_focus(ui, &shortcuts, 5);
@@ -103,18 +104,18 @@ impl PawCommander {
                                         memory.surrender_focus(id);
                                     }
                                 });
-                                ui.close_menu();
+                                ui.close();
                             }
                             let palette_label = Command::Palette.label();
                             let palette = ui.button(self.settings.shortcuts.hint(ctx, Command::Palette, palette_label));
                             paint_focus(ui, &palette, 5);
                             if palette.clicked() {
                                 self.open_command_palette(ctx, Some(button.id));
-                                ui.close_menu();
+                                ui.close();
                             }
                             let about = ui.button(crate::i18n::text("О PawCommander"));
                             paint_focus(ui, &about, 5);
-                            if about.clicked() { self.show_help = true; ui.close_menu(); }
+                            if about.clicked() { self.show_help = true; ui.close(); }
                             let language_menu = ui.menu_button("Язык / Language", |ui| {
                                 for (language, label) in [
                                     (crate::i18n::Language::English, "English"),
@@ -151,7 +152,7 @@ impl PawCommander {
                             ui.separator();
                             if ui.button(crate::tr_format!("Восстановление после сбоя", "Crash recovery")).clicked() {
                                 self.recovery.reopen();
-                                ui.close_menu();
+                                ui.close();
                             }
                             ui.separator();
                             ui.label(crate::i18n::text("Вид текущей папки"));
@@ -183,7 +184,7 @@ impl PawCommander {
                             if columns.clicked() {
                                 self.show_list_columns = true;
                                 self.list_columns_focus = true;
-                                ui.close_menu();
+                                ui.close();
                             }
                             ui.separator();
                             let tools_menu = ui.menu_button(crate::i18n::text("Инструменты"), |ui| {
@@ -200,11 +201,11 @@ impl PawCommander {
                             });
                             paint_focus(ui, &tools_menu.response, 5);
                         });
-                        if shown.is_some() && menu.is_none() && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+                        if shown.is_some() && !egui::Popup::is_id_open(ctx, menu_id) && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
                             button.request_focus();
                         }
-                        ctx.accesskit_node_builder(button.id, |node| node.set_expanded(menu.is_some()));
-                        menu.store(ctx, menu_id);
+                        let menu_open = egui::Popup::is_id_open(ctx, menu_id);
+                        ctx.accesskit_node_builder(button.id, |node| node.set_expanded(menu_open));
                         if icons::button(ui, Icon::Info, "", self.settings.preview).on_hover_text(self.settings.shortcuts.hint(ctx, Command::Preview, Command::Preview.label())).clicked() {
                             self.settings.preview = !self.settings.preview;
                         }

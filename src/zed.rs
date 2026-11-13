@@ -135,7 +135,9 @@ fn is_text(bytes: &[u8], truncated: bool) -> bool {
     if bytes.starts_with(&[0xff, 0xfe]) || bytes.starts_with(&[0xfe, 0xff]) {
         let little = bytes.starts_with(&[0xff, 0xfe]);
         let mut units = bytes[2..]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|p| {
                 if little {
                     u16::from_le_bytes([p[0], p[1]])

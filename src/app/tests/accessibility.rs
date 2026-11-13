@@ -35,15 +35,19 @@ fn accessibility_tree_keeps_file_parent_focus_and_selection_across_views() {
             ..Default::default()
         };
         eframe::App::raw_input_hook(app, &ctx, &mut input);
-        ctx.run(input, |ctx| eframe::App::update(app, ctx, &mut frame))
-            .platform_output
-            .accesskit_update
-            .unwrap()
+        ctx.run_test_ui(input, |ui| {
+            eframe::App::logic(app, ui.ctx(), &mut frame);
+            eframe::App::ui(app, ui, &mut frame);
+        })
+        .platform_output
+        .accesskit_update
+        .unwrap()
     };
     let request = |action| {
         vec![egui::Event::AccessKitActionRequest(ActionRequest {
             action,
-            target: folder_id,
+            target_tree: egui::accesskit::TreeId::ROOT,
+            target_node: folder_id,
             data: None,
         })]
     };
@@ -65,14 +69,26 @@ fn accessibility_tree_keeps_file_parent_focus_and_selection_across_views() {
     assert!(row.1.label().unwrap().starts_with("Note.txt, "));
     assert_eq!(row.1.toggled(), Some(Toggled::True));
     let assert_file_parent = |tree: &egui::accesskit::TreeUpdate| {
-        let parents = tree
-            .nodes
-            .iter()
-            .filter(|(_, node)| node.children().contains(&file_id))
-            .collect::<Vec<_>>();
-        assert_eq!(parents.len(), 1);
-        assert_eq!(parents[0].0, file_list_id);
-        assert_eq!(parents[0].1.role(), Role::List);
+        // egui now exposes layout/scroll containers too. The file must have a
+        // unique, acyclic ancestry reaching its own pane's semantic list.
+        let mut child = file_id;
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            assert!(seen.insert(child), "accessibility ancestry must be acyclic");
+            let parents = tree
+                .nodes
+                .iter()
+                .filter(|(_, node)| node.children().contains(&child))
+                .collect::<Vec<_>>();
+            assert_eq!(parents.len(), 1);
+            let (id, parent) = parents[0];
+            if *id == file_list_id {
+                assert_eq!(parent.role(), Role::List);
+                break;
+            }
+            assert_ne!(parent.role(), Role::List, "file belongs to the wrong list");
+            child = *id;
+        }
     };
     assert_file_parent(&list);
     app.tab_mut().browse_columns = true;
@@ -145,6 +161,6 @@ fn accessibility_settings_migrate_and_round_trip() {
     let restored: Settings = eframe::get_value(&storage, "settings").unwrap();
     assert_eq!(restored.ui_scale, 150);
     assert!(restored.high_contrast);
-    let _ = ctx.run(egui::RawInput::default(), |_| {});
+    let _ = ctx.run_test_ui(egui::RawInput::default(), |_| {});
     assert_eq!(ctx.zoom_factor(), 1.5);
 }

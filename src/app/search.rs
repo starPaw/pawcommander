@@ -27,7 +27,8 @@ impl PawCommander {
         tab.reveal_after_load = Some(path.into());
     }
 
-    pub(super) fn show_search_results(&mut self, ctx: &egui::Context) {
+    pub(super) fn show_search_results(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
         if !self.search.panel.is_open() {
             return;
         }
@@ -45,7 +46,7 @@ impl PawCommander {
         let can_copy = !self.conflict_open();
         self.search
             .panel
-            .show(ctx, target, destination, enabled, can_copy);
+            .show(ui, target, destination, enabled, can_copy);
     }
 
     pub(super) fn search_target_is_current(

@@ -14,19 +14,21 @@ fn properties_shortcut_opens_selected_group_without_navigating() {
         root.path().join("file").into(),
     ]);
     let before = app.tab().path.clone();
-    let _ = ctx.run(
+    let _ = ctx.run_test_ui(
         egui::RawInput {
-            modifiers: egui::Modifiers::ALT,
-            events: vec![egui::Event::Key {
-                key: egui::Key::Enter,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::ALT,
-            }],
+            events: vec![
+                egui::Event::ModifiersChanged(egui::Modifiers::ALT),
+                egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::ALT,
+                },
+            ],
             ..Default::default()
         },
-        |ctx| app.keyboard(ctx),
+        |ui| app.keyboard(ui.ctx()),
     );
     assert!(app.properties.is_some());
     assert_eq!(app.tab().path, before);
@@ -39,7 +41,7 @@ fn pane_shortcuts_leave_text_and_modal_input_alone() {
     let ctx = egui::Context::default();
     let cc = eframe::CreationContext::_new_kittest(ctx.clone());
     let mut app = PawCommander::new(&cc, Some(root.path().into()));
-    let focus = egui::Id::new("test_filter");
+    let focus = egui::Id::unique("test_filter");
     let key = |key, modifiers| egui::Event::Key {
         key,
         physical_key: None,
@@ -48,13 +50,14 @@ fn pane_shortcuts_leave_text_and_modal_input_alone() {
         modifiers,
     };
     let run = |app: &mut PawCommander, events, focused| {
-        let _ = ctx.run(
+        let _ = ctx.run_test_ui(
             egui::RawInput {
                 events,
                 ..Default::default()
             },
-            |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            |ui| {
+                let ctx = &ui.ctx().clone();
+                egui::CentralPanel::default().show(ui, |ui| {
                     let response =
                         ui.add(egui::TextEdit::singleline(&mut app.tab_mut().filter).id(focus));
                     if focused {
@@ -131,7 +134,7 @@ fn custom_toolbar_shortcut_does_not_consume_text_editing_keys() {
         "overrides": {"Open": null, "FocusToolbar": enter}
     }))
     .unwrap();
-    let _ = ctx.run(
+    let _ = ctx.run_test_ui(
         egui::RawInput {
             events: vec![egui::Event::Key {
                 key: egui::Key::Enter,
@@ -142,8 +145,9 @@ fn custom_toolbar_shortcut_does_not_consume_text_editing_keys() {
             }],
             ..Default::default()
         },
-        |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        |ui| {
+            let ctx = &ui.ctx().clone();
+            egui::CentralPanel::default().show(ui, |ui| {
                 ui.text_edit_singleline(&mut app.tab_mut().address)
                     .request_focus();
             });
@@ -181,7 +185,10 @@ fn command_palette_filters_navigates_runs_and_restores_focus() {
             ..Default::default()
         };
         eframe::App::raw_input_hook(app, &ctx, &mut input);
-        ctx.run(input, |ctx| eframe::App::update(app, ctx, &mut frame))
+        ctx.run_test_ui(input, |ui| {
+            eframe::App::logic(app, ui.ctx(), &mut frame);
+            eframe::App::ui(app, ui, &mut frame);
+        })
     };
     let key = |key, pressed, modifiers| Event::Key {
         key,
@@ -250,9 +257,10 @@ fn pane_tab_keeps_event_order_without_traversing_widget_focus() {
             ..Default::default()
         };
         eframe::App::raw_input_hook(app, &ctx, &mut input);
-        let _ = ctx.run(input, |ctx| {
+        let _ = ctx.run_test_ui(input, |ui| {
+            let ctx = &ui.ctx().clone();
             app.keyboard(ctx);
-            egui::CentralPanel::default().show(ctx, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 let _ = ui.button("Widget focus target");
             });
         });
@@ -263,7 +271,7 @@ fn pane_tab_keeps_event_order_without_traversing_widget_focus() {
     );
     assert_eq!(app.active, 1);
     assert_eq!(app.panes[1].tabs.len(), 2, "Tab dispatched before New tab");
-    assert!(!ctx.wants_keyboard_input());
+    assert!(!ctx.egui_wants_keyboard_input());
     run(&mut app, vec![tab(true)]);
     assert_eq!(app.active, 1, "held Tab does not switch panes again");
     run(&mut app, vec![tab(false), tab(true)]);
@@ -275,7 +283,10 @@ fn pane_tab_keeps_event_order_without_traversing_widget_focus() {
     .unwrap();
     run(&mut app, vec![tab(false), tab(true)]);
     assert_eq!(app.active, 0);
-    assert!(ctx.wants_keyboard_input(), "unbound Tab traverses widgets");
+    assert!(
+        ctx.egui_wants_keyboard_input(),
+        "unbound Tab traverses widgets"
+    );
 }
 
 #[test]
@@ -297,7 +308,7 @@ fn starting_filter_input_blocks_a_later_file_shortcut_in_the_same_frame() {
         repeat: false,
         modifiers,
     };
-    let _ = ctx.run(
+    let _ = ctx.run_test_ui(
         egui::RawInput {
             events: vec![
                 key(egui::Key::F, egui::Modifiers::COMMAND),
@@ -305,7 +316,7 @@ fn starting_filter_input_blocks_a_later_file_shortcut_in_the_same_frame() {
             ],
             ..Default::default()
         },
-        |ctx| app.keyboard(ctx),
+        |ui| app.keyboard(ui.ctx()),
     );
     assert!(app.tab().focus_filter);
     assert!(app.dialog.is_none());

@@ -10,14 +10,18 @@ Remove personal paths, hostnames, usernames, credentials, and file contents from
 
 ## Develop a change
 
-Follow the build prerequisites in the [README](README.md), then create a branch and make a focused change. The Rust toolchain and Cargo lockfile are pinned.
+Follow the build prerequisites in the [README](README.md), then create a branch and make a focused change. The Rust toolchain and Cargo lockfile are pinned. Use the [architecture and source map](docs/architecture.md) to find the owning modules, worker boundaries and focused test commands.
 
 ```sh
 cargo run --locked
-cargo fmt --check
-cargo test --locked
-cargo clippy --all-targets --locked -- -D warnings
+python3 scripts/check.py
 ```
+
+The Python 3 script uses only the standard library and runs from the repository root on macOS, Linux and Windows (`python scripts/check.py` where that is your Python command). Its full mode runs `cargo fmt --check`, `cargo test --locked`, `cargo clippy --all-targets --locked -- -D warnings`, then `git diff --check`, stopping at the first failure. It prints each command's output and elapsed time. It does not install tools, clean build artifacts or modify Git state.
+
+During iteration, run the relevant test filter from the source map. `python3 scripts/check.py --quick` checks formatting, compiles all targets with `cargo check --all-targets --locked`, and checks the diff; it does **not** run tests or Clippy and does not replace the full submission checks. Add `--offline` when Cargo dependencies are already cached.
+
+For reproducible timing records, use `python3 scripts/check.py --offline --report target/check-report.json`. The optional JSON report records tool versions, UTC start/end times, platform, commands, monotonic elapsed times and exit codes, including a failed stage. Relative report paths are resolved from the repository root. Compare runs on the same host with the same check mode, dependency versions and build/cache state; a warm build and a clean build are different baselines. Keep reports local and measure before claiming an improvement in development speed.
 
 Changes to file operations should cover cancellation, conflicts, partial failures, and preservation of existing source/destination data where relevant. Include meaningful regression tests for changed behavior. Mention the platforms and native integrations you actually tested in your pull request.
 
@@ -44,7 +48,7 @@ It creates and removes a disposable entry in the OS vault. Default tests use a m
 
 ## Before submitting
 
-Keep generated builds, IDE state, private settings, and credentials out of commits. Review `git diff --cached` before committing. Run the checks above; for UI changes, include a screenshot using synthetic files. Keep the PR description focused on the behavior and validation.
+Keep generated builds, IDE state, private settings, and credentials out of commits. Review `git diff --cached` before committing. Run the full checks above; for UI changes, include a screenshot using synthetic files. Exercise affected native UI, clipboard and drag-and-drop behavior on the relevant OS with disposable files and isolated app state; compilation and shared tests do not replace native acceptance. State any untested platforms. Keep the PR description focused on the behavior and validation.
 
 Contributions are distributed under the project's [MIT license](LICENSE).
 

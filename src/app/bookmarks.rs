@@ -124,7 +124,7 @@ impl BookmarkEditor {
     }
 
     pub(super) fn show(&mut self, ctx: &egui::Context, bookmarks: &mut [Bookmark]) -> bool {
-        let response = egui::Modal::new(egui::Id::new("bookmark_editor")).show(ctx, |ui| {
+        let response = egui::Modal::new(egui::Id::unique("bookmark_editor")).show(ctx, |ui| {
             ui.heading(crate::i18n::text("Изменить избранное"));
             ui.label(crate::i18n::text("Название"));
             let name = ui.text_edit_singleline(&mut self.name);

@@ -155,7 +155,7 @@ impl PawCommander {
         if !self.show_accessibility {
             return;
         }
-        let response = egui::Modal::new(egui::Id::new("accessibility")).show(ctx, |ui| {
+        let response = egui::Modal::new(egui::Id::unique("accessibility")).show(ctx, |ui| {
             ui.set_width(300.0);
             ui.heading(crate::i18n::text("Доступность"));
             let contrast = ui.checkbox(
@@ -196,21 +196,20 @@ impl PawCommander {
         let mut submit = false;
         let mut cancel = false;
         let mut forget = false;
-        egui::Modal::new(egui::Id::new("sftp_connect")).show(ctx, |ui| {
+        egui::Modal::new(egui::Id::unique("sftp_connect")).show(ctx, |ui| {
             ui.set_width(470.0);
             ui.heading(crate::i18n::text("Подключение SFTP"));
             ui.add_space(10.0);
             ui.add_enabled_ui(!busy, |ui| {
                 egui::ComboBox::from_id_salt("saved_sftp_profiles").selected_text(crate::i18n::text("Сохранённые подключения")).show_ui(ui, |ui| {
                     for profile in &self.settings.sftp_profiles {
-                        if ui.selectable_label(false, profile.display()).clicked() {
-                            if let Location::Sftp { endpoint, path } = profile {
+                        if ui.selectable_label(false, profile.display()).clicked()
+                            && let Location::Sftp { endpoint, path } = profile {
                                 form.host = endpoint.host.clone(); form.port = endpoint.port; form.user = endpoint.user.clone();
                                 form.key = endpoint.key.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
                                 form.path = path.display().to_string(); form.password.clear(); form.passphrase.clear();
                                 form.use_saved = true; form.save_key = false; form.error = None;
                             }
-                        }
                     }
                 });
                 egui::Grid::new("sftp_fields").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
@@ -314,7 +313,7 @@ impl PawCommander {
         let colors = Palette::from_ctx(ctx);
         if self.show_help {
             egui::Window::new(crate::i18n::text("О PawCommander")).collapsible(false).resizable(false)
-                .vscroll(true).max_height((ctx.screen_rect().height() - 64.0).max(100.0))
+                .vscroll(true).max_height((ctx.content_rect().height() - 64.0).max(100.0))
                 .open(&mut self.show_help).show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.add(icons::logo(96.0));
@@ -355,7 +354,7 @@ impl PawCommander {
             }
         };
         // The modal blocks file interactions while a concrete destination is being confirmed.
-        egui::Modal::new(egui::Id::new("file_dialog")).show(ctx, |ui| {
+        egui::Modal::new(egui::Id::unique("file_dialog")).show(ctx, |ui| {
             ui.set_width(430.0);
             ui.heading(title);
             ui.add_space(12.0);
@@ -548,14 +547,14 @@ impl PawCommander {
                     .compile(input)
                     .map(|rule| SelectionScan::new(rule, rows));
             }
-            if let Some(scan) = scan {
-                if scan.step(&current.entries, Instant::now() + Duration::from_millis(4)) {
-                    self.apply_selection(
-                        SelectionChange::Matches(std::mem::take(&mut scan.matches)),
-                        ctx,
-                    );
-                    return;
-                }
+            if let Some(scan) = scan
+                && scan.step(&current.entries, Instant::now() + Duration::from_millis(4))
+            {
+                self.apply_selection(
+                    SelectionChange::Matches(std::mem::take(&mut scan.matches)),
+                    ctx,
+                );
+                return;
             }
             self.dialog = Some(dialog);
             ctx.request_repaint();

@@ -1,4 +1,6 @@
 //! Read-only local properties. Cancellation is cooperative between filesystem calls.
+#[cfg(test)]
+use crate::test_ui::ContextExt as _;
 use chrono::{DateTime, Local};
 use eframe::egui;
 use std::cell::Cell;
@@ -106,7 +108,7 @@ impl Properties {
         let summary = self.state.lock().unwrap().clone();
         let mut open = true;
         egui::Window::new(crate::i18n::text("Свойства локальных файлов"))
-            .id(egui::Id::new("local-properties"))
+            .id(egui::Id::unique("local-properties"))
             .open(&mut open)
             .default_width(580.0)
             .show(ctx, |ui| {
@@ -524,10 +526,11 @@ mod tests {
                 cancel: Arc::new(AtomicBool::new(false)),
                 focus_stop: Cell::new(true),
             };
-            let background = egui::Id::new("background");
+            let background = egui::Id::unique("background");
             ctx.memory_mut(|memory| memory.request_focus(background));
             for _ in 0..3 {
-                let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                let _ = ctx.run_test_ui(egui::RawInput::default(), |root_ui| {
+                    let ctx = &root_ui.ctx().clone();
                     assert!(properties.show(ctx));
                 });
             }
@@ -544,7 +547,7 @@ mod tests {
                 }],
                 ..Default::default()
             };
-            let _ = ctx.run(input, |ctx| assert!(properties.show(ctx)));
+            let _ = ctx.run_test_ui(input, |ui| assert!(properties.show(ui.ctx())));
             assert!(properties.cancel.load(Ordering::Relaxed));
 
             let temp = tempfile::tempdir().unwrap();
@@ -553,7 +556,8 @@ mod tests {
             assert!(result.done && result.cancelled);
             assert_eq!((result.files, result.bytes), (0, 0));
             *properties.state.lock().unwrap() = result;
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            let _ = ctx.run_test_ui(egui::RawInput::default(), |root_ui| {
+                let ctx = &root_ui.ctx().clone();
                 assert!(properties.show(ctx));
             });
         }
@@ -569,8 +573,9 @@ mod tests {
         };
         let mut other = None;
         for frame in 0..5 {
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            let _ = ctx.run_test_ui(egui::RawInput::default(), |root_ui| {
+                let ctx = &root_ui.ctx().clone();
+                egui::CentralPanel::default().show(root_ui, |ui| {
                     let response = ui.button("Other control");
                     other = Some(response.id);
                     if frame == 3 {
@@ -601,7 +606,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         assert_eq!(properties.state.lock().unwrap().bytes, 7);
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        let _ = ctx.run_test_ui(egui::RawInput::default(), |root_ui| {
+            let ctx = &root_ui.ctx().clone();
             assert!(properties.show(ctx))
         });
         let input = egui::RawInput {
@@ -614,7 +620,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let _ = ctx.run(input, |ctx| assert!(!properties.show(ctx)));
+        let _ = ctx.run_test_ui(input, |ui| assert!(!properties.show(ui.ctx())));
     }
 
     #[test]

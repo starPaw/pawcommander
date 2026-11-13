@@ -7,7 +7,7 @@ fn pointer_drag_on_tabs_reorders_transfers_and_cancels() {
         panes: &mut [Pane; 2],
         events: Vec<egui::Event>,
     ) -> egui::FullOutput {
-        ctx.run(
+        ctx.run_test_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -16,10 +16,11 @@ fn pointer_drag_on_tabs_reorders_transfers_and_cancels() {
                 events,
                 ..Default::default()
             },
-            |ctx| {
+            |ui| {
+                let ctx = &ui.ctx().clone();
                 let mut file_targets = DropTargets::default();
                 let mut tab_targets = TabDropTargets::default();
-                egui::CentralPanel::default().show(ctx, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
                     ui.columns(2, |cols| {
                         for (i, ui) in cols.iter_mut().enumerate() {
                             tab_strip(
@@ -284,7 +285,10 @@ fn tab_context_menu_blocks_pane_shortcuts_until_escape_dismisses_it() {
             ..Default::default()
         };
         eframe::App::raw_input_hook(app, &ctx, &mut input);
-        ctx.run(input, |ctx| eframe::App::update(app, ctx, &mut frame))
+        ctx.run_test_ui(input, |ui| {
+            eframe::App::logic(app, ui.ctx(), &mut frame);
+            eframe::App::ui(app, ui, &mut frame);
+        })
     };
     let key = |key, modifiers| {
         [true, false].map(|pressed| Event::Key {
@@ -320,14 +324,14 @@ fn tab_context_menu_blocks_pane_shortcuts_until_escape_dismisses_it() {
             ],
         );
     }
-    assert!(ctx.is_context_menu_open());
+    assert!(egui::Popup::is_any_open(&ctx));
     assert!(app.keyboard_blocked(&ctx));
 
     run(&mut app, key(Key::W, Modifiers::COMMAND).to_vec());
     assert_eq!(app.panes[0].tabs.len(), 2);
-    assert!(ctx.is_context_menu_open());
+    assert!(egui::Popup::is_any_open(&ctx));
     run(&mut app, key(Key::Escape, Modifiers::NONE).to_vec());
-    assert!(!ctx.is_context_menu_open());
+    assert!(!egui::Popup::is_any_open(&ctx));
     assert!(app.tab().selected.contains(&file));
     run(&mut app, key(Key::W, Modifiers::COMMAND).to_vec());
     assert_eq!(app.panes[0].tabs.len(), 1);

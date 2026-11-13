@@ -1,4 +1,6 @@
 use super::{Location, PawCommander, TabTarget};
+#[cfg(test)]
+use crate::test_ui::ContextExt as _;
 use crate::{i18n::text, preview::Preview, shortcuts, theme::paint_focus, vfs::FileEntry};
 use eframe::egui::{self, Key, Modifiers};
 
@@ -39,7 +41,7 @@ impl QuickLook {
         // The main window's copy of child focus may be from the previous frame.
         let focused =
             ctx.show_viewport_immediate(viewport, Self::window_builder(), |ctx, class| {
-                class != egui::ViewportClass::Embedded
+                class != egui::ViewportClass::EmbeddedWindow
                     && ctx.input(|input| input.viewport().focused == Some(true))
             });
         ctx.send_viewport_cmd_to(viewport, egui::ViewportCommand::Close);
@@ -113,42 +115,46 @@ impl QuickLook {
         has_next: bool,
     ) -> Option<Action> {
         let viewport = Self::viewport_id();
-        let (action, native) =
-            ctx.show_viewport_immediate(viewport, Self::window_builder(), |ctx, class| {
-                let keys = self.take_keys(ctx, preview.text_input(ctx));
-                if class == egui::ViewportClass::Embedded {
-                    let modal = egui::Modal::new(egui::Id::new("quick-look")).show(ctx, |ui| {
-                        let size = ctx.screen_rect().size() * 0.8;
-                        ui.set_width(size.x.min(760.0));
-                        ui.set_height(size.y.min(540.0));
-                        ui.heading(text("Быстрый просмотр"));
-                        Self::show_content(ui, preview, entry, has_previous, has_next)
-                    });
-                    let action = if modal.backdrop_response.clicked() {
-                        Some(Action::Close)
-                    } else {
-                        keys.or(modal.inner)
-                    };
-                    return (action, false);
-                }
+        let (action, native) = if ctx.embed_viewports() {
+            // egui now wraps embedded viewports in its own Window. Keep our
+            // modal fallback outside that API so it owns the backdrop/focus.
+            let keys = self.take_keys(ctx, preview.text_input(ctx));
+            let modal = egui::Modal::new(egui::Id::unique("quick-look")).show(ctx, |ui| {
+                let size = ctx.content_rect().size() * 0.8;
+                ui.set_width(size.x.min(760.0));
+                ui.set_height(size.y.min(540.0));
+                ui.heading(text("Быстрый просмотр"));
+                Self::show_content(ui, preview, entry, has_previous, has_next)
+            });
+            let action = if modal.backdrop_response.clicked() {
+                Some(Action::Close)
+            } else {
+                keys.or(modal.inner)
+            };
+            (action, false)
+        } else {
+            ctx.show_viewport_immediate(viewport, Self::window_builder(), |ui, class| {
+                let viewport_ctx = ui.ctx().clone();
+                let keys = self.take_keys(&viewport_ctx, preview.text_input(&viewport_ctx));
                 let buttons = egui::CentralPanel::default()
-                    .show(ctx, |ui| {
+                    .show(ui, |ui| {
                         Self::show_content(ui, preview, entry, has_previous, has_next)
                     })
                     .inner;
-                let action = if ctx.input(|input| input.viewport().close_requested()) {
+                let action = if viewport_ctx.input(|input| input.viewport().close_requested()) {
                     Some(Action::Close)
                 } else {
                     keys.or(buttons)
                 };
-                (action, true)
-            });
+                (action, class != egui::ViewportClass::EmbeddedWindow)
+            })
+        };
         let mut action = action;
         if native {
             // The OS may activate the main window while Quick Look remains open.
             action = action.or(self.take_keys(ctx, preview.text_input(ctx)));
             if action != Some(Action::Close) {
-                let backdrop = egui::Modal::new(egui::Id::new("quick-look-backdrop"))
+                let backdrop = egui::Modal::new(egui::Id::unique("quick-look-backdrop"))
                     .frame(egui::Frame::new())
                     .backdrop_color(egui::Color32::TRANSPARENT)
                     .show(ctx, |_| {});
@@ -411,7 +417,10 @@ mod tests {
             ..Default::default()
         };
         app.raw_input_hook(ctx, &mut input);
-        let _ = ctx.run(input, |ctx| app.update(ctx, frame));
+        let _ = ctx.run_test_ui(input, |ui| {
+            app.logic(ui.ctx(), frame);
+            app.ui(ui, frame);
+        });
     }
 
     #[test]
@@ -432,8 +441,8 @@ mod tests {
         };
         let ctx = egui::Context::default();
         let mut query = String::from("a");
-        let id = egui::Id::new("preview-search-test");
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        let id = egui::Id::unique("preview-search-test");
+        let _ = ctx.run_test_ui(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.add(egui::TextEdit::singleline(&mut query).id(id))
                     .request_focus();
@@ -441,7 +450,7 @@ mod tests {
         });
         for key_code in [Key::Space, Key::ArrowLeft, Key::ArrowRight, Key::Escape] {
             let events = tap(key_code);
-            let _ = ctx.run(
+            let _ = ctx.run_test_ui(
                 egui::RawInput {
                     events,
                     ..Default::default()

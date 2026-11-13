@@ -24,7 +24,7 @@ fn directory_tree_targets_the_active_pane_and_preserves_current_selection() {
     let mut time = 0.0;
     let mut run = |app: &mut PawCommander, events| {
         time += 0.2;
-        ctx.run(
+        ctx.run_test_ui(
             egui::RawInput {
                 events,
                 time: Some(time),
@@ -34,7 +34,10 @@ fn directory_tree_targets_the_active_pane_and_preserves_current_selection() {
                 )),
                 ..Default::default()
             },
-            |ctx| eframe::App::update(app, ctx, &mut frame),
+            |ui| {
+                eframe::App::logic(app, ui.ctx(), &mut frame);
+                eframe::App::ui(app, ui, &mut frame);
+            },
         )
         .platform_output
         .accesskit_update
@@ -43,7 +46,8 @@ fn directory_tree_targets_the_active_pane_and_preserves_current_selection() {
     let click = |target| {
         vec![egui::Event::AccessKitActionRequest(ActionRequest {
             action: AxAction::Click,
-            target,
+            target_tree: egui::accesskit::TreeId::ROOT,
+            target_node: target,
             data: None,
         })]
     };
@@ -122,7 +126,10 @@ fn folder_jump_uses_successful_visits_and_opens_in_the_active_pane() {
             ..Default::default()
         };
         eframe::App::raw_input_hook(app, &ctx, &mut input);
-        ctx.run(input, |ctx| eframe::App::update(app, ctx, &mut frame))
+        ctx.run_test_ui(input, |ui| {
+            eframe::App::logic(app, ui.ctx(), &mut frame);
+            eframe::App::ui(app, ui, &mut frame);
+        })
     };
     let press = |key, modifiers| {
         [true, false].map(|pressed| Event::Key {
@@ -263,7 +270,7 @@ fn sftp_file_double_click_and_zed_context_menu_keep_the_clicked_path() {
         let mut render = |events| {
             let mut actions = vec![];
             time += 0.02;
-            let output = ctx.run(
+            let output = ctx.run_test_ui(
                 egui::RawInput {
                     time: Some(time),
                     screen_rect: Some(egui::Rect::from_min_size(
@@ -273,8 +280,8 @@ fn sftp_file_double_click_and_zed_context_menu_keep_the_clicked_path() {
                     events,
                     ..Default::default()
                 },
-                |ctx| {
-                    egui::CentralPanel::default().show(ctx, |ui| {
+                |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| {
                         entry_widget(
                             ui,
                             &mut tab,

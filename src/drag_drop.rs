@@ -1,5 +1,7 @@
 //! One hit test after both panes render keeps nested targets and either drag
 //! direction consistent. Filesystem validation and all I/O stay in the worker.
+#[cfg(test)]
+use crate::test_ui::ContextExt as _;
 use crate::{fs_ops::TransferKind, vfs::Location};
 use eframe::egui::{self, Color32, LayerId, Rect};
 
@@ -87,7 +89,11 @@ impl DropTargets {
             } else {
                 match dropped
                     .iter()
-                    .map(|f| f.path.clone().map(Location::Local))
+                    .map(|f| {
+                        f.path()
+                            .is_absolute()
+                            .then(|| Location::Local(f.path().to_path_buf()))
+                    })
                     .collect::<Option<Vec<_>>>()
                 {
                     Some(paths) => paths,
@@ -148,11 +154,11 @@ impl DropTargets {
             let color = if error.is_some() {
                 Color32::from_rgb(200, 70, 75)
             } else {
-                ctx.style().visuals.selection.stroke.color
+                ctx.global_style().visuals.selection.stroke.color
             };
             let painter = ctx.layer_painter(LayerId::new(
                 egui::Order::Tooltip,
-                egui::Id::new("file_drop_feedback"),
+                egui::Id::unique("file_drop_feedback"),
             ));
             if let Some(t) = target {
                 painter.rect_stroke(
@@ -165,7 +171,7 @@ impl DropTargets {
             let galley = painter.layout(
                 label,
                 egui::FontId::proportional(12.0),
-                ctx.style().visuals.text_color(),
+                ctx.global_style().visuals.text_color(),
                 360.0,
             );
             let badge = Rect::from_min_size(
@@ -173,10 +179,10 @@ impl DropTargets {
                 galley.size() + egui::vec2(16.0, 12.0),
             );
             let badge = badge.translate(egui::vec2(
-                (ctx.screen_rect().right() - badge.right()).min(0.0),
-                (ctx.screen_rect().bottom() - badge.bottom()).min(0.0),
+                (ctx.content_rect().right() - badge.right()).min(0.0),
+                (ctx.content_rect().bottom() - badge.bottom()).min(0.0),
             ));
-            painter.rect_filled(badge, 5, ctx.style().visuals.extreme_bg_color);
+            painter.rect_filled(badge, 5, ctx.global_style().visuals.extreme_bg_color);
             painter.rect_stroke(
                 badge,
                 5,
@@ -186,7 +192,7 @@ impl DropTargets {
             painter.galley(
                 badge.min + egui::vec2(8.0, 6.0),
                 galley,
-                ctx.style().visuals.text_color(),
+                ctx.global_style().visuals.text_color(),
             );
         }
         if !committing {
@@ -274,6 +280,29 @@ mod tests {
             modifiers: Modifiers::NONE,
         }
     }
+    #[derive(Debug)]
+    struct TestDroppedFile(std::path::PathBuf);
+
+    impl egui::DroppedFile for TestDroppedFile {
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            Err("This test validates paths without reading file contents".into())
+        }
+    }
+
+    fn dropped_file(path: &str) -> egui::DroppedFileHandle {
+        let path = if path.is_empty() {
+            std::path::PathBuf::new()
+        } else {
+            // Use an absolute fixture on Windows as well as Unix.
+            std::env::temp_dir().join(path.trim_start_matches('/'))
+        };
+        std::sync::Arc::new(TestDroppedFile(path))
+    }
+
     fn frame(
         ctx: &egui::Context,
         input: RawInput,
@@ -281,9 +310,10 @@ mod tests {
         ready: bool,
     ) -> Option<Result<DropRequest, String>> {
         let mut result = None;
-        let _ = ctx.run(input, |ctx| {
+        let _ = ctx.run_test_ui(input, |root_ui| {
+            let ctx = &root_ui.ctx().clone();
             let mut targets = DropTargets::default();
-            egui::CentralPanel::default().show(ctx, |ui| {
+            egui::CentralPanel::default().show(root_ui, |ui| {
                 targets.add(
                     ui,
                     Rect::from_min_max(pos2(10.0, 10.0), pos2(590.0, 390.0)),
@@ -341,15 +371,16 @@ mod tests {
         );
         egui::DragAndDrop::set_payload(&ctx, DragFiles(vec![local("/source/a")]));
         let mut release = input(vec![button(pos, false)]);
-        release.modifiers = Modifiers::SHIFT;
+        release
+            .events
+            .push(Event::ModifiersChanged(Modifiers::SHIFT));
         let request = frame(&ctx, release, true, true).unwrap().unwrap();
         assert_eq!(request.kind, TransferKind::Move);
         let mut native = input(vec![Event::PointerMoved(pos)]);
-        native.modifiers = Modifiers::SHIFT;
-        native.dropped_files.push(egui::DroppedFile {
-            path: Some("/source/a".into()),
-            ..Default::default()
-        });
+        native
+            .events
+            .push(Event::ModifiersChanged(Modifiers::SHIFT));
+        native.dropped_files.push(dropped_file("/source/a"));
         let request = frame(&ctx, native, true, true).unwrap().unwrap();
         assert_eq!(request.kind, TransferKind::Copy);
         assert_eq!(request.destination, local("/target"));
@@ -383,20 +414,11 @@ mod tests {
     fn native_batch_is_rejected_if_any_path_is_missing_and_busy_drops_are_ignored() {
         let ctx = egui::Context::default();
         let mut native = input(vec![Event::PointerMoved(pos2(50.0, 200.0))]);
-        native.dropped_files = vec![
-            egui::DroppedFile {
-                path: Some("/source/a".into()),
-                ..Default::default()
-            },
-            egui::DroppedFile::default(),
-        ];
+        native.dropped_files = vec![dropped_file("/source/a"), dropped_file("")];
         assert!(frame(&ctx, native.clone(), true, true).unwrap().is_err());
         assert!(frame(&ctx, native, false, true).is_none());
         let mut native = input(vec![]);
-        native.dropped_files.push(egui::DroppedFile {
-            path: Some("/source/a".into()),
-            ..Default::default()
-        });
+        native.dropped_files.push(dropped_file("/source/a"));
         assert!(frame(&ctx, native, true, false).unwrap().is_err());
     }
 
@@ -454,7 +476,7 @@ mod tests {
                 pos2(20.0, 20.0),
                 Some(LayerId::new(
                     egui::Order::Foreground,
-                    egui::Id::new("popup")
+                    egui::Id::unique("popup")
                 ))
             )
             .is_none());

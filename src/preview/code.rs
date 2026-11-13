@@ -1,4 +1,6 @@
 //! Bounded lexical highlighting: deliberately not a parser or semantic analysis.
+#[cfg(test)]
+use crate::test_ui::ContextExt as _;
 use crate::{
     i18n::text,
     icons::{self, Icon},
@@ -161,11 +163,11 @@ pub(super) struct Find {
 
 impl Find {
     pub(super) fn clear(&mut self, ctx: &egui::Context) {
-        if let Some((viewport, ids)) = self.editors {
-            if viewport == ctx.viewport_id() {
-                for id in ids {
-                    ctx.memory_mut(|m| m.surrender_focus(id));
-                }
+        if let Some((viewport, ids)) = self.editors
+            && viewport == ctx.viewport_id()
+        {
+            for id in ids {
+                ctx.memory_mut(|m| m.surrender_focus(id));
             }
         }
         *self = Self::default();
@@ -296,8 +298,8 @@ impl Find {
                         .selectable(false)
                         .extend(),
                     );
-                    let mut layouter = |ui: &egui::Ui, _: &str, _: f32| {
-                        ui.fonts(|f| {
+                    let mut layouter = |ui: &egui::Ui, _: &dyn egui::TextBuffer, _: f32| {
+                        ui.fonts_mut(|f| {
                             f.layout_job(code.job(body, font_size, &p, &self.matches, self.current))
                         })
                     };
@@ -307,7 +309,7 @@ impl Find {
                         .font(FontId::monospace(font_size))
                         .desired_width(f32::INFINITY)
                         .layouter(&mut layouter)
-                        .frame(false)
+                        .frame(egui::Frame::NONE)
                         .margin(egui::Vec2::ZERO)
                         .show(ui);
                     self.editors = Some((ui.ctx().viewport_id(), [search, output.response.id]));
@@ -315,11 +317,10 @@ impl Find {
                     if self.jump {
                         if let Some(m) = self.matches.get(self.current) {
                             let index = body[..m.start].chars().count();
-                            let cursor =
-                                output.galley.from_ccursor(egui::text::CCursor::new(index));
+                            let cursor = egui::text::CCursor::new(index);
                             let rect = output
                                 .galley
-                                .pos_from_cursor(&cursor)
+                                .pos_from_cursor(cursor)
                                 .translate(output.galley_pos.to_vec2());
                             ui.scroll_to_rect(rect.expand(20.0), Some(egui::Align::Center));
                         }
@@ -414,11 +415,11 @@ fn lex(body: &str, language: Language) -> Vec<(Range<usize>, Kind)> {
         } else {
             i += body[i..].chars().next().unwrap().len_utf8();
         }
-        if let Some((range, last)) = spans.last_mut() {
-            if *last == kind {
-                range.end = i;
-                continue;
-            }
+        if let Some((range, last)) = spans.last_mut()
+            && *last == kind
+        {
+            range.end = i;
+            continue;
         }
         spans.push((start..i, kind));
     }
@@ -492,7 +493,7 @@ mod tests {
     #[test]
     fn code_preview_find_scrolls_and_enter_keeps_focus() {
         let ctx = egui::Context::default();
-        ctx.style_mut(|s| s.animation_time = 0.0);
+        ctx.global_style_mut(|s| s.animation_time = 0.0);
         let body = format!(
             "{}target\n{}target",
             "line\n".repeat(200),
@@ -529,7 +530,7 @@ mod tests {
             } else {
                 vec![]
             };
-            let _ = ctx.run(
+            let _ = ctx.run_test_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
@@ -539,8 +540,9 @@ mod tests {
                     events,
                     ..Default::default()
                 },
-                |ctx| {
-                    egui::CentralPanel::default().show(ctx, |ui| {
+                |root_ui| {
+                    let ctx = &root_ui.ctx().clone();
+                    egui::CentralPanel::default().show(root_ui, |ui| {
                         if frame == 22 {
                             assert!(
                                 find.text_input(ctx),
@@ -553,7 +555,7 @@ mod tests {
                                 "Escape releases search focus for the next shortcut"
                             );
                         }
-                        scroll_id = ui.make_persistent_id(egui::Id::new("code-preview"));
+                        scroll_id = ui.make_persistent_id(egui::IdSalt::new("code-preview"));
                         search_id = find.show(ui, &body, &code, 14.0);
                     });
                 },
@@ -562,7 +564,7 @@ mod tests {
                 assert!(
                     egui::scroll_area::State::load(&ctx, scroll_id)
                         .unwrap()
-                        .offset
+                        .clamped_offset()
                         .y
                         > 1000.0
                 );
@@ -584,13 +586,14 @@ mod tests {
         let find = Find {
             editors: Some((
                 ctx.viewport_id(),
-                [egui::Id::new("search"), egui::Id::new("code")],
+                [egui::Id::unique("search"), egui::Id::unique("code")],
             )),
             focused: true,
             ..Default::default()
         };
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = ctx.run_test_ui(egui::RawInput::default(), |root_ui| {
+            let ctx = &root_ui.ctx().clone();
+            egui::CentralPanel::default().show(root_ui, |ui| {
                 ui.button("Next file").request_focus();
                 assert!(!find.text_input(ctx));
             });
@@ -607,8 +610,9 @@ mod tests {
             ..Default::default()
         };
         find.update(body);
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = ctx.run_test_ui(egui::RawInput::default(), |root_ui| {
+            let ctx = &root_ui.ctx().clone();
+            egui::CentralPanel::default().show(root_ui, |ui| {
                 let id = find.show(ui, body, &code, 14.0);
                 ui.memory_mut(|m| m.request_focus(id));
                 assert!(find.text_input(ctx));

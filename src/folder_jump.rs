@@ -42,8 +42,8 @@ impl FolderJump {
         history: &FolderHistory,
         keys: &[egui::Key],
     ) -> JumpOutcome {
-        let modal = egui::Modal::new(egui::Id::new("folder_jump")).show(ctx, |ui| {
-            ui.set_width((ctx.screen_rect().width() - 40.0).clamp(160.0, 540.0));
+        let modal = egui::Modal::new(egui::Id::unique("folder_jump")).show(ctx, |ui| {
+            ui.set_width((ctx.content_rect().width() - 40.0).clamp(160.0, 540.0));
             ui.heading(text("Быстрый переход к папке"));
             let query_id = ui.make_persistent_id("query");
             let moving = keys
@@ -105,7 +105,7 @@ impl FolderJump {
                 "Сначала лучшие совпадения, затем давность и частота посещений"
             }));
             egui::ScrollArea::vertical()
-                .max_height((ctx.screen_rect().height() - 160.0).clamp(60.0, 340.0))
+                .max_height((ctx.content_rect().height() - 160.0).clamp(60.0, 340.0))
                 .show(ui, |ui| {
                     for location in folders {
                         let path = location.display();

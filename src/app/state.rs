@@ -93,15 +93,19 @@ impl PaneLayout {
         let mut divider = workspace;
         divider.min[axis] += first;
         divider.max[axis] = divider.min[axis] + gap;
-        let response = ui.interact(divider, ui.id().with(("pane_divider", axis)), Sense::DRAG);
+        let response = ui.interact(
+            divider,
+            ui.scope_id().with(("pane_divider", axis)),
+            Sense::DRAG,
+        );
         let primary = egui::PointerButton::Primary;
         let grab_id = response.id.with("grab_offset");
-        if response.drag_started_by(primary) {
-            if let Some(origin) = ui.input(|input| input.pointer.press_origin()) {
-                ui.data_mut(|data| {
-                    data.insert_temp(grab_id, origin[axis] - divider.center()[axis]);
-                });
-            }
+        if response.drag_started_by(primary)
+            && let Some(origin) = ui.input(|input| input.pointer.press_origin())
+        {
+            ui.data_mut(|data| {
+                data.insert_temp(grab_id, origin[axis] - divider.center()[axis]);
+            });
         }
         if usable > 0.0 && (response.dragged_by(primary) || response.drag_stopped_by(primary)) {
             let grab_offset = ui.data(|data| data.get_temp::<f32>(grab_id));

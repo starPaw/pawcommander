@@ -108,7 +108,8 @@ pub(super) fn human_size(bytes: u64) -> String {
 }
 
 impl PawCommander {
-    pub(super) fn footer(&mut self, ctx: &egui::Context) {
+    pub(super) fn footer(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
         let colors = Palette::from_ctx(ctx);
         let mut stop_requested = false;
         let history_error = self.history.error.is_some();
@@ -120,13 +121,13 @@ impl PawCommander {
             }
             response.clicked()
         };
-        egui::TopBottomPanel::bottom("status")
+        egui::Panel::bottom("status")
             .frame(
                 egui::Frame::new()
                     .fill(colors.bg)
                     .inner_margin(egui::Margin::symmetric(18, 10)),
             )
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 if let Some(job) = &mut self.job {
                     ui.horizontal(|ui| {
                         self.show_history |= history_button(ui);

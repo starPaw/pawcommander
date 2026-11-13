@@ -67,7 +67,7 @@ This preview has an ad-hoc signature and is **not Apple-notarized or Developer I
 
 ### Build from source
 
-Build from source using [Rust and Cargo](https://www.rust-lang.org/tools/install). The repository pins Rust **1.90.0** and its dependencies.
+Build from source using [Rust and Cargo](https://www.rust-lang.org/tools/install). The repository pins Rust **1.100.0** with the **2024 edition** and its dependencies.
 
 ### 1. Install build prerequisites
 

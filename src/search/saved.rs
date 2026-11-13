@@ -1,4 +1,6 @@
 use super::{validate_folder_query, validate_index_query, FilterInput, FolderTarget, Mode, Search};
+#[cfg(test)]
+use crate::test_ui::ContextExt as _;
 use crate::{app::SavedPath, i18n::text};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
@@ -272,11 +274,7 @@ impl Search {
 
     pub(super) fn close_saved_popup(&mut self, ctx: &egui::Context) {
         if let Some(id) = self.saved_popup.take() {
-            ctx.memory_mut(|memory| {
-                if memory.is_popup_open(id) {
-                    memory.close_popup();
-                }
-            });
+            egui::Popup::close_id(ctx, id);
         }
     }
 }
@@ -315,15 +313,10 @@ impl SavedSearch {
             });
             let menu = menu.on_hover_text(menu_label);
             let popup_id = menu.id.with("saved_search_actions");
-            if menu.clicked() {
-                ui.memory_mut(|memory| memory.toggle_popup(popup_id));
-            }
-            let menu_action = egui::popup::popup_below_widget(
-                ui,
-                popup_id,
-                &menu,
-                egui::popup::PopupCloseBehavior::CloseOnClickOutside,
-                |ui| {
+            let menu_action = egui::Popup::from_toggle_button_response(&menu)
+                .id(popup_id)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .show(|ui| {
                     ui.set_min_width(170.0);
                     if ui.button(text("Переименовать…")).clicked() {
                         return Some(Action::Rename(index));
@@ -333,14 +326,13 @@ impl SavedSearch {
                         return Some(Action::Remove(index));
                     }
                     None
-                },
-            )
-            .flatten();
+                })
+                .and_then(|response| response.inner);
             if let Some(menu_action) = menu_action {
-                ui.memory_mut(egui::Memory::close_popup);
+                egui::Popup::close_id(ui.ctx(), popup_id);
                 action = Some(menu_action);
             }
-            if ui.memory(|memory| memory.is_popup_open(popup_id)) {
+            if egui::Popup::is_id_open(ui.ctx(), popup_id) {
                 *saved_popup = Some(popup_id);
             } else if *saved_popup == Some(popup_id) {
                 *saved_popup = None;
@@ -374,6 +366,11 @@ mod tests {
         fn set_string(&mut self, key: &str, value: String) {
             assert_eq!(key, STORAGE_KEY);
             self.0 = Some(value);
+        }
+
+        fn remove_string(&mut self, key: &str) {
+            assert_eq!(key, STORAGE_KEY);
+            self.0 = None;
         }
 
         fn flush(&mut self) {}
@@ -532,7 +529,7 @@ mod tests {
 
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
-        ctx.style_mut(|style| style.animation_time = 0.0);
+        ctx.global_style_mut(|style| style.animation_time = 0.0);
         let mut search = Search {
             visible: true,
             mode: Mode::Index,
@@ -550,7 +547,8 @@ mod tests {
                 events,
                 ..Default::default()
             };
-            ctx.run(input, |ctx| {
+            ctx.run_test_ui(input, |root_ui| {
+                let ctx = &root_ui.ctx().clone();
                 search.show(ctx, None);
             })
         };
@@ -569,13 +567,14 @@ mod tests {
                 .expect("accessible saved search control");
             vec![egui::Event::AccessKitActionRequest(ActionRequest {
                 action: Action::Click,
-                target,
+                target_node: target,
+                target_tree: egui::accesskit::TreeId::ROOT,
                 data: None,
             })]
         };
         let open = click(draw(&mut search, vec![]), &label);
         let _ = draw(&mut search, open);
-        assert!(ctx.memory(egui::Memory::any_popup_open));
+        assert!(egui::Popup::is_any_open(&ctx));
 
         let escape = |pressed| egui::Event::Key {
             key: egui::Key::Escape,
@@ -585,14 +584,14 @@ mod tests {
             modifiers: egui::Modifiers::NONE,
         };
         let _ = draw(&mut search, vec![escape(true), escape(false)]);
-        assert!(!ctx.memory(egui::Memory::any_popup_open));
+        assert!(!egui::Popup::is_any_open(&ctx));
         assert!(search.visible);
         let open = click(draw(&mut search, vec![]), &label);
         let popup = draw(&mut search, open);
-        assert!(ctx.memory(egui::Memory::any_popup_open));
+        assert!(egui::Popup::is_any_open(&ctx));
         let collapse = click(popup, text("Сохранённые поиски"));
         let _ = draw(&mut search, collapse);
-        assert!(!ctx.memory(egui::Memory::any_popup_open));
+        assert!(!egui::Popup::is_any_open(&ctx));
         let _ = draw(&mut search, vec![escape(true)]);
         assert!(!search.visible);
     }

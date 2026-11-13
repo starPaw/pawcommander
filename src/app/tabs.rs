@@ -270,10 +270,10 @@ impl Tab {
                 }
                 self.reconcile_previous_selection();
                 self.error = None;
-                if let Some(path) = self.column_reveal.take() {
-                    if self.entries.iter().any(|entry| entry.path == path) {
-                        self.select_revealed(path);
-                    }
+                if let Some(path) = self.column_reveal.take()
+                    && self.entries.iter().any(|entry| entry.path == path)
+                {
+                    self.select_revealed(path);
                 }
                 if let Some(path) = self.reveal_after_load.take() {
                     if self.entries.iter().any(|entry| entry.path == path) {
@@ -517,12 +517,12 @@ impl Tab {
     }
 
     pub(super) fn entry_id(&self, path: &Location) -> egui::Id {
-        egui::Id::new(("file_entry", self.id, path))
+        egui::Id::unique(("file_entry", self.id, path))
     }
 
     pub(super) fn file_list_id(&self) -> egui::Id {
         // Stable row IDs need the same accessibility parent in every view.
-        egui::Id::new(("file_list", self.id))
+        egui::Id::unique(("file_list", self.id))
     }
 
     pub(super) fn focus_cursor(&self, ctx: &egui::Context) {

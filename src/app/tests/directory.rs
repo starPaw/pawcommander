@@ -348,18 +348,18 @@ fn automatic_refresh_schedules_only_displayed_tabs_and_waits_for_pointer_release
         pressed: true,
         modifiers: Default::default(),
     };
-    let _ = ctx.run(
+    let _ = ctx.run_test_ui(
         egui::RawInput {
             events: vec![pointer],
             ..Default::default()
         },
-        |ctx| app.poll(ctx),
+        |ui| app.poll(ui.ctx()),
     );
     assert!(
         app.panes[0].tab().loading.is_none(),
         "held pointer postpones automatic read"
     );
-    let _ = ctx.run(
+    let _ = ctx.run_test_ui(
         egui::RawInput {
             events: vec![egui::Event::PointerButton {
                 pos: egui::pos2(100.0, 100.0),
@@ -372,7 +372,7 @@ fn automatic_refresh_schedules_only_displayed_tabs_and_waits_for_pointer_release
         |_| {},
     );
     // Start in a fresh input frame with no held/released pointer.
-    let _ = ctx.run(egui::RawInput::default(), |ctx| app.poll(ctx));
+    let _ = ctx.run_test_ui(egui::RawInput::default(), |ui| app.poll(ui.ctx()));
     assert!(app.panes[0].tabs[0].automatic_loading());
     assert!(
         app.panes[0].tabs[1].loading.is_none(),
@@ -400,7 +400,7 @@ fn automatic_refresh_and_session_restore_preserve_scroll_in_list_and_grid() {
         settings: &Settings,
         index: usize,
     ) -> Vec<(String, egui::Pos2)> {
-        let output = ctx.run(
+        let output = ctx.run_test_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -408,8 +408,8 @@ fn automatic_refresh_and_session_restore_preserve_scroll_in_list_and_grid() {
                 )),
                 ..Default::default()
             },
-            |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
                     render_pane(
                         ui,
                         pane,

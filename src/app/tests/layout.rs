@@ -45,14 +45,14 @@ fn pane_layout_drag_is_bounded_and_remembers_both_orientations() {
     let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 720.0));
     let draw = |layout: &mut PaneLayout, events| {
         let mut result = [egui::Rect::NOTHING; 2];
-        let output = ctx.run(
+        let output = ctx.run_test_ui(
             egui::RawInput {
                 screen_rect: Some(screen),
                 events,
                 ..Default::default()
             },
-            |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
                     result = layout.rects(ui, ui.available_rect_before_wrap());
                 });
             },
@@ -147,7 +147,7 @@ fn custom_columns_scroll_without_losing_rows_or_compact_headers() {
     let mut draw = |app: &mut PawCommander, events| {
         let mut response = None;
         time += 0.08;
-        let output = ctx.run(
+        let output = ctx.run_test_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -157,14 +157,17 @@ fn custom_columns_scroll_without_losing_rows_or_compact_headers() {
                 time: Some(time),
                 ..Default::default()
             },
-            |ctx| {
-                eframe::App::update(app, ctx, &mut frame);
+            |ui| {
+                let ctx = &ui.ctx().clone();
+                eframe::App::ui(app, ui, &mut frame);
                 response = ctx.read_response(row_id);
             },
         );
         (output, response)
     };
     let scroll = |delta| egui::Event::MouseWheel {
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Unknown,
         unit: egui::MouseWheelUnit::Point,
         delta,
         modifiers: egui::Modifiers::NONE,
@@ -225,8 +228,9 @@ fn pane_layout_preserves_selection_and_scroll_at_minimum_size() {
             };
             eframe::App::raw_input_hook(app, &ctx, &mut input);
             let mut rows = [None, None];
-            let output = ctx.run(input, |ctx| {
-                eframe::App::update(app, ctx, &mut frame);
+            let output = ctx.run_test_ui(input, |ui| {
+                let ctx = &ui.ctx().clone();
+                eframe::App::ui(app, ui, &mut frame);
                 for (index, pane) in app.panes.iter().enumerate() {
                     rows[index] = ctx.read_response(pane.tab().entry_id(&selected));
                 }
@@ -330,7 +334,7 @@ fn pane_layout_accepts_tab_drops_between_stacked_panes() {
 
     let mut frame = eframe::Frame::_new_kittest();
     let mut draw = |app: &mut PawCommander, events| {
-        ctx.run(
+        ctx.run_test_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -339,7 +343,10 @@ fn pane_layout_accepts_tab_drops_between_stacked_panes() {
                 events,
                 ..Default::default()
             },
-            |ctx| eframe::App::update(app, ctx, &mut frame),
+            |ui| {
+                eframe::App::logic(app, ui.ctx(), &mut frame);
+                eframe::App::ui(app, ui, &mut frame);
+            },
         )
     };
     let output = draw(&mut app, vec![]);
@@ -427,7 +434,7 @@ fn folder_columns_keyboard_dispatches_in_pane_order_and_preserves_folder_overrid
             ..Default::default()
         };
         eframe::App::raw_input_hook(app, &ctx, &mut input);
-        let _ = ctx.run(input, |ctx| app.keyboard(ctx));
+        let _ = ctx.run_test_ui(input, |ui| app.keyboard(ui.ctx()));
     };
     let stale = app.panes[1].tab().column_action(1, ColumnNavigation::Left);
     run(
@@ -550,7 +557,10 @@ fn folder_columns_current_rows_remain_visible_and_virtual_in_narrow_and_stacked_
             ..Default::default()
         };
         eframe::App::raw_input_hook(app, &ctx, &mut input);
-        let _ = ctx.run(input, |ctx| eframe::App::update(app, ctx, &mut frame));
+        let _ = ctx.run_test_ui(input, |ui| {
+            eframe::App::logic(app, ui.ctx(), &mut frame);
+            eframe::App::ui(app, ui, &mut frame);
+        });
         ctx.read_response(row_id)
     };
     for orientation in [PaneOrientation::SideBySide, PaneOrientation::Stacked] {
@@ -570,6 +580,8 @@ fn folder_columns_current_rows_remain_visible_and_virtual_in_narrow_and_stacked_
                 vec![
                     egui::Event::PointerMoved(response.interact_rect.center()),
                     egui::Event::MouseWheel {
+                        phase: egui::TouchPhase::Move,
+                        source: egui::MouseWheelSource::Unknown,
                         unit: egui::MouseWheelUnit::Point,
                         delta: egui::vec2(1600.0, 0.0),
                         modifiers: egui::Modifiers::NONE,
@@ -797,14 +809,18 @@ fn folder_view_hiding_focused_row_cannot_delete_another_selected_file() {
             ..Default::default()
         };
         eframe::App::raw_input_hook(app, &ctx, &mut input);
-        let _ = ctx.run(input, |ctx| eframe::App::update(app, ctx, &mut frame));
+        let _ = ctx.run_test_ui(input, |ui| {
+            eframe::App::logic(app, ui.ctx(), &mut frame);
+            eframe::App::ui(app, ui, &mut frame);
+        });
     };
     run(&mut app, vec![]);
     run(
         &mut app,
         vec![egui::Event::AccessKitActionRequest(ActionRequest {
             action: AxAction::Focus,
-            target: NodeId(hidden_id.value()),
+            target_tree: egui::accesskit::TreeId::ROOT,
+            target_node: NodeId(hidden_id.value()),
             data: None,
         })],
     );

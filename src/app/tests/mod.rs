@@ -33,6 +33,8 @@ use crate::result_history::History;
 use crate::search::panel::{ReadyAction, TabTarget};
 use crate::shortcuts::{Command, ShortcutEditor, Shortcuts};
 use crate::tab_drag::{TabDrop, TabDropTargets};
+#[cfg(test)]
+use crate::test_ui::ContextExt as _;
 use crate::theme::Theme;
 use crate::vfs::{Endpoint, FileEntry, Location};
 use crate::{shortcuts, vfs as fs_ops};
@@ -56,6 +58,7 @@ mod drag_drop;
 mod jobs;
 mod keyboard;
 mod layout;
+mod lifecycle;
 mod navigation;
 mod recovery;
 mod search;
@@ -81,6 +84,9 @@ impl eframe::Storage for MemoryStorage {
     fn set_string(&mut self, key: &str, value: String) {
         self.0.insert(key.into(), value);
     }
+    fn remove_string(&mut self, key: &str) {
+        self.0.remove(key);
+    }
     fn flush(&mut self) {}
 }
 
@@ -89,7 +95,7 @@ fn operation_footer_frame(
     ctx: &egui::Context,
     events: Vec<egui::Event>,
 ) -> egui::FullOutput {
-    ctx.run(
+    ctx.run_test_ui(
         egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -98,9 +104,10 @@ fn operation_footer_frame(
             events,
             ..Default::default()
         },
-        |ctx| {
+        |ui| {
+            let ctx = &ui.ctx().clone();
             app.transfer_stop_shortcut(ctx);
-            app.footer(ctx);
+            app.footer(ui);
         },
     )
 }
@@ -136,7 +143,7 @@ fn poll_queue_until(
 ) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while !condition(app) && Instant::now() < deadline {
-        app.poll(ctx);
+        eframe::App::logic(app, ctx, &mut eframe::Frame::_new_kittest());
         std::thread::sleep(Duration::from_millis(1));
     }
     assert!(condition(app), "queue did not reach expected state");
@@ -144,7 +151,7 @@ fn poll_queue_until(
 
 fn answer_queue_conflict(app: &mut PawCommander, ctx: &egui::Context, label: &str) {
     let mut draw = |events| {
-        ctx.run(
+        ctx.run_test_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -153,7 +160,8 @@ fn answer_queue_conflict(app: &mut PawCommander, ctx: &egui::Context, label: &st
                 events,
                 ..Default::default()
             },
-            |ctx| {
+            |ui| {
+                let ctx = &ui.ctx().clone();
                 let transfer = app.transfer.as_mut().unwrap();
                 if transfer.conflict.as_mut().unwrap().show(ctx) {
                     transfer.conflict = None;
