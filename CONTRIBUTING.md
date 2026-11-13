@@ -44,7 +44,7 @@ The real credential-store test is separate and explicitly opt-in:
 cargo test --locked os_vault_round_trip -- --ignored
 ```
 
-It creates and removes a disposable entry in the OS vault. Default tests use a mock vault instead.
+It creates and removes a disposable entry in the OS vault, including a key-sized payload and a Unicode passphrase. On Windows it also checks the previous stored format and preservation of an existing entry when a larger value exceeds the platform limit. Default tests use a mock vault instead.
 
 ## Before submitting
 
