@@ -80,6 +80,7 @@ pub(crate) struct Results {
     nested_index: HashMap<Location, usize>,
     group: Option<(usize, std::ops::Range<usize>)>,
     observed_group: bool,
+    confirming_move: bool,
     weight: usize,
     omitted: usize,
     details_truncated: bool,
@@ -93,6 +94,7 @@ impl Results {
         self.nested_index.clear();
         self.group = None;
         self.observed_group = false;
+        self.confirming_move = false;
         self.cancelled = false;
         self.weight = 0;
         self.omitted = 0;
@@ -203,6 +205,19 @@ impl Results {
         }
     }
 
+    /// Keep the operation usable when optional descendant evidence cannot be
+    /// gathered. Only the root remains; the history explicitly lacks coverage.
+    pub fn abandon_group(&mut self) {
+        if let Some((root, range)) = self.group.take() {
+            self.items.truncate(range.start);
+            self.items[root].descendants_enumerated = false;
+            self.weight = self.items.iter().map(ItemResult::weight).sum();
+        }
+        self.observed_group = false;
+        self.confirming_move = false;
+        self.nested_index.clear();
+    }
+
     /// Record only entries already visited by recursive removal. No extra
     /// traversal is needed, and an interrupted walk never claims full coverage.
     pub fn removing(&mut self, source: &Location) {
@@ -251,6 +266,21 @@ impl Results {
         }
     }
 
+    /// The OS trash API acknowledges the selected root, not individual child
+    /// paths. Keep observed descendants visible without inventing receipts.
+    pub fn trash_descendants_unconfirmed(&mut self) {
+        if let Some((_, range)) = self.group.clone() {
+            let reason = crate::tr_format!(
+                "Корень перемещён в корзину; результат вложенного элемента отдельно не подтверждён",
+                "The root was moved to Trash; this descendant has no separate confirmation"
+            );
+            for index in range {
+                self.items[index].outcome = Outcome::PublicationUnconfirmed;
+                self.reason(index, Some(&reason));
+            }
+        }
+    }
+
     /// A successful private write remains unconfirmed until the root publishes.
     pub fn staged(&mut self, source: &Location, error: Option<String>, cancelled: bool) {
         if let Some(&index) = self.nested_index.get(source) {
@@ -262,6 +292,20 @@ impl Results {
                 Outcome::PublicationUnconfirmed
             };
             self.reason(index, error.as_deref());
+        }
+    }
+
+    /// A root rename does not itself establish each descendant's identity.
+    /// Confirm an observed path only after checking the published target.
+    pub fn moved_entry(&mut self, source: &Location, verified: bool, reason: Option<String>) {
+        self.confirming_move = true;
+        if let Some(&index) = self.nested_index.get(source) {
+            self.items[index].outcome = if verified {
+                Outcome::Completed
+            } else {
+                Outcome::PublicationUnconfirmed
+            };
+            self.reason(index, reason.as_deref());
         }
     }
 
@@ -303,6 +347,7 @@ impl Results {
             for index in range {
                 if !self.observed_group
                     && matches!(outcome, Outcome::Completed | Outcome::CompletedWithWarning)
+                    && (!self.confirming_move || self.items[index].outcome == Outcome::NotStarted)
                 {
                     self.items[index].outcome = Outcome::Completed;
                     self.reason(index, None);
@@ -310,6 +355,7 @@ impl Results {
             }
         }
         self.observed_group = false;
+        self.confirming_move = false;
         self.nested_index.clear();
     }
 
@@ -1337,6 +1383,29 @@ mod tests {
         assert_eq!(record.omitted, 1);
         assert!(record.items[0].descendants_enumerated);
         assert_eq!(record.items[0].outcome, Outcome::Completed);
+    }
+
+    #[test]
+    fn trash_root_confirmation_does_not_invent_child_receipts() {
+        let root = local("/tree");
+        let child = root.join("nested/file");
+        let mut results = Results::default();
+        results.plan([(root.clone(), None)]);
+        results.begin(&root);
+        results.removing(&root);
+        results.removing(&child);
+        results.trash_descendants_unconfirmed();
+        results.record(&root, None, Outcome::Completed, None);
+        let record = results
+            .finish("trash".into(), 0, &Ok("Trashed".into()))
+            .unwrap();
+        let reopened: Record =
+            serde_json::from_slice(&serde_json::to_vec(&record).unwrap()).unwrap();
+        assert!(reopened.items[0].descendants_enumerated);
+        assert_eq!(reopened.items[0].outcome, Outcome::Completed);
+        assert_eq!(reopened.items[1].parent, Some(0));
+        assert_eq!(reopened.items[1].outcome, Outcome::PublicationUnconfirmed);
+        assert!(reopened.items[1].reason.is_some());
     }
 
     #[test]

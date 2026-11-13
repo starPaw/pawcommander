@@ -33,6 +33,14 @@ impl EntryMetadata {
             use std::os::unix::fs::MetadataExt;
             return left.dev() == right.dev() && left.ino() == right.ino();
         }
+        #[cfg(windows)]
+        if let (Self::Local(left), Self::Local(right)) = (self, other) {
+            use std::os::windows::fs::MetadataExt;
+            return left.volume_serial_number().is_some()
+                && left.volume_serial_number() == right.volume_serial_number()
+                && left.file_index().is_some()
+                && left.file_index() == right.file_index();
+        }
         let _ = other;
         false
     }
@@ -431,6 +439,52 @@ pub(super) fn transfer_run(
             .into());
         }
         cancel.check()?;
+        let mut history_warning = None;
+        let move_manifest = if kind == TransferKind::Move {
+            let captured = TransferSourceManifest::capture_move_observed(
+                &item.source,
+                &cancel,
+                &mut |source, error| {
+                    if let Some(error) = error {
+                        progress.results.staged(
+                            source,
+                            Some(error.to_string()),
+                            matches!(error, TransferError::Cancelled),
+                        );
+                    } else {
+                        progress
+                            .results
+                            .capturing(&item.source, &item.target, source);
+                    }
+                },
+            );
+            match captured {
+                Ok(manifest) => {
+                    progress.results.captured();
+                    match manifest.verify(&cancel, |source, error| {
+                        progress
+                            .results
+                            .staged(source, Some(error.to_string()), false)
+                    }) {
+                        Ok(()) => Some(manifest),
+                        Err(TransferError::Cancelled) => return Err(TransferError::Cancelled),
+                        Err(error) => {
+                            progress.results.abandon_group();
+                            history_warning = Some(error.to_string());
+                            None
+                        }
+                    }
+                }
+                Err(TransferError::Cancelled) => return Err(TransferError::Cancelled),
+                Err(error) => {
+                    progress.results.abandon_group();
+                    history_warning = Some(error.to_string());
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let mut committed = false;
         let published = || {
             committed = true;
@@ -438,10 +492,45 @@ pub(super) fn transfer_run(
                 moved(&item.original, &item.covered);
             }
         };
-        let result = match kind {
+        let mut result = match kind {
             TransferKind::Copy => copy_item_cancellable(&item, expected, progress, published),
             TransferKind::Move => move_item(&item, expected, count != 0, &cancel, published),
         };
+        if committed && let Some(manifest) = move_manifest {
+            let mut failed = 0usize;
+            for (source, entry) in manifest.entries {
+                let Ok(relative) = source.path().strip_prefix(item.source.path()) else {
+                    continue;
+                };
+                if relative.as_os_str().is_empty() {
+                    continue;
+                }
+                let target = item.target.join(relative);
+                let check = entry_metadata(&target);
+                let verified =
+                    matches!(&check, Ok(Some(actual)) if entry.matches_moved_target(actual));
+                if !verified {
+                    failed += 1;
+                }
+                progress.results.moved_entry(
+                    &source,
+                    verified,
+                    (!verified).then(|| match check {
+                        Err(error) => error,
+                        _ => crate::tr_format!(
+                            "Не удалось подтвердить перемещение {source} в {target}",
+                            "Could not confirm the move of {source} to {target}"
+                        ),
+                    }),
+                );
+            }
+            if failed != 0 && result.is_ok() {
+                result = Err(crate::tr_format!(
+                    "Перемещение корня опубликовано, но результат {failed} вложенных элементов не подтверждён",
+                    "The root move was published, but {failed} descendant results could not be confirmed"
+                ).into());
+            }
+        }
         // Publication precedes cleanup: a committed item stays completed even
         // when cleanup fails, and must not appear in the retryable remainder.
         let outcome = match (&result, committed) {
@@ -453,12 +542,23 @@ pub(super) fn transfer_run(
             }
             _ => crate::result_history::Outcome::Failed,
         };
-        progress.results.record(
-            &item.original,
-            Some(item.target.display()),
-            outcome,
-            result.as_ref().err().map(ToString::to_string),
-        );
+        let outcome =
+            if history_warning.is_some() && outcome == crate::result_history::Outcome::Completed {
+                crate::result_history::Outcome::CompletedWithWarning
+            } else {
+                outcome
+            };
+        let reason = result.as_ref().err().map(ToString::to_string).or_else(|| {
+            history_warning.map(|error| {
+                crate::tr_format!(
+                    "Перенос завершён, но пофайловый журнал неполон: {error}",
+                    "Move completed, but per-item history is incomplete: {error}"
+                )
+            })
+        });
+        progress
+            .results
+            .record(&item.original, Some(item.target.display()), outcome, reason);
         record_item_result(summary, &item.original, committed, result)?;
     }
     // Do not observe a late request after the final successful publication.
@@ -1003,6 +1103,21 @@ pub(super) struct TransferSourceEntry {
 }
 
 impl TransferSourceEntry {
+    fn matches_moved_target(&self, actual: &EntryMetadata) -> bool {
+        match (&self.metadata, actual) {
+            (EntryMetadata::Local(expected), EntryMetadata::Local(actual)) => {
+                self.metadata
+                    .same_object(&EntryMetadata::Local(actual.clone()))
+                    && expected.file_type() == actual.file_type()
+                    && expected.len() == actual.len()
+                    && expected.modified().ok() == actual.modified().ok()
+            }
+            (EntryMetadata::Remote(expected), EntryMetadata::Remote(actual)) => {
+                remote_source_matches(expected, actual)
+            }
+            _ => false,
+        }
+    }
     pub(super) fn verify_metadata(
         &self,
         source: &Location,
@@ -1028,12 +1143,13 @@ impl TransferSourceEntry {
         &self,
         source: &Location,
         cancel: &Cancellation,
+        moving: bool,
     ) -> Result<(), TransferError> {
         cancel.check()?;
         let actual = entry_metadata(source)?.ok_or_else(|| changed_source(source))?;
         self.verify_metadata(source, &actual)?;
         if let Some(children) = &self.children
-            && *children != source_children(source, cancel)?
+            && *children != source_children(source, cancel, moving)?
         {
             return Err(changed_source(source).into());
         }
@@ -1059,6 +1175,7 @@ pub(super) fn validate_source_child_name(source: &Location, name: &OsStr) -> Res
 pub(super) fn source_children(
     source: &Location,
     cancel: &Cancellation,
+    moving: bool,
 ) -> Result<Vec<OsString>, TransferError> {
     cancel.check()?;
     let mut names = Vec::new();
@@ -1080,7 +1197,9 @@ pub(super) fn source_children(
     }
     for name in &names {
         cancel.check()?;
-        validate_source_child_name(source, name)?;
+        if !moving || source.remote() {
+            validate_source_child_name(source, name)?;
+        }
     }
     cancel.check()?;
     names.sort();
@@ -1094,7 +1213,10 @@ pub(super) fn source_children(
 pub(super) struct TransferSourceManifest {
     pub(super) entries: BTreeMap<Location, TransferSourceEntry>,
     pub(super) bytes: u64,
+    moving: bool,
 }
+
+const MAX_MOVE_JOURNAL_ENTRIES: usize = 100_000;
 
 impl TransferSourceManifest {
     #[cfg(test)]
@@ -1118,6 +1240,21 @@ impl TransferSourceManifest {
         let mut manifest = Self {
             entries: BTreeMap::new(),
             bytes: 0,
+            moving: false,
+        };
+        manifest.capture_entry(source, 0, cancel, observe)?;
+        Ok(manifest)
+    }
+
+    fn capture_move_observed(
+        source: &Location,
+        cancel: &Cancellation,
+        observe: &mut impl FnMut(&Location, Option<&TransferError>),
+    ) -> Result<Self, TransferError> {
+        let mut manifest = Self {
+            entries: BTreeMap::new(),
+            bytes: 0,
+            moving: true,
         };
         manifest.capture_entry(source, 0, cancel, observe)?;
         Ok(manifest)
@@ -1146,6 +1283,9 @@ impl TransferSourceManifest {
         observe: &mut impl FnMut(&Location, Option<&TransferError>),
     ) -> Result<(), TransferError> {
         cancel.check()?;
+        if self.moving && self.entries.len() >= MAX_MOVE_JOURNAL_ENTRIES {
+            return Err("Пофайловый журнал переноса превысил лимит 100000 элементов".into());
+        }
         if depth > MAX_TREE_DEPTH {
             return Err("Слишком большая глубина папок (более 128)".into());
         }
@@ -1164,14 +1304,14 @@ impl TransferSourceManifest {
                 (stat.is_dir(), stat.is_file())
             }
         };
-        if !is_dir && !is_file {
+        if !self.moving && !is_dir && !is_file {
             return Err(format!(
                 "SFTP-копирование ссылок и специальных файлов пока недоступно: {source}"
             )
             .into());
         }
         let children = if is_dir {
-            Some(source_children(source, cancel)?)
+            Some(source_children(source, cancel, self.moving)?)
         } else {
             None
         };
@@ -1187,7 +1327,7 @@ impl TransferSourceManifest {
                 self.capture_entry(&source.join(name), depth + 1, cancel, observe)?;
             }
         }
-        entry.verify(source, cancel)?;
+        entry.verify(source, cancel, self.moving)?;
         self.entries.insert(source.clone(), entry);
         Ok(())
     }
@@ -1199,7 +1339,7 @@ impl TransferSourceManifest {
     ) -> Result<(), TransferError> {
         // Revisit early files too; parent mtime does not track child contents.
         for (source, entry) in &self.entries {
-            if let Err(error) = entry.verify(source, cancel) {
+            if let Err(error) = entry.verify(source, cancel, self.moving) {
                 failed(source, &error);
                 return Err(error);
             }
@@ -1265,7 +1405,7 @@ pub(super) fn copy_tree_entry(
         .entries
         .get(source)
         .ok_or_else(|| changed_source(source))?;
-    entry.verify(source, &cancel)?;
+    entry.verify(source, &cancel, false)?;
     let local_write_error = |e| {
         local_parent
             .and_then(|parent| fs_ops::copy_space_error(parent, &e))
@@ -1351,7 +1491,7 @@ pub(super) fn copy_tree_entry(
         return Err(changed_source(source).into());
     }
     entry.verify_metadata(source, &input.metadata()?)?;
-    entry.verify(source, &cancel)?;
+    entry.verify(source, &cancel, false)?;
     cancel.check()?;
     if let Some(source_hash) = source_hash {
         let mut copied = if let Some(path) = target.local() {

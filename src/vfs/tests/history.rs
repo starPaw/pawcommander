@@ -292,7 +292,7 @@ fn nested_result_history_publishes_entire_manifest_at_actual_keep_both_target() 
 }
 
 #[test]
-fn result_history_keeps_atomic_directory_moves_explicitly_grouped() {
+fn result_history_confirms_atomic_directory_move_descendants() {
     use crate::result_history::Outcome;
     let fixture = tempfile::tempdir().unwrap();
     let root: Location = fixture.path().to_path_buf().into();
@@ -311,15 +311,77 @@ fn result_history_keeps_atomic_directory_moves_explicitly_grouped() {
     )
     .unwrap();
     assert_eq!(summary.completed, 1);
-    assert_eq!(progress.results.items.len(), 1);
+    assert_eq!(progress.results.items.len(), 3);
     assert_eq!(progress.results.items[0].outcome, Outcome::Completed);
-    assert!(!progress.results.items[0].descendants_enumerated);
+    assert!(progress.results.items[0].descendants_enumerated);
     assert!(progress.results.items[0].parent.is_none());
+    for row in &progress.results.items[1..] {
+        assert_eq!(row.outcome, Outcome::Completed);
+        assert_eq!(row.parent, Some(0));
+        assert!(row
+            .target
+            .as_deref()
+            .unwrap()
+            .starts_with(&destination.display()));
+    }
     assert!(!source.path().exists());
     assert_eq!(
         fs::read(destination.join("tree/nested/a").path()).unwrap(),
         b"original"
     );
+    let record = std::mem::take(&mut progress.results)
+        .finish("move".into(), 0, &Ok("Moved".into()))
+        .unwrap();
+    let reopened: crate::result_history::Record =
+        serde_json::from_slice(&serde_json::to_vec(&record).unwrap()).unwrap();
+    assert_eq!(reopened.items.len(), 3);
+    assert!(reopened
+        .items
+        .iter()
+        .all(|row| row.outcome == Outcome::Completed));
+}
+
+#[test]
+fn move_still_completes_when_descendant_history_hits_depth_limit() {
+    use crate::result_history::Outcome;
+    let fixture = tempfile::tempdir().unwrap();
+    let root: Location = fixture.path().to_path_buf().into();
+    let source = create_directory(&root, "tree").unwrap();
+    let destination = create_directory(&root, "destination").unwrap();
+    let mut leaf = source.path().to_path_buf();
+    for _ in 0..129 {
+        leaf.push("d");
+        fs::create_dir(&leaf).unwrap();
+    }
+    fs::write(leaf.join("data"), b"kept").unwrap();
+    let mut progress = Progress::default();
+    let summary = transfer_with_conflicts(
+        std::slice::from_ref(&source),
+        &destination,
+        TransferKind::Move,
+        &mut progress,
+        |_| panic!("no conflict"),
+        |_, _| {},
+    )
+    .unwrap();
+    assert_eq!(summary.completed, 1);
+    assert_eq!(progress.results.items.len(), 1);
+    assert_eq!(
+        progress.results.items[0].outcome,
+        Outcome::CompletedWithWarning
+    );
+    assert!(!progress.results.items[0].descendants_enumerated);
+    assert!(progress.results.items[0]
+        .reason
+        .as_ref()
+        .unwrap()
+        .contains("128"));
+    let moved_leaf = destination
+        .join("tree")
+        .path()
+        .join(leaf.strip_prefix(source.path()).unwrap());
+    assert_eq!(fs::read(moved_leaf.join("data")).unwrap(), b"kept");
+    assert!(!source.path().exists());
 }
 
 #[test]
