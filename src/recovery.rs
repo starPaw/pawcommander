@@ -24,6 +24,8 @@ pub(crate) struct Record {
     pub started: u64,
     #[serde(default, skip_serializing)]
     pub staging: Vec<StagingRecord>,
+    #[serde(default, skip_serializing)]
+    pub planned_staging: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -31,6 +33,14 @@ pub(crate) struct StagingRecord {
     /// Display-only receipt. Never used as a cleanup target.
     pub location: String,
     pub identity: Option<LocalIdentity>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(untagged)]
+enum StagingEvent {
+    Created(StagingRecord),
+    Planned { planned: String },
+    Abandoned { abandoned: String },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -78,20 +88,38 @@ thread_local! {
     static ACTIVE_MARKER: RefCell<Option<File>> = const { RefCell::new(None) };
 }
 
-/// Append a receipt only for a staging directory created by the current worker.
-/// The receipt is synced before payload data is written. A partial final line
-/// after a crash is reported while earlier receipts remain readable.
+/// Persist a candidate before mkdir. A crash can then report the location,
+/// without claiming the directory was created or belongs to this operation.
+pub(crate) fn plan_staging(location: &crate::vfs::Location) -> io::Result<()> {
+    append_staging_event(&StagingEvent::Planned {
+        planned: location.display(),
+    })
+}
+
+pub(crate) fn abandon_staging(location: &crate::vfs::Location) -> io::Result<()> {
+    append_staging_event(&StagingEvent::Abandoned {
+        abandoned: location.display(),
+    })
+}
+
+/// Confirm a directory created by the current worker before writing payload.
 pub(crate) fn register_staging(location: &crate::vfs::Location) -> io::Result<()> {
+    let receipt = StagingRecord {
+        location: location.display(),
+        identity: location.local().map(LocalIdentity::of).transpose()?,
+    };
+    append_staging_event(&StagingEvent::Created(receipt))
+}
+
+/// A partial final line after a crash is reported while complete earlier
+/// receipts remain readable. The existing worker marker supplies provenance.
+fn append_staging_event(event: &StagingEvent) -> io::Result<()> {
     ACTIVE_MARKER.with(|active| {
         let mut active = active.borrow_mut();
         let Some(file) = active.as_mut() else {
             return Ok(());
         };
-        let receipt = StagingRecord {
-            location: location.display(),
-            identity: location.local().map(LocalIdentity::of).transpose()?,
-        };
-        let mut bytes = serde_json::to_vec(&receipt).map_err(io::Error::other)?;
+        let mut bytes = serde_json::to_vec(event).map_err(io::Error::other)?;
         bytes.push(b'\n');
         let length = file.metadata()?.len();
         if length.saturating_add(bytes.len() as u64) > MAX_BYTES as u64 {
@@ -226,8 +254,8 @@ impl Recovery {
                     "These operations have no confirmed completion. Some files may have been processed. Check both folders and result history before retrying."
                 ));
                 ui.label(crate::tr_format!(
-                    "Временные копии перечислены только по сохранённым записям; их текущее содержимое не проверено. Ожидающие задания не отслеживаются. Автоматический повтор и удаление файлов не выполняются.",
-                    "Temporary copies are listed only from saved receipts; their current contents are unverified. Queued jobs are not tracked. No automatic retry or file removal is performed."
+                    "Временные копии перечислены только по сохранённым записям; их текущее содержимое не проверено. Запланированный адрес может содержать чужие данные. Ожидающие задания не отслеживаются. Автоматический повтор и удаление файлов не выполняются.",
+                    "Temporary copies are listed only from saved receipts; their current contents are unverified. A planned location may contain someone else's data. Queued jobs are not tracked. No automatic retry or file removal is performed."
                 ));
                 if let Some(directory) = &self.directory {
                     ui.add(egui::Label::new(directory.display().to_string()).selectable(true).wrap());
@@ -259,6 +287,13 @@ impl Recovery {
                                 "Зарегистрирована временная копия: {}",
                                 "Registered temporary copy: {}",
                                 staging.location
+                            )).selectable(true).wrap());
+                        }
+                        for planned in &record.planned_staging {
+                            ui.add(egui::Label::new(crate::tr_format!(
+                                "Запланированная временная папка (создание не подтверждено): {}",
+                                "Planned temporary folder (creation unconfirmed): {}",
+                                planned
                             )).selectable(true).wrap());
                         }
                     }
@@ -294,6 +329,7 @@ pub(crate) fn begin(
             description: description.into(),
             started,
             staging: Vec::new(),
+            planned_staging: Vec::new(),
         },
     };
     let bytes = serde_json::to_vec(&saved).map_err(io::Error::other)?;
@@ -470,6 +506,13 @@ pub(crate) fn scan(directory: &Path) -> Report {
                             .iter()
                             .map(|entry| entry.location.len())
                             .sum::<usize>(),
+                    )
+                    .saturating_add(
+                        record
+                            .planned_staging
+                            .iter()
+                            .map(String::len)
+                            .sum::<usize>(),
                     );
                 if report_bytes > 8 * 1024 * 1024 {
                     report
@@ -546,8 +589,17 @@ fn read_record(path: &Path) -> io::Result<Option<(Record, Vec<String>)>> {
                 break;
             };
             if end > 0 {
-                match serde_json::from_slice::<StagingRecord>(&remainder[..end]) {
-                    Ok(receipt) => record.staging.push(receipt),
+                match serde_json::from_slice::<StagingEvent>(&remainder[..end]) {
+                    Ok(StagingEvent::Created(receipt)) => {
+                        record
+                            .planned_staging
+                            .retain(|path| *path != receipt.location);
+                        record.staging.push(receipt);
+                    }
+                    Ok(StagingEvent::Planned { planned }) => record.planned_staging.push(planned),
+                    Ok(StagingEvent::Abandoned { abandoned }) => {
+                        record.planned_staging.retain(|path| *path != abandoned);
+                    }
                     Err(error) => {
                         warnings.push(format!("Invalid staging receipt preserved: {error}"))
                     }
@@ -654,6 +706,7 @@ mod tests {
                         LocalIdentity::of(&root.path().join(".pawcommander-copy-owned")).unwrap()
                     ),
                 }],
+                planned_staging: Vec::new(),
             }]
         );
         assert_eq!(
@@ -703,12 +756,65 @@ mod tests {
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert_eq!(report.unfinished.len(), 1);
         assert_eq!(report.unfinished[0].staging.len(), 1);
+        assert!(report.unfinished[0].planned_staging.is_empty());
         assert_eq!(
             report.unfinished[0].staging[0].location,
             owned.display().to_string()
         );
         assert_eq!(fs::read(foreign.join("payload")).unwrap(), b"foreign");
         assert!(owned.is_dir());
+    }
+
+    #[test]
+    fn crash_after_mkdir_before_confirmation_reports_an_unconfirmed_candidate() {
+        let root = tempfile::tempdir().unwrap();
+        let recovery = root.path().join("recovery");
+        let candidate = root.path().join(".pawcommander-copy-planned");
+        let foreign = root.path().join(".pawcommander-copy-foreign");
+        fs::create_dir(&foreign).unwrap();
+        fs::write(foreign.join("payload"), b"foreign").unwrap();
+        let pending = begin(&recovery, "copy", "one item", 5).unwrap();
+        let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pending
+                .run(|| {
+                    plan_staging(&crate::vfs::Location::Local(candidate.clone())).unwrap();
+                    fs::create_dir(&candidate).unwrap();
+                    panic!("injected crash after mkdir");
+                })
+                .unwrap();
+        }));
+        assert!(stopped.is_err());
+        drop(pending);
+        let report = scan(&recovery);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.unfinished.len(), 1);
+        assert!(report.unfinished[0].staging.is_empty());
+        assert_eq!(
+            report.unfinished[0].planned_staging,
+            vec![candidate.display().to_string()]
+        );
+        assert!(candidate.is_dir());
+        assert_eq!(fs::read(foreign.join("payload")).unwrap(), b"foreign");
+    }
+
+    #[test]
+    fn rejected_candidate_is_not_reported_as_an_unfinished_copy() {
+        let root = tempfile::tempdir().unwrap();
+        let foreign = root.path().join(".pawcommander-copy-foreign");
+        fs::create_dir(&foreign).unwrap();
+        let pending = begin(root.path(), "copy", "one item", 5).unwrap();
+        pending
+            .run(|| {
+                let location = crate::vfs::Location::Local(foreign.clone());
+                plan_staging(&location).unwrap();
+                abandon_staging(&location).unwrap();
+            })
+            .unwrap();
+        drop(pending);
+        let report = scan(root.path());
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(report.unfinished[0].planned_staging.is_empty());
+        assert!(foreign.is_dir());
     }
 
     #[test]
@@ -762,6 +868,7 @@ mod tests {
         assert_eq!(report.unfinished.len(), 1);
         let registered = &report.unfinished[0].staging;
         assert_eq!(registered.len(), 1);
+        assert!(report.unfinished[0].planned_staging.is_empty());
         assert!(registered[0].identity.is_some());
         let staging = Path::new(&registered[0].location);
         assert_eq!(fs::read(staging.join("payload")).unwrap(), b"source data");

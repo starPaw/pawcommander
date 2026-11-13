@@ -463,6 +463,14 @@ fn create_staging_directory(parent: &Path) -> Result<PathBuf, String> {
             ".pawcommander-copy-{}-{unique}-{counter}",
             std::process::id()
         ));
+        let location = crate::vfs::Location::Local(path.clone());
+        crate::recovery::plan_staging(&location).map_err(|error| {
+            crate::tr_format!(
+                "Не удалось записать план временной копии «{}»: {error}",
+                "Could not record temporary copy plan “{}”: {error}",
+                path.display()
+            )
+        })?;
         let builder = fs::DirBuilder::new();
         #[cfg(unix)]
         let builder = {
@@ -473,7 +481,10 @@ fn create_staging_directory(parent: &Path) -> Result<PathBuf, String> {
         };
         match builder.create(&path) {
             Ok(()) => return Ok(path),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                crate::recovery::abandon_staging(&location).map_err(|error| error.to_string())?;
+                continue;
+            }
             Err(e) => {
                 return Err(copy_space_error(parent, &e).unwrap_or_else(|| {
                     at("Не удалось подготовить копирование в папку", parent, e)

@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{fs, io};
 
@@ -961,6 +962,107 @@ pub(super) fn with_staging(
     .map_err(|error| error.to_string())
 }
 
+static LOCAL_STAGING_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+struct LocalStaging {
+    path: PathBuf,
+    original: fs::Metadata,
+    remove_on_drop: bool,
+}
+
+impl LocalStaging {
+    fn create(parent: &Path) -> Result<Self, TransferError> {
+        for _ in 0..100 {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let counter = LOCAL_STAGING_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = parent.join(format!(
+                ".pawcommander-transfer-{}-{nonce}-{counter}",
+                std::process::id()
+            ));
+            let location = Location::Local(path.clone());
+            crate::recovery::plan_staging(&location).map_err(err)?;
+            let mut builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            match builder.create(&path) {
+                Ok(()) => {
+                    let original = fs::symlink_metadata(&path).map_err(err)?;
+                    return Ok(Self {
+                        path,
+                        original,
+                        remove_on_drop: true,
+                    });
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    crate::recovery::abandon_staging(&location).map_err(err)?;
+                }
+                Err(error) => {
+                    return Err(fs_ops::copy_space_error(parent, &error)
+                        .unwrap_or_else(|| err(error))
+                        .into());
+                }
+            }
+        }
+        Err("Не удалось создать временную папку для копирования".into())
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn same_owned(&self) -> io::Result<bool> {
+        let candidate = fs::symlink_metadata(&self.path)?;
+        if !candidate.is_dir() || candidate.file_type().is_symlink() {
+            return Ok(false);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Ok(self.original.dev() == candidate.dev() && self.original.ino() == candidate.ino())
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            Ok(self.original.volume_serial_number().is_some()
+                && self.original.volume_serial_number() == candidate.volume_serial_number()
+                && self.original.file_index().is_some()
+                && self.original.file_index() == candidate.file_index())
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            Ok(false)
+        }
+    }
+
+    fn keep(&mut self) {
+        self.remove_on_drop = false;
+    }
+
+    fn close(mut self) -> io::Result<()> {
+        self.remove_on_drop = false;
+        if !self.same_owned()? {
+            return Err(io::Error::other(
+                "Staging directory identity changed; data preserved",
+            ));
+        }
+        fs::remove_dir_all(&self.path)
+    }
+}
+
+impl Drop for LocalStaging {
+    fn drop(&mut self) {
+        if self.remove_on_drop && self.same_owned().unwrap_or(false) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
 #[cfg(test)]
 pub(super) fn staging_result(
     result: Result<(), String>,
@@ -983,16 +1085,7 @@ pub(super) fn with_staging_typed(
     let parent = target.parent().ok_or("Недопустимое назначение")?;
     let mut preserve = false;
     if let Some(parent) = parent.local() {
-        let mut builder = tempfile::Builder::new();
-        builder.prefix(".pawcommander-transfer-");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            builder.permissions(fs::Permissions::from_mode(0o700));
-        }
-        let staging = builder
-            .tempdir_in(parent)
-            .map_err(|e| fs_ops::copy_space_error(parent, &e).unwrap_or_else(|| err(e)))?;
+        let mut staging = LocalStaging::create(parent)?;
         let location = Location::Local(staging.path().into());
         if let Err(error) = crate::recovery::register_staging(&location) {
             let cleanup = staging.close().map_err(err);
@@ -1000,36 +1093,36 @@ pub(super) fn with_staging_typed(
         }
         let result = work(&location, &mut preserve);
         if preserve {
-            let _ = staging.keep();
+            staging.keep();
             return result;
         }
         return staging_result_typed(result, staging.close().map_err(err), &location, target);
     }
 
     let sftp = remote(target)?;
-    let mut staging = None;
-    for counter in 0..100 {
-        if let Some(cancel) = cancel {
-            cancel.check()?;
-        }
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let candidate = parent.join(format!(
-            ".pawcommander-sftp-{}-{nonce}-{counter}",
-            std::process::id()
-        ));
-        match sftp.mkdir(candidate.path(), 0o700) {
-            Ok(()) => {
-                staging = Some(candidate);
-                break;
-            }
-            Err(e) if sftp.lstat(candidate.path()).is_err() => return Err(err(e).into()),
-            Err(_) => {}
+    if let Some(cancel) = cancel {
+        cancel.check()?;
+    }
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let counter = LOCAL_STAGING_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let staging = parent.join(format!(
+        ".pawcommander-sftp-{}-{nonce}-{counter}",
+        std::process::id()
+    ));
+    crate::recovery::plan_staging(&staging).map_err(err)?;
+    match sftp.mkdir(staging.path(), 0o700) {
+        Ok(()) => {}
+        Err(e) if sftp.lstat(staging.path()).is_err() => return Err(err(e).into()),
+        Err(e) => {
+            return Err(TransferError::PublicationUnconfirmed(crate::tr_format!(
+                "Создание временной папки {staging} не подтверждено: {e}. Проверьте зарегистрированный адрес перед повтором.",
+                "Temporary folder creation at {staging} is unconfirmed: {e}. Inspect the registered location before retrying."
+            )));
         }
     }
-    let staging = staging.ok_or("Не удалось создать временную папку SFTP")?;
     if let Err(error) = crate::recovery::register_staging(&staging) {
         let cleanup = remove_remote_tree(
             &sftp,
