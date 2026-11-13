@@ -379,11 +379,10 @@ pub(super) fn transfer_run(
             match decision {
                 Decision::Cancel => return Err(TransferError::Cancelled),
                 Decision::Skip => {
-                    progress.results.record(
+                    progress.results.skip_selected(
                         &item.original,
-                        Some(item.target.display()),
-                        crate::result_history::Outcome::Skipped,
-                        Some(crate::i18n::text("Пропущено при разрешении конфликта").into()),
+                        item.target.display(),
+                        &mut item.covered,
                     );
                     summary.skipped += 1;
                     remove_pending(summary, &item.original);
