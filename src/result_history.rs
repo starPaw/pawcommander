@@ -736,6 +736,10 @@ impl History {
                 ui.label(crate::i18n::text(
                     "До 100 операций и 100 000 строк; объём истории ограничен. Неполные записи помечены.",
                 ));
+                ui.label(crate::tr_format!(
+                    "Наведите на строку, чтобы прочитать длинные пути и причину целиком.",
+                    "Hover over a row to read long paths and the full reason."
+                ));
                 if let Some(path) = &self.path {
                     ui.add(egui::Label::new(path.display().to_string()).selectable(true));
                 }
@@ -814,7 +818,30 @@ impl History {
                                                     ))
                                                     .selectable(true)
                                                     .extend(),
-                                                );
+                                                )
+                                                .on_hover_ui(|ui| {
+                                                    ui.set_max_width(640.0);
+                                                    egui::ScrollArea::vertical()
+                                                        .max_height(320.0)
+                                                        .show(ui, |ui| {
+                                                            ui.label(row.outcome.label());
+                                                            ui.add(egui::Label::new(crate::tr_format!(
+                                                                "Источник: {}",
+                                                                "Source: {}",
+                                                                row.source
+                                                            )).selectable(true).wrap());
+                                                            ui.add(egui::Label::new(crate::tr_format!(
+                                                                "Назначение: {}",
+                                                                "Destination: {}",
+                                                                target
+                                                            )).selectable(true).wrap());
+                                                            ui.add(egui::Label::new(crate::tr_format!(
+                                                                "Причина: {}",
+                                                                "Reason: {}",
+                                                                row.reason.as_deref().unwrap_or("—")
+                                                            )).selectable(true).wrap());
+                                                        });
+                                                });
                                             }
                                         },
                                     );
