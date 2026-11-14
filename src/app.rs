@@ -46,7 +46,7 @@ use dialogs::{ConnectionJob, Dialog, SftpForm};
 use directory::DirectoryEntries;
 use eframe::egui;
 use entry_widget::{entry_widget, EntryOptions, COMPACT_FILE_ROW_HEIGHT};
-use jobs::{CutRequest, Job, PendingJob, RetryJob, TransferInteraction};
+use jobs::{CutRequest, Job, PendingJob, RetryJob, TransferInteraction, UndoJob};
 use pane_view::{list_notice, render_pane, workspace_card, PaneOptions};
 use quick_look::QuickLook;
 pub(crate) use state::SavedPath;
@@ -85,6 +85,7 @@ pub struct PawCommander {
     job: Option<Job>,
     pending_jobs: VecDeque<PendingJob>,
     retry_jobs: VecDeque<RetryJob>,
+    undo_jobs: VecDeque<UndoJob>,
     queue_start_failed: bool,
     #[cfg(test)]
     fail_job_spawn: bool,
@@ -339,6 +340,9 @@ impl eframe::App for PawCommander {
         self.history.show(ctx, &mut self.show_history);
         if let Some(id) = self.history.retry_requested.take() {
             self.retry_transfer(ctx, &id);
+        }
+        if let Some(id) = self.history.undo_requested.take() {
+            self.undo_operation(ctx, &id);
         }
         self.show_search_results(ui);
         self.sidebar(ui, &mut actions);

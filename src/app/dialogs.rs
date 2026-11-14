@@ -600,12 +600,7 @@ impl PawCommander {
                         name
                     ),
                     move |progress| {
-                        let target = source.parent().map(|parent| parent.join(&name).display());
-                        progress.results.plan(vec![(source.clone(), target)]);
-                        progress.results.begin(&source);
-                        progress.item(source.path());
-                        fs_ops::rename_entry(&source, &name).map(|p| {
-                            progress.results.target(&source, p.display());
+                        fs_ops::rename_with_undo(&source, &name, progress).map(|p| {
                             crate::tr_format!("Переименовано: {}", "Renamed: {}", p.display())
                         })
                     },

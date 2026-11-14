@@ -40,6 +40,7 @@ mod retry;
 mod sftp;
 mod source;
 mod staging;
+mod undo;
 
 #[cfg(unix)]
 fn unsupported_sftp_names() -> Vec<OsString> {
