@@ -73,3 +73,38 @@ fn remote_join_keeps_literal_posix_separators_on_every_client_os() {
     assert!(resolve("sftp://alice@example.com/a%5Cb", &local).is_err());
     assert_eq!(local.join("folder").path(), local.path().join("folder"));
 }
+
+#[test]
+fn ipv6_address_edits_keep_exact_authenticated_endpoint_without_crossing_authorities() {
+    for host in ["::1", "[::1]", "0:0:0:0:0:0:0:1", "[0:0:0:0:0:0:0:1]"] {
+        let current = Location::Sftp {
+            endpoint: Endpoint {
+                host: host.into(),
+                port: 2222,
+                user: "alice".into(),
+                key: Some("/keys/explicit".into()),
+            },
+            path: "/".into(),
+        };
+        for address in [
+            "sftp://alice@[::1]:2222/папка",
+            "sftp://alice@[0:0:0:0:0:0:0:1]:2222/папка",
+        ] {
+            let result = resolve(address, &current).unwrap();
+            assert_eq!(result, current.join("папка"));
+            assert!(result.same_backend(&current));
+        }
+        for address in [
+            "sftp://bob@[::1]:2222/",
+            "sftp://alice@[::1]:2223/",
+            "sftp://alice@[::2]:2222/",
+        ] {
+            let other = resolve(address, &current).unwrap();
+            assert!(!other.same_sftp_authority(&current));
+            let Location::Sftp { endpoint, .. } = other else {
+                panic!("remote address")
+            };
+            assert!(endpoint.key.is_none());
+        }
+    }
+}

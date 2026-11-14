@@ -37,7 +37,7 @@ pub(super) fn connect_with_key(
         return Err("Укажите сервер, пользователя и порт 1–65535".into());
     }
     // Bound TCP and SSH I/O waits. DNS resolution uses the OS resolver.
-    let host = endpoint.host.trim_matches(['[', ']']);
+    let host = endpoint.host_name();
     let addresses = (host, endpoint.port)
         .to_socket_addrs()
         .map_err(|e| format!("Не удалось найти сервер: {e}"))?;

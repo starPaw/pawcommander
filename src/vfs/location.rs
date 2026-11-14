@@ -17,8 +17,23 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
+    pub(super) fn host_name(&self) -> &str {
+        self.host
+            .strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'))
+            .filter(|host| host.parse::<std::net::Ipv6Addr>().is_ok())
+            .unwrap_or(&self.host)
+    }
+
     pub(super) fn same_authority(&self, other: &Self) -> bool {
-        self.host == other.host && self.port == other.port && self.user == other.user
+        let left = self.host_name();
+        let right = other.host_name();
+        let same_host = left == right
+            || matches!(
+                (left.parse::<std::net::Ipv6Addr>(), right.parse::<std::net::Ipv6Addr>()),
+                (Ok(left), Ok(right)) if left == right
+            );
+        same_host && self.port == other.port && self.user == other.user
     }
 }
 
@@ -177,7 +192,7 @@ impl fmt::Display for Location {
             }
             Self::Sftp { endpoint, path } => {
                 let mut url = url::Url::parse("sftp://localhost/").map_err(|_| fmt::Error)?;
-                let host = endpoint.host.trim_matches(['[', ']']);
+                let host = endpoint.host_name();
                 let host = if host.contains(':') {
                     format!("[{host}]")
                 } else {
@@ -270,7 +285,9 @@ pub fn resolve(address: &str, current: &Location) -> Result<Location, String> {
         } = current
             && endpoint.same_authority(existing)
         {
-            endpoint.key = existing.key.clone();
+            // Keep the exact authenticated session key, including the form
+            // used when connecting. URL rendering may normalize IPv6 text.
+            endpoint = existing.clone();
         }
         let path = percent_decode_str(url.path())
             .decode_utf8()

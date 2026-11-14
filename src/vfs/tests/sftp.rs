@@ -648,7 +648,7 @@ fn openssh_round_trip_and_host_verification() {
     let root =
         PathBuf::from(std::env::var_os("PAWCOMMANDER_TEST_SFTP_ROOT").expect("test server root"));
     let endpoint = Endpoint {
-        host: "127.0.0.1".into(),
+        host: std::env::var("PAWCOMMANDER_TEST_SFTP_HOST").unwrap_or_else(|_| "127.0.0.1".into()),
         port: std::env::var("PAWCOMMANDER_TEST_SFTP_PORT")
             .unwrap()
             .parse()
@@ -667,7 +667,7 @@ fn openssh_round_trip_and_host_verification() {
     let other_key = fs::read_to_string(root.join("other.pub")).unwrap();
     fs::write(
         &mismatch,
-        format!("[127.0.0.1]:{} {}", endpoint.port, other_key),
+        format!("[{}]:{} {}", endpoint.host, endpoint.port, other_key),
     )
     .unwrap();
     assert!(connect(&endpoint, "", "test-passphrase", &mismatch)
