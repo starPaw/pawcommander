@@ -59,6 +59,23 @@ impl std::ops::Deref for LocalEntryMetadata {
 }
 
 impl EntryMetadata {
+    pub(super) fn same_local_volume(&self, other: &Self) -> Option<bool> {
+        if let (Self::Local(left), Self::Local(right)) = (self, other) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                return Some(left.dev() == right.dev());
+            }
+            #[cfg(windows)]
+            {
+                return Some(left.identity?.volume == right.identity?.volume);
+            }
+            #[cfg(not(any(unix, windows)))]
+            let _ = (left, right);
+        }
+        None
+    }
+
     pub(super) fn is_file(&self) -> bool {
         match self {
             Self::Local(meta) => meta.is_file(),
@@ -262,9 +279,6 @@ pub(super) fn transfer_plan(
                     "Нельзя копировать или перемещать элемент в себя или вложенную папку".into(),
                 );
             }
-        }
-        if kind == TransferKind::Move && (!source.remote() || !source.same_backend(destination)) {
-            return Err("Перемещение между локальной папкой и SFTP или разными серверами недоступно. Скопируйте, проверьте копию и удалите оригинал отдельно.".into());
         }
         plan.push(TransferItem::new(
             source.clone(),
@@ -487,8 +501,9 @@ pub(super) fn transfer_run(
             .into());
         }
         cancel.check()?;
+        let copy_move = kind == TransferKind::Move && super::cross_move::required(&item)?;
         let mut history_warning = None;
-        let move_manifest = if kind == TransferKind::Move {
+        let move_manifest = if kind == TransferKind::Move && !copy_move {
             let captured = TransferSourceManifest::capture_move_observed(
                 &item.source,
                 &cancel,
@@ -533,13 +548,14 @@ pub(super) fn transfer_run(
         } else {
             None
         };
-        let undo_capture = (kind == TransferKind::Move && expected.is_none())
+        let undo_capture = (kind == TransferKind::Move && !copy_move && expected.is_none())
             .then(|| super::undo::Capture::before(&item.source, &item.target).ok())
             .flatten();
         let mut committed = false;
+        let mut source_removed = false;
         let published = || {
             committed = true;
-            if kind == TransferKind::Move {
+            if kind == TransferKind::Move && !copy_move {
                 moved(&item.original, &item.covered);
             }
         };
@@ -550,8 +566,19 @@ pub(super) fn transfer_run(
         }
         let mut result = match kind {
             TransferKind::Copy => copy_item_cancellable(&item, expected, progress, published),
+            TransferKind::Move if copy_move => super::cross_move::run(
+                &item,
+                expected,
+                progress,
+                published,
+                || source_removed = true,
+                &mut |_, _| Ok(()),
+            ),
             TransferKind::Move => move_item(&item, expected, count != 0, &cancel, published),
         };
+        if copy_move && source_removed {
+            moved(&item.original, &item.covered);
+        }
         let undo_entry = if committed
             && result.is_ok()
             && let (Some(capture), Some(manifest)) = (undo_capture, move_manifest.as_ref())
@@ -595,9 +622,12 @@ pub(super) fn transfer_run(
                 ).into());
             }
         }
-        // Publication precedes cleanup: a committed item stays completed even
-        // when cleanup fails, and must not appear in the retryable remainder.
+        // A published copy never becomes automatically retryable. A move
+        // counts as completed only when its source removal was confirmed.
         let outcome = match (&result, committed) {
+            (_, true) if copy_move && !source_removed => {
+                crate::result_history::Outcome::CopiedSourceRemaining
+            }
             (Ok(()), true) => crate::result_history::Outcome::Completed,
             (Err(_), true) => crate::result_history::Outcome::CompletedWithWarning,
             (Err(TransferError::Cancelled), false) => crate::result_history::Outcome::Cancelled,
@@ -628,7 +658,12 @@ pub(super) fn transfer_run(
         progress
             .results
             .record(&item.original, Some(item.target.display()), outcome, reason);
-        record_item_result(summary, &item.original, committed, result)?;
+        record_item_result(
+            summary,
+            &item.original,
+            committed && (!copy_move || source_removed),
+            result,
+        )?;
     }
     // Do not observe a late request after the final successful publication.
     Ok(())
@@ -1170,17 +1205,37 @@ pub(super) fn with_staging_typed(
     cancel: Option<&Cancellation>,
     work: impl FnOnce(&Location, &mut bool) -> Result<(), TransferError>,
 ) -> Result<(), TransferError> {
+    staging_typed(target, cancel, false, work)
+}
+
+/// Source data may be moved here: never recursively remove it on unwinding.
+pub(super) fn with_preserved_staging(
+    target: &Location,
+    cancel: &Cancellation,
+    work: impl FnOnce(&Location, &mut bool) -> Result<(), TransferError>,
+) -> Result<(), TransferError> {
+    staging_typed(target, Some(cancel), true, work)
+}
+
+fn staging_typed(
+    target: &Location,
+    cancel: Option<&Cancellation>,
+    mut preserve: bool,
+    work: impl FnOnce(&Location, &mut bool) -> Result<(), TransferError>,
+) -> Result<(), TransferError> {
     if let Some(cancel) = cancel {
         cancel.check()?;
     }
     let parent = target.parent().ok_or("Недопустимое назначение")?;
-    let mut preserve = false;
     if let Some(parent) = parent.local() {
         let mut staging = LocalStaging::create(parent)?;
         let location = Location::Local(staging.path().into());
         if let Err(error) = crate::recovery::register_staging(&location) {
             let cleanup = staging.close().map_err(err);
             return staging_result_typed(Err(err(error).into()), cleanup, &location, target);
+        }
+        if preserve {
+            staging.keep();
         }
         let result = work(&location, &mut preserve);
         if preserve {
