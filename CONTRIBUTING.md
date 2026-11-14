@@ -33,6 +33,7 @@ On macOS/Linux with OpenSSH server tools and Python 3:
 
 ```sh
 bash scripts/test-sftp.sh
+PAWCOMMANDER_TEST_SFTP_HOST=::1 bash scripts/test-sftp.sh
 PAWCOMMANDER_TEST_DISABLE_STATVFS=1 bash scripts/test-sftp.sh
 ```
 
