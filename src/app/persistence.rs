@@ -82,11 +82,13 @@ impl PawCommander {
                     .unwrap_or_else(|_| home.clone())
                     .join(start)
             };
+            // Both panes share one launch visit. Whichever listing first
+            // succeeds records it, even if the other pane navigated away.
+            let visit = FolderVisit::SharedOpen(Default::default());
             let mut left = Tab::new(path.clone().into(), &cc.egui_ctx);
-            left.folder_visit = FolderVisit::CountOnOpen;
-            // The launch argument puts the same location in both panes.
+            left.folder_visit = visit.clone();
             let mut right = Tab::new(path.into(), &cc.egui_ctx);
-            right.folder_visit = FolderVisit::Recorded;
+            right.folder_visit = visit;
             (vec![Pane::new(vec![left]), Pane::new(vec![right])], 0)
         } else if let Some(session) = cc
             .storage

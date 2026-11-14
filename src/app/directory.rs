@@ -1,6 +1,6 @@
 use super::state::Sort;
 use crate::vfs::FileEntry;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ops::Deref;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,10 +21,11 @@ pub(super) enum DirectoryLoadMode {
     Automatic,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) enum FolderVisit {
     Unseen,
     CountOnOpen,
+    SharedOpen(Rc<Cell<bool>>),
     Recorded,
 }
 

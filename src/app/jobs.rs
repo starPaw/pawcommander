@@ -774,9 +774,15 @@ impl PawCommander {
                     ctx.request_repaint();
                 }
                 if tab.has_complete_listing {
-                    match tab.folder_visit {
+                    match &tab.folder_visit {
                         FolderVisit::CountOnOpen => {
                             self.settings.folder_history.record(&tab.path);
+                            tab.folder_visit = FolderVisit::Recorded;
+                        }
+                        FolderVisit::SharedOpen(recorded) => {
+                            if !recorded.replace(true) {
+                                self.settings.folder_history.record(&tab.path);
+                            }
                             tab.folder_visit = FolderVisit::Recorded;
                         }
                         FolderVisit::Unseen if current => {
