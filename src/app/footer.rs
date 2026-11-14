@@ -269,10 +269,7 @@ impl PawCommander {
             });
         });
         if let Some(index) = remove {
-            self.pending_jobs.remove(index);
-            if self.pending_jobs.is_empty() {
-                self.queue_start_failed = false;
-            }
+            self.remove_pending_job(index);
         } else if let Some((index, direction)) = reorder {
             self.move_pending_job(index, direction);
         }

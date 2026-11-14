@@ -5,6 +5,7 @@ mod listing;
 mod location;
 mod mutations;
 mod preview;
+mod retry;
 mod sftp;
 mod transfer;
 
@@ -19,6 +20,7 @@ pub use location::{resolve, Endpoint, Location};
 pub use mutations::trash_entries;
 pub use mutations::{create_directory, rename_entry, trash_entries_with_progress};
 pub use preview::preview_data;
+pub(crate) use retry::RetryTransfer;
 #[cfg(test)]
 pub use sftp::connect;
 pub use sftp::connect_location;

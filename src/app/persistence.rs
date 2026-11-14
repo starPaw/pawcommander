@@ -147,6 +147,7 @@ impl PawCommander {
             dialog_file_focus: None,
             job: None,
             pending_jobs: VecDeque::new(),
+            retry_jobs: VecDeque::new(),
             queue_start_failed: false,
             #[cfg(test)]
             fail_job_spawn: false,

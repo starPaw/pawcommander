@@ -1,5 +1,100 @@
 use super::*;
 
+fn check_sftp_retry(local_root: &Location, remote_root: &Location) {
+    for (name, source_root, target_root, kind) in [
+        ("upload", local_root, remote_root, TransferKind::Copy),
+        ("download", remote_root, local_root, TransferKind::Copy),
+        ("remote-copy", remote_root, remote_root, TransferKind::Copy),
+        ("remote-move", remote_root, remote_root, TransferKind::Move),
+    ] {
+        let source = source_root.join(format!("retry-{name}-source"));
+        let target = target_root.join(format!("retry-{name}-target"));
+        fs::create_dir_all(source.join("tree/empty").path()).unwrap();
+        fs::create_dir(target.path()).unwrap();
+        fs::write(source.join("a").path(), "completed").unwrap();
+        fs::write(source.join("b").path(), "retry payload").unwrap();
+        fs::write(source.join("tree/nested").path(), "nested payload").unwrap();
+        fs::write(target.join("b").path(), "old destination").unwrap();
+        let mut progress = Progress::default();
+        progress.retry = Some(crate::vfs::RetryTransfer::new(kind, target.clone()));
+        let summary = transfer_with_conflicts(
+            &[source.join("a"), source.join("b"), source.join("tree")],
+            &target,
+            kind,
+            &mut progress,
+            |_| {
+                Ok(Answer {
+                    decision: Decision::Skip,
+                    apply_to_group: false,
+                })
+            },
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!((summary.completed, summary.skipped), (2, 1), "{name}");
+        let retry = progress
+            .retry
+            .take()
+            .unwrap()
+            .unfinished(&progress.results)
+            .unwrap();
+        assert_eq!(retry.sources(), vec![source.join("b")]);
+        fs::write(source.join("a").path(), "independent newer source").unwrap();
+        let mut progress = Progress::default();
+        progress.retry = Some(retry);
+        let summary = transfer_with_conflicts(
+            &[source.join("b")],
+            &target,
+            kind,
+            &mut progress,
+            |_| {
+                Ok(Answer {
+                    decision: Decision::KeepBoth,
+                    apply_to_group: false,
+                })
+            },
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(summary.completed, 1, "{name}");
+        assert!(progress
+            .retry
+            .take()
+            .unwrap()
+            .unfinished(&progress.results)
+            .is_none());
+        assert_eq!(fs::read(target.join("a").path()).unwrap(), b"completed");
+        assert_eq!(
+            fs::read(source.join("a").path()).unwrap(),
+            b"independent newer source"
+        );
+        assert!(!target.join("a (2)").path().exists());
+        assert_eq!(
+            fs::read(target.join("b").path()).unwrap(),
+            b"old destination"
+        );
+        assert_eq!(
+            fs::read(target.join("b (2)").path()).unwrap(),
+            b"retry payload"
+        );
+        assert_eq!(source.join("b").path().exists(), kind == TransferKind::Copy);
+        assert_eq!(
+            fs::read(target.join("tree/nested").path()).unwrap(),
+            b"nested payload"
+        );
+        assert!(target.join("tree/empty").path().is_dir());
+        assert!(!fs::read_dir(target.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".pawcommander")));
+        fs::remove_dir_all(source.path()).unwrap();
+        fs::remove_dir_all(target.path()).unwrap();
+    }
+}
+
 #[cfg(unix)]
 fn check_sftp_unsupported_names(local_root: &Location, remote_root: &Location) {
     for direction in ["upload", "download", "remote-copy"] {
@@ -957,6 +1052,7 @@ fn openssh_round_trip_and_host_verification() {
             .starts_with(".pawcommander-transfer-")
     }));
     check_sftp_cancellation(&local_root, &remote_root);
+    check_sftp_retry(&local_root, &remote_root);
     check_sftp_copy_hash_verification(&local_root, &remote_root);
     check_sftp_source_changes(&local_root, &remote_root);
     check_sftp_source_change_cleanup_at_depth_limit(&local_root, &remote_root);

@@ -108,6 +108,14 @@ History is saved in `PawCommander/operation-history.json` under the OS local app
 
 History contains file paths, server names, usernames, and error messages. It does not record file contents or authentication secrets. Non-UTF-8 path characters use display replacements; history is not a source of exact paths for automated replay. Review the file before sharing it. Close PawCommander before manually removing history. A damaged or unsupported history file is preserved and disables saving until you fix or move it and restart. Only one running app instance can write history; another instance reports a save error. A history error does not change the file operation's outcome.
 
+### Retry unfinished transfers
+
+For a copy or move from the current session, expand its result and choose **Check and retry unfinished items**. The new attempt includes only failed, cancelled, skipped or unstarted selected objects for which the app retained source evidence. Completed objects, including those with cleanup warnings, are excluded. A selected folder is retried as a whole only if its root was not published; prepared files in its private temporary copy are not separate completed transfers.
+
+Before doing any writes, the worker checks the original source metadata and destination location. It checks each source again after conflict decisions. A missing or replaced source or destination stops the retry with an explanation; inspect the files and start a new selection if the change was intentional. Existing destinations still use the normal conflict dialog. The copy-verification setting from the original attempt is retained, and retries use the same queue and Stop controls. A second click cannot enqueue the same attempt twice. A partly completed retry produces its own result and a new retry action for its remaining objects.
+
+An unconfirmed publication, such as a lost SFTP rename reply, is never retried automatically. Check both locations and the recovery report. SFTP source checks use the metadata the server provides; they do not establish a filesystem snapshot. Retry evidence stays in memory, bounded to 100 operations and 100,000 selected roots. After restarting the app, or for rename, create-folder and deletion results, review the saved history and select the intended files explicitly; saved display paths are not replayed.
+
 ## SFTP connections
 
 1. Verify the server's fingerprint through a trusted channel. Connect with OpenSSH and accept only the verified host key so it is recorded in `~/.ssh/known_hosts`:

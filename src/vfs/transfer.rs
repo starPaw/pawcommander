@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{fs, io};
 
+#[derive(Clone)]
 pub(super) enum EntryMetadata {
     Local(LocalEntryMetadata),
     Remote(FileStat),
@@ -373,6 +374,10 @@ pub(super) fn transfer_run(
         plan.iter()
             .map(|item| (item.original.clone(), Some(item.target.display()))),
     );
+    let retry_cancel = progress.cancellation();
+    if let Some(retry) = &mut progress.retry {
+        retry.prepare(&plan, &retry_cancel)?;
+    }
     summary.remaining = plan.iter().map(|item| item.original.clone()).collect();
     summary.preparing = false;
     let cancel = progress.cancellation();
@@ -467,6 +472,9 @@ pub(super) fn transfer_run(
         cancel.check()?;
         progress.results.begin(&item.original);
         progress.item(item.source.path());
+        if let Some(retry) = &progress.retry {
+            retry.verify(&item, &cancel)?;
+        }
         let expected = item.replacement.as_ref().map(|(_, target)| target);
         if let Some((expected_source, _)) = &item.replacement
             && !entry_metadata(&item.source)?
@@ -532,6 +540,11 @@ pub(super) fn transfer_run(
                 moved(&item.original, &item.covered);
             }
         };
+        if kind == TransferKind::Move
+            && let Some(retry) = &progress.retry
+        {
+            retry.verify(&item, &cancel)?;
+        }
         let mut result = match kind {
             TransferKind::Copy => copy_item_cancellable(&item, expected, progress, published),
             TransferKind::Move => move_item(&item, expected, count != 0, &cancel, published),
@@ -754,6 +767,15 @@ pub(super) fn copy_transfer_cancellable(
             }
         })?;
     progress.results.captured();
+    if let Some(retry) = &progress.retry {
+        retry.verify_snapshot(
+            item,
+            manifest
+                .entries
+                .get(&item.source)
+                .map(|entry| &entry.metadata),
+        )?;
+    }
     cancel.check()?;
     with_staging_typed(&item.target, Some(&cancel), |staging, preserve| {
         // Finish the probe handle lifecycle before checking cancellation.
@@ -775,6 +797,9 @@ pub(super) fn copy_transfer_cancellable(
                 matches!(error, TransferError::Cancelled),
             )
         })?;
+        if let Some(retry) = &progress.retry {
+            retry.verify(item, &cancel)?;
+        }
         cancel.check()?;
         if let Some(expected) = expected {
             let mut attempted = false;
@@ -1599,7 +1624,17 @@ pub(super) fn copy_tree_entry(
         SourceReader::Remote(remote(source)?.open(source.path()).map_err(err)?)
     };
     observe(source, CopyPhase::Opened)?;
-    entry.verify_metadata(source, &input.metadata()?)?;
+    let opened_metadata = input.metadata()?;
+    if progress
+        .retry
+        .as_ref()
+        .is_some_and(|retry| retry.checking())
+        && matches!(opened_metadata, EntryMetadata::Local(_))
+        && !entry.metadata.same_object(&opened_metadata)
+    {
+        return Err(changed_source(source).into());
+    }
+    entry.verify_metadata(source, &opened_metadata)?;
     // Bound reads to the captured size: a continuously growing source cannot
     // turn a copy into an unbounded stream. Handle/path checks detect growth.
     let expected_size = entry.size();
