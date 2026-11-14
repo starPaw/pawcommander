@@ -40,7 +40,9 @@ impl<'a> Scanner<'a> {
         let pattern = if regex {
             let regex = RegexBuilder::new(query)
                 .size_limit(512 * 1024)
-                .dfa_size_limit(512 * 1024)
+                // Keep valid bounded repetitions in the lazy DFA instead of repeatedly
+                // resetting its cache and falling back to slower, uninterruptible scans.
+                .dfa_size_limit(4 * 1024 * 1024)
                 .build()
                 .map_err(|error| {
                     crate::tr_format!(
