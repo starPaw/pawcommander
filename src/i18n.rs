@@ -661,6 +661,7 @@ fn translate(english: bool, russian: &'static str) -> &'static str {
         "Загрузка журнала…" => "Loading history…",
         "Завершено" => "Completed",
         "Завершено с предупреждением" => "Completed with warning",
+        "Копия создана, перенос не завершён" => "Copy created, move incomplete",
         "Пропущено" => "Skipped",
         "Ошибка" => "Failed",
         "Отменено" => "Cancelled",

@@ -13,6 +13,7 @@ PawCommander is a single Rust binary using eframe/egui. Start at the module that
 | Settings, workspaces, bookmarks | [`app/state.rs`](../src/app/state.rs), [`app/persistence.rs`](../src/app/persistence.rs) | `app/bookmarks.rs`, `app/sidebar.rs` |
 | Mutation queue, progress, conflict UI | [`app/jobs.rs`](../src/app/jobs.rs), [`operations.rs`](../src/operations.rs) | `conflict.rs`, `app/footer.rs`, `app/dialogs.rs` |
 | Local/SFTP transfer policy | [`vfs/transfer.rs`](../src/vfs/transfer.rs) | [`fs_ops.rs`](../src/fs_ops.rs) for local I/O primitives; `vfs/mutations.rs` for mkdir, rename and deletion |
+| Moves across local volumes or connections | [`vfs/cross_move.rs`](../src/vfs/cross_move.rs) | Mandatory copy verification, guarded source removal and partial results; published copies are excluded from Retry and rename-only Undo |
 | Retry unfinished transfers | [`vfs/retry.rs`](../src/vfs/retry.rs) | `app/jobs.rs` owns session retry requests; `result_history.rs` presents actions without replaying stored display paths |
 | Undo renames and moves | [`vfs/undo.rs`](../src/vfs/undo.rs) | Typed session receipts capture parents and moved entries; `app/jobs.rs` serializes inverse renames and owns remaining work, `result_history.rs` exposes eligible actions |
 | Location parsing, listing, SSH sessions | [`vfs/location.rs`](../src/vfs/location.rs), [`vfs/listing.rs`](../src/vfs/listing.rs), [`vfs/sftp.rs`](../src/vfs/sftp.rs) | `credentials.rs`, `app/dialogs.rs` |

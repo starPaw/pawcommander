@@ -6,6 +6,8 @@ fn check_sftp_retry(local_root: &Location, remote_root: &Location) {
         ("download", remote_root, local_root, TransferKind::Copy),
         ("remote-copy", remote_root, remote_root, TransferKind::Copy),
         ("remote-move", remote_root, remote_root, TransferKind::Move),
+        ("upload-move", local_root, remote_root, TransferKind::Move),
+        ("download-move", remote_root, local_root, TransferKind::Move),
     ] {
         let source = source_root.join(format!("retry-{name}-source"));
         let target = target_root.join(format!("retry-{name}-target"));
@@ -563,6 +565,81 @@ fn check_sftp_copy_hash_verification(local_root: &Location, remote_root: &Locati
     }
 }
 
+fn check_cross_connection_partial_move(local_root: &Location, remote_root: &Location) {
+    use crate::result_history::Outcome;
+    for (name, from, to) in [
+        ("upload", local_root, remote_root),
+        ("download", remote_root, local_root),
+    ] {
+        let source = from.join(format!("partial-move-{name}-source"));
+        let target = to.join(format!("partial-move-{name}-target"));
+        fs::create_dir_all(source.path()).unwrap();
+        fs::create_dir_all(target.path()).unwrap();
+        fs::write(source.join("first").path(), b"first payload").unwrap();
+        fs::write(source.join("late").path(), vec![64; 128 * 1024]).unwrap();
+        let published_late = target.join("late");
+        let cancel = Cancellation::at_checkpoint(move || published_late.path().exists());
+        let mut progress = Progress::with_cancellation(cancel);
+        progress.retry = Some(crate::vfs::RetryTransfer::new(
+            TransferKind::Move,
+            target.clone(),
+        ));
+        let mut summary = TransferSummary::default();
+        let mut consumed = Vec::new();
+        let result = super::super::transfer::transfer_run(
+            &[source.join("first"), source.join("late")],
+            &target,
+            TransferKind::Move,
+            &mut progress,
+            |_| panic!("unexpected conflict"),
+            |path, _| consumed.push(path.clone()),
+            &mut summary,
+        );
+        assert!(result.is_err(), "{name}");
+        assert_eq!(
+            summary.completed, 1,
+            "published copy is not a completed move"
+        );
+        assert_eq!(summary.remaining, vec![source.join("late")]);
+        assert_eq!(consumed, vec![source.join("first")]);
+        assert!(!source.join("first").path().exists());
+        assert_eq!(
+            fs::read(target.join("first").path()).unwrap(),
+            b"first payload"
+        );
+        assert_eq!(
+            fs::read(source.join("late").path()).unwrap(),
+            vec![64; 128 * 1024]
+        );
+        assert_eq!(
+            fs::read(target.join("late").path()).unwrap(),
+            vec![64; 128 * 1024]
+        );
+        assert_eq!(
+            progress
+                .results
+                .items
+                .iter()
+                .map(|row| row.outcome)
+                .collect::<Vec<_>>(),
+            vec![Outcome::Completed, Outcome::CopiedSourceRemaining]
+        );
+        assert!(progress
+            .retry
+            .take()
+            .unwrap()
+            .unfinished(&progress.results)
+            .is_none());
+        assert_eq!(progress.undo.len(), 0);
+        assert!(progress.results.cancelled);
+        assert!(fs::read_dir(source.path()).unwrap().all(|e| !e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".pawcommander-")));
+    }
+}
+
 // Run with scripts/test-sftp.sh: a disposable loopback-only OpenSSH server
 // and generated keys, without using the user's real known_hosts or keys.
 #[test]
@@ -787,6 +864,20 @@ fn openssh_round_trip_and_host_verification() {
         assert!(!target.path().exists());
         assert!(read_directory(&remote_root, &|| false).unwrap().is_empty());
         assert_eq!(fs::read(source.path().join(".hidden")).unwrap(), b"hidden");
+        let mut move_progress = Progress::default();
+        let error = transfer_with_conflicts(
+            std::slice::from_ref(&source),
+            &remote_root,
+            TransferKind::Move,
+            &mut move_progress,
+            |_| panic!("unexpected conflict"),
+            |_, _| panic!("source removed"),
+        )
+        .unwrap_err();
+        assert!(error.contains("fstatvfs@openssh.com"), "{error}");
+        assert!(!target.path().exists());
+        assert_eq!(fs::read(source.path().join(".hidden")).unwrap(), b"hidden");
+        assert!(read_directory(&remote_root, &|| false).unwrap().is_empty());
         sessions().lock().unwrap().remove(&endpoint);
         return;
     }
@@ -1001,14 +1092,7 @@ fn openssh_round_trip_and_host_verification() {
     transfer(std::slice::from_ref(&renamed), &sub, TransferKind::Move).unwrap();
     let moved = sub.join("renamed");
     assert!(transfer(std::slice::from_ref(&moved), &moved, TransferKind::Copy).is_err());
-    assert!(transfer(std::slice::from_ref(&moved), &downloads, TransferKind::Move).is_err());
     assert!(remote(&moved).unwrap().stat(moved.path()).unwrap().is_dir());
-    assert!(transfer(
-        std::slice::from_ref(&source),
-        &remote_root,
-        TransferKind::Move
-    )
-    .is_err());
     // Remote -> remote copy and refusal to follow symlinks in transfer trees.
     let mut verified_remote = Progress::default();
     verified_remote.set_copy_verification(true);
@@ -1054,6 +1138,7 @@ fn openssh_round_trip_and_host_verification() {
     }));
     check_sftp_cancellation(&local_root, &remote_root);
     check_sftp_retry(&local_root, &remote_root);
+    check_cross_connection_partial_move(&local_root, &remote_root);
     check_sftp_copy_hash_verification(&local_root, &remote_root);
     check_sftp_source_changes(&local_root, &remote_root);
     check_sftp_source_change_cleanup_at_depth_limit(&local_root, &remote_root);

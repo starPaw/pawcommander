@@ -190,6 +190,7 @@ impl RetryTransfer {
                     outcome,
                     Outcome::Completed
                         | Outcome::CompletedWithWarning
+                        | Outcome::CopiedSourceRemaining
                         | Outcome::PublicationUnconfirmed
                 )
             })

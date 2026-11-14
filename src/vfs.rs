@@ -1,6 +1,7 @@
 //! Local, SFTP and read-only archive locations. Remote credentials live only in authenticated sessions;
 //! saved tabs/bookmarks contain connection coordinates and key paths, never secrets.
 
+mod cross_move;
 mod listing;
 mod location;
 mod mutations;

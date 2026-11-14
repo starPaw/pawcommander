@@ -23,6 +23,7 @@ const ROW_WEIGHT: usize = 256;
 pub(crate) enum Outcome {
     Completed,
     CompletedWithWarning,
+    CopiedSourceRemaining,
     Skipped,
     Failed,
     Cancelled,
@@ -36,6 +37,7 @@ impl Outcome {
         crate::i18n::text(match self {
             Self::Completed => "Завершено",
             Self::CompletedWithWarning => "Завершено с предупреждением",
+            Self::CopiedSourceRemaining => "Копия создана, перенос не завершён",
             Self::Skipped => "Пропущено",
             Self::Failed => "Ошибка",
             Self::Cancelled => "Отменено",
@@ -313,6 +315,17 @@ impl Results {
                 Outcome::PublicationUnconfirmed
             };
             self.reason(index, reason.as_deref());
+        }
+    }
+
+    /// A verified copy alone does not establish removal of its source.
+    pub fn copied_source_remaining(&mut self) {
+        self.confirming_move = true;
+        if let Some((_, range)) = self.group.clone() {
+            for index in range {
+                self.items[index].outcome = Outcome::CopiedSourceRemaining;
+                self.reason(index, None);
+            }
         }
     }
 

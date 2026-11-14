@@ -38,6 +38,8 @@ PAWCOMMANDER_TEST_DISABLE_STATVFS=1 bash scripts/test-sftp.sh
 
 The script creates a temporary loopback-only SSH server, generates disposable keys, and cleans up on exit. It does not change your SSH configuration. Local OS policy may prevent launching `sshd`.
 
+For local moves, set `PAWCOMMANDER_TEST_MOVE_SOURCE_ROOT` and `PAWCOMMANDER_TEST_MOVE_TARGET_ROOT` to writable directories on **different filesystems**, then run `cargo test --locked actual_cross_volume_routing_counts_only_removed_sources -- --ignored`. The test creates its own disposable subdirectories, checks replacement and a nested move, and stops a later move after publication to verify that its source remains and cannot be retried automatically. It refuses two paths on the same volume. This filesystem check does not replace native GUI acceptance.
+
 The real credential-store test is separate and explicitly opt-in:
 
 ```sh
