@@ -533,6 +533,9 @@ pub(super) fn transfer_run(
         } else {
             None
         };
+        let undo_capture = (kind == TransferKind::Move && expected.is_none())
+            .then(|| super::undo::Capture::before(&item.source, &item.target).ok())
+            .flatten();
         let mut committed = false;
         let published = || {
             committed = true;
@@ -548,6 +551,14 @@ pub(super) fn transfer_run(
         let mut result = match kind {
             TransferKind::Copy => copy_item_cancellable(&item, expected, progress, published),
             TransferKind::Move => move_item(&item, expected, count != 0, &cancel, published),
+        };
+        let undo_entry = if committed
+            && result.is_ok()
+            && let (Some(capture), Some(manifest)) = (undo_capture, move_manifest.as_ref())
+        {
+            capture.finish(&item.source, manifest).ok()
+        } else {
+            None
         };
         if committed && let Some(manifest) = move_manifest {
             let mut failed = 0usize;
@@ -609,6 +620,11 @@ pub(super) fn transfer_run(
                 )
             })
         });
+        if outcome == crate::result_history::Outcome::Completed
+            && let Some(entry) = undo_entry
+        {
+            progress.undo.push(entry);
+        }
         progress
             .results
             .record(&item.original, Some(item.target.display()), outcome, reason);
@@ -1279,13 +1295,14 @@ pub(super) fn remote_source_matches(expected: &FileStat, actual: &FileStat) -> b
         && expected.gid == actual.gid
 }
 
+#[derive(Clone)]
 pub(super) struct TransferSourceEntry {
     pub(super) metadata: EntryMetadata,
     pub(super) children: Option<Vec<OsString>>,
 }
 
 impl TransferSourceEntry {
-    fn matches_moved_target(&self, actual: &EntryMetadata) -> bool {
+    pub(super) fn matches_moved_target(&self, actual: &EntryMetadata) -> bool {
         match (&self.metadata, actual) {
             (EntryMetadata::Local(expected), EntryMetadata::Local(actual)) => {
                 self.metadata
@@ -1428,7 +1445,7 @@ impl TransferSourceManifest {
         Ok(manifest)
     }
 
-    fn capture_move_observed(
+    pub(super) fn capture_move_observed(
         source: &Location,
         cancel: &Cancellation,
         observe: &mut impl FnMut(&Location, Option<&TransferError>),

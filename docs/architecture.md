@@ -14,6 +14,7 @@ PawCommander is a single Rust binary using eframe/egui. Start at the module that
 | Mutation queue, progress, conflict UI | [`app/jobs.rs`](../src/app/jobs.rs), [`operations.rs`](../src/operations.rs) | `conflict.rs`, `app/footer.rs`, `app/dialogs.rs` |
 | Local/SFTP transfer policy | [`vfs/transfer.rs`](../src/vfs/transfer.rs) | [`fs_ops.rs`](../src/fs_ops.rs) for local I/O primitives; `vfs/mutations.rs` for mkdir, rename and deletion |
 | Retry unfinished transfers | [`vfs/retry.rs`](../src/vfs/retry.rs) | `app/jobs.rs` owns session retry requests; `result_history.rs` presents actions without replaying stored display paths |
+| Undo renames and moves | [`vfs/undo.rs`](../src/vfs/undo.rs) | Typed session receipts capture parents and moved entries; `app/jobs.rs` serializes inverse renames and owns remaining work, `result_history.rs` exposes eligible actions |
 | Location parsing, listing, SSH sessions | [`vfs/location.rs`](../src/vfs/location.rs), [`vfs/listing.rs`](../src/vfs/listing.rs), [`vfs/sftp.rs`](../src/vfs/sftp.rs) | `credentials.rs`, `app/dialogs.rs` |
 | Copy/cut/paste | [`app/clipboard.rs`](../src/app/clipboard.rs), [`file_clipboard.rs`](../src/file_clipboard.rs) | `file_clipboard/{macos,windows,linux}.rs` |
 | Preview, Quick Look, thumbnails | [`preview.rs`](../src/preview.rs), [`app/quick_look.rs`](../src/app/quick_look.rs) | `preview/code.rs`, `preview/markup.rs`, `thumbnails.rs`, `vfs/preview.rs` |

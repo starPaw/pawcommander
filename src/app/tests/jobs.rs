@@ -769,6 +769,7 @@ fn transfer_stop_button_keeps_pending_ownership_and_navigation_until_result() {
         label: "test operation".into(),
         started: Instant::now(),
         result: receiver,
+        undo: None,
         progress,
     });
     let ordinary = operation_footer_frame(&mut app, &ctx, vec![]);
@@ -964,6 +965,7 @@ fn late_stop_keeps_final_success_and_consumes_committed_cut_events() {
         label: "test move".into(),
         started: Instant::now(),
         result: receiver,
+        undo: None,
         progress,
     });
     let (events, receiver) = mpsc::channel();

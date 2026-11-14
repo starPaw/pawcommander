@@ -116,6 +116,14 @@ Before doing any writes, the worker checks the original source metadata and dest
 
 An unconfirmed publication, such as a lost SFTP rename reply, is never retried automatically. Check both locations and the recovery report. SFTP source checks use the metadata the server provides; they do not establish a filesystem snapshot. Retry evidence stays in memory, bounded to 100 operations and 100,000 selected roots. After restarting the app, or for rename, create-folder and deletion results, review the saved history and select the intended files explicitly; saved display paths are not replayed.
 
+### Undo renames and moves
+
+In **Result history**, expand a completed rename or move and choose **Undo available changes**. The count is the number of confirmed selected objects that can be checked for restoration. A folder counts as one object; its descendants are checked too. A partly completed move offers only its confirmed objects. Undo runs through the same queue, in reverse order within the selected operation, and supports **Stop**. Removing an unstarted Undo from the queue restores its action in history.
+
+Undo uses the exact original paths and evidence kept in memory. Before each rename back, it checks the current object, descendants and both parent folders. If the old name is occupied, the object was replaced or changed, or a folder is inaccessible, it stops with an explanation and preserves existing files. It never offers Replace. Earlier successful restorations are not repeated; the original history entry retains an action only for the remaining eligible objects. A lost SFTP rename reply is marked unconfirmed and that object is excluded from another attempt: inspect both paths first.
+
+**Undo is unavailable** for copies, deletion, folder creation, replacement of an existing destination, unverified results, and operations from before the current app session. It does not recreate the old version discarded by a successful Replace, restore a clipboard selection, or provide Redo. Evidence is bounded to 100 operations and 100,000 files and folders. Local checks use file identity and metadata; SFTP checks use canonical paths and server metadata, which do not provide a remote file identity, snapshot, or protection against every metadata-preserving external race. Undo supports the same local and same-server rename-based moves as the original operation; it does not add cross-filesystem or cross-server move support.
+
 ## SFTP connections
 
 1. Verify the server's fingerprint through a trusted channel. Connect with OpenSSH and accept only the verified host key so it is recorded in `~/.ssh/known_hosts`:

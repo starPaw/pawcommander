@@ -650,6 +650,8 @@ pub(crate) struct History {
     detail: Option<ItemResult>,
     pub retryable: HashSet<String>,
     pub retry_requested: Option<String>,
+    pub undoable: HashMap<String, usize>,
+    pub undo_requested: Option<String>,
 }
 
 impl History {
@@ -775,6 +777,10 @@ impl History {
                     "Повтор доступен для незавершённых копирований и переносов этого сеанса. Опубликованные и неподтверждённые элементы исключены.",
                     "Retry is available for unfinished copies and moves from this session. Published and unconfirmed items are excluded."
                 ));
+                ui.label(crate::tr_format!(
+                    "Undo возвращает подтверждённые переименования и переносы этого сеанса без перезаписи. Замены, копирования, удаления, непроверенные элементы и операции после перезапуска недоступны. Перед возвратом проверяются файлы и папки.",
+                    "Undo reverses confirmed renames and moves from this session without overwriting. Replacements, copies, deletions, unverified items and operations from before restart are unavailable. Files and folders are checked before restoring."
+                ));
                 if let Some(path) = &self.path {
                     ui.add(egui::Label::new(path.display().to_string()).selectable(true));
                 }
@@ -814,6 +820,13 @@ impl History {
                             .default_open(index + 1 == self.records.len())
                             .show(ui, |ui| {
                                 ui.add(egui::Label::new(&record.message).selectable(true).wrap());
+                                if let Some(count) = self.undoable.get(&record.id) {
+                                    if ui.button(crate::tr_format!("Отменить доступные изменения ({count})", "Undo available changes ({count})")).clicked() {
+                                        self.undo_requested = Some(record.id.clone());
+                                    }
+                                } else {
+                                    ui.label(crate::i18n::text("Undo недоступен для этой операции"));
+                                }
                                 if self.retryable.contains(&record.id) && ui.button(crate::tr_format!("Проверить и повторить незавершённое", "Check and retry unfinished items")).clicked() {
                                     self.retry_requested = Some(record.id.clone());
                                 }

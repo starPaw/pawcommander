@@ -27,6 +27,12 @@ pub(super) struct RetryJob {
     verify_copies: bool,
 }
 
+#[derive(Clone)]
+pub(super) struct UndoJob {
+    pub id: String,
+    pub batch: crate::vfs::UndoBatch,
+}
+
 struct TransferRequest {
     label: String,
     sources: Vec<Location>,
@@ -48,6 +54,7 @@ pub(super) struct Job {
     pub(super) started: Instant,
     pub(super) result: Receiver<Result<String, String>>,
     pub(super) progress: ProgressView,
+    pub(super) undo: Option<Receiver<UndoJob>>,
 }
 
 pub(super) type JobWork = Box<dyn FnOnce(&mut Progress) -> Result<String, String> + Send>;
@@ -63,6 +70,7 @@ pub(super) struct PendingJob {
     pub(super) transfer: Option<TransferInteraction>,
     pub(super) cut: Option<CutRequest>,
     retry_origin: Option<RetryJob>,
+    undo_origin: Option<UndoJob>,
 }
 
 pub(super) const MAX_PENDING_JOBS: usize = 100;
@@ -122,6 +130,7 @@ impl PawCommander {
                 transfer: None,
                 cut: None,
                 retry_origin: None,
+                undo_origin: None,
             },
         );
     }
@@ -130,6 +139,9 @@ impl PawCommander {
         if self.pending_jobs.len() >= MAX_PENDING_JOBS {
             if let Some(retry) = job.retry_origin {
                 self.remember_retry(retry);
+            }
+            if let Some(undo) = job.undo_origin {
+                self.remember_undo(undo);
             }
             self.notice = Some((crate::i18n::text("Очередь заполнена (100 заданий). Дождитесь завершения или удалите ожидающее задание.").into(), true));
             return;
@@ -154,6 +166,7 @@ impl PawCommander {
                 transfer,
                 cut,
                 retry_origin,
+                undo_origin,
                 ..
             }) = self.pending_jobs.pop_front()
             else {
@@ -161,6 +174,8 @@ impl PawCommander {
             };
             debug_assert!(self.transfer.is_none());
             let (tx, rx) = mpsc::channel();
+            let (undo_send, undo_receive) = mpsc::channel();
+            let undo_id = undo_origin.as_ref().map(|job| job.id.clone());
             let worker_ctx = ctx.clone();
             let (mut reporter, progress) = Progress::tracked();
             let started = Instant::now();
@@ -174,6 +189,7 @@ impl PawCommander {
             let worker_work = work.clone();
             let worker = move || {
                 let work = worker_work.lock().unwrap().take().unwrap();
+                reporter.results.id = crate::result_history::operation_id();
                 let history_started = crate::result_history::now();
                 if recovery_directory.is_none() && !cfg!(test) {
                     let _ = tx.send(Err(crate::tr_format!(
@@ -222,6 +238,7 @@ impl PawCommander {
                     )
                     .into())
                 });
+                let undo_id = undo_id.unwrap_or_else(|| reporter.results.id.clone());
                 let persisted = if let Some(record) = std::mem::take(&mut reporter.results).finish(
                     history_label,
                     history_started,
@@ -246,6 +263,12 @@ impl PawCommander {
                         "Operation finished, but result history was not saved. Check files in both folders; the recovery record was retained if created."
                     ));
                 }
+                if !panicked && persisted && reporter.undo.len() != 0 {
+                    let _ = undo_send.send(UndoJob {
+                        id: undo_id,
+                        batch: reporter.undo,
+                    });
+                }
                 let _ = tx.send(result);
                 worker_ctx.request_repaint();
             };
@@ -266,6 +289,7 @@ impl PawCommander {
                     transfer,
                     cut,
                     retry_origin,
+                    undo_origin,
                 });
                 self.queue_start_failed = true;
                 self.notice = Some((
@@ -282,6 +306,7 @@ impl PawCommander {
                 started,
                 result: rx,
                 progress,
+                undo: Some(undo_receive),
             });
             self.transfer = transfer;
             self.active_cut = cut;
@@ -493,6 +518,7 @@ impl PawCommander {
                 }),
                 cut,
                 retry_origin,
+                undo_origin: None,
             },
         );
     }
@@ -512,11 +538,89 @@ impl PawCommander {
         self.history.retryable = self.retry_jobs.iter().map(|job| job.id.clone()).collect();
     }
 
-    pub(super) fn remove_pending_job(&mut self, index: usize) {
-        if let Some(job) = self.pending_jobs.remove(index)
-            && let Some(retry) = job.retry_origin
+    fn remember_undo(&mut self, job: UndoJob) {
+        self.undo_jobs.retain(|saved| saved.id != job.id);
+        self.undo_jobs.push_back(job);
+        while self.undo_jobs.len() > 100
+            || self
+                .undo_jobs
+                .iter()
+                .map(|job| job.batch.weight())
+                .sum::<usize>()
+                > 100_000
         {
-            self.remember_retry(retry);
+            self.undo_jobs.pop_front();
+        }
+        self.history.undoable = self
+            .undo_jobs
+            .iter()
+            .map(|job| (job.id.clone(), job.batch.len()))
+            .collect();
+    }
+
+    pub(super) fn undo_operation(&mut self, ctx: &egui::Context, id: &str) {
+        if self.pending_jobs.len() >= MAX_PENDING_JOBS {
+            self.notice = Some((crate::i18n::text("Очередь заполнена (100 заданий). Дождитесь завершения или удалите ожидающее задание.").into(), true));
+            return;
+        }
+        let Some(index) = self.undo_jobs.iter().position(|job| job.id == id) else {
+            return;
+        };
+        let job = self.undo_jobs.remove(index).unwrap();
+        self.history.undoable.remove(id);
+        self.show_history = false;
+        let mut batch = job.batch.clone();
+        let label = crate::i18n::text("Отмена изменений");
+        let description = format!("{label}: {}", batch.len());
+        // A transfer interaction exposes Stop and keeps the normal queue/close
+        // lifecycle even though Undo never offers an overwrite conflict dialog.
+        let (_, events) = mpsc::channel();
+        self.submit_job(
+            ctx,
+            PendingJob {
+                label: label.into(),
+                description,
+                work: Box::new(move |progress| {
+                    let before = batch.len();
+                    let result = batch.restore(progress);
+                    let remaining = batch.len();
+                    progress.undo = batch;
+                    match result {
+                        Ok(completed) => Ok(crate::tr_format!(
+                            "Отменено изменений: {completed}",
+                            "Changes undone: {completed}"
+                        )),
+                        Err(crate::operations::TransferError::Cancelled) => Ok(crate::tr_format!(
+                            "Отмена изменений остановлена. Возвращено: {}. Осталось: {remaining}.",
+                            "Undo stopped. Restored: {}. Remaining: {remaining}.",
+                            before - remaining
+                        )),
+                        Err(error) => Err(crate::tr_format!(
+                            "{error}. Доступно для следующей попытки: {remaining}.",
+                            "{error}. Available for another attempt: {remaining}."
+                        )),
+                    }
+                }),
+                transfer: Some(TransferInteraction {
+                    events,
+                    cut_generation: None,
+                    conflict: None,
+                }),
+                cut: None,
+                retry_origin: None,
+                undo_origin: Some(job),
+            },
+        );
+    }
+
+    pub(super) fn remove_pending_job(&mut self, index: usize) {
+        if let Some(job) = self.pending_jobs.remove(index) {
+            if let Some(retry) = job.retry_origin {
+                self.remember_retry(retry);
+            }
+            if let Some(undo) = job.undo_origin {
+                self.remember_undo(undo);
+            }
         }
         if self.pending_jobs.is_empty() {
             self.queue_start_failed = false;
@@ -712,6 +816,13 @@ impl PawCommander {
                 Err(mpsc::TryRecvError::Empty) => None,
             };
             if let Some(result) = result {
+                let undo = job
+                    .undo
+                    .as_ref()
+                    .and_then(|receive| receive.try_recv().ok());
+                if let Some(undo) = undo {
+                    self.remember_undo(undo);
+                }
                 self.notice = Some(match result {
                     Ok(s) => (s, false),
                     Err(s) => (s, true),

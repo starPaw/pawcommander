@@ -630,6 +630,7 @@ fn openssh_round_trip_and_host_verification() {
     let local_root = Location::Local(root.join("local"));
     fs::create_dir(local_root.path()).unwrap();
     fs::create_dir(remote_root.path()).unwrap();
+    super::undo::sftp_undo(&remote_root);
     let refresh_file = remote_root.join("external.txt");
     fs::write(refresh_file.path(), b"external edit").unwrap();
     let accessed = UNIX_EPOCH + Duration::from_secs(1_600_000_000);

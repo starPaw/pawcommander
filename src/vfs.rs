@@ -8,6 +8,7 @@ mod preview;
 mod retry;
 mod sftp;
 mod transfer;
+mod undo;
 
 use std::fmt;
 
@@ -16,9 +17,9 @@ pub use listing::{
     visit_directory, FileEntry,
 };
 pub use location::{resolve, Endpoint, Location};
+pub use mutations::{create_directory, trash_entries_with_progress};
 #[cfg(test)]
-pub use mutations::trash_entries;
-pub use mutations::{create_directory, rename_entry, trash_entries_with_progress};
+pub use mutations::{rename_entry, trash_entries};
 pub use preview::preview_data;
 pub(crate) use retry::RetryTransfer;
 #[cfg(test)]
@@ -27,6 +28,7 @@ pub use sftp::connect_location;
 #[cfg(test)]
 pub use transfer::transfer;
 pub use transfer::transfer_with_conflicts;
+pub(crate) use undo::{rename_with_undo, UndoBatch};
 
 #[derive(Debug, Default)]
 pub struct TransferSummary {

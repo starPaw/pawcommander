@@ -639,6 +639,8 @@ fn translate(english: bool, russian: &'static str) -> &'static str {
         "Ожидается решение" => "Waiting for a decision",
         "Текущий объект" => "Current item",
         "Журнал результатов" => "Result history",
+        "Отмена изменений" => "Undo changes",
+        "Undo недоступен для этой операции" => "Undo is unavailable for this operation",
         "Очередь заполнена (100 заданий). Дождитесь завершения или удалите ожидающее задание." => "Queue is full (100 jobs). Wait for completion or remove a pending job.",
         "Эти вырезанные объекты уже ожидают перемещения." => "These cut items are already scheduled to move.",
         "Очередь: {} · одновременно: 1" => "Queued: {} · concurrency: 1",

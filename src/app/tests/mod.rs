@@ -65,6 +65,7 @@ mod search;
 mod selection;
 mod sessions;
 mod tabs;
+mod undo;
 
 pub(super) fn wait_for_directory(tab: &mut Tab) {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -131,6 +132,7 @@ fn hold_queue(app: &mut PawCommander) -> mpsc::Sender<Result<String, String>> {
         label: "held operation".into(),
         started: Instant::now(),
         result: receive,
+        undo: None,
         progress,
     });
     send
