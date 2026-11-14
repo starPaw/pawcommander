@@ -228,6 +228,95 @@ fn folder_jump_seeds_visible_restored_tabs_once() {
 }
 
 #[test]
+fn folder_jump_records_startup_visit_when_left_navigates_before_completion() {
+    let root = tempfile::tempdir().unwrap();
+    let initial: Location = root.path().join("initial").into();
+    let next: Location = root.path().join("next").into();
+    for path in [&initial, &next] {
+        std::fs::create_dir(path.path()).unwrap();
+    }
+    let ctx = egui::Context::default();
+    let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+    let mut app = PawCommander::new(&cc, Some(initial.path().into()));
+    app.settings.folder_history.record(&initial);
+    // Supersede the left read before the app observes either completion.
+    app.panes[0].tab_mut().navigate(next.clone(), &ctx);
+    for pane in &mut app.panes {
+        wait_for_directory(pane.tab_mut());
+    }
+    app.poll(&ctx);
+    let recorded = serde_json::to_value(&app.settings.folder_history).unwrap();
+    let visits = recorded["visits"].as_array().unwrap();
+    let count = |path: &Location| {
+        visits
+            .iter()
+            .find(|visit| visit["location"] == serde_json::to_value(path).unwrap())
+            .unwrap()["count"]
+            .as_u64()
+            .unwrap()
+    };
+    assert_eq!(
+        count(&initial),
+        2,
+        "right successful opening records the launch once"
+    );
+    assert_eq!(count(&next), 1);
+    for _ in 0..3 {
+        app.poll(&ctx);
+    }
+    assert_eq!(
+        serde_json::to_value(&app.settings.folder_history).unwrap(),
+        recorded
+    );
+}
+
+#[test]
+fn folder_jump_counts_both_startup_completion_orders_once() {
+    for first in [0, 1] {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        for pane in &mut app.panes {
+            wait_for_directory(pane.tab_mut());
+        }
+        // Hold one successful result until after the other pane is observed.
+        app.panes[1 - first].tab_mut().has_complete_listing = false;
+        app.poll(&ctx);
+        let once = serde_json::to_value(&app.settings.folder_history).unwrap();
+        assert_eq!(once["visits"].as_array().unwrap().len(), 1);
+        assert_eq!(once["visits"][0]["count"], 1);
+        app.panes[1 - first].tab_mut().has_complete_listing = true;
+        app.poll(&ctx);
+        assert_eq!(
+            serde_json::to_value(&app.settings.folder_history).unwrap(),
+            once
+        );
+    }
+}
+
+#[test]
+fn folder_jump_failed_startup_does_not_consume_first_success() {
+    let root = tempfile::tempdir().unwrap();
+    let missing = root.path().join("missing");
+    let ctx = egui::Context::default();
+    let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+    let mut app = PawCommander::new(&cc, Some(missing.clone()));
+    for pane in &mut app.panes {
+        wait_for_directory(pane.tab_mut());
+    }
+    app.poll(&ctx);
+    assert!(app.settings.folder_history.ranked("").is_empty());
+    std::fs::create_dir(&missing).unwrap();
+    app.panes[1].tab_mut().reload(&ctx);
+    wait_for_directory(app.panes[1].tab_mut());
+    app.poll(&ctx);
+    let once = serde_json::to_value(&app.settings.folder_history).unwrap();
+    assert_eq!(once["visits"].as_array().unwrap().len(), 1);
+    assert_eq!(once["visits"][0]["count"], 1);
+}
+
+#[test]
 fn sftp_file_double_click_and_zed_context_menu_keep_the_clicked_path() {
     fn text_rect(shape: &egui::epaint::Shape) -> Option<egui::Rect> {
         match shape {
