@@ -1,6 +1,89 @@
 use super::*;
 
 #[test]
+fn history_retry_owns_one_queued_attempt_and_keeps_completed_files_untouched() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let target = root.path().join("target");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::create_dir(&target).unwrap();
+    std::fs::write(source.join("a"), "retry me").unwrap();
+    std::fs::write(source.join("b"), "already completed").unwrap();
+    std::fs::write(target.join("a"), "existing target").unwrap();
+    let ctx = egui::Context::default();
+    let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+    let mut app = PawCommander::new(&cc, Some(source.clone()));
+    let history_path = root.path().join("history.json");
+    app.history = crate::result_history::History::for_test(history_path.clone(), &ctx);
+    app.settings.verify_copies = true;
+    app.start_transfer(
+        &ctx,
+        "original",
+        vec![source.join("a").into(), source.join("b").into()],
+        target.clone().into(),
+        TransferKind::Copy,
+        false,
+    );
+    poll_queue_until(&mut app, &ctx, PawCommander::conflict_open);
+    answer_queue_conflict(&mut app, &ctx, crate::i18n::text("Пропустить"));
+    poll_queue_until(&mut app, &ctx, |app| app.job.is_none());
+    assert_eq!(app.retry_jobs.len(), 1);
+    let id = app.retry_jobs[0].id.clone();
+    assert!(app.history.retryable.contains(&id));
+    std::fs::write(source.join("b"), "new source content").unwrap();
+    app.settings.verify_copies = false;
+    let held = hold_queue(&mut app);
+    app.retry_transfer(&ctx, &id);
+    app.retry_transfer(&ctx, &id);
+    assert_eq!(
+        app.pending_jobs.len(),
+        1,
+        "a repeated click cannot enqueue twice"
+    );
+    assert!(
+        app.pending_jobs[0].description.contains("SHA-256"),
+        "retry retains the original verification setting"
+    );
+    assert!(!app.history.retryable.contains(&id));
+    assert!(app.retry_jobs.is_empty());
+    app.remove_pending_job(0);
+    assert!(
+        app.history.retryable.contains(&id),
+        "removing an unstarted retry restores its action"
+    );
+    app.retry_transfer(&ctx, &id);
+    assert_eq!(app.pending_jobs.len(), 1);
+    held.send(Ok("release".into())).unwrap();
+    poll_queue_until(&mut app, &ctx, PawCommander::conflict_open);
+    answer_queue_conflict(&mut app, &ctx, crate::i18n::text("Сохранить обе версии"));
+    poll_queue_until(&mut app, &ctx, |app| app.job.is_none());
+    assert!(app.retry_jobs.is_empty());
+    assert_eq!(std::fs::read(target.join("a")).unwrap(), b"existing target");
+    assert_eq!(std::fs::read(target.join("a (2)")).unwrap(), b"retry me");
+    assert_eq!(
+        std::fs::read(target.join("b")).unwrap(),
+        b"already completed"
+    );
+    assert_eq!(
+        std::fs::read(source.join("b")).unwrap(),
+        b"new source content"
+    );
+    assert!(!target.join("b (2)").exists());
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(history_path).unwrap()).unwrap();
+    let records = saved["records"].as_array().unwrap();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["id"], id);
+    assert_ne!(records[1]["id"], records[0]["id"]);
+    assert_eq!(records[1]["items"].as_array().unwrap().len(), 1);
+    let restarted = PawCommander::new(&cc, Some(source));
+    assert!(
+        restarted.retry_jobs.is_empty(),
+        "saved display paths are not retry authority after restart"
+    );
+}
+
+#[test]
 fn copy_verification_defaults_off_persists_and_is_captured_per_queued_job() {
     let mut settings: Settings = serde_json::from_str("{}").unwrap();
     assert!(!settings.verify_copies);

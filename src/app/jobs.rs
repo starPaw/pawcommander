@@ -16,6 +16,25 @@ use std::time::{Duration, Instant};
 pub(super) enum TransferEvent {
     Conflict(Box<ConflictDialog>),
     Moved(Location, Vec<PathBuf>),
+    RetryReady(Box<RetryJob>),
+}
+
+#[derive(Clone)]
+pub(super) struct RetryJob {
+    pub id: String,
+    pub transfer: crate::vfs::RetryTransfer,
+    cut_generation: Option<u64>,
+    verify_copies: bool,
+}
+
+struct TransferRequest {
+    label: String,
+    sources: Vec<Location>,
+    destination: Location,
+    kind: TransferKind,
+    cut_generation: Option<u64>,
+    verify_copies: bool,
+    retry: Option<RetryJob>,
 }
 
 pub(super) struct TransferInteraction {
@@ -43,6 +62,7 @@ pub(super) struct PendingJob {
     pub(super) work: JobWork,
     pub(super) transfer: Option<TransferInteraction>,
     pub(super) cut: Option<CutRequest>,
+    retry_origin: Option<RetryJob>,
 }
 
 pub(super) const MAX_PENDING_JOBS: usize = 100;
@@ -101,12 +121,16 @@ impl PawCommander {
                 work: Box::new(work),
                 transfer: None,
                 cut: None,
+                retry_origin: None,
             },
         );
     }
 
     pub(super) fn submit_job(&mut self, ctx: &egui::Context, job: PendingJob) {
         if self.pending_jobs.len() >= MAX_PENDING_JOBS {
+            if let Some(retry) = job.retry_origin {
+                self.remember_retry(retry);
+            }
             self.notice = Some((crate::i18n::text("Очередь заполнена (100 заданий). Дождитесь завершения или удалите ожидающее задание.").into(), true));
             return;
         }
@@ -129,6 +153,7 @@ impl PawCommander {
                 work,
                 transfer,
                 cut,
+                retry_origin,
                 ..
             }) = self.pending_jobs.pop_front()
             else {
@@ -240,6 +265,7 @@ impl PawCommander {
                     work: work.lock().unwrap().take().unwrap(),
                     transfer,
                     cut,
+                    retry_origin,
                 });
                 self.queue_start_failed = true;
                 self.notice = Some((
@@ -288,6 +314,64 @@ impl PawCommander {
         kind: TransferKind,
         from_cut_clipboard: bool,
     ) {
+        let cut_generation = from_cut_clipboard
+            .then(|| {
+                self.clipboard
+                    .as_ref()
+                    .map(|clipboard| clipboard.generation)
+            })
+            .flatten();
+        self.submit_transfer(
+            ctx,
+            TransferRequest {
+                label: label.into(),
+                sources,
+                destination,
+                kind,
+                cut_generation,
+                verify_copies: kind == TransferKind::Copy && self.settings.verify_copies,
+                retry: None,
+            },
+        );
+    }
+
+    pub(super) fn retry_transfer(&mut self, ctx: &egui::Context, id: &str) {
+        if self.pending_jobs.len() >= MAX_PENDING_JOBS {
+            self.notice = Some((crate::i18n::text("Очередь заполнена (100 заданий). Дождитесь завершения или удалите ожидающее задание.").into(), true));
+            return;
+        }
+        let Some(index) = self.retry_jobs.iter().position(|job| job.id == id) else {
+            return;
+        };
+        // Move ownership before enqueueing: a second click cannot repeat the
+        // same attempt, even while this job waits behind another operation.
+        let job = self.retry_jobs.remove(index).unwrap();
+        self.history.retryable.remove(id);
+        self.show_history = false;
+        self.submit_transfer(
+            ctx,
+            TransferRequest {
+                label: crate::tr_format!("Повтор незавершённого", "Retry unfinished items"),
+                sources: job.transfer.sources(),
+                destination: job.transfer.destination.clone(),
+                kind: job.transfer.kind,
+                cut_generation: job.cut_generation,
+                verify_copies: job.verify_copies,
+                retry: Some(job),
+            },
+        );
+    }
+
+    fn submit_transfer(&mut self, ctx: &egui::Context, request: TransferRequest) {
+        let TransferRequest {
+            label,
+            sources,
+            destination,
+            kind,
+            cut_generation,
+            verify_copies,
+            retry,
+        } = request;
         if sources.is_empty() {
             return;
         }
@@ -295,13 +379,6 @@ impl PawCommander {
             self.notice = Some((crate::archive::readonly().into(), true));
             return;
         }
-        let cut_generation = if from_cut_clipboard {
-            self.clipboard
-                .as_ref()
-                .map(|clipboard| clipboard.generation)
-        } else {
-            None
-        };
         let cut = cut_generation.map(|generation| (generation, sources.clone()));
         if let Some((generation, paths)) = &cut {
             let overlaps = |(other_generation, other_paths): &CutRequest| {
@@ -321,6 +398,9 @@ impl PawCommander {
                     .filter_map(|job| job.cut.as_ref())
                     .any(overlaps)
             {
+                if let Some(retry) = retry {
+                    self.remember_retry(retry);
+                }
                 self.notice = Some((
                     crate::i18n::text("Эти вырезанные объекты уже ожидают перемещения.").into(),
                     true,
@@ -328,7 +408,6 @@ impl PawCommander {
                 return;
             }
         }
-        let verify_copies = kind == TransferKind::Copy && self.settings.verify_copies;
         let mut description = format!(
             "{} ({}): {} → {}",
             label,
@@ -341,10 +420,18 @@ impl PawCommander {
         }
         let (events, rx) = mpsc::channel();
         let worker_ctx = ctx.clone();
+        let retry_origin = retry.clone();
         let work = move |progress: &mut Progress| {
+            let id = crate::result_history::operation_id();
+            progress.results.id = id.clone();
+            progress.retry = Some(
+                retry
+                    .map(|job| job.transfer)
+                    .unwrap_or_else(|| crate::vfs::RetryTransfer::new(kind, destination.clone())),
+            );
             progress.set_copy_verification(verify_copies);
             let cancellation = progress.cancellation();
-            let summary = fs_ops::transfer_with_conflicts(
+            let result = fs_ops::transfer_with_conflicts(
                 &sources,
                 &destination,
                 kind,
@@ -365,7 +452,21 @@ impl PawCommander {
                         worker_ctx.request_repaint();
                     }
                 },
-            )?;
+            );
+            if let Some(transfer) = progress
+                .retry
+                .take()
+                .and_then(|retry| retry.unfinished(&progress.results))
+            {
+                let _ = events.send(TransferEvent::RetryReady(Box::new(RetryJob {
+                    id,
+                    transfer,
+                    cut_generation,
+                    verify_copies,
+                })));
+                worker_ctx.request_repaint();
+            }
+            let summary = result?;
             Ok(crate::i18n::transfer_finished(
                 summary.completed,
                 summary.skipped,
@@ -382,7 +483,7 @@ impl PawCommander {
         self.submit_job(
             ctx,
             PendingJob {
-                label: label.into(),
+                label,
                 description,
                 work: Box::new(work),
                 transfer: Some(TransferInteraction {
@@ -391,8 +492,35 @@ impl PawCommander {
                     conflict: None,
                 }),
                 cut,
+                retry_origin,
             },
         );
+    }
+
+    fn remember_retry(&mut self, job: RetryJob) {
+        self.retry_jobs.push_back(job);
+        while self.retry_jobs.len() > 100
+            || self
+                .retry_jobs
+                .iter()
+                .map(|job| job.transfer.len())
+                .sum::<usize>()
+                > 100_000
+        {
+            self.retry_jobs.pop_front();
+        }
+        self.history.retryable = self.retry_jobs.iter().map(|job| job.id.clone()).collect();
+    }
+
+    pub(super) fn remove_pending_job(&mut self, index: usize) {
+        if let Some(job) = self.pending_jobs.remove(index)
+            && let Some(retry) = job.retry_origin
+        {
+            self.remember_retry(retry);
+        }
+        if self.pending_jobs.is_empty() {
+            self.queue_start_failed = false;
+        }
     }
 
     pub(super) fn poll_transfer(&mut self) {
@@ -411,6 +539,9 @@ impl PawCommander {
                     if let Some(generation) = transfer.cut_generation {
                         self.consume_cut_source(&location, &covered, generation);
                     }
+                }
+                Ok(TransferEvent::RetryReady(job)) => {
+                    self.remember_retry(*job);
                 }
                 // The worker drops its event sender before publishing its result. Keep
                 // ownership (and Stop state) until that terminal result is consumed.

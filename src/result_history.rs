@@ -4,7 +4,7 @@ use crate::test_ui::ContextExt as _;
 use crate::vfs::Location;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -73,6 +73,7 @@ impl ItemResult {
 /// The active item is explicit: progress paths also include probes and staging.
 #[derive(Default)]
 pub(crate) struct Results {
+    pub id: String,
     pub items: Vec<ItemResult>,
     active: Option<usize>,
     index: HashMap<Location, usize>,
@@ -88,6 +89,12 @@ pub(crate) struct Results {
 }
 
 impl Results {
+    pub(crate) fn root_outcomes(&self) -> Vec<(Location, Outcome)> {
+        self.index
+            .iter()
+            .map(|(path, &index)| (path.clone(), self.items[index].outcome))
+            .collect()
+    }
     pub fn plan(&mut self, items: impl IntoIterator<Item = (Location, Option<String>)>) {
         self.items.clear();
         self.index.clear();
@@ -459,6 +466,7 @@ impl Results {
             }
         }
         Some(Record {
+            id: self.id,
             label: limited_text(&label, MAX_TEXT_BYTES, &mut self.details_truncated),
             started,
             finished: now(),
@@ -483,8 +491,24 @@ pub(crate) fn now() -> u64 {
         .as_secs()
 }
 
+pub(crate) fn operation_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "{}-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Record {
+    #[serde(default)]
+    id: String,
     label: String,
     started: u64,
     finished: u64,
@@ -509,15 +533,18 @@ impl ItemResult {
 
 impl Record {
     fn weight(&self) -> usize {
-        4096 + json_weight(&self.label)
+        4096 + json_weight(&self.id)
+            + json_weight(&self.label)
             + json_weight(&self.message)
             + self.items.iter().map(ItemResult::weight).sum::<usize>()
     }
 
     fn limit(&mut self) {
+        self.id = limited_text(&self.id, 128, &mut self.details_truncated);
         self.label = limited_text(&self.label, MAX_TEXT_BYTES, &mut self.details_truncated);
         self.message = limited_text(&self.message, MAX_TEXT_BYTES, &mut self.details_truncated);
-        let mut weight = 4096 + json_weight(&self.label) + json_weight(&self.message);
+        let mut weight =
+            4096 + json_weight(&self.id) + json_weight(&self.label) + json_weight(&self.message);
         let mut keep = 0;
         for row in &self.items {
             if keep == KEEP_ROWS || weight.saturating_add(row.weight()) > MAX_RECORD_WEIGHT {
@@ -621,6 +648,8 @@ pub(crate) struct History {
     path: Option<PathBuf>,
     loaded: bool,
     detail: Option<ItemResult>,
+    pub retryable: HashSet<String>,
+    pub retry_requested: Option<String>,
 }
 
 impl History {
@@ -742,6 +771,10 @@ impl History {
                     "Нажмите «Подробнее», чтобы прочитать пути и причину целиком.",
                     "Choose Details to read the complete paths and reason."
                 ));
+                ui.label(crate::tr_format!(
+                    "Повтор доступен для незавершённых копирований и переносов этого сеанса. Опубликованные и неподтверждённые элементы исключены.",
+                    "Retry is available for unfinished copies and moves from this session. Published and unconfirmed items are excluded."
+                ));
                 if let Some(path) = &self.path {
                     ui.add(egui::Label::new(path.display().to_string()).selectable(true));
                 }
@@ -781,6 +814,9 @@ impl History {
                             .default_open(index + 1 == self.records.len())
                             .show(ui, |ui| {
                                 ui.add(egui::Label::new(&record.message).selectable(true).wrap());
+                                if self.retryable.contains(&record.id) && ui.button(crate::tr_format!("Проверить и повторить незавершённое", "Check and retry unfinished items")).clicked() {
+                                    self.retry_requested = Some(record.id.clone());
+                                }
                                 if record.omitted != 0 {
                                     ui.colored_label(ui.visuals().warn_fg_color, crate::tr_format!(
                                         "Из-за лимита журнала не показано строк: {}. Это не меняет результат передачи.",
