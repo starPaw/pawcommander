@@ -9,6 +9,7 @@ fi
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 app_dir="$project_dir/dist/PawCommander.app"
 target_dir="$project_dir/target"
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
 cd "$project_dir"
 
 cargo build --release --locked --target-dir "$target_dir"
@@ -52,6 +53,8 @@ cat > "$app_dir/Contents/Info.plist" <<PLIST
     <string>$app_version</string>
     <key>CFBundleVersion</key>
     <string>$app_version</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>$MACOSX_DEPLOYMENT_TARGET</string>
     <key>NSHighResolutionCapable</key>
     <true/>
 </dict>
