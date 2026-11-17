@@ -102,6 +102,7 @@ struct ActiveDrag {
 #[derive(Default)]
 pub struct NativeDrag {
     active: Option<ActiveDrag>,
+    mouse_event: Option<Retained<NSEvent>>,
 }
 
 impl NativeDrag {
@@ -110,6 +111,22 @@ impl NativeDrag {
     }
 
     pub fn finish_input(&mut self, input: &mut egui::RawInput) -> Option<bool> {
+        // Retain the real initiating mouse event before a redraw, focus change
+        // or tracking event becomes NSApplication.currentEvent. AppKit needs
+        // the original window/event identity for its native tracking session.
+        if let Some(mtm) = MainThreadMarker::new()
+            && let Some(event) = NSApplication::sharedApplication(mtm).currentEvent()
+        {
+            let event_type = event.r#type();
+            if matches!(
+                event_type,
+                NSEventType::LeftMouseDown | NSEventType::LeftMouseDragged
+            ) {
+                self.mouse_event = Some(event);
+            } else if event_type == NSEventType::LeftMouseUp {
+                self.mouse_event = None;
+            }
+        }
         let active = self.active.as_ref()?;
         let position = active.position.lock().ok().and_then(|p| *p);
         if let Some(pos) = position {
@@ -175,9 +192,16 @@ impl NativeDrag {
         let view = unsafe { &*handle.ns_view.cast::<NSView>().as_ptr() };
         let window = view.window().ok_or(crate::i18n::text("Окно уже закрыто"))?;
         let app = NSApplication::sharedApplication(mtm);
-        let previous = app.currentEvent().ok_or(crate::i18n::text(
-            "Не удалось получить событие перетаскивания",
-        ))?;
+        let event = self
+            .mouse_event
+            .take()
+            .or_else(|| app.currentEvent())
+            .filter(|event| {
+                drag_event_matches(event.r#type(), event.windowNumber(), window.windowNumber())
+            })
+            .ok_or(crate::i18n::text(
+                "Не удалось получить событие перетаскивания",
+            ))?;
         let result = Arc::new(AtomicU8::new(0));
         let position = Arc::new(Mutex::new(None));
         let source = DragSource::alloc(mtm).set_ivars(SourceState {
@@ -198,9 +222,6 @@ impl NativeDrag {
                 );
             }
             let location = window.convertPointFromScreen(NSEvent::mouseLocation());
-            let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
-                NSEventType::LeftMouseDragged, location, NSEvent::modifierFlags_class(), previous.timestamp(), window.windowNumber(), None, 0, 1, 1.0,
-            ).ok_or(crate::i18n::text("Не удалось создать событие перетаскивания"))?;
             let point = view.convertPoint_fromView(location, None);
             let workspace = NSWorkspace::sharedWorkspace();
             let mut items = Vec::with_capacity(paths.len());
@@ -238,6 +259,30 @@ impl NativeDrag {
         }
         Ok(())
     }
+}
+
+fn drag_event_matches(event_type: NSEventType, event_window: isize, source_window: isize) -> bool {
+    matches!(
+        event_type,
+        NSEventType::LeftMouseDown | NSEventType::LeftMouseDragged
+    ) && source_window > 0
+        && event_window == source_window
+}
+
+#[test]
+fn drag_start_rejects_redraw_keyboard_and_other_window_events() {
+    assert!(drag_event_matches(NSEventType::LeftMouseDown, 17, 17));
+    assert!(drag_event_matches(NSEventType::LeftMouseDragged, 17, 17));
+    for event_type in [
+        NSEventType::ApplicationDefined,
+        NSEventType::KeyDown,
+        NSEventType::MouseMoved,
+        NSEventType::LeftMouseUp,
+    ] {
+        assert!(!drag_event_matches(event_type, 17, 17));
+    }
+    assert!(!drag_event_matches(NSEventType::LeftMouseDragged, 18, 17));
+    assert!(!drag_event_matches(NSEventType::LeftMouseDragged, 0, 0));
 }
 
 fn release_pointer(
