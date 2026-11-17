@@ -1,6 +1,78 @@
 use super::*;
 
 #[test]
+fn empty_pane_space_activates_without_changing_selection() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("keep.txt"), b"selection stays").unwrap();
+    for orientation in [PaneOrientation::SideBySide, PaneOrientation::Stacked] {
+        for mode in [FolderMode::List, FolderMode::Grid, FolderMode::Columns] {
+            let ctx = egui::Context::default();
+            let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+            let mut app = PawCommander::new(&cc, Some(root.path().into()));
+            let mut frame = eframe::Frame::_new_kittest();
+            app.settings.preview = false;
+            app.settings.pane_layout.sidebar_visible = false;
+            app.settings.pane_layout.orientation = orientation;
+            for index in 0..2 {
+                wait_for_directory(app.panes[index].tab_mut());
+                app.change_folder_view(index, FolderViewChange::Mode(mode));
+                let path = app.panes[index].tab().path.join("keep.txt");
+                app.panes[index].tab_mut().selected.insert(path);
+            }
+            let before = [
+                app.panes[0].tab().selected.clone(),
+                app.panes[1].tab().selected.clone(),
+            ];
+            let mut draw = |app: &mut PawCommander, events| {
+                let _ = ctx.run_test_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(1200.0, 800.0),
+                        )),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| eframe::App::ui(app, ui, &mut frame),
+                );
+            };
+            draw(&mut app, vec![]);
+            let empty = match orientation {
+                PaneOrientation::SideBySide => egui::pos2(1100.0, 600.0),
+                PaneOrientation::Stacked => egui::pos2(1000.0, 680.0),
+            };
+            draw(
+                &mut app,
+                vec![
+                    egui::Event::PointerMoved(empty),
+                    egui::Event::PointerButton {
+                        pos: empty,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+            assert_eq!(
+                app.active, 1,
+                "empty {orientation:?}/{mode:?} pane should activate on press"
+            );
+            draw(
+                &mut app,
+                vec![egui::Event::PointerButton {
+                    pos: empty,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+            assert_eq!(app.panes[0].tab().selected, before[0]);
+            assert_eq!(app.panes[1].tab().selected, before[1]);
+        }
+    }
+}
+
+#[test]
 fn pane_layout_defaults_and_persists_through_settings() {
     let directory = tempfile::tempdir().unwrap();
     let ctx = egui::Context::default();
