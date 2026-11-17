@@ -458,7 +458,7 @@ impl PawCommander {
                 ui.add_space(10.0);
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                     ui.label(
-                        RichText::new("PawCommander  /  0.1")
+                        RichText::new(concat!("PawCommander  /  ", env!("CARGO_PKG_VERSION")))
                             .size(10.0)
                             .color(colors.muted),
                     );
