@@ -111,17 +111,14 @@ impl NativeDrag {
     }
 
     pub fn finish_input(&mut self, input: &mut egui::RawInput) -> Option<bool> {
-        // Retain the real initiating mouse event before a redraw, focus change
-        // or tracking event becomes NSApplication.currentEvent. AppKit needs
-        // the original window/event identity for its native tracking session.
+        // AppKit requires the original mouse-down event, not the latest drag
+        // update. Preserve its window/event identity across redraws and focus
+        // changes until handoff; a mouse-up invalidates the pending press.
         if let Some(mtm) = MainThreadMarker::new()
             && let Some(event) = NSApplication::sharedApplication(mtm).currentEvent()
         {
             let event_type = event.r#type();
-            if matches!(
-                event_type,
-                NSEventType::LeftMouseDown | NSEventType::LeftMouseDragged
-            ) {
+            if event_type == NSEventType::LeftMouseDown {
                 self.mouse_event = Some(event);
             } else if event_type == NSEventType::LeftMouseUp {
                 self.mouse_event = None;
@@ -262,18 +259,14 @@ impl NativeDrag {
 }
 
 fn drag_event_matches(event_type: NSEventType, event_window: isize, source_window: isize) -> bool {
-    matches!(
-        event_type,
-        NSEventType::LeftMouseDown | NSEventType::LeftMouseDragged
-    ) && source_window > 0
-        && event_window == source_window
+    event_type == NSEventType::LeftMouseDown && source_window > 0 && event_window == source_window
 }
 
 #[test]
 fn drag_start_rejects_redraw_keyboard_and_other_window_events() {
     assert!(drag_event_matches(NSEventType::LeftMouseDown, 17, 17));
-    assert!(drag_event_matches(NSEventType::LeftMouseDragged, 17, 17));
     for event_type in [
+        NSEventType::LeftMouseDragged,
         NSEventType::ApplicationDefined,
         NSEventType::KeyDown,
         NSEventType::MouseMoved,
@@ -281,8 +274,8 @@ fn drag_start_rejects_redraw_keyboard_and_other_window_events() {
     ] {
         assert!(!drag_event_matches(event_type, 17, 17));
     }
-    assert!(!drag_event_matches(NSEventType::LeftMouseDragged, 18, 17));
-    assert!(!drag_event_matches(NSEventType::LeftMouseDragged, 0, 0));
+    assert!(!drag_event_matches(NSEventType::LeftMouseDown, 18, 17));
+    assert!(!drag_event_matches(NSEventType::LeftMouseDown, 0, 0));
 }
 
 fn release_pointer(
