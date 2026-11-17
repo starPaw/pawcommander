@@ -1,8 +1,8 @@
 # Install PawCommander on macOS
 
-The first downloadable preview is for Apple Silicon (M-series Macs). It is built for macOS 11 or later and tested on macOS 27.0.1. Older macOS versions have not been manually verified. There is no Intel binary in this release.
+The 0.2.0 preview is for Apple Silicon (M-series Macs). It is built for macOS 11 or later and tested on macOS 27.0.1. Older macOS versions have not been manually verified. There is no Intel binary in this release.
 
-1. Download `PawCommander-0.1.0-macOS-arm64.zip` from the [official release](https://github.com/starPaw/pawcommander/releases/tag/v0.1.0).
+1. Download `PawCommander-0.2.0-macOS-arm64.zip` from the [official release](https://github.com/starPaw/pawcommander/releases/tag/v0.2.0).
 2. Double-click the ZIP to extract it.
 3. Drag **PawCommander.app** into **Applications** and open it.
 
@@ -30,4 +30,4 @@ The ZIP contains the app, this guide, the MIT license, third-party license notic
 
 Quit PawCommander before replacing it with a newer copy in Applications. Automatic app updates are not included. Check the [Releases page](https://github.com/starPaw/pawcommander/releases) for updates.
 
-The public preview uses new PawCommander application and credential-store identifiers. Settings and saved keys from older development builds are not migrated.
+Version 0.2.0 keeps the application and credential-store identifiers used by the public 0.1.0 preview. Replacing the app preserves that preview’s settings and saved connections. Settings and saved keys from older development builds with different identifiers are not migrated.
