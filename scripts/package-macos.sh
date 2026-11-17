@@ -24,6 +24,9 @@ ditto dist/PawCommander.app "$staging/PawCommander.app"
 python3 scripts/package-licenses.py "$staging" "$target"
 cp LICENSE "$staging/LICENSE.txt"
 cp docs/MACOS_INSTALL.md "$staging/READ_ME.md"
+if [[ -f "docs/releases/$version.md" ]]; then
+  sed 's@(../MACOS_INSTALL.md)@(READ_ME.md)@g' "docs/releases/$version.md" > "$staging/RELEASE_NOTES.md"
+fi
 cp "$staging/THIRD_PARTY_NOTICES.txt" "$staging/PawCommander.app/Contents/Resources/"
 cp LICENSE "$staging/PawCommander.app/Contents/Resources/LICENSE.txt"
 source_commit="${SOURCE_COMMIT:-$(git rev-parse HEAD 2>/dev/null || printf unknown)}"

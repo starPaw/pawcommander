@@ -24,7 +24,11 @@ shasum -a 256 -c SHA256SUMS.txt
 
 The result should be `OK`. A checksum verifies the downloaded bytes against the published file; it is not Apple notarization.
 
-The ZIP contains the app, this guide, the MIT license, third-party license notices, corresponding source for MPL-licensed components, and a build manifest identifying the source commit.
+The ZIP contains the app, this guide, release notes, the MIT license, third-party license notices, corresponding source for MPL-licensed components, and a build manifest identifying the source commit.
+
+## Known preview issue
+
+On macOS 27.0.1, Escape does not reliably cancel a file drag after Finder becomes active. Releasing the mouse can still copy the files. Use Cmd+C and Cmd+V for transfers to Finder until this is fixed. See `RELEASE_NOTES.md` in the ZIP for the remaining preview limits.
 
 ## Updates
 
