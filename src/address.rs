@@ -183,6 +183,18 @@ impl Completion {
     }
 
     fn start_read(&mut self, parent: Location, allow_unique_session: bool, ctx: &egui::Context) {
+        self.start_read_with(parent, allow_unique_session, ctx, |path, unique, token| {
+            read_folders(path, unique, &|| token.load(Ordering::Relaxed))
+        });
+    }
+
+    fn start_read_with(
+        &mut self,
+        parent: Location,
+        allow_unique_session: bool,
+        ctx: &egui::Context,
+        reader: impl FnOnce(&Location, bool, &AtomicBool) -> Vec<Suggestion> + Send + 'static,
+    ) {
         if ACTIVE_READS
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
                 (count < MAX_ACTIVE_READS).then_some(count + 1)
@@ -207,7 +219,7 @@ impl Completion {
                 // Disconnect the result channel before releasing the worker slot.
                 let sender = sender;
                 let cancelled = || token.load(Ordering::Relaxed);
-                let entries = read_folders(&path, allow_unique_session, &cancelled);
+                let entries = reader(&path, allow_unique_session, &token);
                 if !cancelled() {
                     let _ = sender.send(entries);
                 }
@@ -386,6 +398,106 @@ mod tests {
         finished.store(true, Ordering::Relaxed);
         assert!(completion.suggestions("old/st", &current, &ctx).is_empty());
         assert!(completion.pending.is_empty());
+    }
+
+    #[test]
+    fn spawned_reader_finishing_after_replacement_cannot_publish_stale_folders() {
+        assert_blocked_reader_is_discarded(false);
+    }
+
+    #[test]
+    fn spawned_reader_finishing_after_reset_cannot_restore_the_old_cache() {
+        assert_blocked_reader_is_discarded(true);
+    }
+
+    fn assert_blocked_reader_is_discarded(reset_same_parent: bool) {
+        let root = tempfile::tempdir().unwrap();
+        let old_dir = root.path().join("old");
+        let new_dir = root.path().join("new");
+        std::fs::create_dir_all(old_dir.join("Café stale")).unwrap();
+        std::fs::create_dir_all(new_dir.join("Café fresh")).unwrap();
+        let marker = root.path().join("current-marker.txt");
+        std::fs::write(&marker, b"current directory stays unchanged").unwrap();
+        let current: Location = root.path().to_path_buf().into();
+        let original_current = current.clone();
+        let old = current.join("old");
+        let ctx = egui::Context::default();
+        let mut completion = Completion {
+            edited: true,
+            ..Default::default()
+        };
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (cancel_tx, cancel_rx) = mpsc::channel();
+        completion.start_read_with(old.clone(), false, &ctx, move |path, unique, token| {
+            let entries = read_folders(path, unique, &|| token.load(Ordering::Relaxed));
+            ready_tx
+                .send(
+                    entries
+                        .iter()
+                        .map(|item| item.name.clone())
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap();
+            // Hold a real worker after its filesystem read, emulating I/O that
+            // cannot return until after the editor has moved to another request.
+            release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            cancel_tx.send(token.load(Ordering::Relaxed)).unwrap();
+            entries
+        });
+        assert_eq!(completion.pending.len(), 1, "worker slot unavailable");
+        let old_finished = Arc::clone(&completion.pending[0].finished);
+        assert_eq!(
+            ready_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            ["Café stale"]
+        );
+
+        let (parent, query) = if reset_same_parent {
+            completion.reset();
+            // A reopened editor requests the same parent after its contents
+            // changed. A stale cache would have the right path but wrong folders.
+            std::fs::rename(old_dir.join("Café stale"), old_dir.join("Café fresh")).unwrap();
+            (old, "old/CAFE\u{301}")
+        } else {
+            (current.join("new"), "new/CAFE\u{301}")
+        };
+        completion.address_changed(query, &current);
+        completion.requested = Some((parent.clone(), Instant::now()));
+        assert!(completion.suggestions(query, &current, &ctx).is_empty());
+        assert!(completion.pending[0].cancelled.load(Ordering::Relaxed));
+        assert!(completion.pending[0].receiver.is_none());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let suggestions = completion.suggestions(query, &current, &ctx);
+            if !suggestions.is_empty() {
+                assert_eq!(suggestions.len(), 1);
+                assert_eq!(suggestions[0].name, "Café fresh");
+                assert_eq!(suggestions[0].path, parent.join("Café fresh"));
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "new worker blocked by stale read"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Force the old worker to finish only after the newer result is cached.
+        release_tx.send(()).unwrap();
+        assert!(cancel_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+        while !old_finished.load(Ordering::Relaxed) {
+            assert!(Instant::now() < deadline, "old worker did not finish");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let suggestions = completion.suggestions(query, &current, &ctx);
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].name, "Café fresh");
+        assert_eq!(suggestions[0].path, parent.join("Café fresh"));
+        assert!(completion.pending.is_empty());
+        assert_eq!(current, original_current);
+        assert_eq!(
+            std::fs::read(marker).unwrap(),
+            b"current directory stays unchanged"
+        );
     }
 
     #[test]
