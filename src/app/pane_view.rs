@@ -578,6 +578,15 @@ pub(super) fn render_pane(
             content.end(pane_ui);
             (strip, active_tab)
         });
+        // Observe the whole pane without allocating a click target over its
+        // children: empty rows, margins and status space activate it too.
+        if ui.is_enabled()
+            && ui.memory(|memory| memory.allows_interaction(ui.layer_id()))
+            && ui.input(|input| input.pointer.any_pressed())
+            && ui.rect_contains_pointer(frame.response.rect)
+        {
+            actions.push(Action::Focus(pane_index));
+        }
         let (strip, active_tab) = frame.inner;
         let mut body = frame.response.rect.shrink(0.5);
         body.min.y = strip.bottom() - 0.5;
