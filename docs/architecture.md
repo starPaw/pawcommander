@@ -23,6 +23,7 @@ PawCommander is a single Rust binary using eframe/egui. Start at the module that
 | Read-only ZIP/TAR browsing | [`archive.rs`](../src/archive.rs) | `vfs/location.rs`, `app/tabs.rs` |
 | ZIP/TAR creation | [`archive/writer.rs`](../src/archive/writer.rs), [`vfs/archive_create.rs`](../src/vfs/archive_create.rs) | `app/dialogs.rs`, `operations.rs` |
 | ZIP/TAR extraction | [`archive/extraction.rs`](../src/archive/extraction.rs), [`vfs/archive_extract.rs`](../src/vfs/archive_extract.rs) | `app/jobs.rs`, `vfs/staged_file.rs`, `conflict.rs` |
+| Password-protected ZIP | [`archive/protected_zip.rs`](../src/archive/protected_zip.rs), [`archive/writer.rs`](../src/archive/writer.rs) | `app/dialogs.rs`, `vfs/staged_file.rs` |
 | Recovery and operation history | [`recovery.rs`](../src/recovery.rs), [`result_history.rs`](../src/result_history.rs) | `app/jobs.rs` |
 | Native integrations and file properties | [`native_drag.rs`](../src/native_drag.rs), [`properties.rs`](../src/properties.rs) | `native_drag/{macos,desktop,windows,linux}.rs`, `native_drag/linux/`, `properties/{unix,windows}.rs`, `macos_about.rs`, `tools.rs`, `zed.rs` |
 | UI text, colors and icons | [`i18n.rs`](../src/i18n.rs), [`theme.rs`](../src/theme.rs), [`icons.rs`](../src/icons.rs) | Keep English and Russian text synchronized |
@@ -59,6 +60,8 @@ Directory reads use bounded channels and progressive batches. Dropping a directo
 5. Progress and committed move events return to the UI. Cut entries are consumed only for confirmed moves of the matching clipboard generation. The worker records results, completes the recovery record when appropriate, and the UI refreshes affected views.
 
 `Location` represents local, SFTP and archive paths. Archive locations support browsing and explicit extraction into a local or SFTP folder. Extraction validates the bounded archive index, streams regular files into private staging and publishes each selected root through the existing conflict and publication flow. Copies can cross local/SFTP boundaries; moves between local and SFTP or between different SFTP backends are rejected. Saved locations contain connection coordinates and key paths; secrets belong in credential storage and authenticated sessions, not serialized settings.
+
+Password-protected ZIP creation streams AES-256 to the same private staging file used for plain archives. Encrypted extraction matches the decoder's entry offsets and sizes against the bounded index and reads through EOF before publishing. The dialog passes the password directly to its queued work. The operation description, result history and recovery record use file locations and outcomes.
 
 OS adapters are selected with `cfg`: file clipboard and native drag-out implementations cover macOS, Windows and Linux. Native drag-out keeps egui's internal targets until the pointer reaches the window boundary, then exports local files with copy permission. Windows uses OLE file-drop data; Linux uses a separate XDND worker for X11 or a private Wayland event queue on the existing display, observing the actual pointer-press serial. Linux protocol handling and data-pipe writes run outside the UI thread. The drag source never removes files; the receiver owns conflicts and transfer progress. Shared tests cannot establish native clipboard, drag, accessibility or window behavior on another OS.
 

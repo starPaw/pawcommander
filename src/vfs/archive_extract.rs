@@ -24,6 +24,7 @@ mod tests;
 pub(crate) fn extract_archive(
     sources: &[Location],
     directory: &Location,
+    password: Option<&str>,
     progress: &mut Progress,
     decide: impl FnMut(Conflict) -> Result<Answer, String>,
 ) -> Result<String, String> {
@@ -31,7 +32,7 @@ pub(crate) fn extract_archive(
         selected: sources.len(),
         ..Totals::default()
     };
-    let result = extract(sources, directory, progress, decide, &mut totals);
+    let result = extract(sources, directory, password, progress, decide, &mut totals);
     match result {
         Ok(()) => Ok(totals.text()),
         Err(TransferError::Cancelled) => {
@@ -74,6 +75,7 @@ impl Totals {
 fn extract(
     sources: &[Location],
     directory: &Location,
+    password: Option<&str>,
     progress: &mut Progress,
     mut decide: impl FnMut(Conflict) -> Result<Answer, String>,
     totals: &mut Totals,
@@ -94,7 +96,7 @@ fn extract(
     if let Some(path) = sources.first().and_then(Location::archive_source) {
         progress.item(path);
     }
-    let (mut archive, trees) = Extraction::prepare(sources, &cancel)?;
+    let (mut archive, trees) = Extraction::prepare(sources, password, &cancel)?;
     totals.selected = trees.len();
     let parent = Parent::capture(directory)?;
     let targets = trees
@@ -230,7 +232,7 @@ fn verify_destination(parent: &Parent, directory: &Location) -> Result<(), Trans
 }
 
 fn unpack_tree(
-    archive: &mut Extraction,
+    archive: &mut Extraction<'_>,
     tree: &SelectedTree,
     payload: &Location,
     progress: &mut Progress,

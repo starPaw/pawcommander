@@ -1,3 +1,4 @@
+use super::protected_zip::{password_required, EntryReader, ProtectedZip};
 use super::{invalid, open_regular, Contents, Format, Index, Member};
 use crate::{
     fs_ops,
@@ -16,10 +17,12 @@ use std::{
 
 const MAX_OUTPUT_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 
-pub(crate) struct Extraction {
+pub(crate) struct Extraction<'a> {
     path: PathBuf,
     file: File,
     stamp: Metadata,
+    protected: ProtectedZip,
+    password: Option<&'a str>,
 }
 
 pub(crate) struct SelectedTree {
@@ -41,9 +44,10 @@ impl SelectedEntry {
     }
 }
 
-impl Extraction {
+impl<'a> Extraction<'a> {
     pub(crate) fn prepare(
         sources: &[Location],
+        password: Option<&'a str>,
         cancel: &Cancellation,
     ) -> Result<(Self, Vec<SelectedTree>), TransferError> {
         let first = sources.first().ok_or_else(selection_required)?;
@@ -60,10 +64,12 @@ impl Extraction {
         let parsed = Index::read(&file, stamp.len(), format, &|| cancel.is_requested());
         cancel.check()?;
         let index = parsed.map_err(|error| archive_read_error(path, error))?;
-        let archive = Self {
+        let mut archive = Self {
             path: path.into(),
             file,
             stamp,
+            protected: ProtectedZip::default(),
+            password: password.filter(|password| !password.is_empty()),
         };
         archive.verify_source()?;
 
@@ -98,6 +104,23 @@ impl Extraction {
                 bytes: start - budget,
             });
         }
+        let encrypted = trees
+            .iter()
+            .flat_map(|tree| &tree.entries)
+            .filter_map(|entry| match entry.contents {
+                Contents::Encrypted(member) => Some((member, entry.size)),
+                _ => None,
+            });
+        let prepared = ProtectedZip::read(
+            &archive.file,
+            archive.stamp.len(),
+            encrypted,
+            archive.password,
+            cancel,
+        );
+        cancel.check()?;
+        archive.protected = prepared.map_err(|error| archive_read_error(path, error))?;
+        archive.verify_source()?;
         Ok((archive, trees))
     }
 
@@ -169,6 +192,23 @@ impl Extraction {
                     copy_zip(path, entry.size, crc, input, output, progress)
                 }
             }
+            Contents::Encrypted(member) => {
+                let password = self.password.ok_or_else(password_required)?;
+                let mut reader = EntryReader {
+                    file: &self.file,
+                    cancel: &cancel,
+                };
+                let mut input = self.protected.open(member, &mut reader, password)?;
+                // Read through EOF in addition to enforcing the planned size.
+                // In AES ZIP, the reader authenticates the data at EOF.
+                copy_exact(path, entry.size, &mut input, output, progress).map_err(|error| {
+                    if error.kind() == io::ErrorKind::InvalidData {
+                        invalid("Неверный пароль или повреждены данные ZIP")
+                    } else {
+                        error
+                    }
+                })
+            }
             _ => Err(invalid("Недопустимая запись архива")),
         }
     }
@@ -206,10 +246,12 @@ impl Selection<'_> {
             Contents::Tar { offset } if offset.checked_add(member.size).is_none() => {
                 return Err(bad_data().into());
             }
-            Contents::Tar { .. } | Contents::Zip { .. } => member.size,
+            Contents::Tar { .. } | Contents::Zip { .. } | Contents::Encrypted(_) => member.size,
             contents => {
                 let reason = text(match contents {
-                    Contents::Encrypted => "Запись ZIP защищена паролем",
+                    Contents::UnsupportedEncryption => {
+                        "Шифрование или сжатие ZIP не поддерживается"
+                    }
                     Contents::UnsupportedCompression => "Метод сжатия ZIP не поддерживается",
                     _ => "Распаковка поддерживает только обычные файлы и папки",
                 });

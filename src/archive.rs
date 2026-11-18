@@ -1,5 +1,6 @@
 //! Archive formats and directory indexes. The index uses virtual member paths.
 mod extraction;
+mod protected_zip;
 mod writer;
 
 pub(crate) use extraction::{Extraction, SelectedTree};
@@ -75,7 +76,8 @@ enum Contents {
         crc: u32,
         deflate: bool,
     },
-    Encrypted,
+    Encrypted(protected_zip::Member),
+    UnsupportedEncryption,
     UnsupportedCompression,
     #[default]
     UnsupportedType,
@@ -249,8 +251,27 @@ impl Index {
             let compression = entry.compression_method();
             let contents = if !matches!(file_type, 0 | 0o100000 | 0o040000) {
                 Contents::UnsupportedType
-            } else if flags.is_encrypted() || flags.has_strong_encryption() || flags.is_masked() {
-                Contents::Encrypted
+            } else if flags.has_strong_encryption() || flags.is_masked() {
+                Contents::UnsupportedEncryption
+            } else if flags.is_encrypted() {
+                if is_dir
+                    || !matches!(
+                        compression,
+                        rawzip::CompressionMethod::STORE
+                            | rawzip::CompressionMethod::DEFLATE
+                            | rawzip::CompressionMethod::AES
+                    )
+                {
+                    Contents::UnsupportedEncryption
+                } else {
+                    Contents::Encrypted(protected_zip::Member {
+                        index: count - 1,
+                        header: entry.local_header_offset(),
+                        data: offset,
+                        length: end - offset,
+                        crc: entry.crc32(),
+                    })
+                }
             } else if is_dir {
                 Contents::Directory
             } else if matches!(

@@ -26,6 +26,7 @@ pub(crate) fn create_archive(
     directory: &Location,
     name: &str,
     format: Format,
+    password: Option<&str>,
     progress: &mut Progress,
 ) -> Result<String, String> {
     let name = archive_file_name(name, format)?;
@@ -36,7 +37,16 @@ pub(crate) fn create_archive(
             .map(|source| (source.clone(), Some(target.display()))),
     );
     let mut published = false;
-    let result = write_archive(sources, directory, &name, format, progress, &mut published);
+    let password = password.filter(|password| !password.is_empty());
+    let result = write_archive(
+        sources,
+        directory,
+        &name,
+        format,
+        password,
+        progress,
+        &mut published,
+    );
     let (outcome, reason) = match &result {
         Ok(()) => (Outcome::Completed, None),
         Err(error) => (
@@ -72,11 +82,15 @@ fn write_archive(
     directory: &Location,
     name: &str,
     format: Format,
+    password: Option<&str>,
     progress: &mut Progress,
     published: &mut bool,
 ) -> Result<(), TransferError> {
     if directory.is_archive() || sources.iter().any(Location::is_archive) {
         return Err(crate::archive::readonly().into());
+    }
+    if format == Format::Tar && password.is_some() {
+        return Err(crate::i18n::text("Пароль можно задать только для ZIP").into());
     }
     if sources.is_empty()
         || sources
@@ -93,6 +107,7 @@ fn write_archive(
 
     let mut plan = ArchivePlan {
         format,
+        protected: password.is_some(),
         limits: CreationLimits::default(),
         members: Vec::new(),
     };
@@ -116,7 +131,7 @@ fn write_archive(
     with_staging_typed(&target, Some(&cancel), |staging, _| {
         let payload = staging.join("payload");
         let output = StagedFile::open(&payload, cancel.clone())?;
-        let mut archive = ArchiveWriter::new(format, output);
+        let mut archive = ArchiveWriter::new(format, password, output)?;
         for member in &plan.members {
             member.append(&mut archive, progress, &cancel)?;
         }
@@ -162,6 +177,7 @@ fn ensure_absent(target: &Location) -> Result<(), TransferError> {
 
 struct ArchivePlan {
     format: Format,
+    protected: bool,
     limits: CreationLimits,
     members: Vec<ArchiveSource>,
 }
@@ -178,7 +194,8 @@ impl ArchivePlan {
         progress.item(source.path());
         let metadata = entry_metadata(&source)?.ok_or_else(|| changed_source(&source))?;
         let attributes = attributes(&source, &metadata)?;
-        self.limits.add(self.format, &name, attributes.directory)?;
+        self.limits
+            .add(self.format, &name, attributes.directory, self.protected)?;
         let children = if attributes.directory {
             Some(source_children(&source, cancel, true)?)
         } else {
@@ -218,7 +235,7 @@ struct ArchiveSource {
 impl ArchiveSource {
     fn append(
         &self,
-        archive: &mut ArchiveWriter<StagedFile>,
+        archive: &mut ArchiveWriter<'_, StagedFile>,
         progress: &mut Progress,
         cancel: &Cancellation,
     ) -> Result<(), TransferError> {
@@ -317,6 +334,7 @@ mod tests {
                 &root,
                 "result",
                 format,
+                None,
                 &mut progress,
             )
             .unwrap();
@@ -380,6 +398,7 @@ mod tests {
             &root,
             "cancelled",
             Format::Tar,
+            None,
             &mut progress,
         )
         .unwrap();
@@ -410,6 +429,7 @@ mod tests {
             &root,
             "occupied",
             Format::Tar,
+            None,
             &mut progress
         )
         .is_err());
@@ -431,7 +451,15 @@ mod tests {
         let link = source.join("external-link");
         std::os::unix::fs::symlink(outside.path(), link.path()).unwrap();
         let mut progress = Progress::default();
-        assert!(create_archive(&[source], &root, "archive", Format::Zip, &mut progress).is_err());
+        assert!(create_archive(
+            &[source],
+            &root,
+            "archive",
+            Format::Zip,
+            None,
+            &mut progress
+        )
+        .is_err());
         assert!(!root.join("archive.zip").path().exists());
         assert!(staging(temp.path()).is_none());
         assert_eq!(fs::read(outside.path()).unwrap(), DATA);

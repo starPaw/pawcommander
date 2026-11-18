@@ -16,6 +16,7 @@ use std::rc::Rc;
 use std::sync::mpsc;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
+use zeroize::{Zeroize, Zeroizing};
 
 pub(super) struct SelectionScan {
     pub(super) rule: Rule,
@@ -72,12 +73,14 @@ pub(super) enum Dialog {
         directory: Location,
         name: String,
         format: Format,
+        password: Zeroizing<String>,
     },
     ExtractArchive {
         sources: Vec<Location>,
         archive_directory: Location,
         other: Option<Location>,
         address: String,
+        password: Zeroizing<String>,
     },
     Trash {
         paths: Vec<Location>,
@@ -86,6 +89,18 @@ pub(super) enum Dialog {
         editing: Option<usize>,
         name: String,
     },
+}
+
+fn archive_password_field(ui: &mut egui::Ui, password: &mut String) {
+    let label = ui.label(crate::i18n::text("Пароль ZIP (необязательно)"));
+    let mut edit = egui::TextEdit::singleline(password)
+        .id_salt("archive_password")
+        .password(true)
+        .desired_width(f32::INFINITY)
+        .show(ui);
+    edit.response.response.labelled_by(label.id);
+    // The password field does not retain a second copy in egui's undo buffer.
+    edit.state.clear_undoer();
 }
 
 fn extraction_destination(
@@ -465,7 +480,7 @@ impl PawCommander {
                     }
                 }
                 Dialog::BatchRename(editor) => editor.show(ui, self.dialog_focus),
-                Dialog::CreateArchive { sources, directory, name, format } => {
+                Dialog::CreateArchive { sources, directory, name, format, password } => {
                     ui.label(crate::tr_format!("Выбрано объектов: {}", "Selected items: {}", sources.len()));
                     let label = ui.label(crate::i18n::text("Имя архива"));
                     let edit = ui.add(egui::TextEdit::singleline(name).desired_width(f32::INFINITY));
@@ -478,12 +493,17 @@ impl PawCommander {
                         ui.selectable_value(format, Format::Zip, "ZIP");
                         ui.selectable_value(format, Format::Tar, "TAR");
                     });
+                    if *format == Format::Zip {
+                        archive_password_field(ui, password);
+                    } else {
+                        password.zeroize();
+                    }
                     match fs_ops::archive_file_name(name, *format) {
                         Ok(file) => { ui.label(directory.join(file).display()); }
                         Err(error) => { ui.label(error); }
                     }
                 }
-                Dialog::ExtractArchive { sources, archive_directory, other, address } => {
+                Dialog::ExtractArchive { sources, archive_directory, other, address, password } => {
                     ui.label(crate::tr_format!("Выбрано объектов: {}", "Selected items: {}", sources.len()));
                     let label = ui.label(crate::i18n::text("Папка для распаковки"));
                     let response = ui.add(egui::TextEdit::singleline(address).desired_width(f32::INFINITY)).labelled_by(label.id);
@@ -502,6 +522,9 @@ impl PawCommander {
                     }
                     if let Err(error) = extraction_destination(address, archive_directory, other.as_ref()) {
                         ui.colored_label(colors.error, error);
+                    }
+                    if sources.first().and_then(Location::archive_source).and_then(Format::from_path) == Some(Format::Zip) {
+                        archive_password_field(ui, password);
                     }
                 }
                 Dialog::WorkspaceName { editing, name } => {
@@ -713,12 +736,20 @@ impl PawCommander {
                     directory,
                     name,
                     format,
+                    password,
                 } => {
                     if let Ok(file) = fs_ops::archive_file_name(&name, format) {
                         let label = Command::CreateArchive.label();
                         let description = format!("{label} · {}", directory.join(file));
                         self.start_stoppable_job(ctx, label, description, move |progress| {
-                            fs_ops::create_archive(&sources, &directory, &name, format, progress)
+                            fs_ops::create_archive(
+                                &sources,
+                                &directory,
+                                &name,
+                                format,
+                                Some(password.as_str()),
+                                progress,
+                            )
                         });
                     }
                 }
@@ -727,6 +758,7 @@ impl PawCommander {
                     archive_directory,
                     other,
                     address,
+                    password,
                 } => {
                     if let Ok(directory) =
                         extraction_destination(&address, &archive_directory, other.as_ref())
@@ -738,7 +770,13 @@ impl PawCommander {
                             label,
                             description,
                             move |progress, decide| {
-                                fs_ops::extract_archive(&sources, &directory, progress, decide)
+                                fs_ops::extract_archive(
+                                    &sources,
+                                    &directory,
+                                    Some(password.as_str()),
+                                    progress,
+                                    decide,
+                                )
                             },
                         );
                     }
