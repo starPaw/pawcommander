@@ -29,7 +29,34 @@ use std::{
     },
 };
 
+unsafe extern "C" {
+    fn paw_drag_escape_listen() -> i32;
+    fn paw_drag_escape_start(window: isize) -> *mut NSObject;
+    fn paw_drag_escape_stop(guard: &NSObject);
+}
+
+pub fn listen_for_escape() -> i32 {
+    // SAFETY: the helper enters its own event loop on its main thread.
+    unsafe { paw_drag_escape_listen() }
+}
+
+struct EscapeListener(Retained<NSObject>);
+
+impl EscapeListener {
+    fn stop(&self) {
+        // SAFETY: the object owns only this drag's private control pipe.
+        unsafe { paw_drag_escape_stop(&self.0) };
+    }
+}
+
+impl Drop for EscapeListener {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 struct SourceState {
+    escape: EscapeListener,
     // 0: running, 1: cancelled, 2: accepted by the destination.
     result: Arc<AtomicU8>,
     ctx: egui::Context,
@@ -86,6 +113,7 @@ define_class!(
 
         #[unsafe(method(draggingSession:endedAtPoint:operation:))]
         fn ended(&self, _: &NSDraggingSession, point: NSPoint, operation: NSDragOperation) {
+            self.ivars().escape.stop();
             self.ivars().moved(point);
             self.ivars()
                 .result
@@ -255,7 +283,13 @@ impl NativeDrag {
             ))?;
         let result = Arc::new(AtomicU8::new(0));
         let position = Arc::new(Mutex::new(None));
+        // SAFETY: the bridge returns an owned token for this window or null.
+        let token = unsafe { Retained::from_raw(paw_drag_escape_start(window.windowNumber())) }
+            .ok_or(crate::i18n::text(
+                "Не удалось получить событие перетаскивания",
+            ))?;
         let source = DragSource::alloc(mtm).set_ivars(SourceState {
+            escape: EscapeListener(token),
             result: result.clone(),
             ctx: ctx.clone(),
             // SAFETY: the borrowed live NSView is retained for the session.
