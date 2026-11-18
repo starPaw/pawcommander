@@ -365,6 +365,11 @@ pub(super) fn entry_widget(
                     idle && !tab.selected.is_empty(),
                 ),
                 (
+                    crate::i18n::text("Создать архив…"),
+                    Action::CreateArchive,
+                    !tab.selected.is_empty(),
+                ),
+                (
                     if path.remote() {
                         crate::i18n::text("Удалить навсегда…")
                     } else {

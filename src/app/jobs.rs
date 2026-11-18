@@ -143,13 +143,25 @@ impl PawCommander {
         let label = crate::i18n::text("Массовое переименование");
         let folder = plan.directory().display();
         let description = format!("{label} ({}) · {folder}", plan.changes);
+        self.start_stoppable_job(ctx, label, description, move |progress| {
+            plan.apply(progress)
+        });
+    }
+
+    pub(super) fn start_stoppable_job(
+        &mut self,
+        ctx: &egui::Context,
+        label: &str,
+        description: String,
+        work: impl FnOnce(&mut Progress) -> Result<String, String> + Send + 'static,
+    ) {
         let (_, events) = mpsc::channel();
         self.submit_job(
             ctx,
             PendingJob {
                 label: label.into(),
                 description,
-                work: Box::new(move |progress| plan.apply(progress)),
+                work: Box::new(work),
                 transfer: Some(TransferInteraction {
                     events,
                     cut_generation: None,

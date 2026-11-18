@@ -127,6 +127,7 @@ pub(crate) struct Snapshot {
     pub transfer: Option<Transfer>,
     pub verification: Option<Verification>,
     pub total_written: u64,
+    pub reading_inputs: bool,
 }
 
 #[derive(Clone)]
@@ -336,6 +337,27 @@ impl Progress {
         })
     }
 
+    /// Feed an archive from a bounded source while reporting bytes consumed.
+    pub(crate) fn read_stream(
+        &mut self,
+        path: &Path,
+        expected: u64,
+        input: impl Read,
+        consume: impl FnOnce(&mut dyn Read) -> io::Result<()>,
+    ) -> io::Result<u64> {
+        self.current.reading_inputs = true;
+        self.copy_tracked(path, Some(expected), |progress| {
+            let mut reader = ProgressReader {
+                input: input.take(expected),
+                progress,
+                bytes: 0,
+            };
+            consume(&mut reader)?;
+            reader.progress.check_cancelled()?;
+            Ok(reader.bytes)
+        })
+    }
+
     pub fn copy_local(
         &mut self,
         path: &Path,
@@ -451,6 +473,23 @@ impl Progress {
         }
         self.current.total_written = self.current.total_written.saturating_add(bytes);
         self.publish(now, first_write);
+    }
+}
+
+struct ProgressReader<'a, R> {
+    input: R,
+    progress: &'a mut Progress,
+    bytes: u64,
+}
+
+impl<R: Read> Read for ProgressReader<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.progress.check_cancelled()?;
+        let count = self.input.read(buffer)?;
+        self.progress.check_cancelled()?;
+        self.bytes += count as u64;
+        self.progress.wrote(count as u64);
+        Ok(count)
     }
 }
 

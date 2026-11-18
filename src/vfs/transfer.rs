@@ -1608,6 +1608,19 @@ pub(super) enum SourceReader {
 }
 
 impl SourceReader {
+    pub(super) fn open(source: &Location) -> Result<Self, String> {
+        if let Some(path) = source.local() {
+            fs_ops::open_regular_source(path)
+                .map(Self::Local)
+                .map_err(err)
+        } else {
+            remote(source)?
+                .open(source.path())
+                .map(Self::Remote)
+                .map_err(err)
+        }
+    }
+
     pub(super) fn metadata(&mut self) -> Result<EntryMetadata, String> {
         match self {
             Self::Local(input) => input
@@ -1690,11 +1703,7 @@ pub(super) fn copy_tree_entry(
         return observe(source, CopyPhase::EntryCopied).map_err(Into::into);
     }
     cancel.check()?;
-    let mut input = if let Some(path) = source.local() {
-        SourceReader::Local(fs_ops::open_regular_source(path).map_err(err)?)
-    } else {
-        SourceReader::Remote(remote(source)?.open(source.path()).map_err(err)?)
-    };
+    let mut input = SourceReader::open(source)?;
     observe(source, CopyPhase::Opened)?;
     let opened_metadata = input.metadata()?;
     if progress
