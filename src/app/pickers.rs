@@ -89,6 +89,7 @@ impl PawCommander {
                 Command::NewFolder => idle && writable,
                 Command::Rename => idle && writable && has_selection && selected.len() == 1,
                 Command::Trash | Command::CreateArchive => idle && writable && has_selection,
+                Command::ExtractArchive => idle && !writable && has_selection,
                 Command::Properties => {
                     has_selection && selected.iter().all(|path| path.local().is_some())
                 }

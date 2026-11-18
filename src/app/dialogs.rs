@@ -73,6 +73,12 @@ pub(super) enum Dialog {
         name: String,
         format: Format,
     },
+    ExtractArchive {
+        sources: Vec<Location>,
+        archive_directory: Location,
+        other: Option<Location>,
+        address: String,
+    },
     Trash {
         paths: Vec<Location>,
     },
@@ -80,6 +86,37 @@ pub(super) enum Dialog {
         editing: Option<usize>,
         name: String,
     },
+}
+
+fn extraction_destination(
+    address: &str,
+    archive_directory: &Location,
+    other: Option<&Location>,
+) -> Result<Location, String> {
+    if address.trim().is_empty() {
+        return Err(crate::i18n::text("Укажите папку для распаковки").into());
+    }
+    if address == archive_directory.display() {
+        return Ok(archive_directory.clone());
+    }
+    if let Some(other) = other
+        && address == other.display()
+    {
+        return Ok(other.clone());
+    }
+    let base = if address.starts_with("sftp:") {
+        other
+            .filter(|location| location.remote())
+            .unwrap_or(archive_directory)
+    } else {
+        archive_directory
+    };
+    let destination = fs_ops::resolve(address, base)?;
+    if destination.is_archive() {
+        Err(crate::archive::readonly().into())
+    } else {
+        Ok(destination)
+    }
 }
 
 #[derive(Clone)]
@@ -351,6 +388,7 @@ impl PawCommander {
             Dialog::Rename { .. } => crate::i18n::text("Переименовать"),
             Dialog::BatchRename(_) => crate::i18n::text("Массовое переименование"),
             Dialog::CreateArchive { .. } => Command::CreateArchive.label(),
+            Dialog::ExtractArchive { .. } => Command::ExtractArchive.label(),
             Dialog::WorkspaceName { editing, .. } => {
                 if editing.is_some() {
                     crate::i18n::text("Переименовать рабочее пространство")
@@ -445,6 +483,27 @@ impl PawCommander {
                         Err(error) => { ui.label(error); }
                     }
                 }
+                Dialog::ExtractArchive { sources, archive_directory, other, address } => {
+                    ui.label(crate::tr_format!("Выбрано объектов: {}", "Selected items: {}", sources.len()));
+                    let label = ui.label(crate::i18n::text("Папка для распаковки"));
+                    let response = ui.add(egui::TextEdit::singleline(address).desired_width(f32::INFINITY)).labelled_by(label.id);
+                    if self.dialog_focus {
+                        response.request_focus();
+                    }
+                    if let Some(other) = other {
+                        ui.horizontal_wrapped(|ui| {
+                            if ui.button(crate::i18n::text("Папка с архивом")).clicked() {
+                                *address = archive_directory.display();
+                            }
+                            if ui.button(crate::i18n::text("Папка в соседней панели")).clicked() {
+                                *address = other.display();
+                            }
+                        });
+                    }
+                    if let Err(error) = extraction_destination(address, archive_directory, other.as_ref()) {
+                        ui.colored_label(colors.error, error);
+                    }
+                }
                 Dialog::WorkspaceName { editing, name } => {
                     if editing.is_none() {
                         for (label, pane) in [
@@ -494,6 +553,7 @@ impl PawCommander {
                 }
                 Dialog::BatchRename(editor) => editor.can_apply(),
                 Dialog::CreateArchive { name, format, .. } => fs_ops::archive_file_name(name, *format).is_ok(),
+                Dialog::ExtractArchive { address, archive_directory, other, .. } => extraction_destination(address, archive_directory, other.as_ref()).is_ok(),
                 Dialog::WorkspaceName { editing, name } => {
                     !name.trim().is_empty() && !self.workspace_name_taken(name, *editing)
                 }
@@ -513,6 +573,8 @@ impl PawCommander {
                     crate::i18n::text("Переименовать")
                 } else if matches!(dialog, Dialog::CreateArchive { .. }) {
                     crate::i18n::text("Создать")
+                } else if matches!(dialog, Dialog::ExtractArchive { .. }) {
+                    crate::i18n::text("Распаковать")
                 } else {
                     crate::i18n::text("Сохранить")
                 };
@@ -525,7 +587,7 @@ impl PawCommander {
                 confirm = ui.add_enabled(valid, button).clicked();
             });
             let submit_on_enter = match dialog {
-                Dialog::Trash { .. } | Dialog::BatchRename(_) | Dialog::CreateArchive { .. } => false,
+                Dialog::Trash { .. } | Dialog::BatchRename(_) | Dialog::CreateArchive { .. } | Dialog::ExtractArchive { .. } => false,
                 // The Enter that opens the dialog belongs to its sidebar control.
                 Dialog::WorkspaceName { .. } | Dialog::SelectionRule { .. } => !self.dialog_focus,
                 _ => true,
@@ -658,6 +720,27 @@ impl PawCommander {
                         self.start_stoppable_job(ctx, label, description, move |progress| {
                             fs_ops::create_archive(&sources, &directory, &name, format, progress)
                         });
+                    }
+                }
+                Dialog::ExtractArchive {
+                    sources,
+                    archive_directory,
+                    other,
+                    address,
+                } => {
+                    if let Ok(directory) =
+                        extraction_destination(&address, &archive_directory, other.as_ref())
+                    {
+                        let label = Command::ExtractArchive.label();
+                        let description = format!("{label} · {}", directory.display());
+                        self.start_conflict_job(
+                            ctx,
+                            label,
+                            description,
+                            move |progress, decide| {
+                                fs_ops::extract_archive(&sources, &directory, progress, decide)
+                            },
+                        );
                     }
                 }
                 Dialog::WorkspaceName { editing, name } => {

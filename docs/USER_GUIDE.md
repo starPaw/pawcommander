@@ -24,13 +24,17 @@ Opening a local or SFTP folder shows entries progressively while **Reading folde
 
 Visible folders refresh in the background after the previous read finishes: approximately every two seconds locally and every ten seconds for SFTP. Selection is retained by path; filters, sorting, and scroll offsets are preserved. Hidden panes and inactive tabs are not polled. SFTP polling uses an existing authenticated session and skips a busy refresh or unavailable session without clearing the listing or prompting for credentials. Automatic refresh pauses during file operations and dragging. Large or slow folders may take longer. Use `F5` to refresh manually. The selected local file's preview reloads when observed metadata changes; this is not a content watcher.
 
-## Browse and create ZIP and TAR archives
+## ZIP and TAR archives
 
 Double-click a local `.zip` or uncompressed `.tar` file, or select it and press `Enter`. PawCommander opens the archive in the current pane and reads its directory structure and metadata. **Open** in the search results pane also opens the archive in the active pane. Browse nested folders from the file list. From the archive root, use **Parent folder** to return to the folder containing the archive. Use **Back** and **Forward** to revisit locations, and **Refresh** to reread an archive after it changes.
 
-Archive browsing is read-only. Entries stay inside the archive while you browse. PawCommander reports unreadable archives and invalid member paths in the pane. The browser indexes up to 50,000 items, including implied folders, and supports up to 64 path levels.
+Entries stay inside the archive while you browse. PawCommander reports unreadable archives and invalid member paths in the pane. The browser indexes up to 50,000 items, including implied folders, and supports up to 64 path levels.
 
 Select files or folders and choose **Create archive…** from the context menu or **Create archive** from the command palette. Choose ZIP (Deflate) or TAR (uncompressed) and enter a name. The queue displays progress and lets you **Stop** the operation. The completed archive appears in the current folder, including on SFTP. Choose an unused name to keep existing files. PawCommander archives regular files and folders, including empty folders. Symbolic links and special files require a different selection.
+
+Inside an archive, select the entries you need and choose **Extract…** from the context menu or **Extract selected entries** from the command palette. Enter a destination or use the folder in the other pane, including an SFTP connection. For name conflicts, choose **Skip**, **Keep both**, or **Replace** for two different regular files. Folders publish as a whole after their files have been written, and existing folders can be kept under separate names. **Stop** removes the active partial output and keeps entries that already finished.
+
+Extraction supports unencrypted ZIP (Stored or Deflate) and uncompressed TAR with regular files and directories. Select up to 32 GiB of uncompressed data per operation. Links and special entries need a different selection. The extraction keeps the archive unchanged and checks ZIP data against its recorded size and CRC before saving it.
 
 ## Selection, clipboard, and drag and drop
 
