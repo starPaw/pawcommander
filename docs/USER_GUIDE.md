@@ -32,9 +32,11 @@ Entries stay inside the archive while you browse. PawCommander reports unreadabl
 
 Select files or folders and choose **Create archive…** from the context menu or **Create archive** from the command palette. Choose ZIP (Deflate) or TAR (uncompressed) and enter a name. The queue displays progress and lets you **Stop** the operation. The completed archive appears in the current folder, including on SFTP. Choose an unused name to keep existing files. PawCommander archives regular files and folders, including empty folders. Symbolic links and special files require a different selection.
 
+Enter an optional password when creating a ZIP to encrypt file contents with AES-256. Entry names remain visible when browsing. Leave the password field empty to create a plain ZIP.
+
 Inside an archive, select the entries you need and choose **Extract…** from the context menu or **Extract selected entries** from the command palette. Enter a destination or use the folder in the other pane, including an SFTP connection. For name conflicts, choose **Skip**, **Keep both**, or **Replace** for two different regular files. Folders publish as a whole after their files have been written, and existing folders can be kept under separate names. **Stop** removes the active partial output and keeps entries that already finished.
 
-Extraction supports unencrypted ZIP (Stored or Deflate) and uncompressed TAR with regular files and directories. Select up to 32 GiB of uncompressed data per operation. Links and special entries need a different selection. The extraction keeps the archive unchanged and checks ZIP data against its recorded size and CRC before saving it.
+Extraction supports ZIP (Stored or Deflate) and uncompressed TAR with regular files and directories. For protected ZIP files, enter the password in the extract dialog. PawCommander reads WinZip AES and legacy ZipCrypto entries. It checks recorded sizes and authenticates AES entries before publishing them. An incorrect password leaves the affected output unpublished. Select up to 32 GiB of uncompressed data per operation. Links and special entries need a different selection. The application keeps the password in memory for the operation.
 
 ## Selection, clipboard, and drag and drop
 

@@ -1,6 +1,6 @@
 use super::{member_path, Format, MAX_ENTRIES, MAX_INDEX_BYTES, MAX_METADATA_BYTES};
 use flate2::{write::DeflateEncoder, Compression};
-use rawzip::time::UtcDateTime;
+use rawzip::time::{DosDateTime, UtcDateTime};
 use std::{
     io::{self, Read, Write},
     path::Path,
@@ -21,7 +21,13 @@ pub(crate) struct CreationLimits {
 }
 
 impl CreationLimits {
-    pub(crate) fn add(&mut self, format: Format, name: &str, directory: bool) -> io::Result<()> {
+    pub(crate) fn add(
+        &mut self,
+        format: Format,
+        name: &str,
+        directory: bool,
+        protected: bool,
+    ) -> io::Result<()> {
         let path = member_path(name.as_bytes())?;
         let length = name.len();
         if path.as_os_str().is_empty()
@@ -34,7 +40,10 @@ impl CreationLimits {
         // Include the ZIP local headers, directory records and end-of-directory
         // search, or the TAR headers, GNU long names and trailer.
         self.metadata_bytes += match format {
-            Format::Zip => 160 + 2 * (length + usize::from(directory)),
+            Format::Zip => {
+                160 + 2 * (length + usize::from(directory))
+                    + 22 * usize::from(protected && !directory)
+            }
             Format::Tar if length >= 100 => 1024 + (length + 1).next_multiple_of(512),
             Format::Tar => 512,
         };
@@ -54,17 +63,28 @@ impl CreationLimits {
     }
 }
 
-pub(crate) enum ArchiveWriter<W: Write> {
+pub(crate) enum ArchiveWriter<'a, W: Write> {
     Zip(rawzip::ZipArchiveWriter<W>),
+    ProtectedZip {
+        writer: Box<zip::ZipWriter<zip::write::StreamWriter<W>>>,
+        password: &'a str,
+    },
     Tar(tar::Builder<W>),
 }
 
-impl<W: Write> ArchiveWriter<W> {
-    pub(crate) fn new(format: Format, output: W) -> Self {
-        match format {
-            Format::Zip => Self::Zip(rawzip::ZipArchiveWriter::new(output)),
-            Format::Tar => Self::Tar(tar::Builder::new(output)),
-        }
+impl<'a, W: Write> ArchiveWriter<'a, W> {
+    pub(crate) fn new(format: Format, password: Option<&'a str>, output: W) -> io::Result<Self> {
+        Ok(match (format, password) {
+            (Format::Zip, Some(password)) => Self::ProtectedZip {
+                writer: Box::new(zip::ZipWriter::new_stream(output)),
+                password,
+            },
+            (Format::Zip, None) => Self::Zip(rawzip::ZipArchiveWriter::new(output)),
+            (Format::Tar, None) => Self::Tar(tar::Builder::new(output)),
+            (Format::Tar, Some(_)) => {
+                return Err(super::invalid("Пароль можно задать только для ZIP"))
+            }
+        })
     }
 
     pub(crate) fn append(
@@ -104,6 +124,45 @@ impl<W: Write> ArchiveWriter<W> {
                 }
                 Ok(())
             }
+            Self::ProtectedZip { writer, password } => {
+                let mut options =
+                    zip::write::SimpleFileOptions::default().unix_permissions(attributes.mode);
+                if let Some(time) = attributes
+                    .modified
+                    .and_then(|time| i64::try_from(time).ok())
+                {
+                    let time = DosDateTime::from(&UtcDateTime::from_unix(time));
+                    let time = zip::DateTime::from_date_and_time(
+                        time.year(),
+                        time.month(),
+                        time.day(),
+                        time.hour(),
+                        time.minute(),
+                        time.second(),
+                    );
+                    if let Ok(time) = time {
+                        options = options.last_modified_time(time);
+                    }
+                }
+                if attributes.directory {
+                    writer
+                        .add_directory(format!("{name}/"), options)
+                        .map_err(super::protected_zip::zip_error)?;
+                } else {
+                    // Reserve ZIP64 before streaming for sizes near 4 GiB, where
+                    // Deflate overhead could cross the 32-bit boundary.
+                    let large = attributes.size >= zip::ZIP64_BYTES_THR - 16 * 1024 * 1024;
+                    let options = options
+                        .large_file(large)
+                        .compression_method(zip::CompressionMethod::Deflated)
+                        .with_aes_encryption(zip::AesMode::Aes256, password);
+                    writer
+                        .start_file(name, options)
+                        .map_err(super::protected_zip::zip_error)?;
+                    io::copy(&mut input, writer)?;
+                }
+                Ok(())
+            }
             Self::Tar(tar) => {
                 let mut header = tar::Header::new_gnu();
                 header.set_entry_type(if attributes.directory {
@@ -122,6 +181,10 @@ impl<W: Write> ArchiveWriter<W> {
     pub(crate) fn finish(self) -> io::Result<W> {
         match self {
             Self::Zip(zip) => zip.finish().map_err(zip_io),
+            Self::ProtectedZip { writer, .. } => writer
+                .finish()
+                .map(|stream| stream.into_inner())
+                .map_err(super::protected_zip::zip_error),
             Self::Tar(tar) => tar.into_inner(),
         }
     }

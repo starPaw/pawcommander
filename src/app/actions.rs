@@ -447,6 +447,7 @@ impl PawCommander {
                         directory: self.tab().path.clone(),
                         name: crate::i18n::text("Архив").into(),
                         format: crate::archive::Format::Zip,
+                        password: zeroize::Zeroizing::new(String::new()),
                     });
                     self.dialog_focus = true;
                 }
@@ -473,6 +474,7 @@ impl PawCommander {
                         address: archive_directory.display(),
                         archive_directory,
                         other,
+                        password: zeroize::Zeroizing::new(String::new()),
                     });
                     self.dialog_focus = true;
                 }

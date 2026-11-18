@@ -650,13 +650,22 @@ fn check_sftp_archive_round_trip(remote_root: &Location) {
     fs::create_dir_all(source.join("Empty").path()).unwrap();
     let file = source.join("file.txt");
     fs::write(file.path(), b"SFTP archive contents").unwrap();
-    for (format, name) in [(Format::Zip, "created.zip"), (Format::Tar, "created.tar")] {
+    for (format, name, password) in [
+        (Format::Zip, "created.zip", None),
+        (Format::Tar, "created.tar", None),
+        (
+            Format::Zip,
+            "protected.zip",
+            Some("disposable SFTP archive secret"),
+        ),
+    ] {
         let mut progress = Progress::default();
         create_archive(
             std::slice::from_ref(&source),
             &parent,
             name,
             format,
+            password,
             &mut progress,
         )
         .unwrap();
@@ -679,13 +688,14 @@ fn check_sftp_archive_round_trip(remote_root: &Location) {
             &parent,
             name,
             format,
+            password,
             &mut progress
         )
         .is_err());
         assert_eq!(fs::read(target.path()).unwrap(), created);
-        let extracted = parent.join(format!("extracted-{}", format.extension()));
+        let extracted = parent.join(format!("extracted-{name}"));
         fs::create_dir(extracted.path()).unwrap();
-        extract_archive(&[location], &extracted, &mut progress, |_| {
+        extract_archive(&[location], &extracted, password, &mut progress, |_| {
             Err("unexpected extraction conflict".into())
         })
         .unwrap();
@@ -697,7 +707,7 @@ fn check_sftp_archive_round_trip(remote_root: &Location) {
         assert_eq!(fs::read_dir(extracted.path()).unwrap().count(), 1);
     }
     assert_eq!(fs::read(file.path()).unwrap(), b"SFTP archive contents");
-    assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 5);
+    assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 7);
     fs::remove_dir_all(parent.path()).unwrap();
 }
 

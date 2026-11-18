@@ -36,6 +36,7 @@ fn extracts_only_the_selected_paths_from_both_formats() {
             &input,
             "source",
             format,
+            None,
             &mut progress,
         )
         .unwrap();
@@ -47,6 +48,7 @@ fn extracts_only_the_selected_paths_from_both_formats() {
         extract_archive(
             &[original.join("Nested"), original.join("zero.txt")],
             &output,
+            None,
             &mut progress,
             unexpected_conflict,
         )
@@ -67,6 +69,212 @@ fn extracts_only_the_selected_paths_from_both_formats() {
             .all(|item| item.outcome == Outcome::Completed));
         no_staging(&output);
     }
+}
+
+#[test]
+fn password_zip_uses_aes_and_keeps_secrets_out_of_results() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = Location::Local(temp.path().into());
+    let folder = root.join("Folder");
+    fs::create_dir_all(folder.join("Empty").path()).unwrap();
+    let bytes = b"encrypted ZIP bytes cross multiple output buffers\n".repeat(7000);
+    fs::write(folder.join("данные.txt").path(), &bytes).unwrap();
+    fs::write(folder.join("zero").path(), b"").unwrap();
+    let password = " fixture-архив-2026 secret ";
+    let mut progress = Progress::default();
+    create_archive(
+        std::slice::from_ref(&folder),
+        &root,
+        "locked",
+        Format::Zip,
+        Some(password),
+        &mut progress,
+    )
+    .unwrap();
+    let archive = root.join("locked.zip");
+    let mut buffer = vec![0; rawzip::RECOMMENDED_BUFFER_SIZE];
+    let raw =
+        rawzip::ZipArchive::from_seekable(fs::File::open(archive.path()).unwrap(), &mut buffer)
+            .unwrap();
+    let mut entries = raw.entries(&mut buffer);
+    let mut encrypted = 0;
+    while let Some(entry) = entries.next_entry().unwrap() {
+        if !entry.is_dir() {
+            assert!(entry.flags().is_encrypted());
+            assert_eq!(entry.compression_method(), rawzip::CompressionMethod::AES);
+            assert!(entry
+                .extra_fields()
+                .any(|(id, data)| id == rawzip::extra_fields::ExtraFieldId::AES
+                    && data.get(4) == Some(&3)));
+            encrypted += 1;
+        }
+    }
+    assert_eq!(encrypted, 2);
+
+    let dest = root.join("out");
+    fs::create_dir(dest.path()).unwrap();
+    let selection = archive.browse_archive().unwrap().join("Folder");
+    let missing = extract_archive(
+        std::slice::from_ref(&selection),
+        &dest,
+        None,
+        &mut progress,
+        unexpected_conflict,
+    );
+    assert!(missing.as_ref().is_err_and(
+        |message| message.contains(crate::i18n::text("Укажите пароль для распаковки ZIP"))
+    ));
+    assert_eq!(fs::read_dir(dest.path()).unwrap().count(), 0);
+
+    // AES ZIP has a short password verifier. Pick a definitely rejected test
+    // password so this regression never depends on a random salt collision.
+    let mut reference = zip::ZipArchive::new(fs::File::open(archive.path()).unwrap()).unwrap();
+    let index = reference.index_for_name("Folder/zero").unwrap();
+    let wrong = (1..=8)
+        .map(|n| format!("wrong fixture secret {n}"))
+        .find(|guess| {
+            matches!(
+                reference.by_index_decrypt(index, guess.as_bytes()),
+                Err(zip::result::ZipError::InvalidPassword)
+            )
+        })
+        .unwrap();
+    let part = selection.join("zero");
+    let wrong_result = extract_archive(
+        &[part],
+        &dest,
+        Some(&wrong),
+        &mut progress,
+        unexpected_conflict,
+    );
+    assert!(wrong_result
+        .as_ref()
+        .is_err_and(|message| message.contains(crate::i18n::text("Неверный пароль ZIP"))));
+    let failed_record = std::mem::take(&mut progress.results)
+        .finish("Extract".into(), 0, &wrong_result)
+        .unwrap();
+    let json = serde_json::to_string(&failed_record).unwrap();
+    assert!(!json.contains(&wrong) && !json.contains(password));
+    assert_eq!(fs::read_dir(dest.path()).unwrap().count(), 0);
+
+    let good = extract_archive(
+        &[selection],
+        &dest,
+        Some(password),
+        &mut progress,
+        unexpected_conflict,
+    );
+    assert!(good.is_ok(), "{good:?}");
+    assert_eq!(
+        fs::read(dest.join("Folder/данные.txt").path()).unwrap(),
+        bytes
+    );
+    assert!(dest.join("Folder/Empty").path().is_dir());
+    assert_eq!(
+        fs::metadata(dest.join("Folder/zero").path()).unwrap().len(),
+        0
+    );
+    let success_record = progress.results.finish("Extract".into(), 0, &good).unwrap();
+    assert!(!serde_json::to_string(&success_record)
+        .unwrap()
+        .contains(password));
+    no_staging(&dest);
+}
+
+#[test]
+fn a_bad_aes_authenticator_blocks_replacement_even_for_an_empty_member() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = Location::Local(temp.path().into());
+    let source = root.join("zero");
+    fs::write(source.path(), b"").unwrap();
+    let password = "disposable AES fixture password";
+    let mut progress = Progress::default();
+    create_archive(
+        std::slice::from_ref(&source),
+        &root,
+        "protected",
+        Format::Zip,
+        Some(password),
+        &mut progress,
+    )
+    .unwrap();
+    let archive = root.join("protected.zip");
+    let mut bytes = fs::read(archive.path()).unwrap();
+    let last_auth_byte = {
+        let zip = rawzip::ZipArchive::from_slice(&bytes).unwrap();
+        let mut entries = zip.entries();
+        let member = entries.next_entry().unwrap().unwrap();
+        (zip.get_entry(member.wayfinder())
+            .unwrap()
+            .compressed_data_range()
+            .1
+            - 1) as usize
+    };
+    bytes[last_auth_byte] ^= 1;
+    fs::write(archive.path(), &bytes).unwrap();
+    let before = b"existing destination";
+    fs::write(source.path(), before).unwrap();
+    let entry = archive.browse_archive().unwrap().join("zero");
+
+    let mut saw_conflict = false;
+    let result = extract_archive(&[entry], &root, Some(password), &mut progress, |conflict| {
+        assert!(conflict.can_replace);
+        saw_conflict = true;
+        Ok(Answer {
+            decision: Decision::Replace,
+            apply_to_group: false,
+        })
+    });
+    assert!(saw_conflict);
+    assert!(result
+        .as_ref()
+        .is_err_and(|message| message.contains(crate::i18n::text(
+            "Неверный пароль или повреждены данные ZIP"
+        ))));
+    assert_eq!(progress.results.items[0].outcome, Outcome::Failed);
+    assert_eq!(fs::read(source.path()).unwrap(), before);
+    assert_eq!(fs::read(archive.path()).unwrap(), bytes);
+    no_staging(&root);
+}
+
+#[test]
+fn reads_legacy_zipcrypto_and_keeps_tar_unencrypted() {
+    use zip::unstable::write::FileOptionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let root = Location::Local(temp.path().into());
+    let archive = root.join("legacy.zip");
+    let mut writer = zip::ZipWriter::new(fs::File::create(archive.path()).unwrap());
+    let password = "legacy fixture password";
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .with_deprecated_encryption(password.as_bytes())
+        .unwrap();
+    writer.start_file("legacy.txt", options).unwrap();
+    writer.write_all(b"legacy bytes").unwrap();
+    writer.finish().unwrap();
+    let file = archive.browse_archive().unwrap().join("legacy.txt");
+    let mut progress = Progress::default();
+    extract_archive(
+        &[file],
+        &root,
+        Some(password),
+        &mut progress,
+        unexpected_conflict,
+    )
+    .unwrap();
+    let output = root.join("legacy.txt");
+    assert_eq!(fs::read(output.path()).unwrap(), b"legacy bytes");
+    assert!(create_archive(
+        &[output],
+        &root,
+        "unsupported",
+        Format::Tar,
+        Some(password),
+        &mut progress
+    )
+    .is_err());
+    assert!(!root.join("unsupported.tar").path().exists());
+    no_staging(&root);
 }
 
 #[test]
@@ -91,6 +299,7 @@ fn conflicting_files_can_be_replaced_or_kept_with_reserved_names() {
             root.join("copy (2).txt"),
         ],
         &directory,
+        None,
         &mut progress,
         |conflict| {
             assert!(conflict.can_replace);
@@ -141,7 +350,7 @@ fn staged_output_is_withheld_for_crc_or_length_mismatch_and_volume_limit() {
         let mut progress = Progress::default();
         let source = archive.browse_archive().unwrap().join("item.txt");
         assert!(
-            extract_archive(&[source], &directory, &mut progress, |conflict| {
+            extract_archive(&[source], &directory, None, &mut progress, |conflict| {
                 assert!(conflict.can_replace);
                 prompts += 1;
                 Ok(Answer {
@@ -169,7 +378,7 @@ fn extracting_an_entry_cannot_replace_the_archive_itself() {
     let nested = source.browse_archive().unwrap().join("original.tar");
     let mut progress = Progress::default();
     assert!(
-        extract_archive(&[nested], &directory, &mut progress, |conflict| {
+        extract_archive(&[nested], &directory, None, &mut progress, |conflict| {
             assert!(!conflict.can_replace);
             Ok(Answer {
                 decision: Decision::Replace,
@@ -207,6 +416,7 @@ fn rejects_untrusted_paths_and_symlink_entries_before_any_write() {
     assert!(extract_archive(
         &[root.join("ordinary.txt")],
         &output,
+        None,
         &mut progress,
         unexpected_conflict
     )
@@ -224,6 +434,7 @@ fn rejects_untrusted_paths_and_symlink_entries_before_any_write() {
     assert!(extract_archive(
         &[root.join("Tree")],
         &output,
+        None,
         &mut progress,
         unexpected_conflict
     )
@@ -248,7 +459,7 @@ fn a_symlink_in_the_destination_is_not_used_as_an_output_directory() {
     tar.into_inner().unwrap();
     let tree = archive.browse_archive().unwrap().join("Folder");
     let mut progress = Progress::default();
-    extract_archive(&[tree], &destination, &mut progress, |conflict| {
+    extract_archive(&[tree], &destination, None, &mut progress, |conflict| {
         assert!(!conflict.can_replace);
         Ok(Answer {
             decision: Decision::KeepBoth,
@@ -302,6 +513,7 @@ fn stopping_a_stream_keeps_completed_entries_and_removes_the_active_payload() {
             root.join("last.txt"),
         ],
         &directory,
+        None,
         &mut progress,
         unexpected_conflict,
     )
