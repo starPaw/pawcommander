@@ -8,16 +8,16 @@ use crate::operations::{Cancellation, Progress, TransferError};
 use crate::result_history::Outcome;
 use std::collections::BTreeMap;
 
-const MAX_UNDO_ENTRIES: usize = 100_000;
+pub(super) const MAX_UNDO_ENTRIES: usize = 100_000;
 
 #[derive(Clone)]
-struct Parent {
-    location: Location,
+pub(super) struct Parent {
+    pub(super) location: Location,
     metadata: EntryMetadata,
 }
 
 impl Parent {
-    fn capture(location: &Location) -> Result<Self, String> {
+    pub(super) fn capture(location: &Location) -> Result<Self, String> {
         let location = location.with_path(canonical(location)?);
         let metadata = entry_metadata(&location)?.ok_or_else(unavailable)?;
         let parent = Self { location, metadata };
@@ -25,7 +25,7 @@ impl Parent {
         Ok(parent)
     }
 
-    fn verify(&self) -> Result<(), String> {
+    pub(super) fn verify(&self) -> Result<(), String> {
         let actual = entry_metadata(&self.location)?.ok_or_else(unavailable)?;
         let same = match (&self.metadata, &actual) {
             (EntryMetadata::Local(_), EntryMetadata::Local(actual)) => {
@@ -237,8 +237,12 @@ impl UndoBatch {
         self.weight
     }
 
+    pub(super) fn can_fit(&self, entries: usize) -> bool {
+        self.weight.saturating_add(entries) <= MAX_UNDO_ENTRIES
+    }
+
     pub(super) fn push(&mut self, entry: UndoEntry) {
-        if self.weight.saturating_add(entry.entries.len()) <= MAX_UNDO_ENTRIES {
+        if self.can_fit(entry.entries.len()) {
             self.weight += entry.entries.len();
             self.entries.push(entry);
         }

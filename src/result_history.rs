@@ -157,8 +157,7 @@ impl Results {
         Some(index)
     }
 
-    /// Expand only an already captured copy manifest; never perform extra I/O.
-    #[cfg(test)]
+    /// Expand an already captured manifest without performing any extra I/O.
     pub fn descendants(
         &mut self,
         source: &Location,

@@ -135,6 +135,33 @@ impl PawCommander {
         );
     }
 
+    pub(super) fn start_batch_rename(
+        &mut self,
+        ctx: &egui::Context,
+        plan: crate::vfs::BatchRenamePreview,
+    ) {
+        let label = crate::i18n::text("Массовое переименование");
+        let folder = plan.directory().display();
+        let description = format!("{label} ({}) · {folder}", plan.changes);
+        let (_, events) = mpsc::channel();
+        self.submit_job(
+            ctx,
+            PendingJob {
+                label: label.into(),
+                description,
+                work: Box::new(move |progress| plan.apply(progress)),
+                transfer: Some(TransferInteraction {
+                    events,
+                    cut_generation: None,
+                    conflict: None,
+                }),
+                cut: None,
+                retry_origin: None,
+                undo_origin: None,
+            },
+        );
+    }
+
     pub(super) fn submit_job(&mut self, ctx: &egui::Context, job: PendingJob) {
         if self.pending_jobs.len() >= MAX_PENDING_JOBS {
             if let Some(retry) = job.retry_origin {

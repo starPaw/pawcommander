@@ -421,11 +421,17 @@ impl PawCommander {
             }
             Action::Rename if !self.conflict_open() => {
                 let selected = self.selected();
-                if selected.len() == 1 {
+                if !selected.is_empty() {
                     self.remember_dialog_file_focus(ctx);
-                    let source = selected[0].clone();
-                    let name = file_name(&source);
-                    self.dialog = Some(Dialog::Rename { source, name });
+                    self.dialog = Some(if selected.len() == 1 {
+                        let source = selected.into_iter().next().unwrap();
+                        let name = file_name(&source);
+                        Dialog::Rename { source, name }
+                    } else {
+                        Dialog::BatchRename(Box::new(super::batch_rename::BatchRenameDialog::new(
+                            selected,
+                        )))
+                    });
                     self.dialog_focus = true;
                 }
             }

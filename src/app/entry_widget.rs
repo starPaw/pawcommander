@@ -362,7 +362,7 @@ pub(super) fn entry_widget(
                 (
                     crate::i18n::text("Переименовать…"),
                     Action::Rename,
-                    idle && tab.selected.len() == 1,
+                    idle && !tab.selected.is_empty(),
                 ),
                 (
                     if path.remote() {
