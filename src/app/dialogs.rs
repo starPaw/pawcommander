@@ -1,4 +1,5 @@
 use super::actions::SelectionChange;
+use super::batch_rename::BatchRenameDialog;
 use super::selection::{Rule, RuleKind};
 use super::state::Settings;
 use super::{file_name, PawCommander};
@@ -64,6 +65,7 @@ pub(super) enum Dialog {
         source: Location,
         name: String,
     },
+    BatchRename(Box<BatchRenameDialog>),
     Trash {
         paths: Vec<Location>,
     },
@@ -340,6 +342,7 @@ impl PawCommander {
             Dialog::SelectionRule { command, .. } => command.label(),
             Dialog::NewFolder { .. } => crate::i18n::text("Новая папка"),
             Dialog::Rename { .. } => crate::i18n::text("Переименовать"),
+            Dialog::BatchRename(_) => crate::i18n::text("Массовое переименование"),
             Dialog::WorkspaceName { editing, .. } => {
                 if editing.is_some() {
                     crate::i18n::text("Переименовать рабочее пространство")
@@ -357,7 +360,7 @@ impl PawCommander {
         };
         // The modal blocks file interactions while a concrete destination is being confirmed.
         egui::Modal::new(egui::Id::unique("file_dialog")).show(ctx, |ui| {
-            ui.set_width(430.0);
+            ui.set_width(if matches!(dialog, Dialog::BatchRename(_)) { 605.0 } else { 430.0 });
             ui.heading(title);
             ui.add_space(12.0);
             match &mut dialog {
@@ -415,6 +418,7 @@ impl PawCommander {
                         response.request_focus();
                     }
                 }
+                Dialog::BatchRename(editor) => editor.show(ui, self.dialog_focus),
                 Dialog::WorkspaceName { editing, name } => {
                     if editing.is_none() {
                         for (label, pane) in [
@@ -462,6 +466,7 @@ impl PawCommander {
                 Dialog::NewFolder { name, .. } | Dialog::Rename { name, .. } => {
                     !name.trim().is_empty()
                 }
+                Dialog::BatchRename(editor) => editor.can_apply(),
                 Dialog::WorkspaceName { editing, name } => {
                     !name.trim().is_empty() && !self.workspace_name_taken(name, *editing)
                 }
@@ -477,6 +482,8 @@ impl PawCommander {
                     if matches!(&dialog, Dialog::Trash { paths } if paths.iter().any(Location::remote)) { crate::i18n::text("Удалить навсегда") } else { crate::i18n::text("В корзину") }
                 } else if matches!(dialog, Dialog::SelectionRule { .. }) {
                     crate::i18n::text("Выделить")
+                } else if matches!(dialog, Dialog::BatchRename(_)) {
+                    crate::i18n::text("Переименовать")
                 } else {
                     crate::i18n::text("Сохранить")
                 };
@@ -489,7 +496,7 @@ impl PawCommander {
                 confirm = ui.add_enabled(valid, button).clicked();
             });
             let submit_on_enter = match dialog {
-                Dialog::Trash { .. } => false,
+                Dialog::Trash { .. } | Dialog::BatchRename(_) => false,
                 // The Enter that opens the dialog belongs to its sidebar control.
                 Dialog::WorkspaceName { .. } | Dialog::SelectionRule { .. } => !self.dialog_focus,
                 _ => true,
@@ -605,6 +612,11 @@ impl PawCommander {
                         })
                     },
                 ),
+                Dialog::BatchRename(editor) => {
+                    if let Some(plan) = (*editor).into_plan() {
+                        self.start_batch_rename(ctx, plan);
+                    }
+                }
                 Dialog::WorkspaceName { editing, name } => {
                     self.save_workspace_name(editing, name);
                 }

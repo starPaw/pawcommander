@@ -50,6 +50,14 @@ Incoming drops from a system file manager always copy. To drag local files into 
 
 Wayland outgoing drag uses the window's active pointer press and requires `wl_data_device_manager` version 3. It does not require the clipboard's data-control extension. Wayland clipboard copy/cut/paste separately needs `ext-data-control` or `wlr-data-control` as described above.
 
+## Batch rename
+
+Select at least two files or folders in one local or SFTP directory and press `F2`. Edit the template and choose **Preview names** to compare the current names with the proposed ones. **Rename** becomes available when the preview contains a change and all proposed names are valid and free.
+
+Use `{stem}` for the base name, `{ext}` for the extension including its dot, and `{n}` for a counter in the displayed selection order. Set the starting number and minimum digits for zero padding. For example, `photo-{n}{ext}` with three digits produces `photo-001.jpg`. The optional regular expression applies to the base name before the template. Use replacement groups such as `$1`, and double braces to include literal braces. Batch rename uses UTF-8 names. For folders, `{stem}` is the entire name.
+
+Existing names, including names held by other items in the selection, and colliding proposals block the batch before it starts. **Stop** or `Shift+Esc` stops between changes. After a stop or partial failure, **Result history** shows the confirmed renames and the remaining items. Use **Undo changes** in the same session to restore confirmed renames when their original names are still free and the renamed items can be verified.
+
 ## Copying, moving, and conflicts
 
 The operation panel shows the current item, elapsed time, and, when available, copied bytes, speed, and an estimate for the current file. One file operation runs at a time; browsing remains available. Further copies, moves, folder creation, renames, and deletions join a FIFO queue with room for 100 pending jobs. Expand **Queued** in the footer to inspect the order, move a pending job earlier or later, or **Remove from queue** before it starts. Removing a pending job makes no filesystem changes and creates no result-history record.

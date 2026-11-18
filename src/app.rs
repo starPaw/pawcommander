@@ -2,6 +2,7 @@
 
 mod actions;
 mod address_bar;
+mod batch_rename;
 mod bookmarks;
 mod clipboard;
 mod column_view;
