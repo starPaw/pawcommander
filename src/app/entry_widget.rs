@@ -262,7 +262,9 @@ pub(super) fn entry_widget(
     }
     paint_focus(ui, &response, 5);
     if idle && !archive_member && response.drag_started_by(egui::PointerButton::Primary) {
-        egui::DragAndDrop::set_payload(ui.ctx(), DragFiles(tab.drag_paths(index, visible)));
+        let icon = icons::file_icon(&entry.name, entry.is_dir);
+        let paths = tab.drag_paths(index, visible);
+        egui::DragAndDrop::set_payload(ui.ctx(), DragFiles { paths, icon });
         actions.push(Action::Focus(pane));
     }
     let on_checkbox = !grid

@@ -37,6 +37,12 @@ mod windows_file_id;
 mod zed;
 
 fn main() -> eframe::Result {
+    #[cfg(target_os = "macos")]
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new("--paw-drag-escape-listener"))
+    {
+        std::process::exit(native_drag::listen_for_escape());
+    }
     let start = std::env::args_os().nth(1).map(std::path::PathBuf::from);
     let viewport = eframe::egui::ViewportBuilder::default()
         .with_inner_size([1440.0, 860.0])

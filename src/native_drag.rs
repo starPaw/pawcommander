@@ -3,7 +3,7 @@
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
-pub use macos::NativeDrag;
+pub use macos::{listen_for_escape, NativeDrag};
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 mod desktop;

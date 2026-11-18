@@ -26,10 +26,6 @@ The result should be `OK`. A checksum verifies the downloaded bytes against the 
 
 The ZIP contains the app, this guide, release notes, the MIT license, third-party license notices, corresponding source for MPL-licensed components, and a build manifest identifying the source commit.
 
-## Known preview issue
-
-On macOS 27.0.1, Escape does not reliably cancel a file drag after Finder becomes active. Releasing the mouse can still copy the files. Use Cmd+C and Cmd+V for transfers to Finder until this is fixed. See `RELEASE_NOTES.md` in the ZIP for the remaining preview limits.
-
 ## Updates
 
 Quit PawCommander before replacing it with a newer copy in Applications. Automatic app updates are not included. Check the [Releases page](https://github.com/starPaw/pawcommander/releases) for updates.
