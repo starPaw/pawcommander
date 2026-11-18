@@ -640,10 +640,10 @@ fn check_cross_connection_partial_move(local_root: &Location, remote_root: &Loca
     }
 }
 
-fn check_sftp_archive_creation(remote_root: &Location) {
+fn check_sftp_archive_round_trip(remote_root: &Location) {
     use crate::archive::{Format, Index};
     use crate::result_history::Outcome;
-    use crate::vfs::create_archive;
+    use crate::vfs::{create_archive, extract_archive};
 
     let parent = remote_root.join("archive-creation");
     let source = parent.join("Folder");
@@ -683,9 +683,21 @@ fn check_sftp_archive_creation(remote_root: &Location) {
         )
         .is_err());
         assert_eq!(fs::read(target.path()).unwrap(), created);
+        let extracted = parent.join(format!("extracted-{}", format.extension()));
+        fs::create_dir(extracted.path()).unwrap();
+        extract_archive(&[location], &extracted, &mut progress, |_| {
+            Err("unexpected extraction conflict".into())
+        })
+        .unwrap();
+        assert!(extracted.join("Folder/Empty").path().is_dir());
+        assert_eq!(
+            fs::read(extracted.join("Folder/file.txt").path()).unwrap(),
+            b"SFTP archive contents"
+        );
+        assert_eq!(fs::read_dir(extracted.path()).unwrap().count(), 1);
     }
     assert_eq!(fs::read(file.path()).unwrap(), b"SFTP archive contents");
-    assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 3);
+    assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 5);
     fs::remove_dir_all(parent.path()).unwrap();
 }
 
@@ -757,7 +769,7 @@ fn openssh_round_trip_and_host_verification() {
     fs::create_dir(local_root.path()).unwrap();
     fs::create_dir(remote_root.path()).unwrap();
     super::undo::sftp_undo(&remote_root);
-    check_sftp_archive_creation(&remote_root);
+    check_sftp_archive_round_trip(&remote_root);
     let refresh_file = remote_root.join("external.txt");
     fs::write(refresh_file.path(), b"external edit").unwrap();
     let accessed = UNIX_EPOCH + Duration::from_secs(1_600_000_000);

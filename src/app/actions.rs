@@ -65,6 +65,7 @@ pub(super) enum Action {
     NewFolder,
     Rename,
     CreateArchive,
+    ExtractArchive,
     Trash,
     Transfer(TransferKind),
     Bookmark,
@@ -450,6 +451,32 @@ impl PawCommander {
                     self.dialog_focus = true;
                 }
             }
+            Action::ExtractArchive if !self.conflict_open() => {
+                let Some(parent) = self
+                    .tab()
+                    .path
+                    .archive_source()
+                    .and_then(std::path::Path::parent)
+                else {
+                    return;
+                };
+                let sources = self.selected();
+                if !sources.is_empty() {
+                    let archive_directory = Location::Local(parent.to_owned());
+                    let peer = self.panes[1 - self.active].tab().path.clone();
+                    let other =
+                        (self.settings.split && !peer.is_archive() && peer != archive_directory)
+                            .then_some(peer);
+                    self.remember_dialog_file_focus(ctx);
+                    self.dialog = Some(Dialog::ExtractArchive {
+                        sources,
+                        address: archive_directory.display(),
+                        archive_directory,
+                        other,
+                    });
+                    self.dialog_focus = true;
+                }
+            }
             Action::Trash if !self.conflict_open() => {
                 let paths = self.selected();
                 if !paths.is_empty() {
@@ -680,6 +707,7 @@ impl PawCommander {
                     | Action::Shortcut(
                         Command::Rename
                             | Command::CreateArchive
+                            | Command::ExtractArchive
                             | Command::Trash
                             | Command::Properties
                             | Command::CopyToPane

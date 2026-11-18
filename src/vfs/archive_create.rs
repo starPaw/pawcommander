@@ -1,5 +1,5 @@
 use super::location::{validate_name, Location};
-use super::sftp::remote;
+use super::staged_file::StagedFile;
 use super::transfer::{
     canonical, changed_source, entry_metadata, rename_for_publication, source_children,
     with_staging_typed, EntryMetadata, SourceReader, TransferSourceEntry,
@@ -8,14 +8,7 @@ use super::undo::Parent;
 use crate::archive::{ArchiveWriter, Attributes, CreationLimits, Format};
 use crate::operations::{Cancellation, Progress, TransferError};
 use crate::result_history::Outcome;
-use ssh2::{OpenFlags, OpenType};
-use std::{
-    collections::BTreeSet,
-    fs,
-    io::{self, BufWriter, Write},
-    path::Path,
-    time::UNIX_EPOCH,
-};
+use std::{collections::BTreeSet, io, path::Path, time::UNIX_EPOCH};
 
 pub(crate) fn archive_file_name(name: &str, format: Format) -> Result<String, String> {
     let name = name.trim();
@@ -122,7 +115,7 @@ fn write_archive(
 
     with_staging_typed(&target, Some(&cancel), |staging, _| {
         let payload = staging.join("payload");
-        let output = ArchiveOutput::open(&payload, cancel.clone())?;
+        let output = StagedFile::open(&payload, cancel.clone())?;
         let mut archive = ArchiveWriter::new(format, output);
         for member in &plan.members {
             member.append(&mut archive, progress, &cancel)?;
@@ -225,7 +218,7 @@ struct ArchiveSource {
 impl ArchiveSource {
     fn append(
         &self,
-        archive: &mut ArchiveWriter<ArchiveOutput>,
+        archive: &mut ArchiveWriter<StagedFile>,
         progress: &mut Progress,
         cancel: &Cancellation,
     ) -> Result<(), TransferError> {
@@ -298,81 +291,11 @@ fn attributes(source: &Location, metadata: &EntryMetadata) -> Result<Attributes,
     }
 }
 
-enum ArchiveFile {
-    Local(fs::File),
-    Remote(ssh2::File),
-}
-
-impl Write for ArchiveFile {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        match self {
-            Self::Local(file) => file.write(bytes),
-            Self::Remote(file) => file.write(bytes),
-        }
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        match self {
-            Self::Local(file) => file.flush(),
-            Self::Remote(file) => file.flush(),
-        }
-    }
-}
-
-struct ArchiveOutput {
-    file: BufWriter<ArchiveFile>,
-    cancel: Cancellation,
-}
-
-impl ArchiveOutput {
-    fn open(payload: &Location, cancel: Cancellation) -> Result<Self, TransferError> {
-        cancel.check()?;
-        let file = if let Some(path) = payload.local() {
-            let mut options = fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-            ArchiveFile::Local(options.open(path)?)
-        } else {
-            let flags = OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCLUSIVE;
-            ArchiveFile::Remote(
-                remote(payload)?
-                    .open_mode(payload.path(), flags, 0o600, OpenType::File)
-                    .map_err(super::err)?,
-            )
-        };
-        Ok(Self {
-            file: BufWriter::with_capacity(64 * 1024, file),
-            cancel,
-        })
-    }
-
-    fn close(mut self) -> Result<(), TransferError> {
-        self.flush()?;
-        match self.file.into_inner().map_err(|error| error.into_error())? {
-            ArchiveFile::Local(file) => file.sync_all()?,
-            ArchiveFile::Remote(mut file) => file.close().map_err(super::err)?,
-        }
-        Ok(())
-    }
-}
-
-impl Write for ArchiveOutput {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.cancel.check()?;
-        self.file.write(bytes)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.cancel.check()?;
-        self.file.flush()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::archive::Index;
+    use std::fs;
     use std::io::Read;
     use std::path::PathBuf;
 

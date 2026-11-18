@@ -34,6 +34,7 @@ pub enum Command {
     Properties,
     Rename,
     CreateArchive,
+    ExtractArchive,
     NewFolder,
     Trash,
     CopyToPane,
@@ -45,7 +46,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Self; 34] = [
+    pub const ALL: [Self; 35] = [
         Self::EditPath,
         Self::Filter,
         Self::Search,
@@ -73,6 +74,7 @@ impl Command {
         Self::Properties,
         Self::Rename,
         Self::CreateArchive,
+        Self::ExtractArchive,
         Self::NewFolder,
         Self::Trash,
         Self::CopyToPane,
@@ -111,6 +113,7 @@ impl Command {
             Self::Properties => "Свойства",
             Self::Rename => "Переименовать",
             Self::CreateArchive => "Создать архив",
+            Self::ExtractArchive => "Распаковать выбранное",
             Self::NewFolder => "Создать папку",
             Self::Trash => "В корзину с подтверждением",
             Self::CopyToPane => "Копировать в соседнюю панель",
@@ -190,7 +193,7 @@ impl Profile {
             FolderJump => (CMD_SHIFT, Key::J),
             Preview | EditInZed | CopyToPane | MoveToPane | TogglePinTab | DuplicateTab
             | SelectByMask | SelectByExtension | InvertSelection | RestoreSelection
-            | CreateArchive => return None,
+            | CreateArchive | ExtractArchive => return None,
         };
         Some(Chord::new(modifiers, key))
     }

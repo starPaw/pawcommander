@@ -961,7 +961,7 @@ fn publication_error(target: &Location, attempted: bool, error: String) -> Trans
     }
 }
 
-fn publish_item_typed(
+pub(super) fn publish_item_typed(
     payload: &Location,
     target: &Location,
     expected: Option<&EntryMetadata>,

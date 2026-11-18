@@ -330,6 +330,11 @@ pub(super) fn entry_widget(
                 ui.close();
             }
             if archive_member {
+                if ui.add_enabled(idle && !tab.selected.is_empty(), egui::Button::new(crate::i18n::text("Распаковать…"))).clicked() {
+                    actions.push(Action::Focus(pane));
+                    actions.push(Action::ExtractArchive);
+                    ui.close();
+                }
                 if ui.button(crate::i18n::text("Копировать путь")).clicked() {
                     actions.push(Action::Focus(pane));
                     actions.push(Action::CopyPath);

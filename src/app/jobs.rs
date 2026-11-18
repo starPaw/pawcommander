@@ -2,7 +2,7 @@ use super::dialogs::Dialog;
 use super::directory::{FolderVisit, AUTO_REFRESH_INTERVAL};
 use super::state::FolderMode;
 use super::PawCommander;
-use crate::conflict::{Answer, ConflictDialog, Decision};
+use crate::conflict::{Answer, Conflict, ConflictDialog, Decision};
 use crate::fs_ops::TransferKind;
 use crate::operations::{Cancellation, Progress, ProgressView};
 use crate::vfs as fs_ops;
@@ -95,6 +95,21 @@ pub(super) fn wait_for_conflict_answer(
     }
 }
 
+fn ask_conflict(
+    events: &mpsc::Sender<TransferEvent>,
+    ctx: &egui::Context,
+    cancellation: &Cancellation,
+    conflict: Conflict,
+) -> Result<Answer, String> {
+    let (reply, answer) = mpsc::channel();
+    let dialog = ConflictDialog::new(conflict, reply);
+    events
+        .send(TransferEvent::Conflict(Box::new(dialog)))
+        .map_err(|_| crate::i18n::text("Диалог конфликта закрыт"))?;
+    ctx.request_repaint();
+    Ok(wait_for_conflict_answer(&answer, cancellation))
+}
+
 impl PawCommander {
     pub(super) fn start_job(
         &mut self,
@@ -155,15 +170,36 @@ impl PawCommander {
         description: String,
         work: impl FnOnce(&mut Progress) -> Result<String, String> + Send + 'static,
     ) {
-        let (_, events) = mpsc::channel();
+        self.start_conflict_job(ctx, label, description, move |progress, _| work(progress));
+    }
+
+    pub(super) fn start_conflict_job(
+        &mut self,
+        ctx: &egui::Context,
+        label: &str,
+        description: String,
+        work: impl FnOnce(
+                &mut Progress,
+                &mut dyn FnMut(Conflict) -> Result<Answer, String>,
+            ) -> Result<String, String>
+            + Send
+            + 'static,
+    ) {
+        let (events, receive) = mpsc::channel();
+        let worker_ctx = ctx.clone();
         self.submit_job(
             ctx,
             PendingJob {
                 label: label.into(),
                 description,
-                work: Box::new(work),
+                work: Box::new(move |progress| {
+                    let cancel = progress.cancellation();
+                    work(progress, &mut |conflict| {
+                        ask_conflict(&events, &worker_ctx, &cancel, conflict)
+                    })
+                }),
                 transfer: Some(TransferInteraction {
-                    events,
+                    events: receive,
                     cut_generation: None,
                     conflict: None,
                 }),
@@ -500,15 +536,7 @@ impl PawCommander {
                 &destination,
                 kind,
                 progress,
-                |conflict| {
-                    let (reply, answer) = mpsc::channel();
-                    let dialog = ConflictDialog::new(conflict, reply);
-                    events
-                        .send(TransferEvent::Conflict(Box::new(dialog)))
-                        .map_err(|_| crate::i18n::text("Диалог конфликта закрыт"))?;
-                    worker_ctx.request_repaint();
-                    Ok(wait_for_conflict_answer(&answer, &cancellation))
-                },
+                |conflict| ask_conflict(&events, &worker_ctx, &cancellation, conflict),
                 |location, covered| {
                     if cut_generation.is_some() {
                         let _ =

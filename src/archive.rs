@@ -1,6 +1,8 @@
-//! Archive formats and directory indexes. Indexed member names never enter host I/O.
+//! Archive formats and directory indexes. The index uses virtual member paths.
+mod extraction;
 mod writer;
 
+pub(crate) use extraction::{Extraction, SelectedTree};
 pub(crate) use writer::{ArchiveWriter, Attributes, CreationLimits};
 
 use crate::{
@@ -58,6 +60,25 @@ struct Member {
     size: u64,
     modified: Option<SystemTime>,
     mode: Option<u16>,
+    contents: Contents,
+}
+
+#[derive(Clone, Copy, Default)]
+enum Contents {
+    Directory,
+    Tar {
+        offset: u64,
+    },
+    Zip {
+        offset: u64,
+        length: u64,
+        crc: u32,
+        deflate: bool,
+    },
+    Encrypted,
+    UnsupportedCompression,
+    #[default]
+    UnsupportedType,
 }
 
 #[derive(Default)]
@@ -71,31 +92,39 @@ impl Index {
     pub(crate) fn load(file: &Path, cancelled: &impl Fn() -> bool) -> Result<Self, String> {
         let format =
             Format::from_path(file).ok_or_else(|| text("Поддерживаются архивы ZIP и TAR"))?;
-        let mut index = Self::default();
-        index.folders.insert(PathBuf::new(), BTreeMap::new());
         if cancelled() {
             return Err(cancelled_read().to_string());
         }
-        let result = open_regular(file).and_then(|(file, length)| {
-            let input = MetadataReader {
-                file,
-                length,
-                position: 0,
-                remaining: MAX_METADATA_BYTES,
-                cancelled,
-            };
-            match format {
-                Format::Zip => index.read_zip(input),
-                Format::Tar => index.read_tar(input),
-            }
-        });
-        result.map_err(|error| {
-            crate::tr_format!(
-                "Не удалось прочитать архив «{}»: {error}",
-                "Could not read archive “{}”: {error}",
-                file.display()
-            )
-        })?;
+        open_regular(file)
+            .and_then(|(file, metadata)| Self::read(&file, metadata.len(), format, cancelled))
+            .map_err(|error| {
+                crate::tr_format!(
+                    "Не удалось прочитать архив «{}»: {error}",
+                    "Could not read archive “{}”: {error}",
+                    file.display()
+                )
+            })
+    }
+
+    fn read(
+        file: &File,
+        length: u64,
+        format: Format,
+        cancelled: &dyn Fn() -> bool,
+    ) -> io::Result<Self> {
+        let mut index = Self::default();
+        index.folders.insert(PathBuf::new(), BTreeMap::new());
+        let input = MetadataReader {
+            file,
+            length,
+            position: 0,
+            remaining: MAX_METADATA_BYTES,
+            cancelled,
+        };
+        match format {
+            Format::Zip => index.read_zip(input)?,
+            Format::Tar => index.read_tar(input)?,
+        }
         Ok(index)
     }
 
@@ -139,6 +168,7 @@ impl Index {
                 parent,
                 Member {
                     is_dir: true,
+                    contents: Contents::Directory,
                     ..Member::default()
                 },
             )?;
@@ -193,7 +223,15 @@ impl Index {
                 name
             };
             let mode = entry.mode();
-            let is_symlink = mode.is_symlink();
+            // The decoded mode can synthesize regular-file bits for missing
+            // Unix type information and OR in the directory bit from '/'.
+            let file_type = match entry.version_made_by().creator_system() {
+                rawzip::CreatorSystem::UNIX | rawzip::CreatorSystem::MACOS => {
+                    (entry.external_attributes() >> 16) & 0o170000
+                }
+                _ => 0,
+            };
+            let is_symlink = file_type == 0o120000;
             let is_dir =
                 !is_symlink && (mode.value() & 0o170000 == 0o040000 || name.ends_with('/'));
             let directory_start = archive.directory_offset();
@@ -203,9 +241,31 @@ impl Index {
             let local = archive
                 .get_entry(entry.wayfinder())
                 .map_err(io::Error::other)?;
-            if local.compressed_data_range().1 > directory_start {
+            let (offset, end) = local.compressed_data_range();
+            if end > directory_start {
                 return Err(invalid("Недопустимая запись архива"));
             }
+            let flags = entry.flags();
+            let compression = entry.compression_method();
+            let contents = if !matches!(file_type, 0 | 0o100000 | 0o040000) {
+                Contents::UnsupportedType
+            } else if flags.is_encrypted() || flags.has_strong_encryption() || flags.is_masked() {
+                Contents::Encrypted
+            } else if is_dir {
+                Contents::Directory
+            } else if matches!(
+                compression,
+                rawzip::CompressionMethod::STORE | rawzip::CompressionMethod::DEFLATE
+            ) {
+                Contents::Zip {
+                    offset,
+                    length: end - offset,
+                    crc: entry.crc32(),
+                    deflate: compression == rawzip::CompressionMethod::DEFLATE,
+                }
+            } else {
+                Contents::UnsupportedCompression
+            };
             self.add(
                 &member_path(name.as_bytes())?,
                 Member {
@@ -214,6 +274,7 @@ impl Index {
                     size: entry.uncompressed_size_hint(),
                     modified: zip_modified(entry.last_modified()),
                     mode: Some((mode.value() & 0o7777) as u16),
+                    contents,
                 },
             )?;
         }
@@ -237,19 +298,34 @@ impl Index {
             if index >= MAX_ENTRIES {
                 return Err(too_large());
             }
-            let entry = entry?;
-            let header = entry.header();
-            let kind = header.entry_type();
+            let mut entry = entry?;
+            let kind = entry.header().entry_type();
             if kind.is_pax_global_extensions() {
                 continue;
             }
+            let sparse = entry.pax_extensions()?.is_some_and(|mut extensions| {
+                extensions.any(|extension| {
+                    extension.is_ok_and(|field| field.key_bytes().starts_with(b"GNU.sparse."))
+                })
+            });
+            let header = entry.header();
             let name = entry.path_bytes();
             let path = member_path(&name)?;
+            let is_dir = kind.is_dir()
+                || (kind.is_file() && header.as_ustar().is_none() && name.ends_with(b"/"));
+            let contents = if is_dir {
+                Contents::Directory
+            } else if !sparse && (kind.is_file() || kind.is_contiguous()) {
+                Contents::Tar {
+                    offset: entry.raw_file_position(),
+                }
+            } else {
+                Contents::UnsupportedType
+            };
             self.add(
                 &path,
                 Member {
-                    is_dir: kind.is_dir()
-                        || (kind.is_file() && header.as_ustar().is_none() && name.ends_with(b"/")),
+                    is_dir,
                     is_symlink: kind.is_symlink(),
                     size: entry.size(),
                     modified: header
@@ -257,6 +333,7 @@ impl Index {
                         .ok()
                         .and_then(|secs| UNIX_EPOCH.checked_add(Duration::from_secs(secs))),
                     mode: header.mode().ok().map(|mode| (mode & 0o7777) as u16),
+                    contents,
                 },
             )?;
         }
@@ -378,7 +455,7 @@ fn cancelled_read() -> io::Error {
     io::Error::other(text("Чтение архива отменено"))
 }
 
-fn open_regular(path: &Path) -> io::Result<(File, u64)> {
+fn open_regular(path: &Path) -> io::Result<(File, fs::Metadata)> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -394,13 +471,13 @@ fn open_regular(path: &Path) -> io::Result<(File, u64)> {
     if !metadata.is_file() {
         return Err(invalid("Архив должен быть обычным файлом"));
     }
-    Ok((file, metadata.len()))
+    Ok((file, metadata))
 }
 
 // Both readers seek past ordinary payloads. Cap actual reads to bound
 // central-directory work and TAR's allocations for PAX and GNU metadata.
 struct MetadataReader<'a> {
-    file: File,
+    file: &'a File,
     length: u64,
     position: u64,
     remaining: usize,
