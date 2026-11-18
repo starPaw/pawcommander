@@ -1,6 +1,7 @@
 //! Local, SFTP and read-only archive locations. Remote credentials live only in authenticated sessions;
 //! saved tabs/bookmarks contain connection coordinates and key paths, never secrets.
 
+mod archive_create;
 mod batch_rename;
 mod cross_move;
 mod listing;
@@ -14,6 +15,7 @@ mod undo;
 
 use std::fmt;
 
+pub(crate) use archive_create::{archive_file_name, create_archive};
 pub(crate) use batch_rename::{BatchRenamePreview, BatchRenameRules};
 pub use listing::{
     read_automatic_directory, read_directory, visit_address_directory, visit_connected_directory,

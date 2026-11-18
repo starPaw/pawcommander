@@ -1,4 +1,8 @@
-//! Read-only archive directory indexes. Member names never enter host I/O.
+//! Archive formats and directory indexes. Indexed member names never enter host I/O.
+mod writer;
+
+pub(crate) use writer::{ArchiveWriter, Attributes, CreationLimits};
+
 use crate::{
     fs_ops::ListingMetadata,
     i18n::text,
@@ -21,13 +25,20 @@ const MAX_METADATA_BYTES: usize = 32 * 1024 * 1024;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_DEPTH: usize = 64;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Format {
     Zip,
     Tar,
 }
 
 impl Format {
+    pub(crate) fn extension(self) -> &'static str {
+        match self {
+            Self::Zip => "zip",
+            Self::Tar => "tar",
+        }
+    }
+
     pub(crate) fn from_path(path: &Path) -> Option<Self> {
         let extension = path.extension()?.to_str()?;
         if extension.eq_ignore_ascii_case("zip") {

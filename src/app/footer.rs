@@ -83,11 +83,15 @@ pub(super) fn operation_details(ui: &mut egui::Ui, progress: &crate::operations:
         });
     }
     if progress.total_written > 0 {
-        ui.label(crate::tr_format!(
-            "Записано за операцию: {}",
-            "Total written: {}",
-            human_size(progress.total_written)
-        ));
+        let total = human_size(progress.total_written);
+        ui.label(if progress.reading_inputs {
+            crate::tr_format!(
+                "Прочитано из файлов: {total}",
+                "Read from source files: {total}"
+            )
+        } else {
+            crate::tr_format!("Записано за операцию: {total}", "Total written: {total}")
+        });
     }
 }
 
@@ -149,7 +153,9 @@ impl PawCommander {
                                         crate::i18n::text("Остановить")
                                     }),
                                 )
-                                .on_hover_text(crate::i18n::text("Остановить перенос · Shift+Esc"));
+                                .on_hover_text(crate::i18n::text(
+                                    "Остановить операцию · Shift+Esc",
+                                ));
                             paint_focus(ui, &response, 5);
                             stop_requested = response.clicked();
                         }

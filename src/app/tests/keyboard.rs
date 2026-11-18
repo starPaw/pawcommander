@@ -223,6 +223,18 @@ fn command_palette_filters_navigates_runs_and_restores_focus() {
 
     run(&mut app, open());
     run(&mut app, vec![]);
+    let output = run(
+        &mut app,
+        vec![Event::Text(Command::CreateArchive.label().into())],
+    );
+    let tree = output.platform_output.accesskit_update.unwrap();
+    assert!(tree.nodes.iter().any(|(_, node)| {
+        node.label() == Some(Command::CreateArchive.label()) && node.is_disabled()
+    }));
+    run(&mut app, vec![key(Key::Escape, true, Modifiers::NONE)]);
+
+    run(&mut app, open());
+    run(&mut app, vec![]);
     let output = run(&mut app, vec![Event::Text("TAB".into())]);
     let tree = output.platform_output.accesskit_update.unwrap();
     assert!(tree.nodes.iter().any(|(_, node)| {

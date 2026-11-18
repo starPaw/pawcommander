@@ -640,6 +640,55 @@ fn check_cross_connection_partial_move(local_root: &Location, remote_root: &Loca
     }
 }
 
+fn check_sftp_archive_creation(remote_root: &Location) {
+    use crate::archive::{Format, Index};
+    use crate::result_history::Outcome;
+    use crate::vfs::create_archive;
+
+    let parent = remote_root.join("archive-creation");
+    let source = parent.join("Folder");
+    fs::create_dir_all(source.join("Empty").path()).unwrap();
+    let file = source.join("file.txt");
+    fs::write(file.path(), b"SFTP archive contents").unwrap();
+    for (format, name) in [(Format::Zip, "created.zip"), (Format::Tar, "created.tar")] {
+        let mut progress = Progress::default();
+        create_archive(
+            std::slice::from_ref(&source),
+            &parent,
+            name,
+            format,
+            &mut progress,
+        )
+        .unwrap();
+        assert_eq!(progress.results.items[0].outcome, Outcome::Completed);
+        // On this loopback fixture, an independent local read checks the server's file.
+        let target = parent.join(name);
+        let local_target = Location::Local(target.path().into());
+        let location = local_target.browse_archive().unwrap().join("Folder");
+        let index = Index::load(local_target.path(), &|| false).unwrap();
+        let files = index.list(&location, &|| false).unwrap();
+        assert!(files
+            .iter()
+            .any(|entry| entry.name == "Empty" && entry.is_dir));
+        assert!(files
+            .iter()
+            .any(|entry| entry.name == "file.txt" && entry.size == 21));
+        let created = fs::read(target.path()).unwrap();
+        assert!(create_archive(
+            std::slice::from_ref(&source),
+            &parent,
+            name,
+            format,
+            &mut progress
+        )
+        .is_err());
+        assert_eq!(fs::read(target.path()).unwrap(), created);
+    }
+    assert_eq!(fs::read(file.path()).unwrap(), b"SFTP archive contents");
+    assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 3);
+    fs::remove_dir_all(parent.path()).unwrap();
+}
+
 // Run with scripts/test-sftp.sh: a disposable loopback-only OpenSSH server
 // and generated keys, without using the user's real known_hosts or keys.
 #[test]
@@ -708,6 +757,7 @@ fn openssh_round_trip_and_host_verification() {
     fs::create_dir(local_root.path()).unwrap();
     fs::create_dir(remote_root.path()).unwrap();
     super::undo::sftp_undo(&remote_root);
+    check_sftp_archive_creation(&remote_root);
     let refresh_file = remote_root.join("external.txt");
     fs::write(refresh_file.path(), b"external edit").unwrap();
     let accessed = UNIX_EPOCH + Duration::from_secs(1_600_000_000);

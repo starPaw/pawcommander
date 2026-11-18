@@ -2850,6 +2850,7 @@ dependencies = [
  "dirs",
  "eframe",
  "egui_extras",
+ "flate2",
  "html5ever",
  "icu_normalizer",
  "image",

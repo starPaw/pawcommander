@@ -64,6 +64,7 @@ pub(super) enum Action {
     Paste(bool),
     NewFolder,
     Rename,
+    CreateArchive,
     Trash,
     Transfer(TransferKind),
     Bookmark,
@@ -165,6 +166,7 @@ impl PawCommander {
                     | Action::Paste(_)
                     | Action::NewFolder
                     | Action::Rename
+                    | Action::CreateArchive
                     | Action::Trash
                     | Action::Transfer(_)
                     | Action::Properties
@@ -435,6 +437,19 @@ impl PawCommander {
                     self.dialog_focus = true;
                 }
             }
+            Action::CreateArchive if !self.conflict_open() => {
+                let sources = self.selected();
+                if !sources.is_empty() {
+                    self.remember_dialog_file_focus(ctx);
+                    self.dialog = Some(Dialog::CreateArchive {
+                        sources,
+                        directory: self.tab().path.clone(),
+                        name: crate::i18n::text("Архив").into(),
+                        format: crate::archive::Format::Zip,
+                    });
+                    self.dialog_focus = true;
+                }
+            }
             Action::Trash if !self.conflict_open() => {
                 let paths = self.selected();
                 if !paths.is_empty() {
@@ -664,6 +679,7 @@ impl PawCommander {
                 Action::Copy(_)
                     | Action::Shortcut(
                         Command::Rename
+                            | Command::CreateArchive
                             | Command::Trash
                             | Command::Properties
                             | Command::CopyToPane

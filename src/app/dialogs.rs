@@ -3,6 +3,7 @@ use super::batch_rename::BatchRenameDialog;
 use super::selection::{Rule, RuleKind};
 use super::state::Settings;
 use super::{file_name, PawCommander};
+use crate::archive::Format;
 use crate::shortcuts::Command;
 use crate::theme::Palette;
 use crate::vfs::{Endpoint, FileEntry, Location};
@@ -66,6 +67,12 @@ pub(super) enum Dialog {
         name: String,
     },
     BatchRename(Box<BatchRenameDialog>),
+    CreateArchive {
+        sources: Vec<Location>,
+        directory: Location,
+        name: String,
+        format: Format,
+    },
     Trash {
         paths: Vec<Location>,
     },
@@ -343,6 +350,7 @@ impl PawCommander {
             Dialog::NewFolder { .. } => crate::i18n::text("Новая папка"),
             Dialog::Rename { .. } => crate::i18n::text("Переименовать"),
             Dialog::BatchRename(_) => crate::i18n::text("Массовое переименование"),
+            Dialog::CreateArchive { .. } => Command::CreateArchive.label(),
             Dialog::WorkspaceName { editing, .. } => {
                 if editing.is_some() {
                     crate::i18n::text("Переименовать рабочее пространство")
@@ -419,6 +427,24 @@ impl PawCommander {
                     }
                 }
                 Dialog::BatchRename(editor) => editor.show(ui, self.dialog_focus),
+                Dialog::CreateArchive { sources, directory, name, format } => {
+                    ui.label(crate::tr_format!("Выбрано объектов: {}", "Selected items: {}", sources.len()));
+                    let label = ui.label(crate::i18n::text("Имя архива"));
+                    let edit = ui.add(egui::TextEdit::singleline(name).desired_width(f32::INFINITY));
+                    edit.clone().labelled_by(label.id);
+                    if self.dialog_focus {
+                        edit.request_focus();
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label(crate::i18n::text("Формат архива"));
+                        ui.selectable_value(format, Format::Zip, "ZIP");
+                        ui.selectable_value(format, Format::Tar, "TAR");
+                    });
+                    match fs_ops::archive_file_name(name, *format) {
+                        Ok(file) => { ui.label(directory.join(file).display()); }
+                        Err(error) => { ui.label(error); }
+                    }
+                }
                 Dialog::WorkspaceName { editing, name } => {
                     if editing.is_none() {
                         for (label, pane) in [
@@ -467,6 +493,7 @@ impl PawCommander {
                     !name.trim().is_empty()
                 }
                 Dialog::BatchRename(editor) => editor.can_apply(),
+                Dialog::CreateArchive { name, format, .. } => fs_ops::archive_file_name(name, *format).is_ok(),
                 Dialog::WorkspaceName { editing, name } => {
                     !name.trim().is_empty() && !self.workspace_name_taken(name, *editing)
                 }
@@ -484,6 +511,8 @@ impl PawCommander {
                     crate::i18n::text("Выделить")
                 } else if matches!(dialog, Dialog::BatchRename(_)) {
                     crate::i18n::text("Переименовать")
+                } else if matches!(dialog, Dialog::CreateArchive { .. }) {
+                    crate::i18n::text("Создать")
                 } else {
                     crate::i18n::text("Сохранить")
                 };
@@ -496,7 +525,7 @@ impl PawCommander {
                 confirm = ui.add_enabled(valid, button).clicked();
             });
             let submit_on_enter = match dialog {
-                Dialog::Trash { .. } | Dialog::BatchRename(_) => false,
+                Dialog::Trash { .. } | Dialog::BatchRename(_) | Dialog::CreateArchive { .. } => false,
                 // The Enter that opens the dialog belongs to its sidebar control.
                 Dialog::WorkspaceName { .. } | Dialog::SelectionRule { .. } => !self.dialog_focus,
                 _ => true,
@@ -615,6 +644,20 @@ impl PawCommander {
                 Dialog::BatchRename(editor) => {
                     if let Some(plan) = (*editor).into_plan() {
                         self.start_batch_rename(ctx, plan);
+                    }
+                }
+                Dialog::CreateArchive {
+                    sources,
+                    directory,
+                    name,
+                    format,
+                } => {
+                    if let Ok(file) = fs_ops::archive_file_name(&name, format) {
+                        let label = Command::CreateArchive.label();
+                        let description = format!("{label} · {}", directory.join(file));
+                        self.start_stoppable_job(ctx, label, description, move |progress| {
+                            fs_ops::create_archive(&sources, &directory, &name, format, progress)
+                        });
                     }
                 }
                 Dialog::WorkspaceName { editing, name } => {
