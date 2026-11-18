@@ -37,13 +37,16 @@ mod windows_file_id;
 mod zed;
 
 fn main() -> eframe::Result {
+    let argument = std::env::args_os().nth(1);
     #[cfg(target_os = "macos")]
-    if std::env::args_os().nth(1).as_deref()
-        == Some(std::ffi::OsStr::new("--paw-drag-escape-listener"))
-    {
-        std::process::exit(native_drag::listen_for_escape());
+    if let Some(mode) = argument.as_deref().and_then(std::ffi::OsStr::to_str) {
+        match mode {
+            "--paw-drag-escape-listener" => std::process::exit(native_drag::listen_for_escape()),
+            preview::PDF_WORKER_ARG => std::process::exit(preview::run_pdf_worker()),
+            _ => {}
+        }
     }
-    let start = std::env::args_os().nth(1).map(std::path::PathBuf::from);
+    let start = argument.map(std::path::PathBuf::from);
     let viewport = eframe::egui::ViewportBuilder::default()
         .with_inner_size([1440.0, 860.0])
         .with_min_inner_size([960.0, 600.0])
