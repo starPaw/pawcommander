@@ -2,6 +2,16 @@ use super::*;
 
 #[test]
 fn dragging_rows_and_tiles_preserves_visible_group_and_transfers_files() {
+    exercise_file_drag(false);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn fast_drag_claims_the_pressed_row_before_crossing_to_another_pane() {
+    exercise_file_drag(true);
+}
+
+fn exercise_file_drag(coalesced: bool) {
     for grid in [false, true] {
         let ctx = egui::Context::default();
         let root = tempfile::tempdir().unwrap();
@@ -19,6 +29,8 @@ fn dragging_rows_and_tiles_preserves_visible_group_and_transfers_files() {
         tab.selected = tab.entries.iter().map(|e| e.path.clone()).collect();
         let mut source_pos = egui::Pos2::ZERO;
         let mut target_pos = egui::Pos2::ZERO;
+        #[cfg(target_os = "macos")]
+        let mut native = crate::native_drag::NativeDrag::default();
         let mut run = |events| {
             let mut drop = None;
             let input = egui::RawInput {
@@ -28,6 +40,12 @@ fn dragging_rows_and_tiles_preserves_visible_group_and_transfers_files() {
                 )),
                 events,
                 ..Default::default()
+            };
+            #[cfg(target_os = "macos")]
+            let input = {
+                let mut input = input;
+                native.prepare_input(&ctx, &mut input);
+                input
             };
             let _ = ctx.run_test_ui(input, |ui| {
                 let ctx = &ui.ctx().clone();
@@ -67,13 +85,19 @@ fn dragging_rows_and_tiles_preserves_visible_group_and_transfers_files() {
         };
         let (start, end, _) = run(vec![]);
         run(vec![egui::Event::PointerMoved(start)]);
-        run(vec![egui::Event::PointerButton {
+        let press = egui::Event::PointerButton {
             pos: start,
             button: egui::PointerButton::Primary,
             pressed: true,
             modifiers: egui::Modifiers::NONE,
-        }]);
-        run(vec![egui::Event::PointerMoved(end)]);
+        };
+        if coalesced {
+            run(vec![press, egui::Event::PointerMoved(end)]);
+            run(vec![]);
+        } else {
+            run(vec![press]);
+            run(vec![egui::Event::PointerMoved(end)]);
+        }
         let (_, _, result) = run(vec![egui::Event::PointerButton {
             pos: end,
             button: egui::PointerButton::Primary,

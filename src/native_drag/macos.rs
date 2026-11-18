@@ -3,22 +3,26 @@ use crate::test_ui::ContextExt as _;
 use crate::{drag_drop::DragFiles, vfs::Location};
 use eframe::egui;
 use objc2::{
-    define_class, msg_send, rc::Retained, runtime::ProtocolObject, AnyThread, DefinedClass,
-    MainThreadOnly,
+    define_class, msg_send,
+    rc::Retained,
+    runtime::{AnyObject, ProtocolObject},
+    AnyThread, DefinedClass, MainThreadOnly,
 };
 use objc2_app_kit::{
     NSApplication, NSDragOperation, NSDraggingContext, NSDraggingItem, NSDraggingSession,
-    NSDraggingSource, NSEvent, NSEventType, NSView, NSWorkspace,
+    NSDraggingSource, NSEvent, NSEventMask, NSEventType, NSView, NSWorkspace,
 };
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSURL,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{
+    cell::RefCell,
     ffi::CString,
     os::unix::ffi::OsStrExt,
     path::PathBuf,
     ptr::NonNull,
+    rc::Rc,
     sync::{
         atomic::{AtomicU8, Ordering},
         Arc, Mutex,
@@ -99,30 +103,79 @@ struct ActiveDrag {
     bounds: egui::Rect,
 }
 
+// A frame can be drawn after both mouseDown and mouseDragged. Capture the
+// original press during event delivery, before winit coalesces redraws.
+struct MousePressMonitor {
+    token: Retained<AnyObject>,
+    press: Rc<RefCell<Option<Retained<NSEvent>>>>,
+}
+
+impl MousePressMonitor {
+    fn install(_: MainThreadMarker) -> Option<Self> {
+        let press = Rc::new(RefCell::new(None));
+        let slot = Rc::clone(&press);
+        let handler = block2::RcBlock::new(move |event: NonNull<NSEvent>| {
+            // SAFETY: AppKit supplies a live event, invokes local monitors on
+            // the main thread, and expects this unmodified event back.
+            let value = unsafe { event.as_ref() };
+            *slot.borrow_mut() = if value.r#type() == NSEventType::LeftMouseDown {
+                unsafe { Retained::retain(event.as_ptr()) }
+            } else {
+                None
+            };
+            event.as_ptr()
+        });
+        let token = unsafe {
+            NSEvent::addLocalMonitorForEventsMatchingMask_handler(
+                NSEventMask::LeftMouseDown | NSEventMask::LeftMouseUp,
+                &handler,
+            )
+        }?;
+        Some(Self { token, press })
+    }
+}
+
+impl Drop for MousePressMonitor {
+    fn drop(&mut self) {
+        // SAFETY: this is the live token returned by our main-thread monitor.
+        unsafe { NSEvent::removeMonitor(&self.token) };
+    }
+}
+
 #[derive(Default)]
 pub struct NativeDrag {
     active: Option<ActiveDrag>,
-    mouse_event: Option<Retained<NSEvent>>,
+    mouse_monitor: Option<MousePressMonitor>,
+    deferred_input: Vec<egui::Event>,
 }
 
 impl NativeDrag {
+    pub fn prepare_input(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+        // egui hit-tests the final pointer position of a frame. If the press
+        // and a fast movement arrive together, first let the row at the press
+        // position claim the gesture, then deliver the movement in order.
+        if !self.deferred_input.is_empty() {
+            self.deferred_input.append(&mut input.events);
+            input.events = std::mem::take(&mut self.deferred_input);
+        }
+        if !input.focused || self.active() {
+            return;
+        }
+        if let Some(split) = fast_drag_split(&input.events) {
+            self.deferred_input = input.events.split_off(split);
+            ctx.request_repaint();
+        }
+    }
+
     pub fn active(&self) -> bool {
         self.active.is_some()
     }
 
     pub fn finish_input(&mut self, input: &mut egui::RawInput) -> Option<bool> {
-        // AppKit requires the original mouse-down event, not the latest drag
-        // update. Preserve its window/event identity across redraws and focus
-        // changes until handoff; a mouse-up invalidates the pending press.
-        if let Some(mtm) = MainThreadMarker::new()
-            && let Some(event) = NSApplication::sharedApplication(mtm).currentEvent()
+        if self.mouse_monitor.is_none()
+            && let Some(mtm) = MainThreadMarker::new()
         {
-            let event_type = event.r#type();
-            if event_type == NSEventType::LeftMouseDown {
-                self.mouse_event = Some(event);
-            } else if event_type == NSEventType::LeftMouseUp {
-                self.mouse_event = None;
-            }
+            self.mouse_monitor = MousePressMonitor::install(mtm);
         }
         let active = self.active.as_ref()?;
         let position = active.position.lock().ok().and_then(|p| *p);
@@ -190,8 +243,9 @@ impl NativeDrag {
         let window = view.window().ok_or(crate::i18n::text("Окно уже закрыто"))?;
         let app = NSApplication::sharedApplication(mtm);
         let event = self
-            .mouse_event
-            .take()
+            .mouse_monitor
+            .as_ref()
+            .and_then(|monitor| monitor.press.borrow_mut().take())
             .or_else(|| app.currentEvent())
             .filter(|event| {
                 drag_event_matches(event.r#type(), event.windowNumber(), window.windowNumber())
@@ -256,6 +310,30 @@ impl NativeDrag {
         }
         Ok(())
     }
+}
+
+fn fast_drag_split(events: &[egui::Event]) -> Option<usize> {
+    let mut press = None;
+    for (index, event) in events.iter().enumerate() {
+        match event {
+            egui::Event::PointerButton {
+                button: egui::PointerButton::Primary,
+                pressed,
+                pos,
+                ..
+            } => {
+                press = pressed.then_some(*pos);
+            }
+            egui::Event::PointerMoved(pos)
+                if press.is_some_and(|origin| pos.distance(origin) > 6.0) =>
+            {
+                return Some(index);
+            }
+            egui::Event::PointerGone if press.is_some() => return Some(index),
+            _ => {}
+        }
+    }
+    None
 }
 
 fn drag_event_matches(event_type: NSEventType, event_window: isize, source_window: isize) -> bool {
