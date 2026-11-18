@@ -271,29 +271,7 @@ impl Report<'_> {
             });
             self.member_result(index + 1, &String::from_utf8_lossy(&raw), result)?;
         }
-        let mut trailer = tar.into_inner();
-        // The iterator consumed the first zero header. TAR ends with a second
-        // zero block and may have additional zero padding.
-        let remaining = length - trailer.position;
-        if remaining < BLOCK || !length.is_multiple_of(BLOCK) {
-            return Err(invalid("Отсутствуют завершающие блоки TAR"));
-        }
-        reading_payload.set(true);
-        self.progress
-            .read_stream(self.source.path(), remaining, &mut trailer, |reader| {
-                let mut buffer = [0; 64 * 1024];
-                loop {
-                    let count = reader.read(&mut buffer)?;
-                    if count == 0 {
-                        break;
-                    }
-                    if buffer[..count].iter().any(|&byte| byte != 0) {
-                        return Err(invalid("Неожиданные данные после конца TAR"));
-                    }
-                }
-                Ok(())
-            })?;
-        Ok(())
+        check_tar_trailer(tar.into_inner(), self.source.path(), self.progress)
     }
 
     fn member_result(
@@ -325,6 +303,41 @@ impl Report<'_> {
             .diagnostic(self.source, &name, outcome, &error.to_string());
         Ok(())
     }
+}
+
+pub(super) fn check_tar_trailer(
+    input: MetadataReader<'_>,
+    path: &Path,
+    progress: &mut Progress,
+) -> io::Result<()> {
+    const BLOCK: u64 = 512;
+    // The iterator consumed the first zero header. TAR ends with a second
+    // zero block and may have additional zero padding.
+    let remaining = input.length - input.position;
+    if remaining < BLOCK || !input.length.is_multiple_of(BLOCK) {
+        return Err(invalid("Отсутствуют завершающие блоки TAR"));
+    }
+    let reading_payload = Cell::new(true);
+    let trailer = MetadataReader {
+        reading_payload: Some(&reading_payload),
+        ..input
+    };
+    let read = progress.read_stream(path, remaining, trailer, |reader| {
+        let mut buffer = [0; 64 * 1024];
+        loop {
+            let count = reader.read(&mut buffer)?;
+            if count == 0 {
+                return Ok(());
+            }
+            if buffer[..count].iter().any(|&byte| byte != 0) {
+                return Err(invalid("Неожиданные данные после конца TAR"));
+            }
+        }
+    })?;
+    if read != remaining {
+        return Err(invalid("Отсутствуют завершающие блоки TAR"));
+    }
+    Ok(())
 }
 
 fn unsupported(message: &'static str) -> io::Error {

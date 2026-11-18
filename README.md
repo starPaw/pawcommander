@@ -156,7 +156,7 @@ See the [user guide](docs/USER_GUIDE.md) for SFTP setup, clipboard behavior, dra
 - **Remote deletion is permanent.** Local deletion uses the system trash; SFTP deletion requires a separate permanent-delete confirmation.
 - **Name search is local.** Folder search reads the filesystem directly. The optional `locate` mode uses an external index whose results can be stale.
 - **SFTP is deliberately explicit.** Verify server keys with OpenSSH first. ProxyJump, interactive MFA, and SSH-config-based connection setup are not supported. Transfers require server free-space reporting.
-- **Some features are still ahead.** No built-in terminal, archive browsing, transfer resume, or network protocols beyond SFTP.
+- **Some features are still ahead.** No built-in terminal, transfer resume, or network protocols beyond SFTP.
 
 Details about transfer recovery and platform differences live in the [user guide](docs/USER_GUIDE.md).
 

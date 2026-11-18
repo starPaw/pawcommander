@@ -643,7 +643,7 @@ fn check_cross_connection_partial_move(local_root: &Location, remote_root: &Loca
 fn check_sftp_archive_round_trip(remote_root: &Location) {
     use crate::archive::{Format, Index};
     use crate::result_history::Outcome;
-    use crate::vfs::{create_archive, extract_archive};
+    use crate::vfs::{create_archive, edit_archive, extract_archive, ArchiveEdit};
 
     let parent = remote_root.join("archive-creation");
     let source = parent.join("Folder");
@@ -693,18 +693,37 @@ fn check_sftp_archive_round_trip(remote_root: &Location) {
         )
         .is_err());
         assert_eq!(fs::read(target.path()).unwrap(), created);
+        edit_archive(
+            local_target.path(),
+            ArchiveEdit::Add {
+                folder: PathBuf::new(),
+                sources: vec![file.clone()],
+            },
+            password,
+            &mut progress,
+        )
+        .unwrap();
+        let archive_root = local_target.browse_archive().unwrap();
         let extracted = parent.join(format!("extracted-{name}"));
         fs::create_dir(extracted.path()).unwrap();
-        extract_archive(&[location], &extracted, password, &mut progress, |_| {
-            Err("unexpected extraction conflict".into())
-        })
+        extract_archive(
+            &[location, archive_root.join("file.txt")],
+            &extracted,
+            password,
+            &mut progress,
+            |_| Err("unexpected extraction conflict".into()),
+        )
         .unwrap();
         assert!(extracted.join("Folder/Empty").path().is_dir());
         assert_eq!(
             fs::read(extracted.join("Folder/file.txt").path()).unwrap(),
             b"SFTP archive contents"
         );
-        assert_eq!(fs::read_dir(extracted.path()).unwrap().count(), 1);
+        assert_eq!(
+            fs::read(extracted.join("file.txt").path()).unwrap(),
+            b"SFTP archive contents"
+        );
+        assert_eq!(fs::read_dir(extracted.path()).unwrap().count(), 2);
     }
     assert_eq!(fs::read(file.path()).unwrap(), b"SFTP archive contents");
     assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 7);

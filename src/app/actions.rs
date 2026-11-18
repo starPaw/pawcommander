@@ -6,7 +6,7 @@ use super::{file_name, PawCommander};
 use crate::drag_drop::DropRequest;
 use crate::fs_ops::TransferKind;
 use crate::shortcuts::Command;
-use crate::vfs::Location;
+use crate::vfs::{ArchiveEdit, Location};
 use eframe::egui;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -67,6 +67,8 @@ pub(super) enum Action {
     CreateArchive,
     ExtractArchive,
     VerifyArchive,
+    AddToArchive,
+    RemoveFromArchive,
     Trash,
     Transfer(TransferKind),
     Bookmark,
@@ -167,7 +169,6 @@ impl PawCommander {
                 Action::Copy(_)
                     | Action::Paste(_)
                     | Action::NewFolder
-                    | Action::Rename
                     | Action::CreateArchive
                     | Action::Trash
                     | Action::Transfer(_)
@@ -425,6 +426,18 @@ impl PawCommander {
             }
             Action::Rename if !self.conflict_open() => {
                 let selected = self.selected();
+                if self.tab().path.is_archive() {
+                    if let [source] = selected.as_slice() {
+                        self.open_archive_edit(
+                            ArchiveEdit::Rename {
+                                entry: source.path().to_owned(),
+                                name: file_name(source),
+                            },
+                            ctx,
+                        );
+                    }
+                    return;
+                }
                 if !selected.is_empty() {
                     self.remember_dialog_file_focus(ctx);
                     self.dialog = Some(if selected.len() == 1 {
@@ -496,6 +509,33 @@ impl PawCommander {
                     self.remember_dialog_file_focus(ctx);
                     self.dialog = Some(Dialog::Trash { paths });
                     self.dialog_focus = true;
+                }
+            }
+            Action::AddToArchive if !self.conflict_open() && self.tab().path.is_archive() => {
+                let sources = self.archive_add_sources();
+                if sources.is_empty() {
+                    self.notice = Some((
+                        crate::i18n::text("Выберите файлы или папки в соседней панели").into(),
+                        true,
+                    ));
+                } else {
+                    self.open_archive_edit(
+                        ArchiveEdit::Add {
+                            folder: self.tab().path.path().to_owned(),
+                            sources,
+                        },
+                        ctx,
+                    );
+                }
+            }
+            Action::RemoveFromArchive if !self.conflict_open() && self.tab().path.is_archive() => {
+                let paths: Vec<_> = self
+                    .selected()
+                    .into_iter()
+                    .map(|path| path.path().to_owned())
+                    .collect();
+                if !paths.is_empty() {
+                    self.open_archive_edit(ArchiveEdit::Remove(paths), ctx);
                 }
             }
             Action::Bookmark => {
@@ -715,6 +755,28 @@ impl PawCommander {
             .then(|| archive.to_owned())
     }
 
+    pub(super) fn archive_add_sources(&self) -> Vec<Location> {
+        let peer = 1 - self.active;
+        let tab = self.panes[peer].tab();
+        if self.settings.split && !tab.path.is_archive() && !tab.selected.is_empty() {
+            tab.selected_visible(self.folder_view(peer))
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn open_archive_edit(&mut self, edit: ArchiveEdit, ctx: &egui::Context) {
+        if let Some(archive) = self.tab().path.archive_source().map(Path::to_owned) {
+            self.remember_dialog_file_focus(ctx);
+            self.dialog = Some(Dialog::ArchiveEdit {
+                archive,
+                edit,
+                password: zeroize::Zeroizing::new(String::new()),
+            });
+            self.dialog_focus = true;
+        }
+    }
+
     pub(super) fn run_pane_action(&mut self, action: Action, ctx: &egui::Context) {
         if self.tab().focused_cursor(ctx).is_some() {
             let tab = self.tab();
@@ -738,6 +800,7 @@ impl PawCommander {
                             Command::Rename
                                 | Command::CreateArchive
                                 | Command::ExtractArchive
+                                | Command::RemoveFromArchive
                                 | Command::Trash
                                 | Command::Properties
                                 | Command::CopyToPane

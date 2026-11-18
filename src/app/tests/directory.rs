@@ -1,6 +1,119 @@
 use super::*;
 
 #[test]
+fn archive_edit_dialogs_run_the_queue_and_refresh_the_pane() {
+    use crate::vfs::ArchiveEdit;
+    use egui::accesskit::{Action as AxAction, ActionRequest, Role, TreeId};
+    use std::fs;
+
+    let root = tempfile::tempdir().unwrap();
+    let tar_path = root.path().join("fixtures.tar");
+    let mut archive = tar::Builder::new(fs::File::create(&tar_path).unwrap());
+    let mut header = tar::Header::new_gnu();
+    header.set_size(4);
+    archive
+        .append_data(&mut header, "keep.txt", &b"keep"[..])
+        .unwrap();
+    drop(archive.into_inner().unwrap());
+    let peer = root.path().join("peer");
+    fs::create_dir(&peer).unwrap();
+    let addition = Location::Local(peer.join("new.txt"));
+    fs::write(addition.path(), b"disposable additions").unwrap();
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+    let mut app = PawCommander::new(&cc, Some(root.path().into()));
+    app.history = History::for_test(root.path().join("history.json"), &ctx);
+    app.settings.split = true;
+    app.panes[1].tab_mut().navigate(peer.into(), &ctx);
+    wait_for_directory(app.panes[1].tab_mut());
+    app.panes[1].tab_mut().select_revealed(addition.clone());
+    let file = Location::Local(tar_path.clone());
+    let root_member = file.browse_archive().unwrap();
+    app.action(Action::Open(0, file), &ctx);
+    wait_for_directory(app.tab_mut());
+    assert_eq!(app.tab().path, root_member);
+
+    let draw = |app: &mut PawCommander, events| {
+        ctx.run_test_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(980.0, 720.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ui| app.dialogs(ui.ctx()),
+        )
+    };
+    let click = |app: &mut PawCommander, label: &'static str| {
+        draw(app, vec![]);
+        let output = draw(app, vec![]).platform_output.accesskit_update.unwrap();
+        let button = output
+            .nodes
+            .iter()
+            .find(|(_, node)| {
+                node.role() == Role::Button
+                    && node.label() == Some(crate::i18n::text(label))
+                    && !node.is_disabled()
+            })
+            .unwrap_or_else(|| panic!("expected visible button {label}"))
+            .0;
+        draw(
+            app,
+            vec![egui::Event::AccessKitActionRequest(ActionRequest {
+                action: AxAction::Click,
+                target_tree: TreeId::ROOT,
+                target_node: button,
+                data: None,
+            })],
+        );
+        assert!(app.dialog.is_none());
+    };
+    let finish = |app: &mut PawCommander| {
+        poll_queue_until(app, &ctx, |app| app.job.is_none());
+        wait_for_directory(app.tab_mut());
+        assert!(app.notice.as_ref().is_some_and(|(_, error)| !error));
+    };
+    app.run_shortcut(Command::AddToArchive, &ctx);
+    assert!(matches!(&app.dialog, Some(Dialog::ArchiveEdit {
+        edit: ArchiveEdit::Add { sources, .. }, ..
+    }) if sources == std::slice::from_ref(&addition)));
+    click(&mut app, "Добавить");
+    finish(&mut app);
+    let added = root_member.join("new.txt");
+    assert!(app.tab().entries.iter().any(|entry| entry.path == added));
+
+    app.tab_mut().select_revealed(added);
+    app.run_shortcut(Command::Rename, &ctx);
+    let Some(Dialog::ArchiveEdit {
+        edit: ArchiveEdit::Rename { name, .. },
+        ..
+    }) = &mut app.dialog
+    else {
+        panic!("expected the archive rename dialog");
+    };
+    *name = "renamed.txt".into();
+    click(&mut app, "Переименовать");
+    finish(&mut app);
+    let renamed = root_member.join("renamed.txt");
+    assert!(app.tab().entries.iter().any(|entry| entry.path == renamed));
+
+    app.tab_mut().select_revealed(renamed);
+    let before = fs::read(&tar_path).unwrap();
+    app.run_shortcut(Command::RemoveFromArchive, &ctx);
+    click(&mut app, "Отмена");
+    assert_eq!(fs::read(&tar_path).unwrap(), before);
+    app.run_shortcut(Command::RemoveFromArchive, &ctx);
+    click(&mut app, "Удалить");
+    finish(&mut app);
+    assert_eq!(app.tab().entries.len(), 1);
+    assert_eq!(app.tab().entries[0].name, "keep.txt");
+    assert_eq!(fs::read(addition.path()).unwrap(), b"disposable additions");
+}
+
+#[test]
 fn archive_open_navigation_session_refresh_and_search_use_the_pane() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("fixture.tar");

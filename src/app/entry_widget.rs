@@ -346,6 +346,17 @@ pub(super) fn entry_widget(
                     actions.push(Action::ExtractArchive);
                     ui.close();
                 }
+                for (label, action, enabled) in [
+                    ("Переименовать…", Action::Rename, tab.selected.len() == 1),
+                    ("Удалить из архива…", Action::RemoveFromArchive, !tab.selected.is_empty()),
+                    ("Добавить из соседней панели…", Action::AddToArchive, split),
+                ] {
+                    if ui.add_enabled(idle && enabled, egui::Button::new(crate::i18n::text(label))).clicked() {
+                        actions.push(Action::Focus(pane));
+                        actions.push(action);
+                        ui.close();
+                    }
+                }
                 if ui.button(crate::i18n::text("Копировать путь")).clicked() {
                     actions.push(Action::Focus(pane));
                     actions.push(Action::CopyPath);
