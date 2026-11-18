@@ -38,6 +38,8 @@ Inside an archive, select the entries you need and choose **Extract…** from th
 
 Extraction supports ZIP (Stored or Deflate) and uncompressed TAR with regular files and directories. For protected ZIP files, enter the password in the extract dialog. PawCommander reads WinZip AES and legacy ZipCrypto entries. It checks recorded sizes and authenticates AES entries before publishing them. An incorrect password leaves the affected output unpublished. Select up to 32 GiB of uncompressed data per operation. Links and special entries need a different selection. The application keeps the password in memory for the operation.
 
+Choose **Check archive…** on a single local archive or **Check archive** from the command palette while browsing one. The queue checks the whole archive without extracting any files and lets you **Stop**. Open **Result history** for the names and reasons behind damaged or unverified entries. ZIP checks include recorded sizes, CRCs and supported encryption when you supply the password. TAR checks include header checksums and whether the entry data can be read. The TAR format has no per-file data checksum.
+
 ## Selection, clipboard, and drag and drop
 
 Click a row or tile to select it, use `Cmd/Ctrl` for individual additions and `Shift` for a range, or use the selection checkboxes. File commands apply to the active pane.

@@ -82,6 +82,10 @@ pub(super) enum Dialog {
         address: String,
         password: Zeroizing<String>,
     },
+    VerifyArchive {
+        archive: PathBuf,
+        password: Zeroizing<String>,
+    },
     Trash {
         paths: Vec<Location>,
     },
@@ -404,6 +408,7 @@ impl PawCommander {
             Dialog::BatchRename(_) => crate::i18n::text("Массовое переименование"),
             Dialog::CreateArchive { .. } => Command::CreateArchive.label(),
             Dialog::ExtractArchive { .. } => Command::ExtractArchive.label(),
+            Dialog::VerifyArchive { .. } => Command::VerifyArchive.label(),
             Dialog::WorkspaceName { editing, .. } => {
                 if editing.is_some() {
                     crate::i18n::text("Переименовать рабочее пространство")
@@ -527,6 +532,12 @@ impl PawCommander {
                         archive_password_field(ui, password);
                     }
                 }
+                Dialog::VerifyArchive { archive, password } => {
+                    ui.label(archive.to_string_lossy());
+                    if Format::from_path(archive) == Some(Format::Zip) {
+                        archive_password_field(ui, password);
+                    }
+                }
                 Dialog::WorkspaceName { editing, name } => {
                     if editing.is_none() {
                         for (label, pane) in [
@@ -580,7 +591,7 @@ impl PawCommander {
                 Dialog::WorkspaceName { editing, name } => {
                     !name.trim().is_empty() && !self.workspace_name_taken(name, *editing)
                 }
-                Dialog::Trash { .. } => true,
+                Dialog::Trash { .. } | Dialog::VerifyArchive { .. } => true,
             };
             ui.horizontal(|ui| {
                 let cancel_button = ui.button(crate::i18n::text("Отмена"));
@@ -598,6 +609,8 @@ impl PawCommander {
                     crate::i18n::text("Создать")
                 } else if matches!(dialog, Dialog::ExtractArchive { .. }) {
                     crate::i18n::text("Распаковать")
+                } else if matches!(dialog, Dialog::VerifyArchive { .. }) {
+                    crate::i18n::text("Проверить")
                 } else {
                     crate::i18n::text("Сохранить")
                 };
@@ -610,7 +623,7 @@ impl PawCommander {
                 confirm = ui.add_enabled(valid, button).clicked();
             });
             let submit_on_enter = match dialog {
-                Dialog::Trash { .. } | Dialog::BatchRename(_) | Dialog::CreateArchive { .. } | Dialog::ExtractArchive { .. } => false,
+                Dialog::Trash { .. } | Dialog::BatchRename(_) | Dialog::CreateArchive { .. } | Dialog::ExtractArchive { .. } | Dialog::VerifyArchive { .. } => false,
                 // The Enter that opens the dialog belongs to its sidebar control.
                 Dialog::WorkspaceName { .. } | Dialog::SelectionRule { .. } => !self.dialog_focus,
                 _ => true,
@@ -780,6 +793,13 @@ impl PawCommander {
                             },
                         );
                     }
+                }
+                Dialog::VerifyArchive { archive, password } => {
+                    let label = Command::VerifyArchive.label();
+                    let description = format!("{label} · {}", archive.display());
+                    self.start_stoppable_job(ctx, label, description, move |progress| {
+                        crate::archive::verify_archive(&archive, Some(password.as_str()), progress)
+                    });
                 }
                 Dialog::WorkspaceName { editing, name } => {
                     self.save_workspace_name(editing, name);

@@ -90,6 +90,10 @@ impl PawCommander {
                 Command::Rename => idle && writable && has_selection && selected.len() == 1,
                 Command::Trash | Command::CreateArchive => idle && writable && has_selection,
                 Command::ExtractArchive => idle && !writable && has_selection,
+                Command::VerifyArchive => {
+                    idle && (!writable || has_selection)
+                        && self.archive_to_verify(&selected).is_some()
+                }
                 Command::Properties => {
                     has_selection && selected.iter().all(|path| path.local().is_some())
                 }

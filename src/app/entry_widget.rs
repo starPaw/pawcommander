@@ -329,6 +329,17 @@ pub(super) fn entry_widget(
                 actions.push(open());
                 ui.close();
             }
+            let local_archive = !is_dir
+                && tab.selected.len() == 1
+                && tab.selected.contains(&path)
+                && path.local().and_then(crate::archive::Format::from_path).is_some();
+            if (archive_member || local_archive)
+                && ui.add_enabled(idle, egui::Button::new(crate::i18n::text("Проверить архив…"))).clicked()
+            {
+                actions.push(Action::Focus(pane));
+                actions.push(Action::VerifyArchive);
+                ui.close();
+            }
             if archive_member {
                 if ui.add_enabled(idle && !tab.selected.is_empty(), egui::Button::new(crate::i18n::text("Распаковать…"))).clicked() {
                     actions.push(Action::Focus(pane));

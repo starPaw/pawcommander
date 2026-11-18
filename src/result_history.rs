@@ -133,16 +133,21 @@ impl Results {
         target: Option<String>,
         parent: Option<usize>,
     ) -> Option<usize> {
+        self.add_display_row(&source.display(), target, parent)
+    }
+
+    fn add_display_row(
+        &mut self,
+        source: &str,
+        target: Option<String>,
+        parent: Option<usize>,
+    ) -> Option<usize> {
         if self.items.len() >= KEEP_ROWS {
             self.omitted = self.omitted.saturating_add(1);
             return None;
         }
         let mut row = ItemResult::new(
-            limited_text(
-                &source.display(),
-                MAX_TEXT_BYTES,
-                &mut self.details_truncated,
-            ),
+            limited_text(source, MAX_TEXT_BYTES, &mut self.details_truncated),
             target.map(|text| limited_text(&text, MAX_TEXT_BYTES, &mut self.details_truncated)),
         );
         row.parent = parent;
@@ -155,6 +160,27 @@ impl Results {
         let index = self.items.len();
         self.items.push(row);
         Some(index)
+    }
+
+    /// Record a diagnostic without deduplicating member names.
+    pub(crate) fn diagnostic(
+        &mut self,
+        archive: &Location,
+        name: &str,
+        outcome: Outcome,
+        reason: &str,
+    ) {
+        let parent = self.index.get(archive).copied();
+        if let Some(index) = self.add_display_row(name, None, parent) {
+            self.items[index].outcome = outcome;
+            self.reason(index, Some(reason));
+        }
+    }
+
+    pub(crate) fn finish_diagnostics(&mut self, archive: &Location) {
+        if let Some(&index) = self.index.get(archive) {
+            self.items[index].descendants_enumerated = true;
+        }
     }
 
     /// Expand an already captured manifest without performing any extra I/O.
@@ -872,13 +898,16 @@ impl History {
                                                 if ui.small_button(crate::tr_format!("Подробнее", "Details")).clicked() {
                                                     selected = Some(row.clone());
                                                 }
-                                                let target = row.target.as_deref().unwrap_or("—");
+                                                let source = single_line(&row.source);
+                                                let paths = if let Some(target) = &row.target {
+                                                    format!("{source} → {}", single_line(target))
+                                                } else {
+                                                    source
+                                                };
                                                 ui.add(
                                                     egui::Label::new(format!(
-                                                        "{}\n{} → {}\n{}",
+                                                        "{}\n{paths}\n{}",
                                                         if row.parent.is_none() && !row.descendants_enumerated { format!("{} · {}", row.outcome.label(), crate::tr_format!("Потомки не перечислены полностью", "Descendants were not fully listed")) } else { row.outcome.label().to_owned() },
-                                                        single_line(&row.source),
-                                                        single_line(target),
                                                         single_line(
                                                             row.reason.as_deref().unwrap_or("—")
                                                         )
