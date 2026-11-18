@@ -5,7 +5,20 @@ use crate::test_ui::ContextExt as _;
 use crate::{fs_ops::TransferKind, vfs::Location};
 use eframe::egui::{self, Color32, LayerId, Rect};
 
-pub struct DragFiles(pub Vec<Location>);
+pub struct DragFiles {
+    pub paths: Vec<Location>,
+    pub icon: crate::icons::Icon,
+}
+
+#[cfg(test)]
+impl DragFiles {
+    pub fn test_files(paths: Vec<Location>) -> Self {
+        Self {
+            paths,
+            icon: crate::icons::Icon::Document,
+        }
+    }
+}
 
 pub struct DropRequest {
     pub sources: Vec<Location>,
@@ -106,7 +119,7 @@ impl DropTargets {
                 }
             }
         } else {
-            internal.as_ref()?.0.clone()
+            internal.as_ref()?.paths.clone()
         };
         // Native drops only copy: the OS source has no move-completion protocol
         // with this app, so it must never lose its originals.
@@ -174,9 +187,17 @@ impl DropTargets {
                 ctx.global_style().visuals.text_color(),
                 360.0,
             );
+            let icon = internal
+                .as_ref()
+                .filter(|_| !external)
+                .map(|drag| drag.icon);
+            let icon_space = if icon.is_some() { 30.0 } else { 0.0 };
             let badge = Rect::from_min_size(
                 pos + egui::vec2(16.0, 20.0),
-                galley.size() + egui::vec2(16.0, 12.0),
+                egui::vec2(
+                    galley.size().x + 16.0 + icon_space,
+                    (galley.size().y + 12.0).max(icon_space),
+                ),
             );
             let badge = badge.translate(egui::vec2(
                 (ctx.content_rect().right() - badge.right()).min(0.0),
@@ -189,8 +210,24 @@ impl DropTargets {
                 egui::Stroke::new(1.0, color),
                 egui::StrokeKind::Inside,
             );
+            if let Some(icon) = icon {
+                let rect = Rect::from_center_size(
+                    egui::pos2(badge.left() + 18.0, badge.center().y),
+                    egui::Vec2::splat(24.0),
+                );
+                crate::icons::paint_on(
+                    &painter,
+                    rect,
+                    icon,
+                    crate::icons::tint(icon, crate::theme::Palette::from_ctx(ctx)),
+                    ctx.global_style().visuals.dark_mode,
+                );
+            }
             painter.galley(
-                badge.min + egui::vec2(8.0, 6.0),
+                egui::pos2(
+                    badge.left() + 8.0 + icon_space,
+                    badge.center().y - galley.size().y / 2.0,
+                ),
                 galley,
                 ctx.global_style().visuals.text_color(),
             );
@@ -346,7 +383,7 @@ mod tests {
         );
         egui::DragAndDrop::set_payload(
             &ctx,
-            DragFiles(vec![local("/source/a"), local("/source/b")]),
+            DragFiles::test_files(vec![local("/source/a"), local("/source/b")]),
         );
         assert!(frame(&ctx, input(vec![]), true, true).is_none());
         let request = frame(&ctx, input(vec![button(pos, false)]), true, true)
@@ -369,7 +406,7 @@ mod tests {
             true,
             true,
         );
-        egui::DragAndDrop::set_payload(&ctx, DragFiles(vec![local("/source/a")]));
+        egui::DragAndDrop::set_payload(&ctx, DragFiles::test_files(vec![local("/source/a")]));
         let mut release = input(vec![button(pos, false)]);
         release
             .events
@@ -396,9 +433,9 @@ mod tests {
             true,
             true,
         );
-        egui::DragAndDrop::set_payload(&ctx, DragFiles(vec![local("/source/a")]));
+        egui::DragAndDrop::set_payload(&ctx, DragFiles::test_files(vec![local("/source/a")]));
         assert!(frame(&ctx, input(vec![button(pos, false)]), true, true).is_none());
-        egui::DragAndDrop::set_payload(&ctx, DragFiles(vec![local("/source/a")]));
+        egui::DragAndDrop::set_payload(&ctx, DragFiles::test_files(vec![local("/source/a")]));
         let escape = Event::Key {
             key: egui::Key::Escape,
             physical_key: None,

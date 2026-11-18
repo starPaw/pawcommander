@@ -166,8 +166,11 @@ pub fn button_width(
 }
 
 pub fn paint(ui: &egui::Ui, rect: Rect, icon: Icon, color: Color32) {
-    let painter = ui.painter();
-    let p = Palette::from_ctx(ui.ctx());
+    paint_on(ui.painter(), rect, icon, color, ui.visuals().dark_mode);
+}
+
+pub fn paint_on(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32, dark_mode: bool) {
+    let p = Palette::from_ctx(painter.ctx());
     let pt = |x: f32, y: f32| {
         pos2(
             rect.left() + x * rect.width() / 24.0,
@@ -186,7 +189,7 @@ pub fn paint(ui: &egui::Ui, rect: Rect, icon: Icon, color: Color32) {
         |r: Rect, radius| painter.rect_stroke(r, radius, stroke, egui::StrokeKind::Inside);
     match icon {
         Icon::Folder | Icon::NewFolder => {
-            let blue = if ui.visuals().dark_mode {
+            let blue = if dark_mode {
                 color.lerp_to_gamma(Color32::from_rgb(97, 163, 252), 0.55)
             } else {
                 color

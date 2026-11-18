@@ -243,7 +243,7 @@ impl NativeDrag {
             return None;
         }
         let payload = egui::DragAndDrop::take_payload::<DragFiles>(ctx)?;
-        let paths = match local_paths(&payload.0) {
+        let paths = match local_paths(&payload.paths) {
             Ok(paths) => paths,
             Err(error) => return Some(Err(error)),
         };
@@ -557,7 +557,10 @@ mod tests {
                     ..Default::default()
                 },
                 |ctx| {
-                    egui::DragAndDrop::set_payload(ctx, DragFiles(vec![path.clone().into()]));
+                    egui::DragAndDrop::set_payload(
+                        ctx,
+                        DragFiles::test_files(vec![path.clone().into()]),
+                    );
                     result = native.handoff(ctx, &frame, enabled);
                 },
             );
