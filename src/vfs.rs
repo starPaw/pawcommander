@@ -2,6 +2,7 @@
 //! saved tabs/bookmarks contain connection coordinates and key paths, never secrets.
 
 mod archive_create;
+mod archive_edit;
 mod archive_extract;
 mod batch_rename;
 mod cross_move;
@@ -18,6 +19,7 @@ mod undo;
 use std::fmt;
 
 pub(crate) use archive_create::{archive_file_name, create_archive};
+pub(crate) use archive_edit::{edit_archive, ArchiveEdit};
 pub(crate) use archive_extract::extract_archive;
 pub(crate) use batch_rename::{BatchRenamePreview, BatchRenameRules};
 pub use listing::{

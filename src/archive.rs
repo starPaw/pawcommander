@@ -1,9 +1,11 @@
 //! Archive formats and directory indexes. The index uses virtual member paths.
+mod edit;
 mod extraction;
 mod integrity;
 mod protected_zip;
 mod writer;
 
+pub(crate) use edit::{EditableArchive, MemberEdit};
 pub(crate) use extraction::{Extraction, SelectedTree};
 pub(crate) use integrity::verify_archive;
 pub(crate) use writer::{ArchiveWriter, Attributes, CreationLimits};
@@ -579,7 +581,7 @@ pub(crate) fn member_path(raw: &[u8]) -> io::Result<PathBuf> {
 }
 
 pub(crate) fn readonly() -> &'static str {
-    text("Архив открыт только для просмотра")
+    text("Эта операция недоступна внутри архива")
 }
 
 fn invalid(message: &'static str) -> io::Error {

@@ -105,41 +105,17 @@ fn write_archive(
     let target = parent.location.join(name);
     ensure_absent(&target)?;
 
-    let mut plan = ArchivePlan {
-        format,
-        protected: password.is_some(),
-        limits: CreationLimits::default(),
-        members: Vec::new(),
-    };
-    let mut selected = BTreeSet::new();
-    for source in sources {
-        let name = source
-            .path()
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(invalid_name)?;
-        if selected.insert(name) {
-            plan.capture(
-                parent.location.join(name),
-                name.to_owned(),
-                progress,
-                &cancel,
-            )?;
-        }
-    }
+    let mut plan = ArchivePlan::new(format, password.is_some());
+    plan.capture_sources(sources, &parent.location, Path::new(""), progress, &cancel)?;
 
     with_staging_typed(&target, Some(&cancel), |staging, _| {
         let payload = staging.join("payload");
         let output = StagedFile::open(&payload, cancel.clone())?;
         let mut archive = ArchiveWriter::new(format, password, output)?;
-        for member in &plan.members {
-            member.append(&mut archive, progress, &cancel)?;
-        }
+        plan.append(&mut archive, progress, &cancel)?;
         progress.item(target.path());
         archive.finish()?.close()?;
-        for member in &plan.members {
-            member.entry.verify(&member.source, &cancel, true)?;
-        }
+        plan.verify(&cancel)?;
         parent.verify()?;
         if canonical(directory)? != parent.location.path() {
             return Err(changed_source(directory).into());
@@ -175,7 +151,7 @@ fn ensure_absent(target: &Location) -> Result<(), TransferError> {
     Ok(())
 }
 
-struct ArchivePlan {
+pub(super) struct ArchivePlan {
     format: Format,
     protected: bool,
     limits: CreationLimits,
@@ -183,6 +159,74 @@ struct ArchivePlan {
 }
 
 impl ArchivePlan {
+    pub(super) fn new(format: Format, protected: bool) -> Self {
+        Self {
+            format,
+            protected,
+            limits: CreationLimits::default(),
+            members: Vec::new(),
+        }
+    }
+
+    pub(super) fn capture_sources(
+        &mut self,
+        sources: &[Location],
+        directory: &Location,
+        prefix: &Path,
+        progress: &mut Progress,
+        cancel: &Cancellation,
+    ) -> Result<(), TransferError> {
+        let mut selected = BTreeSet::new();
+        for source in sources {
+            let name = source
+                .path()
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(invalid_name)?;
+            if selected.insert(name) {
+                let path = prefix.join(name);
+                self.capture(
+                    directory.join(name),
+                    path.to_str().ok_or_else(invalid_name)?.to_owned(),
+                    progress,
+                    cancel,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn names(&self) -> impl Iterator<Item = (&Path, bool)> + Clone {
+        self.members
+            .iter()
+            .map(|member| (Path::new(&member.name), member.attributes.directory))
+    }
+
+    pub(super) fn contains_file(&self, metadata: &EntryMetadata) -> bool {
+        self.members
+            .iter()
+            .any(|member| member.entry.metadata.same_object(metadata))
+    }
+
+    pub(super) fn append(
+        &self,
+        archive: &mut ArchiveWriter<'_, StagedFile>,
+        progress: &mut Progress,
+        cancel: &Cancellation,
+    ) -> Result<(), TransferError> {
+        for member in &self.members {
+            member.append(archive, progress, cancel)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn verify(&self, cancel: &Cancellation) -> Result<(), TransferError> {
+        for member in &self.members {
+            member.entry.verify(&member.source, cancel, true)?;
+        }
+        Ok(())
+    }
+
     fn capture(
         &mut self,
         source: Location,

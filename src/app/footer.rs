@@ -116,6 +116,7 @@ impl PawCommander {
         let ctx = &ui.ctx().clone();
         let colors = Palette::from_ctx(ctx);
         let mut stop_requested = false;
+        let mut archive_add_requested = false;
         let history_error = self.history.error.is_some();
         let history_button = |ui: &mut egui::Ui| {
             let response = ui.button(crate::i18n::text("Журнал результатов"));
@@ -213,15 +214,26 @@ impl PawCommander {
                             .color(colors.muted),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(
-                                RichText::new(if self.tab().path.is_archive() {
-                                    crate::archive::readonly()
-                                } else {
-                                    crate::i18n::text("Двойной щелчок — открыть")
-                                })
-                                .size(11.0)
-                                .color(colors.muted),
-                            );
+                            if self.tab().path.is_archive() && self.settings.split {
+                                let add = ui
+                                    .add_enabled(
+                                        !self.archive_add_sources().is_empty(),
+                                        egui::Button::new(crate::i18n::text(
+                                            "Добавить из соседней панели…",
+                                        )),
+                                    )
+                                    .on_disabled_hover_text(crate::i18n::text(
+                                        "Выберите файлы или папки в соседней панели",
+                                    ));
+                                paint_focus(ui, &add, 5);
+                                archive_add_requested = add.clicked();
+                            } else if !self.tab().path.is_archive() {
+                                ui.label(
+                                    RichText::new(crate::i18n::text("Двойной щелчок — открыть"))
+                                        .size(11.0)
+                                        .color(colors.muted),
+                                );
+                            }
                         });
                     });
                 }
@@ -229,6 +241,9 @@ impl PawCommander {
             });
         if stop_requested {
             self.request_transfer_stop(ctx);
+        }
+        if archive_add_requested {
+            self.action(super::actions::Action::AddToArchive, ctx);
         }
     }
 

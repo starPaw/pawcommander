@@ -65,9 +65,9 @@ impl CreationLimits {
 
 pub(crate) enum ArchiveWriter<'a, W: Write> {
     Zip(rawzip::ZipArchiveWriter<W>),
-    ProtectedZip {
+    StreamZip {
         writer: Box<zip::ZipWriter<zip::write::StreamWriter<W>>>,
-        password: &'a str,
+        password: Option<&'a str>,
     },
     Tar(tar::Builder<W>),
 }
@@ -75,9 +75,9 @@ pub(crate) enum ArchiveWriter<'a, W: Write> {
 impl<'a, W: Write> ArchiveWriter<'a, W> {
     pub(crate) fn new(format: Format, password: Option<&'a str>, output: W) -> io::Result<Self> {
         Ok(match (format, password) {
-            (Format::Zip, Some(password)) => Self::ProtectedZip {
+            (Format::Zip, Some(password)) => Self::StreamZip {
                 writer: Box::new(zip::ZipWriter::new_stream(output)),
-                password,
+                password: Some(password),
             },
             (Format::Zip, None) => Self::Zip(rawzip::ZipArchiveWriter::new(output)),
             (Format::Tar, None) => Self::Tar(tar::Builder::new(output)),
@@ -85,6 +85,20 @@ impl<'a, W: Write> ArchiveWriter<'a, W> {
                 return Err(super::invalid("Пароль можно задать только для ZIP"))
             }
         })
+    }
+
+    pub(crate) fn rebuild(
+        format: Format,
+        password: Option<&'a str>,
+        output: W,
+    ) -> io::Result<Self> {
+        match format {
+            Format::Zip => Ok(Self::StreamZip {
+                writer: Box::new(zip::ZipWriter::new_stream(output)),
+                password,
+            }),
+            Format::Tar => Self::new(format, password, output),
+        }
     }
 
     pub(crate) fn append(
@@ -124,7 +138,7 @@ impl<'a, W: Write> ArchiveWriter<'a, W> {
                 }
                 Ok(())
             }
-            Self::ProtectedZip { writer, password } => {
+            Self::StreamZip { writer, password } => {
                 let mut options =
                     zip::write::SimpleFileOptions::default().unix_permissions(attributes.mode);
                 if let Some(time) = attributes
@@ -152,10 +166,12 @@ impl<'a, W: Write> ArchiveWriter<'a, W> {
                     // Reserve ZIP64 before streaming for sizes near 4 GiB, where
                     // Deflate overhead could cross the 32-bit boundary.
                     let large = attributes.size >= zip::ZIP64_BYTES_THR - 16 * 1024 * 1024;
-                    let options = options
+                    let mut options = options
                         .large_file(large)
-                        .compression_method(zip::CompressionMethod::Deflated)
-                        .with_aes_encryption(zip::AesMode::Aes256, password);
+                        .compression_method(zip::CompressionMethod::Deflated);
+                    if let Some(password) = password {
+                        options = options.with_aes_encryption(zip::AesMode::Aes256, password);
+                    }
                     writer
                         .start_file(name, options)
                         .map_err(super::protected_zip::zip_error)?;
@@ -181,7 +197,7 @@ impl<'a, W: Write> ArchiveWriter<'a, W> {
     pub(crate) fn finish(self) -> io::Result<W> {
         match self {
             Self::Zip(zip) => zip.finish().map_err(zip_io),
-            Self::ProtectedZip { writer, .. } => writer
+            Self::StreamZip { writer, .. } => writer
                 .finish()
                 .map(|stream| stream.into_inner())
                 .map_err(super::protected_zip::zip_error),

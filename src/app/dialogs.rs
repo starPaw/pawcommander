@@ -6,7 +6,7 @@ use super::{file_name, PawCommander};
 use crate::archive::Format;
 use crate::shortcuts::Command;
 use crate::theme::Palette;
-use crate::vfs::{Endpoint, FileEntry, Location};
+use crate::vfs::{ArchiveEdit, Endpoint, FileEntry, Location};
 use crate::{icons, vfs as fs_ops};
 use eframe::egui;
 use eframe::egui::{Color32, RichText};
@@ -86,6 +86,11 @@ pub(super) enum Dialog {
         archive: PathBuf,
         password: Zeroizing<String>,
     },
+    ArchiveEdit {
+        archive: PathBuf,
+        edit: ArchiveEdit,
+        password: Zeroizing<String>,
+    },
     Trash {
         paths: Vec<Location>,
     },
@@ -95,8 +100,8 @@ pub(super) enum Dialog {
     },
 }
 
-fn archive_password_field(ui: &mut egui::Ui, password: &mut String) {
-    let label = ui.label(crate::i18n::text("Пароль ZIP (необязательно)"));
+fn archive_password_field(ui: &mut egui::Ui, password: &mut String, label: &'static str) {
+    let label = ui.label(crate::i18n::text(label));
     let mut edit = egui::TextEdit::singleline(password)
         .id_salt("archive_password")
         .password(true)
@@ -105,6 +110,14 @@ fn archive_password_field(ui: &mut egui::Ui, password: &mut String) {
     edit.response.response.labelled_by(label.id);
     // The password field does not retain a second copy in egui's undo buffer.
     edit.state.clear_undoer();
+}
+
+fn archive_edit_command(edit: &ArchiveEdit) -> Command {
+    match edit {
+        ArchiveEdit::Add { .. } => Command::AddToArchive,
+        ArchiveEdit::Remove(_) => Command::RemoveFromArchive,
+        ArchiveEdit::Rename { .. } => Command::Rename,
+    }
 }
 
 fn extraction_destination(
@@ -409,6 +422,7 @@ impl PawCommander {
             Dialog::CreateArchive { .. } => Command::CreateArchive.label(),
             Dialog::ExtractArchive { .. } => Command::ExtractArchive.label(),
             Dialog::VerifyArchive { .. } => Command::VerifyArchive.label(),
+            Dialog::ArchiveEdit { edit, .. } => archive_edit_command(edit).label(),
             Dialog::WorkspaceName { editing, .. } => {
                 if editing.is_some() {
                     crate::i18n::text("Переименовать рабочее пространство")
@@ -499,7 +513,7 @@ impl PawCommander {
                         ui.selectable_value(format, Format::Tar, "TAR");
                     });
                     if *format == Format::Zip {
-                        archive_password_field(ui, password);
+                        archive_password_field(ui, password, "Пароль ZIP (необязательно)");
                     } else {
                         password.zeroize();
                     }
@@ -529,13 +543,55 @@ impl PawCommander {
                         ui.colored_label(colors.error, error);
                     }
                     if sources.first().and_then(Location::archive_source).and_then(Format::from_path) == Some(Format::Zip) {
-                        archive_password_field(ui, password);
+                        archive_password_field(ui, password, "Пароль ZIP (необязательно)");
                     }
                 }
                 Dialog::VerifyArchive { archive, password } => {
                     ui.label(archive.to_string_lossy());
                     if Format::from_path(archive) == Some(Format::Zip) {
-                        archive_password_field(ui, password);
+                        archive_password_field(ui, password, "Пароль ZIP (необязательно)");
+                    }
+                }
+                Dialog::ArchiveEdit { archive, edit, password } => {
+                    ui.label(archive.to_string_lossy());
+                    match edit {
+                        ArchiveEdit::Add { folder, sources } => {
+                            if !folder.as_os_str().is_empty() {
+                                ui.label(crate::tr_format!(
+                                    "Папка в архиве: {}", "Folder in archive: {}", folder.display()
+                                ));
+                            }
+                            ui.label(crate::tr_format!(
+                                "Выбрано объектов: {}", "Selected items: {}", sources.len()
+                            ));
+                            for source in sources.iter().take(6) {
+                                ui.label(file_name(source));
+                            }
+                            if sources.len() > 6 {
+                                ui.label(crate::tr_format!("…и ещё {}", "…and {} more", sources.len() - 6));
+                            }
+                            if Format::from_path(archive) == Some(Format::Zip) {
+                                archive_password_field(ui, password, "Пароль добавляемых файлов ZIP");
+                                ui.weak(crate::i18n::text("Для защищённого ZIP задайте пароль добавляемых файлов."));
+                            }
+                        }
+                        ArchiveEdit::Rename { entry, name } => {
+                            ui.label(entry.to_string_lossy());
+                            let label = ui.label(crate::i18n::text("Новое имя"));
+                            let response = ui.add(egui::TextEdit::singleline(name).desired_width(f32::INFINITY)).labelled_by(label.id);
+                            if self.dialog_focus {
+                                response.request_focus();
+                            }
+                        }
+                        ArchiveEdit::Remove(paths) => {
+                            ui.label(crate::i18n::text("Удалить выбранные записи из архива?"));
+                            for path in paths.iter().take(6) {
+                                ui.label(path.to_string_lossy());
+                            }
+                            if paths.len() > 6 {
+                                ui.label(crate::tr_format!("…и ещё {}", "…and {} more", paths.len() - 6));
+                            }
+                        }
                     }
                 }
                 Dialog::WorkspaceName { editing, name } => {
@@ -588,10 +644,13 @@ impl PawCommander {
                 Dialog::BatchRename(editor) => editor.can_apply(),
                 Dialog::CreateArchive { name, format, .. } => fs_ops::archive_file_name(name, *format).is_ok(),
                 Dialog::ExtractArchive { address, archive_directory, other, .. } => extraction_destination(address, archive_directory, other.as_ref()).is_ok(),
+                Dialog::ArchiveEdit { edit: ArchiveEdit::Rename { entry, name }, .. } => {
+                    !name.trim().is_empty() && entry.file_name() != Some(std::ffi::OsStr::new(name.trim()))
+                }
                 Dialog::WorkspaceName { editing, name } => {
                     !name.trim().is_empty() && !self.workspace_name_taken(name, *editing)
                 }
-                Dialog::Trash { .. } | Dialog::VerifyArchive { .. } => true,
+                Dialog::Trash { .. } | Dialog::VerifyArchive { .. } | Dialog::ArchiveEdit { .. } => true,
             };
             ui.horizontal(|ui| {
                 let cancel_button = ui.button(crate::i18n::text("Отмена"));
@@ -611,6 +670,12 @@ impl PawCommander {
                     crate::i18n::text("Распаковать")
                 } else if matches!(dialog, Dialog::VerifyArchive { .. }) {
                     crate::i18n::text("Проверить")
+                } else if let Dialog::ArchiveEdit { edit, .. } = &dialog {
+                    crate::i18n::text(match edit {
+                        ArchiveEdit::Add { .. } => "Добавить",
+                        ArchiveEdit::Rename { .. } => "Переименовать",
+                        ArchiveEdit::Remove(_) => "Удалить",
+                    })
                 } else {
                     crate::i18n::text("Сохранить")
                 };
@@ -623,7 +688,7 @@ impl PawCommander {
                 confirm = ui.add_enabled(valid, button).clicked();
             });
             let submit_on_enter = match dialog {
-                Dialog::Trash { .. } | Dialog::BatchRename(_) | Dialog::CreateArchive { .. } | Dialog::ExtractArchive { .. } | Dialog::VerifyArchive { .. } => false,
+                Dialog::Trash { .. } | Dialog::BatchRename(_) | Dialog::CreateArchive { .. } | Dialog::ExtractArchive { .. } | Dialog::VerifyArchive { .. } | Dialog::ArchiveEdit { .. } => false,
                 // The Enter that opens the dialog belongs to its sidebar control.
                 Dialog::WorkspaceName { .. } | Dialog::SelectionRule { .. } => !self.dialog_focus,
                 _ => true,
@@ -799,6 +864,17 @@ impl PawCommander {
                     let description = format!("{label} · {}", archive.display());
                     self.start_stoppable_job(ctx, label, description, move |progress| {
                         crate::archive::verify_archive(&archive, Some(password.as_str()), progress)
+                    });
+                }
+                Dialog::ArchiveEdit {
+                    archive,
+                    edit,
+                    password,
+                } => {
+                    let label = archive_edit_command(&edit).label();
+                    let description = format!("{label} · {}", archive.display());
+                    self.start_stoppable_job(ctx, label, description, move |progress| {
+                        fs_ops::edit_archive(&archive, edit, Some(password.as_str()), progress)
                     });
                 }
                 Dialog::WorkspaceName { editing, name } => {

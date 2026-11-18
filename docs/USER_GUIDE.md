@@ -40,6 +40,10 @@ Extraction supports ZIP (Stored or Deflate) and uncompressed TAR with regular fi
 
 Choose **Check archive…** on a single local archive or **Check archive** from the command palette while browsing one. The queue checks the whole archive without extracting any files and lets you **Stop**. Open **Result history** for the names and reasons behind damaged or unverified entries. ZIP checks include recorded sizes, CRCs and supported encryption when you supply the password. TAR checks include header checksums and whether the entry data can be read. The TAR format has no per-file data checksum.
 
+To edit a local ZIP or TAR, open it in a pane. Select local or SFTP files or folders in the other pane, then activate the archive pane and choose **Add from other pane…** or **Add to archive** in the command palette. The files are added to the archive folder shown in the pane. Use **Rename…** or **F2** on a single entry, or select entries and confirm **Remove from archive…**. Renaming or removing a folder includes its contents. Choosing an occupied name leaves the archive unchanged.
+
+Edits rebuild and check a temporary archive before replacing the original. **Stop** discards unfinished work. Retained ZIP entries keep their compressed and encrypted data. When adding files to a protected ZIP, enter a password for the new files. Archives with ambiguous duplicate paths, unsupported retained ZIP methods, or sparse TAR records cannot be rebuilt safely by this editor.
+
 ## Selection, clipboard, and drag and drop
 
 Click a row or tile to select it, use `Cmd/Ctrl` for individual additions and `Shift` for a range, or use the selection checkboxes. File commands apply to the active pane.

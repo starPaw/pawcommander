@@ -149,6 +149,8 @@ impl PawCommander {
             Command::CreateArchive => Action::CreateArchive,
             Command::ExtractArchive => Action::ExtractArchive,
             Command::VerifyArchive => Action::VerifyArchive,
+            Command::AddToArchive => Action::AddToArchive,
+            Command::RemoveFromArchive => Action::RemoveFromArchive,
             Command::NewFolder => Action::NewFolder,
             Command::Trash => Action::Trash,
             Command::CopyToPane => Action::Transfer(TransferKind::Copy),
