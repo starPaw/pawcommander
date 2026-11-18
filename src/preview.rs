@@ -2,7 +2,10 @@
 use crate::test_ui::ContextExt as _;
 mod code;
 mod markup;
+#[cfg(target_os = "macos")]
+mod pdf;
 
+use crate::operations::Cancellation;
 use crate::vfs::{self, Location};
 use std::{
     fs::{self, File},
@@ -18,6 +21,8 @@ use crate::{
 };
 use chrono::{DateTime, Local};
 use eframe::egui::{self, RichText};
+#[cfg(target_os = "macos")]
+pub(crate) use pdf::{run_pdf_worker, PDF_WORKER_ARG};
 
 const TEXT_LIMIT: usize = 32 * 1024;
 const IMAGE_LIMIT: u64 = 20 * 1024 * 1024;
@@ -28,6 +33,7 @@ struct Request {
     path: Location,
     context: egui::Context,
     viewport: egui::ViewportId,
+    cancel: Cancellation,
 }
 
 struct Response {
@@ -56,6 +62,8 @@ enum Content {
         original_size: [u32; 2],
         rgba: Vec<u8>,
     },
+    #[cfg(target_os = "macos")]
+    Pdf(Box<pdf::Document>),
     Message(String),
 }
 
@@ -70,6 +78,7 @@ pub struct Preview {
     text: TextView,
     dirty: bool,
     fingerprint: Option<(u64, Option<std::time::SystemTime>)>,
+    cancel: Cancellation,
 }
 
 #[derive(Default)]
@@ -89,7 +98,13 @@ impl Preview {
                 while let Ok(newer) = receiver.try_recv() {
                     request = newer;
                 }
-                let result = load_location(&request.path);
+                if request.cancel.is_requested() {
+                    continue;
+                }
+                let result = load_location(&request.path, &request.cancel);
+                if request.cancel.is_requested() {
+                    continue;
+                }
                 if sender
                     .send(Response {
                         generation: request.generation,
@@ -112,6 +127,7 @@ impl Preview {
             text: TextView::default(),
             dirty: false,
             fingerprint: None,
+            cancel: Cancellation::default(),
         }
     }
 
@@ -185,6 +201,15 @@ impl Preview {
         self.upload_texture(ui.ctx());
         ui.add(egui::Label::new(RichText::new(path.name()).heading()).truncate());
         ui.add_space(8.0);
+        #[cfg(target_os = "macos")]
+        if let Some(Ok(Loaded {
+            content: Content::Pdf(document),
+            ..
+        })) = &mut self.result
+        {
+            ui.push_id(("pdf-preview", self.generation), |ui| document.show(ui));
+            return;
+        }
         let image_height = ui.available_height().max(1.0);
         let mut scroll = egui::ScrollArea::vertical().id_salt((
             "quick-look-content",
@@ -231,11 +256,21 @@ impl Preview {
                     Content::Directory => {
                         ui.label(&loaded.kind);
                     }
+                    #[cfg(target_os = "macos")]
+                    Content::Pdf(_) => {}
                 },
             });
     }
 
     pub fn text_input(&self, ctx: &egui::Context) -> bool {
+        #[cfg(target_os = "macos")]
+        if let Some(Ok(Loaded {
+            content: Content::Pdf(document),
+            ..
+        })) = &self.result
+        {
+            return document.text_input(ctx);
+        }
         self.text.find.text_input(ctx)
     }
 
@@ -250,6 +285,8 @@ impl Preview {
         fingerprint: Option<(u64, Option<std::time::SystemTime>)>,
     ) {
         if self.path.as_ref() != path || self.fingerprint != fingerprint || self.dirty {
+            self.cancel.request();
+            self.cancel = Cancellation::default();
             self.fingerprint = fingerprint;
             self.dirty = false;
             self.path = path.cloned();
@@ -268,6 +305,7 @@ impl Preview {
                         path: path.clone(),
                         context: ctx.clone(),
                         viewport: ctx.viewport_id(),
+                        cancel: self.cancel.clone(),
                     })
                     .is_err()
                 {
@@ -311,7 +349,19 @@ impl Preview {
             .id_salt(("file-preview-details", self.generation, self.text.revision))
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                match (&self.result, &self.texture) {
+                match (&mut self.result, &self.texture) {
+                    #[cfg(target_os = "macos")]
+                    (
+                        Some(Ok(Loaded {
+                            content: Content::Pdf(document),
+                            ..
+                        })),
+                        _,
+                    ) => {
+                        ui.push_id(("pdf-details", self.generation), |ui| {
+                            document.thumbnail(ui)
+                        });
+                    }
                     (Some(Ok(_)), Some(texture)) => draw_image(ui, texture, 220.0),
                     (Some(Ok(loaded)), _) => draw_icon(ui, loaded.is_dir, &path.name()),
                     _ => draw_icon(ui, false, &path.name()),
@@ -384,6 +434,12 @@ impl Preview {
                     }
                 }
             });
+    }
+}
+
+impl Drop for Preview {
+    fn drop(&mut self) {
+        self.cancel.request();
     }
 }
 
@@ -489,23 +545,27 @@ fn draw_icon(ui: &mut egui::Ui, is_dir: bool, name: &str) {
     );
 }
 
-fn load_location(location: &Location) -> Result<Loaded, String> {
+fn load_location(location: &Location, cancel: &Cancellation) -> Result<Loaded, String> {
     if let Some(path) = location.local() {
-        return load(path);
+        return load(path, cancel);
     }
     let limit = if image_path_format(location.path()).is_some() {
         IMAGE_LIMIT as usize
     } else {
         TEXT_LIMIT
     };
+    #[cfg(target_os = "macos")]
+    let limit = if pdf::is_pdf(location.path()) {
+        pdf::FILE_LIMIT
+    } else {
+        limit
+    };
     let (stat, bytes) = vfs::preview_data(location, limit)?;
     let content = if stat.is_dir() {
         Content::Directory
     } else {
-        let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
-        let path = directory.path().join(location.name());
-        fs::write(&path, &bytes).map_err(|e| e.to_string())?;
-        load_content(&path, stat.size.unwrap_or(bytes.len() as u64))
+        let length = stat.size.unwrap_or(bytes.len() as u64);
+        load_remote_content(&location.name(), bytes, length, cancel)
             .unwrap_or_else(Content::Message)
     };
     Ok(Loaded {
@@ -530,7 +590,23 @@ fn load_location(location: &Location) -> Result<Loaded, String> {
     })
 }
 
-fn load(path: &Path) -> Result<Loaded, String> {
+fn load_remote_content(
+    name: &str,
+    bytes: Vec<u8>,
+    length: u64,
+    cancel: &Cancellation,
+) -> Result<Content, String> {
+    #[cfg(target_os = "macos")]
+    if pdf::is_pdf(Path::new(name)) {
+        return pdf_content(bytes, length, cancel);
+    }
+    let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let path = directory.path().join(name);
+    fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    load_content(&path, length, cancel)
+}
+
+fn load(path: &Path, cancel: &Cancellation) -> Result<Loaded, String> {
     let link_metadata = fs::symlink_metadata(path).map_err(|e| {
         crate::tr_format!(
             "Не удалось прочитать сведения: {e}",
@@ -569,7 +645,7 @@ fn load(path: &Path) -> Result<Loaded, String> {
         // Do not open sockets, devices or named pipes: a read may never finish.
         Content::Message(crate::i18n::text("Предпросмотр специальных файлов недоступен.").into())
     } else {
-        load_content(path, metadata.len()).unwrap_or_else(Content::Message)
+        load_content(path, metadata.len(), cancel).unwrap_or_else(Content::Message)
     };
     Ok(Loaded {
         kind: kind.into(),
@@ -594,7 +670,34 @@ pub(crate) fn image_path_format(path: &Path) -> Option<image::ImageFormat> {
     .find_map(|(name, format)| extension.eq_ignore_ascii_case(name).then_some(format))
 }
 
-fn load_content(path: &Path, length: u64) -> Result<Content, String> {
+fn load_content(path: &Path, length: u64, cancel: &Cancellation) -> Result<Content, String> {
+    cancel.check().map_err(|error| error.to_string())?;
+    #[cfg(target_os = "macos")]
+    if pdf::is_pdf(path) {
+        use std::os::unix::fs::OpenOptionsExt;
+        if length > pdf::FILE_LIMIT as u64 {
+            return Err(pdf_too_large());
+        }
+        // The name can change after the metadata lookup. Never wait on a
+        // FIFO or read a special file in the preview worker.
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)
+            .map_err(|error| error.to_string())?;
+        if !file
+            .metadata()
+            .map_err(|error| error.to_string())?
+            .is_file()
+        {
+            return Err(crate::i18n::text("Предпросмотр специальных файлов недоступен.").into());
+        }
+        let mut bytes = Vec::new();
+        file.take(pdf::FILE_LIMIT as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| error.to_string())?;
+        return pdf_content(bytes, length, cancel);
+    }
     if image_path_format(path).is_some() {
         if length > IMAGE_LIMIT {
             return Err(crate::i18n::text(
@@ -646,6 +749,19 @@ fn load_content(path: &Path, length: u64) -> Result<Content, String> {
         code,
         markup,
     })
+}
+
+#[cfg(target_os = "macos")]
+fn pdf_content(bytes: Vec<u8>, length: u64, cancel: &Cancellation) -> Result<Content, String> {
+    if length > pdf::FILE_LIMIT as u64 || bytes.len() > pdf::FILE_LIMIT {
+        return Err(pdf_too_large());
+    }
+    pdf::Document::open(bytes, cancel).map(|document| Content::Pdf(Box::new(document)))
+}
+
+#[cfg(target_os = "macos")]
+fn pdf_too_large() -> String {
+    crate::i18n::text("PDF больше 64 МиБ. Откройте его во внешнем приложении.").into()
 }
 
 fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
@@ -719,7 +835,7 @@ mod tests {
         let path = dir.path().join("document.MARKDOWN");
         let original = format!("# Заголовок\n\n{}", "я".repeat(TEXT_LIMIT));
         fs::write(&path, &original).unwrap();
-        let loaded = load(&path).unwrap();
+        let loaded = load(&path, &Cancellation::default()).unwrap();
         assert!(matches!(
             loaded.content,
             Content::Text {
@@ -773,7 +889,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("large.txt");
         fs::write(&path, "я".repeat(TEXT_LIMIT)).unwrap();
-        let loaded = load(&path).unwrap();
+        let loaded = load(&path, &Cancellation::default()).unwrap();
         match loaded.content {
             Content::Text {
                 body, truncated, ..
@@ -793,14 +909,14 @@ mod tests {
         image::RgbaImage::new(IMAGE_EDGE_LIMIT + 1, 1)
             .save(&path)
             .unwrap();
-        let loaded = load(&path).unwrap();
+        let loaded = load(&path, &Cancellation::default()).unwrap();
         assert!(matches!(loaded.content, Content::Message(_)));
     }
 
     #[test]
     fn directory_does_not_get_a_recursive_size_or_text_preview() {
         let directory = tempfile::tempdir().unwrap();
-        let loaded = load(directory.path()).unwrap();
+        let loaded = load(directory.path(), &Cancellation::default()).unwrap();
         assert!(loaded.is_dir);
         assert!(loaded.size.is_none());
         assert!(matches!(loaded.content, Content::Directory));

@@ -7,5 +7,13 @@ fn main() {
             .flag("-fobjc-arc")
             .compile("paw_drag_escape");
         println!("cargo:rustc-link-lib=framework=Carbon");
+        let pdf = "src/preview/pdf/macos.m";
+        println!("cargo:rerun-if-changed={pdf}");
+        cc::Build::new()
+            .file(pdf)
+            .flag("-fobjc-arc")
+            .compile("paw_pdf");
+        println!("cargo:rustc-link-lib=framework=PDFKit");
+        println!("cargo:rustc-link-lib=framework=CoreGraphics");
     }
 }
