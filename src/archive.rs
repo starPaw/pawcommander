@@ -1,9 +1,11 @@
 //! Archive formats and directory indexes. The index uses virtual member paths.
 mod extraction;
+mod integrity;
 mod protected_zip;
 mod writer;
 
 pub(crate) use extraction::{Extraction, SelectedTree};
+pub(crate) use integrity::verify_archive;
 pub(crate) use writer::{ArchiveWriter, Attributes, CreationLimits};
 
 use crate::{
@@ -14,10 +16,12 @@ use crate::{
 use chrono::TimeZone;
 use std::{
     borrow::Cow,
+    cell::Cell,
     collections::BTreeMap,
     ffi::{OsStr, OsString},
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom},
+    ops::Range,
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -122,6 +126,7 @@ impl Index {
             position: 0,
             remaining: MAX_METADATA_BYTES,
             cancelled,
+            reading_payload: None,
         };
         match format {
             Format::Zip => index.read_zip(input)?,
@@ -202,108 +207,10 @@ impl Index {
     }
 
     fn read_zip(&mut self, input: MetadataReader<'_>) -> io::Result<()> {
-        let cancelled = input.cancelled;
-        // The three variable-length fields in a central-directory record
-        // can each be up to 65535 bytes.
-        let mut buffer = vec![0; 3 * usize::from(u16::MAX)];
-        let archive =
-            rawzip::ZipArchive::from_seekable(input, &mut buffer).map_err(io::Error::other)?;
-        let mut entries = archive.entries(&mut buffer);
-        let mut count = 0;
-        while let Some(entry) = entries.next_entry().map_err(io::Error::other)? {
-            if cancelled() {
-                return Err(cancelled_read());
-            }
-            count += 1;
-            if count > MAX_ENTRIES {
-                return Err(too_large());
-            }
-            let name = zip_name(&entry)?;
-            let name = if name.contains('\\') {
-                Cow::Owned(name.replace('\\', "/"))
-            } else {
-                name
-            };
-            let mode = entry.mode();
-            // The decoded mode can synthesize regular-file bits for missing
-            // Unix type information and OR in the directory bit from '/'.
-            let file_type = match entry.version_made_by().creator_system() {
-                rawzip::CreatorSystem::UNIX | rawzip::CreatorSystem::MACOS => {
-                    (entry.external_attributes() >> 16) & 0o170000
-                }
-                _ => 0,
-            };
-            let is_symlink = file_type == 0o120000;
-            let is_dir =
-                !is_symlink && (mode.value() & 0o170000 == 0o040000 || name.ends_with('/'));
-            let directory_start = archive.directory_offset();
-            if entry.local_header_offset() >= directory_start {
-                return Err(invalid("Недопустимая запись архива"));
-            }
-            let local = archive
-                .get_entry(entry.wayfinder())
-                .map_err(io::Error::other)?;
-            let (offset, end) = local.compressed_data_range();
-            if end > directory_start {
-                return Err(invalid("Недопустимая запись архива"));
-            }
-            let flags = entry.flags();
-            let compression = entry.compression_method();
-            let contents = if !matches!(file_type, 0 | 0o100000 | 0o040000) {
-                Contents::UnsupportedType
-            } else if flags.has_strong_encryption() || flags.is_masked() {
-                Contents::UnsupportedEncryption
-            } else if flags.is_encrypted() {
-                if is_dir
-                    || !matches!(
-                        compression,
-                        rawzip::CompressionMethod::STORE
-                            | rawzip::CompressionMethod::DEFLATE
-                            | rawzip::CompressionMethod::AES
-                    )
-                {
-                    Contents::UnsupportedEncryption
-                } else {
-                    Contents::Encrypted(protected_zip::Member {
-                        index: count - 1,
-                        header: entry.local_header_offset(),
-                        data: offset,
-                        length: end - offset,
-                        crc: entry.crc32(),
-                    })
-                }
-            } else if is_dir {
-                Contents::Directory
-            } else if matches!(
-                compression,
-                rawzip::CompressionMethod::STORE | rawzip::CompressionMethod::DEFLATE
-            ) {
-                Contents::Zip {
-                    offset,
-                    length: end - offset,
-                    crc: entry.crc32(),
-                    deflate: compression == rawzip::CompressionMethod::DEFLATE,
-                }
-            } else {
-                Contents::UnsupportedCompression
-            };
-            self.add(
-                &member_path(name.as_bytes())?,
-                Member {
-                    is_dir,
-                    is_symlink,
-                    size: entry.uncompressed_size_hint(),
-                    modified: zip_modified(entry.last_modified()),
-                    mode: Some((mode.value() & 0o7777) as u16),
-                    contents,
-                },
-            )?;
-        }
-        // Our entry limit is below the count at which legacy ZIP counts wrap.
-        if count as u64 != archive.entries_hint() {
-            return Err(invalid("Недопустимая запись архива"));
-        }
-        Ok(())
+        scan_zip(input, false, |_, _, entry| {
+            let entry = entry?;
+            self.add(&entry.path, entry.member)
+        })
     }
 
     fn read_tar(&mut self, input: MetadataReader<'_>) -> io::Result<()> {
@@ -359,6 +266,221 @@ impl Index {
             )?;
         }
         Ok(())
+    }
+}
+
+struct ZipRecord {
+    path: PathBuf,
+    member: Member,
+    payload: Contents,
+    span: Range<u64>,
+}
+
+fn scan_zip(
+    input: MetadataReader<'_>,
+    check_headers: bool,
+    mut visit: impl FnMut(usize, &str, io::Result<ZipRecord>) -> io::Result<()>,
+) -> io::Result<()> {
+    let cancelled = input.cancelled;
+    let mut buffer = vec![0; 3 * usize::from(u16::MAX)];
+    let mut headers = check_headers.then(|| vec![0; 2 * usize::from(u16::MAX)]);
+    let archive =
+        rawzip::ZipArchive::from_seekable(input, &mut buffer).map_err(io::Error::other)?;
+    let mut entries = archive.entries(&mut buffer);
+    let mut count = 0;
+    while let Some(entry) = entries.next_entry().map_err(io::Error::other)? {
+        if cancelled() {
+            return Err(cancelled_read());
+        }
+        count += 1;
+        if count > MAX_ENTRIES {
+            return Err(too_large());
+        }
+        let name = zip_name(&entry);
+        let shown = match &name {
+            Ok(name) => Cow::Borrowed(name.as_ref()),
+            Err(_) => String::from_utf8_lossy(entry.file_path().as_bytes()),
+        };
+        let record = (|| {
+            let name = name.as_ref().map_err(|_| invalid_path())?;
+            let path = if name.contains('\\') {
+                member_path(name.replace('\\', "/").as_bytes())?
+            } else {
+                member_path(name.as_bytes())?
+            };
+            if check_headers && path.as_os_str().is_empty() && !name.ends_with(['/', '\\']) {
+                return Err(invalid_path());
+            }
+            let mode = entry.mode();
+            let file_type = match entry.version_made_by().creator_system() {
+                rawzip::CreatorSystem::UNIX | rawzip::CreatorSystem::MACOS => {
+                    (entry.external_attributes() >> 16) & 0o170000
+                }
+                _ => 0,
+            };
+            let is_symlink = file_type == 0o120000;
+            let is_dir =
+                !is_symlink && (mode.value() & 0o170000 == 0o040000 || name.ends_with(['/', '\\']));
+            let directory = archive.directory_offset();
+            if entry.local_header_offset() >= directory {
+                return Err(invalid("Недопустимая запись архива"));
+            }
+            let local = archive
+                .get_entry(entry.wayfinder())
+                .map_err(io::Error::other)?;
+            let (offset, end) = local.compressed_data_range();
+            if end > directory {
+                return Err(invalid("Недопустимая запись архива"));
+            }
+            let mut record_end = end;
+            if let Some(buffer) = &mut headers {
+                let local_header = local.local_header(buffer).map_err(io::Error::other)?;
+                if local_header.file_path().as_bytes() != entry.file_path().as_bytes()
+                    || local_header.flags() != entry.flags()
+                    || local_header.compression_method() != entry.compression_method()
+                {
+                    return Err(invalid("Локальный заголовок ZIP отличается от каталога"));
+                }
+                if entry.flags().has_data_descriptor() {
+                    record_end = check_zip_descriptor(
+                        archive.get_ref(),
+                        &entry,
+                        &local_header,
+                        end,
+                        directory,
+                    )?;
+                } else if (
+                    local_header.crc32(),
+                    local_header.compressed_size_hint(),
+                    local_header.uncompressed_size_hint(),
+                ) != (
+                    entry.crc32(),
+                    entry.compressed_size_hint(),
+                    entry.uncompressed_size_hint(),
+                ) {
+                    return Err(invalid(
+                        "Размер или контрольная сумма ZIP отличаются в заголовках",
+                    ));
+                }
+            }
+            let payload = zip_payload(&entry, count - 1, offset, end - offset);
+            let contents = if !matches!(file_type, 0 | 0o100000 | 0o040000) {
+                Contents::UnsupportedType
+            } else if !is_dir {
+                payload
+            } else if entry.flags().is_encrypted()
+                || entry.flags().has_strong_encryption()
+                || entry.flags().is_masked()
+            {
+                Contents::UnsupportedEncryption
+            } else {
+                Contents::Directory
+            };
+            Ok(ZipRecord {
+                path,
+                member: Member {
+                    is_dir,
+                    is_symlink,
+                    size: entry.uncompressed_size_hint(),
+                    modified: zip_modified(entry.last_modified()),
+                    mode: Some((mode.value() & 0o7777) as u16),
+                    contents,
+                },
+                payload,
+                span: entry.local_header_offset()..record_end,
+            })
+        })();
+        visit(count, &shown, record)?;
+    }
+    if count as u64 != archive.entries_hint() {
+        return Err(invalid("Недопустимая запись архива"));
+    }
+    Ok(())
+}
+
+fn check_zip_descriptor(
+    input: &impl rawzip::ReaderAt,
+    entry: &rawzip::ZipFileHeaderRecord<'_>,
+    local: &rawzip::ZipLocalFileHeader<'_>,
+    end: u64,
+    directory: u64,
+) -> io::Result<u64> {
+    const SIGNATURE: [u8; 4] = 0x08074b50u32.to_le_bytes();
+    let compressed = entry.compressed_size_hint();
+    let uncompressed = entry.uncompressed_size_hint();
+    // Seekless writers can reserve ZIP64 sizes in the local header even
+    // when the final sizes fit in the central header's 32-bit fields.
+    let zip64 = compressed >= u64::from(u32::MAX)
+        || uncompressed >= u64::from(u32::MAX)
+        || local
+            .extra_fields()
+            .any(|(id, _)| id == rawzip::extra_fields::ExtraFieldId::ZIP64);
+    let mut expected = [0; 20];
+    expected[..4].copy_from_slice(&entry.crc32().to_le_bytes());
+    let width = if zip64 {
+        expected[4..12].copy_from_slice(&compressed.to_le_bytes());
+        expected[12..20].copy_from_slice(&uncompressed.to_le_bytes());
+        20
+    } else {
+        expected[4..8].copy_from_slice(&(compressed as u32).to_le_bytes());
+        expected[8..12].copy_from_slice(&(uncompressed as u32).to_le_bytes());
+        12
+    };
+    let mut buffer = [0; 24];
+    let length = (directory - end).min((width + SIGNATURE.len()) as u64) as usize;
+    let actual = &mut buffer[..length];
+    input.read_exact_at(actual, end)?;
+    let body = &expected[..width];
+    if actual
+        .strip_prefix(&SIGNATURE)
+        .is_some_and(|tail| tail.starts_with(body))
+    {
+        Ok(end + (width + SIGNATURE.len()) as u64)
+    } else if actual.starts_with(body) {
+        Ok(end + width as u64)
+    } else {
+        Err(invalid(
+            "Размер или контрольная сумма ZIP отличаются в заголовках",
+        ))
+    }
+}
+
+fn zip_payload(
+    entry: &rawzip::ZipFileHeaderRecord<'_>,
+    index: usize,
+    offset: u64,
+    length: u64,
+) -> Contents {
+    use rawzip::CompressionMethod;
+    let flags = entry.flags();
+    let compression = entry.compression_method();
+    let is_plain = matches!(
+        compression,
+        CompressionMethod::STORE | CompressionMethod::DEFLATE
+    );
+    if flags.has_strong_encryption() || flags.is_masked() {
+        Contents::UnsupportedEncryption
+    } else if flags.is_encrypted() {
+        if is_plain || compression == CompressionMethod::AES {
+            Contents::Encrypted(protected_zip::Member {
+                index,
+                header: entry.local_header_offset(),
+                data: offset,
+                length,
+                crc: entry.crc32(),
+            })
+        } else {
+            Contents::UnsupportedEncryption
+        }
+    } else if is_plain {
+        Contents::Zip {
+            offset,
+            length,
+            crc: entry.crc32(),
+            deflate: compression == CompressionMethod::DEFLATE,
+        }
+    } else {
+        Contents::UnsupportedCompression
     }
 }
 
@@ -503,6 +625,7 @@ struct MetadataReader<'a> {
     position: u64,
     remaining: usize,
     cancelled: &'a dyn Fn() -> bool,
+    reading_payload: Option<&'a Cell<bool>>,
 }
 
 impl Read for MetadataReader<'_> {
@@ -513,20 +636,26 @@ impl Read for MetadataReader<'_> {
         if self.position == self.length || buf.is_empty() {
             return Ok(0);
         }
-        if self.remaining == 0 {
-            return Err(too_large());
-        }
-        let count = buf.len().min(self.remaining).min(
+        let charge_metadata = !self.reading_payload.is_some_and(Cell::get);
+        let mut count = buf.len().min(
             (self.length - self.position)
                 .try_into()
                 .unwrap_or(usize::MAX),
         );
+        if charge_metadata {
+            count = count.min(self.remaining);
+        }
+        if count == 0 {
+            return Err(too_large());
+        }
         let read = self.file.read(&mut buf[..count])?;
         if read == 0 {
             return Err(invalid("Недопустимая запись архива"));
         }
         self.position += read as u64;
-        self.remaining -= read;
+        if charge_metadata {
+            self.remaining -= read;
+        }
         Ok(read)
     }
 }

@@ -45,6 +45,32 @@ impl SelectedEntry {
 }
 
 impl<'a> Extraction<'a> {
+    pub(super) fn open(path: &Path, password: Option<&'a str>) -> io::Result<Self> {
+        let (file, stamp) = open_regular(path)?;
+        Ok(Self {
+            path: path.into(),
+            file,
+            stamp,
+            protected: ProtectedZip::default(),
+            password: password.filter(|password| !password.is_empty()),
+        })
+    }
+
+    pub(super) fn input(&self) -> (&File, u64) {
+        (&self.file, self.stamp.len())
+    }
+
+    pub(super) fn prepare_protected(
+        &mut self,
+        entries: impl Iterator<Item = (super::protected_zip::Member, u64)>,
+        cancel: &Cancellation,
+    ) -> io::Result<()> {
+        let prepared = ProtectedZip::read(&self.file, self.stamp.len(), entries, cancel);
+        cancel.check()?;
+        self.protected = prepared?;
+        Ok(())
+    }
+
     pub(crate) fn prepare(
         sources: &[Location],
         password: Option<&'a str>,
@@ -60,17 +86,12 @@ impl<'a> Extraction<'a> {
             return Err(selection_required().into());
         }
         cancel.check()?;
-        let (file, stamp) = open_regular(path).map_err(|error| archive_read_error(path, error))?;
-        let parsed = Index::read(&file, stamp.len(), format, &|| cancel.is_requested());
+        let mut archive =
+            Self::open(path, password).map_err(|error| archive_read_error(path, error))?;
+        let (file, length) = archive.input();
+        let parsed = Index::read(file, length, format, &|| cancel.is_requested());
         cancel.check()?;
         let index = parsed.map_err(|error| archive_read_error(path, error))?;
-        let mut archive = Self {
-            path: path.into(),
-            file,
-            stamp,
-            protected: ProtectedZip::default(),
-            password: password.filter(|password| !password.is_empty()),
-        };
         archive.verify_source()?;
 
         let mut budget = MAX_OUTPUT_BYTES;
@@ -104,33 +125,43 @@ impl<'a> Extraction<'a> {
                 bytes: start - budget,
             });
         }
-        let encrypted = trees
+        let mut encrypted = trees
             .iter()
             .flat_map(|tree| &tree.entries)
             .filter_map(|entry| match entry.contents {
                 Contents::Encrypted(member) => Some((member, entry.size)),
                 _ => None,
-            });
-        let prepared = ProtectedZip::read(
-            &archive.file,
-            archive.stamp.len(),
-            encrypted,
-            archive.password,
-            cancel,
-        );
-        cancel.check()?;
-        archive.protected = prepared.map_err(|error| archive_read_error(path, error))?;
+            })
+            .peekable();
+        if let Some(&(first, _)) = encrypted.peek() {
+            let password = archive
+                .password
+                .ok_or_else(|| archive_read_error(path, password_required()))?;
+            archive
+                .prepare_protected(encrypted, cancel)
+                .map_err(|error| archive_read_error(path, error))?;
+            archive
+                .protected
+                .validate()
+                .map_err(|error| archive_read_error(path, error))?;
+            // Report an ordinary wrong password before asking about conflicts.
+            let mut input = EntryReader {
+                file: &archive.file,
+                cancel,
+            };
+            drop(
+                archive
+                    .protected
+                    .open(first, &mut input, password)
+                    .map_err(|error| archive_read_error(path, error))?,
+            );
+        }
         archive.verify_source()?;
         Ok((archive, trees))
     }
 
     pub(crate) fn verify_source(&self) -> Result<(), TransferError> {
-        let unchanged = self.file.metadata().ok().is_some_and(|current| {
-            fs_ops::source_metadata_matches(&self.stamp, &current).unwrap_or(false)
-        }) && fs::metadata(&self.path).ok().is_some_and(|current| {
-            fs_ops::source_metadata_matches(&self.stamp, &current).unwrap_or(false)
-        });
-        if unchanged {
+        if self.source_unchanged() {
             Ok(())
         } else {
             Err(crate::tr_format!(
@@ -140,6 +171,14 @@ impl<'a> Extraction<'a> {
             )
             .into())
         }
+    }
+
+    pub(super) fn source_unchanged(&self) -> bool {
+        self.file.metadata().ok().is_some_and(|current| {
+            fs_ops::source_metadata_matches(&self.stamp, &current).unwrap_or(false)
+        }) && fs::metadata(&self.path).ok().is_some_and(|current| {
+            fs_ops::source_metadata_matches(&self.stamp, &current).unwrap_or(false)
+        })
     }
 
     pub(crate) fn is_source_file(&self, target: &Path, metadata: &Metadata) -> bool {
@@ -164,12 +203,34 @@ impl<'a> Extraction<'a> {
         output: &mut impl Write,
         progress: &mut Progress,
     ) -> io::Result<()> {
+        self.consume(entry.contents, entry.size, path, Some(output), progress)
+    }
+
+    pub(super) fn check_payload(
+        &self,
+        contents: Contents,
+        size: u64,
+        path: &Path,
+        progress: &mut Progress,
+    ) -> io::Result<()> {
+        self.consume(contents, size, path, None, progress)
+    }
+
+    fn consume(
+        &self,
+        contents: Contents,
+        size: u64,
+        path: &Path,
+        output: Option<&mut dyn Write>,
+        progress: &mut Progress,
+    ) -> io::Result<()> {
         let cancel = progress.cancellation();
-        match entry.contents {
+        let mut file = &self.file;
+        match contents {
             Contents::Tar { offset } => {
-                self.file.seek(SeekFrom::Start(offset))?;
-                let mut input = (&mut self.file).take(entry.size);
-                copy_exact(path, entry.size, &mut input, output, progress)
+                file.seek(SeekFrom::Start(offset))?;
+                let mut input = file.take(size);
+                copy_exact(path, size, &mut input, output, progress)
             }
             Contents::Zip {
                 offset,
@@ -177,8 +238,8 @@ impl<'a> Extraction<'a> {
                 crc,
                 deflate,
             } => {
-                self.file.seek(SeekFrom::Start(offset))?;
-                let input = (&mut self.file).take(length);
+                file.seek(SeekFrom::Start(offset))?;
+                let input = file.take(length);
                 if deflate {
                     let decoder = DeflateReader {
                         input: BufReader::with_capacity(64 * 1024, input),
@@ -187,9 +248,9 @@ impl<'a> Extraction<'a> {
                         cancel,
                         finished: false,
                     };
-                    copy_zip(path, entry.size, crc, decoder, output, progress)
+                    copy_zip(path, size, crc, decoder, output, progress)
                 } else {
-                    copy_zip(path, entry.size, crc, input, output, progress)
+                    copy_zip(path, size, crc, input, output, progress)
                 }
             }
             Contents::Encrypted(member) => {
@@ -201,7 +262,7 @@ impl<'a> Extraction<'a> {
                 let mut input = self.protected.open(member, &mut reader, password)?;
                 // Read through EOF in addition to enforcing the planned size.
                 // In AES ZIP, the reader authenticates the data at EOF.
-                copy_exact(path, entry.size, &mut input, output, progress).map_err(|error| {
+                copy_exact(path, size, &mut input, output, progress).map_err(|error| {
                     if error.kind() == io::ErrorKind::InvalidData {
                         invalid("Неверный пароль или повреждены данные ZIP")
                     } else {
@@ -314,17 +375,28 @@ fn bad_data() -> io::Error {
     invalid("Повреждены данные записи архива")
 }
 
-fn copy_exact(
+pub(super) fn copy_exact(
     path: &Path,
     size: u64,
     input: &mut impl Read,
-    output: &mut impl Write,
+    output: Option<&mut dyn Write>,
     progress: &mut Progress,
 ) -> io::Result<()> {
-    let copied = progress.copy(path, Some(size), &mut input.by_ref().take(size), output)?;
+    let copied = if let Some(mut output) = output {
+        progress.copy(
+            path,
+            Some(size),
+            &mut input.by_ref().take(size),
+            &mut output,
+        )?
+    } else {
+        progress.read_stream(path, size, &mut *input, |reader| {
+            io::copy(reader, &mut io::sink()).map(|_| ())
+        })?
+    };
     progress.check_cancelled()?;
     if copied != size || input.read(&mut [0])? != 0 {
-        return Err(bad_data());
+        return Err(invalid("Размер данных записи архива не совпадает"));
     }
     Ok(())
 }
@@ -334,13 +406,13 @@ fn copy_zip(
     size: u64,
     crc: u32,
     input: impl Read,
-    output: &mut impl Write,
+    output: Option<&mut dyn Write>,
     progress: &mut Progress,
 ) -> io::Result<()> {
     let mut input = CrcReader::new(input);
     copy_exact(path, size, &mut input, output, progress)?;
     if input.crc().sum() != crc {
-        return Err(bad_data());
+        return Err(invalid("Контрольная сумма ZIP не совпадает"));
     }
     Ok(())
 }

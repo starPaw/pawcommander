@@ -9,7 +9,7 @@ use crate::shortcuts::Command;
 use crate::vfs::Location;
 use eframe::egui;
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 #[derive(Clone)]
@@ -66,6 +66,7 @@ pub(super) enum Action {
     Rename,
     CreateArchive,
     ExtractArchive,
+    VerifyArchive,
     Trash,
     Transfer(TransferKind),
     Bookmark,
@@ -479,6 +480,16 @@ impl PawCommander {
                     self.dialog_focus = true;
                 }
             }
+            Action::VerifyArchive if !self.conflict_open() => {
+                if let Some(archive) = self.archive_to_verify(&self.selected()) {
+                    self.remember_dialog_file_focus(ctx);
+                    self.dialog = Some(Dialog::VerifyArchive {
+                        archive,
+                        password: zeroize::Zeroizing::new(String::new()),
+                    });
+                    self.dialog_focus = true;
+                }
+            }
             Action::Trash if !self.conflict_open() => {
                 let paths = self.selected();
                 if !paths.is_empty() {
@@ -688,6 +699,22 @@ impl PawCommander {
         ctx.request_repaint();
     }
 
+    pub(super) fn archive_to_verify(&self, selected: &[Location]) -> Option<PathBuf> {
+        let tab = self.tab();
+        if let Some(archive) = tab.path.archive_source() {
+            return Some(archive.to_owned());
+        }
+        let [file] = selected else {
+            return None;
+        };
+        let archive = file.local()?;
+        crate::archive::Format::from_path(archive)?;
+        tab.entries
+            .iter()
+            .any(|entry| entry.path == *file && !entry.is_dir)
+            .then(|| archive.to_owned())
+    }
+
     pub(super) fn run_pane_action(&mut self, action: Action, ctx: &egui::Context) {
         if self.tab().focused_cursor(ctx).is_some() {
             let tab = self.tab();
@@ -703,23 +730,27 @@ impl PawCommander {
                 }
                 return;
             }
-            if matches!(
-                action,
-                Action::Copy(_)
-                    | Action::Shortcut(
-                        Command::Rename
-                            | Command::CreateArchive
-                            | Command::ExtractArchive
-                            | Command::Trash
-                            | Command::Properties
-                            | Command::CopyToPane
-                            | Command::MoveToPane
-                            | Command::EditInZed
-                    )
-            ) && !tab
-                .cursor
-                .as_ref()
-                .is_some_and(|path| tab.selected.contains(path))
+            let acts_on_selection =
+                matches!(
+                    action,
+                    Action::Copy(_)
+                        | Action::Shortcut(
+                            Command::Rename
+                                | Command::CreateArchive
+                                | Command::ExtractArchive
+                                | Command::Trash
+                                | Command::Properties
+                                | Command::CopyToPane
+                                | Command::MoveToPane
+                                | Command::EditInZed
+                        )
+                ) || (matches!(action, Action::Shortcut(Command::VerifyArchive))
+                    && !tab.path.is_archive());
+            if acts_on_selection
+                && !tab
+                    .cursor
+                    .as_ref()
+                    .is_some_and(|path| tab.selected.contains(path))
             {
                 // A focus-only move must never act on another file's selection.
                 return;

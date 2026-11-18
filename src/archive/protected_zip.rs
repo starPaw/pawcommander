@@ -23,7 +23,7 @@ pub(super) struct Member {
 
 #[derive(Default)]
 pub(super) struct ProtectedZip {
-    entries: BTreeMap<usize, OwnedZipFileEntry>,
+    entries: BTreeMap<usize, io::Result<OwnedZipFileEntry>>,
 }
 
 impl ProtectedZip {
@@ -31,25 +31,22 @@ impl ProtectedZip {
         file: &File,
         length: u64,
         selection: impl Iterator<Item = (Member, u64)>,
-        password: Option<&str>,
         cancel: &Cancellation,
     ) -> io::Result<Self> {
         let mut wanted: BTreeMap<_, _> = selection
             .map(|(member, size)| (member.index, (member, size)))
             .collect();
         let mut archive = Self::default();
-        let (Some(&(first, _)), Some((&last, _))) =
-            (wanted.values().next(), wanted.last_key_value())
-        else {
+        let Some((&last, _)) = wanted.last_key_value() else {
             return Ok(archive);
         };
-        let password = password.ok_or_else(password_required)?;
         let metadata = MetadataReader {
             file,
             length,
             position: 0,
             remaining: MAX_METADATA_BYTES,
             cancelled: &|| cancel.is_requested(),
+            reading_payload: None,
         };
         let mut zip = ZipIterable::try_new(metadata, Config::default()).map_err(zip_error)?;
         if zip.len() > MAX_ENTRIES {
@@ -61,31 +58,37 @@ impl ProtectedZip {
             if let Some((expected, size)) = wanted.remove(&index) {
                 // Paths come only from the bounded raw ZIP index. Match the
                 // decoder's record to the exact encrypted bytes it selected.
-                if item.header_start() != expected.header
+                let entry = if item.header_start() != expected.header
                     || item.compressed_size() != expected.length
                     || item.size() != size
                     || item.crc32() != expected.crc
                     || !item.encrypted()
                 {
-                    return Err(invalid("Недопустимая запись архива"));
-                }
-                if !matches!(
+                    Err(invalid("Недопустимая запись архива"))
+                } else if !matches!(
                     item.compression(),
                     CompressionMethod::Stored | CompressionMethod::Deflated
                 ) {
-                    return Err(invalid("Метод сжатия ZIP не поддерживается"));
-                }
-                archive.entries.insert(index, item.into());
+                    Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        text("Метод сжатия ZIP не поддерживается"),
+                    ))
+                } else {
+                    Ok(item.into())
+                };
+                archive.entries.insert(index, entry);
             }
         }
         if !wanted.is_empty() {
             return Err(invalid("Недопустимая запись архива"));
         }
-        // Reject an ordinary wrong password before asking about destination
-        // conflicts. Every entry is still checked through EOF at extraction.
-        let mut input = EntryReader { file, cancel };
-        drop(archive.open(first, &mut input, password)?);
         Ok(archive)
+    }
+
+    pub(super) fn validate(&self) -> io::Result<()> {
+        self.entries
+            .values()
+            .try_for_each(|entry| entry.as_ref().map(|_| ()).map_err(clone_error))
     }
 
     pub(super) fn open<'a, R: Read + Seek>(
@@ -97,7 +100,9 @@ impl ProtectedZip {
         let entry = self
             .entries
             .get(&member.index)
-            .ok_or_else(|| invalid("Недопустимая запись архива"))?;
+            .ok_or_else(|| invalid("Недопустимая запись архива"))?
+            .as_ref()
+            .map_err(clone_error)?;
         let options = ZipReadOptions::new().password(Some(password.as_bytes()));
         let entry = entry
             .as_ref()
@@ -108,6 +113,10 @@ impl ProtectedZip {
         }
         Ok(entry)
     }
+}
+
+fn clone_error(error: &io::Error) -> io::Error {
+    io::Error::new(error.kind(), error.to_string())
 }
 
 pub(super) fn password_required() -> io::Error {
@@ -124,7 +133,10 @@ pub(super) fn zip_error(error: ZipError) -> io::Error {
             io::Error::new(io::ErrorKind::InvalidInput, text("Неверный пароль ZIP"))
         }
         ZipError::UnsupportedArchive(_) | ZipError::CompressionMethodNotSupported(_) => {
-            invalid("Шифрование или сжатие ZIP не поддерживается")
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                text("Шифрование или сжатие ZIP не поддерживается"),
+            )
         }
         _ => invalid("Недопустимая запись архива"),
     }
