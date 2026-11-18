@@ -2842,6 +2842,7 @@ name = "pawcommander"
 version = "0.2.0"
 dependencies = [
  "apple-native-keyring-store",
+ "block2 0.6.2",
  "chrono",
  "clipboard-rs",
  "clipboard-win",

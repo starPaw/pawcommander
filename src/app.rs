@@ -175,6 +175,8 @@ impl eframe::App for PawCommander {
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+        #[cfg(target_os = "macos")]
+        self.native_drag.prepare_input(ctx, input);
         if let Some(accepted) = self.native_drag.finish_input(input)
             && accepted
         {
