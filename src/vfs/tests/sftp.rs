@@ -739,7 +739,7 @@ fn check_sftp_archive_round_trip(remote_root: &Location) {
 fn openssh_round_trip_and_host_verification() {
     let root =
         PathBuf::from(std::env::var_os("PAWCOMMANDER_TEST_SFTP_ROOT").expect("test server root"));
-    let endpoint = Endpoint {
+    let expected = Endpoint {
         host: std::env::var("PAWCOMMANDER_TEST_SFTP_HOST").unwrap_or_else(|_| "127.0.0.1".into()),
         port: std::env::var("PAWCOMMANDER_TEST_SFTP_PORT")
             .unwrap()
@@ -748,6 +748,28 @@ fn openssh_round_trip_and_host_verification() {
         user: std::env::var("PAWCOMMANDER_TEST_SFTP_USER").unwrap(),
         key: Some(root.join("client")),
     };
+    let home = tempfile::tempdir_in(&root).unwrap();
+    let ssh = home.path().join(".ssh");
+    fs::create_dir(&ssh).unwrap();
+    fs::write(
+        ssh.join("config"),
+        format!(
+            "Host fixture\nHostName {}\nUser {}\nPort {}\nIdentityFile ~/.ssh/unused\nIdentityFile \"{}\"\nStrictHostKeyChecking no\n",
+            expected.host, expected.user, expected.port, root.join("client").display()
+        ),
+    )
+    .unwrap();
+    let imported = crate::ssh_config::load_config(home.path(), "fixture", "unused").unwrap();
+    assert!(imported.matched);
+    assert_eq!(imported.identities.len(), 2);
+    assert_eq!(imported.unsupported[0].keyword, "StrictHostKeyChecking");
+    let endpoint = Endpoint {
+        host: imported.host,
+        port: imported.port,
+        user: imported.user,
+        key: Some(imported.identities[1].clone()),
+    };
+    assert_eq!(endpoint, expected);
     let known = root.join("known_hosts");
     let empty = root.join("empty_hosts");
     fs::write(&empty, "").unwrap();

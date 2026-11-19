@@ -25,6 +25,7 @@ mod recovery;
 mod result_history;
 mod search;
 mod shortcuts;
+mod ssh_config;
 mod tab_drag;
 #[cfg(test)]
 mod test_ui;

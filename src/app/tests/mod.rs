@@ -64,6 +64,7 @@ mod recovery;
 mod search;
 mod selection;
 mod sessions;
+mod sftp;
 mod tabs;
 mod undo;
 
