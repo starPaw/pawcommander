@@ -28,6 +28,18 @@ typedef struct {
     bool seeking;
 } PawMediaState;
 
+typedef struct {
+    double fps;
+    double sampleRate;
+    uint32_t width;
+    uint32_t height;
+    uint32_t videoCodec;
+    uint32_t audioCodec;
+    uint32_t channels;
+    bool hasVideo;
+    bool hasAudio;
+} PawMediaMetadata;
+
 void *paw_media_open(const char *path) {
     @autoreleasepool {
         @try {
@@ -142,6 +154,54 @@ bool paw_media_state(void *handle, PawMediaState *out) {
             return true;
         } @catch (NSException *exception) {
             return false;
+        }
+    }
+}
+
+void paw_media_metadata(void *handle, PawMediaMetadata *out) {
+    @autoreleasepool {
+        @try {
+            PawMedia *media = (__bridge PawMedia *)handle;
+            // The player is ready. Query each enabled track once in the helper.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            for (AVPlayerItemTrack *itemTrack in media.item.tracks) {
+                if (!itemTrack.enabled) {
+                    continue;
+                }
+                AVAssetTrack *track = itemTrack.assetTrack;
+                if (!out->hasVideo && [track.mediaType isEqualToString:AVMediaTypeVideo]) {
+                    out->hasVideo = true;
+                    out->fps = track.nominalFrameRate;
+                    CMFormatDescriptionRef format =
+                        (__bridge CMFormatDescriptionRef)track.formatDescriptions.firstObject;
+                    if (format != NULL) {
+                        out->videoCodec = CMFormatDescriptionGetMediaSubType(format);
+                        CMVideoDimensions size = CMVideoFormatDescriptionGetDimensions(format);
+                        out->width = size.width > 0 ? (uint32_t)size.width : 0;
+                        out->height = size.height > 0 ? (uint32_t)size.height : 0;
+                    }
+                } else if (!out->hasAudio && [track.mediaType isEqualToString:AVMediaTypeAudio]) {
+                    out->hasAudio = true;
+                    CMFormatDescriptionRef format =
+                        (__bridge CMFormatDescriptionRef)track.formatDescriptions.firstObject;
+                    if (format != NULL) {
+                        out->audioCodec = CMFormatDescriptionGetMediaSubType(format);
+                        const AudioStreamBasicDescription *description =
+                            CMAudioFormatDescriptionGetStreamBasicDescription(format);
+                        if (description != NULL) {
+                            out->sampleRate = description->mSampleRate;
+                            out->channels = description->mChannelsPerFrame;
+                        }
+                    }
+                }
+                if (out->hasVideo && out->hasAudio) {
+                    break;
+                }
+            }
+#pragma clang diagnostic pop
+        } @catch (NSException *exception) {
+            // Preserve the fields already read and let playback continue.
         }
     }
 }

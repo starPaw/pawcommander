@@ -1,5 +1,10 @@
-use super::{frame_size, Command, Mode, Reply, State, VIDEO_EDGE};
-use crate::preview::helper::{read_message, read_size, write_message};
+use super::{
+    frame_size, AudioMetadata, Command, Metadata, Mode, Reply, State, VideoMetadata, VIDEO_EDGE,
+};
+use crate::preview::{
+    helper::{read_message, read_size, write_message},
+    metadata::positive,
+};
 use std::{
     ffi::{c_char, c_void, CString},
     io::{self, BufReader, BufWriter, Read, Write},
@@ -18,12 +23,27 @@ struct NativeState {
     seeking: bool,
 }
 
+#[repr(C)]
+#[derive(Default)]
+struct NativeMetadata {
+    fps: f64,
+    sample_rate: f64,
+    width: u32,
+    height: u32,
+    video_codec: u32,
+    audio_codec: u32,
+    channels: u32,
+    has_video: bool,
+    has_audio: bool,
+}
+
 unsafe extern "C" {
     fn paw_media_open(path: *const c_char) -> *mut c_void;
     fn paw_media_close(player: *mut c_void);
     fn paw_media_pump();
     fn paw_media_command(player: *mut c_void, command: i32, seconds: f64) -> bool;
     fn paw_media_state(player: *mut c_void, state: *mut NativeState) -> bool;
+    fn paw_media_metadata(player: *mut c_void, metadata: *mut NativeMetadata);
     fn paw_media_frame(
         player: *mut c_void,
         rgba: *mut u8,
@@ -67,6 +87,7 @@ fn serve(mut input: impl Read + Send + 'static, output: &mut impl Write) -> io::
     write_message(output, &Reply::Opened)?;
     output.flush()?;
     let mut rgba = vec![0; frame_size([VIDEO_EDGE, VIDEO_EDGE]).unwrap()];
+    let mut sent_metadata = false;
     loop {
         // AVPlayer is owned by this process's main thread. Give AVFoundation
         // time to publish loading, buffering and seek completions even when
@@ -80,20 +101,25 @@ fn serve(mut input: impl Read + Send + 'static, output: &mut impl Write) -> io::
         let Some(state) = player.apply(command) else {
             return fail(output);
         };
-        let frame = player.frame(&mut rgba, state.mode);
-        match frame {
-            Ok(Some((size, len))) => {
-                write_message(
-                    output,
-                    &Reply::Snapshot {
-                        state,
-                        size: Some(size),
-                    },
-                )?;
-                output.write_all(&rgba[..len])?;
-            }
-            Ok(None) => write_message(output, &Reply::Snapshot { state, size: None })?,
-            Err(()) => return fail(output),
+        let Ok(frame) = player.frame(&mut rgba, state.mode) else {
+            return fail(output);
+        };
+        let metadata = if !sent_metadata && state.mode != Mode::Loading {
+            sent_metadata = true;
+            Some(player.metadata())
+        } else {
+            None
+        };
+        write_message(
+            output,
+            &Reply::Snapshot {
+                state,
+                size: frame.map(|(size, _)| size),
+                metadata,
+            },
+        )?;
+        if let Some((_, len)) = frame {
+            output.write_all(&rgba[..len])?;
         }
         output.flush()?;
     }
@@ -162,6 +188,25 @@ impl Player {
                 .map(|len| Some((size, len)))
                 .ok_or(()),
             _ => Err(()),
+        }
+    }
+
+    fn metadata(&self) -> Metadata {
+        let mut native = NativeMetadata::default();
+        // The ready player stays owned by the helper throughout this call.
+        unsafe { paw_media_metadata(self.0.as_ptr(), &mut native) };
+        Metadata {
+            video: native.has_video.then_some(VideoMetadata {
+                dimensions: (native.width > 0 && native.height > 0)
+                    .then_some([native.width, native.height]),
+                codec: (native.video_codec != 0).then_some(native.video_codec),
+                fps: positive(native.fps),
+            }),
+            audio: native.has_audio.then_some(AudioMetadata {
+                codec: (native.audio_codec != 0).then_some(native.audio_codec),
+                sample_rate: positive(native.sample_rate),
+                channels: (native.channels > 0).then_some(native.channels),
+            }),
         }
     }
 }

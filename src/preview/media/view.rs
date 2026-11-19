@@ -1,5 +1,5 @@
-use super::{media_error, session::Session, Command, Frame, Mode, State};
-use crate::{i18n::text, operations::Cancellation, vfs::Location};
+use super::{media_error, session::Session, Command, Frame, Metadata, Mode, Snapshot, State};
+use crate::{i18n::text, operations::Cancellation, preview::metadata, vfs::Location};
 use eframe::egui;
 use std::{
     sync::{mpsc, Arc, Mutex},
@@ -11,6 +11,7 @@ pub(in crate::preview) struct Player {
     location: Location,
     controller: Option<Controller>,
     state: State,
+    metadata: Metadata,
     error: Option<String>,
     texture: Option<egui::TextureHandle>,
     seek_widget: Option<egui::Id>,
@@ -26,6 +27,7 @@ impl Player {
             location,
             controller: None,
             state: State::default(),
+            metadata: Metadata::default(),
             error: None,
             texture: None,
             seek_widget: None,
@@ -51,6 +53,7 @@ impl Player {
         self.update(ui.ctx());
         if let Some(error) = &self.error {
             ui.colored_label(ui.visuals().error_fg_color, error);
+            self.show_metadata(ui);
             return;
         }
         if self.state.mode == Mode::Loading {
@@ -61,10 +64,58 @@ impl Player {
             return;
         }
         self.controls(ui);
+        self.show_metadata(ui);
         ui.separator();
         if let Some(texture) = &self.texture {
             super::super::draw_image(ui, texture, ui.available_height().max(1.0));
         }
+    }
+
+    fn show_metadata(&self, ui: &mut egui::Ui) {
+        use metadata::field;
+
+        metadata::section(ui, |ui| {
+            field(
+                ui,
+                "Длительность",
+                self.state.duration.map(timestamp).as_deref(),
+            );
+            if let Some(video) = self.metadata.video {
+                field(
+                    ui,
+                    "Размер кадра",
+                    video.dimensions.map(metadata::dimensions).as_deref(),
+                );
+                field(ui, "Видеокодек", video.codec.and_then(codec).as_deref());
+                field(
+                    ui,
+                    "Частота кадров",
+                    video
+                        .fps
+                        .map(|rate| format!("{rate:.2} {}", text("кадр/с")))
+                        .as_deref(),
+                );
+            }
+            if let Some(audio) = self.metadata.audio {
+                field(ui, "Аудиокодек", audio.codec.and_then(codec).as_deref());
+                field(
+                    ui,
+                    "Частота дискретизации",
+                    audio
+                        .sample_rate
+                        .map(|rate| format!("{rate:.0} {}", text("Гц")))
+                        .as_deref(),
+                );
+                field(
+                    ui,
+                    "Каналы",
+                    audio.channels.map(|count| count.to_string()).as_deref(),
+                );
+            }
+            if self.metadata.audio.is_none() && self.metadata.video.is_none() {
+                field(ui, "Медиадорожки", None);
+            }
+        });
     }
 
     fn controls(&mut self, ui: &mut egui::Ui) {
@@ -165,6 +216,9 @@ impl Player {
                 self.button = None;
             }
         }
+        if let Some(metadata) = update.metadata {
+            self.metadata = metadata;
+        }
         if let Some(Frame { size, rgba }) = update.frame {
             let image = egui::ColorImage::from_rgba_unmultiplied(
                 size.map(|dimension| dimension as usize),
@@ -186,6 +240,7 @@ const STARTUP_LIMIT: Duration = Duration::from_secs(12);
 struct Update {
     state: Option<(u64, State)>,
     frame: Option<Frame>,
+    metadata: Option<Metadata>,
     error: Option<String>,
 }
 
@@ -262,17 +317,24 @@ fn run(
             Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
             Err(mpsc::RecvTimeoutError::Timeout) => (applied, Command::Poll),
         };
-        let (next, frame) = session.update(command, cancel)?;
+        let Snapshot {
+            state: next,
+            frame,
+            metadata,
+        } = session.update(command, cancel)?;
         if next.mode == Mode::Loading && began.elapsed() >= STARTUP_LIMIT {
             return Err(text("Медиаплеер не ответил вовремя.").into());
         }
-        if next != state || ticket != applied || frame.is_some() {
+        if next != state || ticket != applied || frame.is_some() || metadata.is_some() {
             let Ok(mut update) = latest.lock() else {
                 return Ok(());
             };
             update.state = Some((ticket, next));
             if frame.is_some() {
                 update.frame = frame;
+            }
+            if metadata.is_some() {
+                update.metadata = metadata;
             }
             drop(update);
             repaint();
@@ -281,6 +343,26 @@ fn run(
         state = next;
     }
     Ok(())
+}
+
+fn codec(value: u32) -> Option<String> {
+    let bytes = value.to_be_bytes();
+    let name = match &bytes {
+        b"avc1" | b"avc3" => "H.264",
+        b"hvc1" | b"hev1" => "HEVC",
+        b"mp4v" => "MPEG-4",
+        b"aac " => "AAC",
+        b"alac" => "ALAC",
+        b"lpcm" | b"twos" | b"sowt" => "PCM",
+        b".mp3" => "MP3",
+        b"fLaC" => "FLAC",
+        _ if bytes.iter().all(|byte| matches!(byte, b' '..=b'~')) => {
+            let value = std::str::from_utf8(&bytes).ok()?.trim();
+            return (!value.is_empty()).then(|| value.to_owned());
+        }
+        _ => return None,
+    };
+    Some(name.to_owned())
 }
 
 fn timestamp(seconds: f64) -> String {
