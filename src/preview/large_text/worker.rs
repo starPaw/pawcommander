@@ -1,6 +1,6 @@
 use super::{
     reader::{changed, read_error, PageText, Reader},
-    Direction, Hit, Position,
+    Codec, Direction, Hit, Position,
 };
 use crate::{
     operations::Cancellation,
@@ -11,7 +11,7 @@ use crate::{
     vfs::Location,
 };
 use eframe::egui;
-use std::{sync::mpsc, thread};
+use std::{ops::Range, sync::mpsc, thread};
 
 pub(super) enum Work {
     Page {
@@ -33,11 +33,12 @@ pub(super) struct Page {
     pub text: PageText,
     pub code: Code,
     pub hit: Option<Hit>,
-    pub jump: Option<u64>,
+    pub hit_range: Option<Range<usize>>,
+    pub jump: Option<usize>,
 }
 
 pub(super) enum ResultPage {
-    Page(Page),
+    Page(Box<Page>),
     NoMatch,
     NoLine,
 }
@@ -75,7 +76,11 @@ impl Drop for Pending {
 pub(super) struct Worker(mpsc::Sender<Job>);
 
 impl Worker {
-    pub(super) fn start(location: Location, ctx: &egui::Context) -> Result<Self, String> {
+    pub(super) fn start(
+        location: Location,
+        encoding: Codec,
+        ctx: &egui::Context,
+    ) -> Result<Self, String> {
         let (requests, jobs) = mpsc::channel::<Job>();
         let ctx = ctx.clone();
         let viewport = ctx.viewport_id();
@@ -89,7 +94,7 @@ impl Worker {
                     if job.cancel.is_requested() {
                         continue;
                     }
-                    let reply = run(&location, &job.work, job.version, &job.cancel);
+                    let reply = run(&location, &job.work, job.version, encoding, &job.cancel);
                     if !job.cancel.is_requested() && job.reply.send(reply).is_ok() {
                         ctx.request_repaint_of(viewport);
                     }
@@ -118,6 +123,7 @@ fn run(
     location: &Location,
     work: &Work,
     expected: Option<Version>,
+    encoding: Codec,
     cancel: &Cancellation,
 ) -> Reply {
     cancel.check().map_err(read_error)?;
@@ -127,7 +133,7 @@ fn run(
         return Err(changed());
     }
 
-    let mut reader = Reader::new(&mut source, version.size, cancel);
+    let mut reader = Reader::new(&mut source, version.size, encoding, cancel);
     let (text, hit, jump) = match work {
         Work::Page { index, near } => (Some(reader.page(*index, *near, None)?), None, None),
         Work::Match {
@@ -154,14 +160,21 @@ fn run(
     if source.version().map_err(read_error)? != version {
         return Err(changed());
     }
-    let result = if let Some(text) = text {
+    let result = if let Some(mut text) = text {
         let code = Code::numbered(location.path(), &text.text, text.start.line);
-        ResultPage::Page(Page {
+        let hit_range = hit.and_then(|hit| text.local_range(hit.start.byte..hit.end.byte));
+        let jump = jump.and_then(|byte| {
+            let byte = byte.max(text.origin);
+            text.local_range(byte..byte).map(|range| range.start)
+        });
+        text.forget_encoded();
+        ResultPage::Page(Box::new(Page {
             text,
             code,
             hit,
+            hit_range,
             jump,
-        })
+        }))
     } else if matches!(work, Work::Match { .. }) {
         ResultPage::NoMatch
     } else {
@@ -184,6 +197,8 @@ mod tests {
 
     pub(crate) fn check_sftp_large_text(location: &Location) {
         let cancel = Cancellation::default();
+        let (_, prefix) = crate::vfs::preview_data(location, 3).unwrap();
+        let encoding = Codec::choose(None, &prefix);
         let (version, first) = run(
             location,
             &Work::Page {
@@ -191,6 +206,7 @@ mod tests {
                 near: Position::START,
             },
             None,
+            encoding,
             &cancel,
         )
         .unwrap();
@@ -206,6 +222,7 @@ mod tests {
                 direction: Direction::Forward,
             },
             Some(version),
+            encoding,
             &cancel,
         )
         .unwrap();
@@ -214,7 +231,10 @@ mod tests {
         };
         assert_eq!(found.hit.unwrap().start.line, 4097);
         assert!(!found.text.has_next);
-        assert!(found.text.text.contains("REMOTE PREVIEW MARKER"));
+        assert_eq!(
+            &found.text.text[found.hit_range.unwrap()],
+            "REMOTE PREVIEW MARKER"
+        );
     }
 
     #[test]
@@ -231,6 +251,7 @@ mod tests {
                 near: Position::START,
             },
             None,
+            Codec::Utf8,
             &cancel,
         )
         .unwrap();
@@ -246,6 +267,7 @@ mod tests {
                 near: first.text.start
             },
             Some(version),
+            Codec::Utf8,
             &cancel,
         )
         .is_err());

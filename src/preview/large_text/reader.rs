@@ -1,6 +1,6 @@
-use super::{Direction, Hit, Position, QUERY_CHARS};
+use super::{Codec, Direction, Hit, Position, QUERY_CHARS};
 use crate::{operations::Cancellation, preview::source::Source};
-use memchr::{memchr, memchr_iter, memmem, memrchr_iter};
+use memchr::memmem;
 use std::{
     io::{self, Read},
     ops::Range,
@@ -9,7 +9,6 @@ use std::{
 const PAGE_BYTES: u64 = 32 * 1024;
 const LINE_LOOKAHEAD: usize = 512;
 const BLOCK: usize = 64 * 1024;
-const BOM: &[u8] = b"\xef\xbb\xbf";
 
 pub(super) struct PageText {
     pub index: u64,
@@ -17,21 +16,29 @@ pub(super) struct PageText {
     pub origin: u64,
     pub text: String,
     pub has_next: bool,
+    encoded: Option<(Codec, Vec<u8>)>,
 }
 
 pub(super) struct Reader<'a> {
     source: &'a mut Source,
     size: Option<u64>,
     offset: u64,
+    encoding: Codec,
     cancel: &'a Cancellation,
 }
 
 impl<'a> Reader<'a> {
-    pub(super) fn new(source: &'a mut Source, size: Option<u64>, cancel: &'a Cancellation) -> Self {
+    pub(super) fn new(
+        source: &'a mut Source,
+        size: Option<u64>,
+        encoding: Codec,
+        cancel: &'a Cancellation,
+    ) -> Self {
         Self {
             source,
             size,
             offset: 0,
+            encoding,
             cancel,
         }
     }
@@ -48,20 +55,33 @@ impl<'a> Reader<'a> {
         let mut data = vec![0; nominal_end as usize + LINE_LOOKAHEAD + QUERY_CHARS * 4 + 1];
         let count = self.read_at(first, &mut data)?;
         data.truncate(count);
-        let end = split_at(&data, nominal_end as usize);
+        let end = split_at(&data, nominal_end as usize, self.encoding);
         let has_next = end < data.len();
         let through =
             show_through.map_or(end, |byte| (byte.saturating_sub(first) as usize).max(end));
         data.truncate(through);
-        let origin = if first == 0 && data.starts_with(BOM) {
-            data.drain(..BOM.len());
-            BOM.len() as u64
+        let origin = if first == 0 {
+            let bom = self.encoding.bom(&data);
+            data.drain(..bom);
+            bom as u64
         } else {
             first
         };
-        let text = String::from_utf8(data).map_err(|_| invalid_text())?;
+        let (text, encoded) = if self.encoding == Codec::Utf8 {
+            (
+                String::from_utf8(data).map_err(|_| self.encoding.error())?,
+                None,
+            )
+        } else {
+            let text = self
+                .encoding
+                .decode(&data)
+                .ok_or_else(|| self.encoding.error())?
+                .into_owned();
+            (text, Some((self.encoding, data)))
+        };
         if !super::super::preview_text_chars(&text) {
-            return Err(invalid_text());
+            return Err(self.encoding.error());
         }
         Ok(PageText {
             index,
@@ -69,6 +89,7 @@ impl<'a> Reader<'a> {
             origin,
             text,
             has_next,
+            encoded,
         })
     }
 
@@ -102,20 +123,20 @@ impl<'a> Reader<'a> {
     ) -> Result<Option<Hit>, String> {
         let mut prefix = [0; 3];
         let used = self.read_at(0, &mut prefix)?;
-        let first = if &prefix[..used] == BOM {
-            Position::START.after(BOM)
-        } else {
-            Position::START
-        };
+        let bom = self.encoding.bom(&prefix[..used]);
+        let first = Position::START.after(&prefix[..bom], self.encoding);
         let from = if from.byte < first.byte { first } else { from };
-        let needle = query.as_bytes();
-        if needle.is_empty() {
+        let Some(needle) = self
+            .encoding
+            .encode(query)
+            .filter(|needle| !needle.is_empty())
+        else {
             return Ok(None);
-        }
-        let overlap = needle.len() - 1;
+        };
+        let overlap = needle.len() - self.encoding.width();
         match direction {
             Direction::Forward => {
-                let finder = memmem::Finder::new(needle);
+                let finder = memmem::Finder::new(&needle);
                 let hit = self.forward(from, self.size.unwrap_or(u64::MAX), &finder)?;
                 if hit.is_some() || from.byte == first.byte {
                     return Ok(hit);
@@ -125,16 +146,24 @@ impl<'a> Reader<'a> {
                 self.forward(first, from.byte.saturating_add(overlap as u64), &finder)
             }
             Direction::Backward => {
-                let finder = memmem::FinderRev::new(needle);
+                let finder = memmem::FinderRev::new(&needle);
                 if from.byte > first.byte {
                     let mut tail = vec![0; overlap];
                     let used = self.read_at(from.byte, &mut tail)?;
-                    let hit = self.backward(first.byte, from.after(&tail[..used]), &finder)?;
+                    let aligned = used - used % self.encoding.width();
+                    let hit = self.backward(
+                        first.byte,
+                        from.after(&tail[..aligned], self.encoding),
+                        &finder,
+                    )?;
                     if hit.is_some() {
                         return Ok(hit);
                     }
                 }
                 let end = self.end_position(from)?;
+                if !end.byte.is_multiple_of(self.encoding.width() as u64) {
+                    return Err(self.encoding.error());
+                }
                 self.backward(from.byte, end, &finder)
             }
         }
@@ -153,33 +182,38 @@ impl<'a> Reader<'a> {
             loop {
                 let count = self.read_at(at.byte, &mut buffer)?;
                 let bytes = &buffer[..count];
-                if let Some(found) =
-                    memchr_iter(b'\n', bytes).nth((wanted - at.line - 1).min(BLOCK as u64) as usize)
+                if let Some(found) = self
+                    .encoding
+                    .line_breaks(bytes)
+                    .nth((wanted - at.line - 1).min(BLOCK as u64) as usize)
                 {
                     return Ok(Some(Position {
-                        byte: at.byte + found as u64 + 1,
+                        byte: at.byte + found as u64,
                         line: wanted,
                     }));
                 }
                 if count < BLOCK {
                     return Ok(None);
                 }
-                at = at.after(bytes);
+                at = at.after(bytes, self.encoding);
             }
         }
         while at.byte > 0 {
             let count = at.byte.min(BLOCK as u64) as usize;
             let byte = at.byte - count as u64;
             let bytes = self.read_exact_at(byte, &mut buffer[..count])?;
-            if let Some(found) =
-                memrchr_iter(b'\n', bytes).nth((at.line - wanted).min(BLOCK as u64) as usize)
+            if let Some(found) = self
+                .encoding
+                .line_breaks(bytes)
+                .rev()
+                .nth((at.line - wanted).min(BLOCK as u64) as usize)
             {
                 return Ok(Some(Position {
-                    byte: byte + found as u64 + 1,
+                    byte: byte + found as u64,
                     line: wanted,
                 }));
             }
-            at = at.before(bytes);
+            at = at.before(bytes, self.encoding);
         }
         Ok(None)
     }
@@ -190,7 +224,8 @@ impl<'a> Reader<'a> {
         end: u64,
         finder: &memmem::Finder<'_>,
     ) -> Result<Option<Hit>, String> {
-        let overlap = finder.needle().len() - 1;
+        let width = self.encoding.width();
+        let overlap = finder.needle().len() - width;
         let mut buffer = vec![0; BLOCK + overlap];
         let mut carried = 0;
         while at.byte + (carried as u64) < end {
@@ -198,11 +233,11 @@ impl<'a> Reader<'a> {
             let wanted = BLOCK.min((end - offset).min(usize::MAX as u64) as usize);
             let fresh = self.read_at(offset, &mut buffer[carried..carried + wanted])?;
             let used = carried + fresh;
-            if let Some(index) = finder.find(&buffer[..used]) {
-                let start = at.after(&buffer[..index]);
+            if let Some(index) = aligned_find(&buffer[..used], finder, width) {
+                let start = at.after(&buffer[..index], self.encoding);
                 return Ok(Some(Hit {
                     start,
-                    end: start.after(finder.needle()),
+                    end: start.after(finder.needle(), self.encoding),
                 }));
             }
             if fresh < wanted {
@@ -210,7 +245,7 @@ impl<'a> Reader<'a> {
             }
             carried = overlap.min(used);
             let consumed = used - carried;
-            at = at.after(&buffer[..consumed]);
+            at = at.after(&buffer[..consumed], self.encoding);
             buffer.copy_within(consumed..used, 0);
         }
         Ok(None)
@@ -223,19 +258,20 @@ impl<'a> Reader<'a> {
         finder: &memmem::FinderRev<'_>,
     ) -> Result<Option<Hit>, String> {
         let end = at.byte;
-        let overlap = (finder.needle().len() - 1) as u64;
+        let width = self.encoding.width();
+        let overlap = (finder.needle().len() - width) as u64;
         let mut buffer = vec![0; BLOCK + overlap as usize];
         while at.byte > lower {
             let byte = at.byte.saturating_sub(BLOCK as u64).max(lower);
             let block = (at.byte - byte) as usize;
             let tail = overlap.min(end - at.byte) as usize;
             let bytes = self.read_exact_at(byte, &mut buffer[..block + tail])?;
-            at = at.before(&bytes[..block]);
-            if let Some(index) = finder.rfind(bytes) {
-                let start = at.after(&bytes[..index]);
+            at = at.before(&bytes[..block], self.encoding);
+            if let Some(index) = aligned_rfind(bytes, finder, width) {
+                let start = at.after(&bytes[..index], self.encoding);
                 return Ok(Some(Hit {
                     start,
-                    end: start.after(finder.needle()),
+                    end: start.after(finder.needle(), self.encoding),
                 }));
             }
         }
@@ -252,9 +288,11 @@ impl<'a> Reader<'a> {
         {
             return Ok(size);
         }
-        let mut edge = [0u8; LINE_LOOKAHEAD + 1];
-        let count = self.read_at(nominal - 1, &mut edge)?;
-        Ok(nominal - 1 + split_at(&edge[..count], 1) as u64)
+        let width = self.encoding.width();
+        let base = nominal - width as u64;
+        let mut edge = [0u8; LINE_LOOKAHEAD + 2];
+        let count = self.read_at(base, &mut edge[..LINE_LOOKAHEAD + width])?;
+        Ok(base + split_at(&edge[..count], width, self.encoding) as u64)
     }
 
     fn relocate(&mut self, from: Position, to: u64) -> Result<Position, String> {
@@ -265,7 +303,7 @@ impl<'a> Reader<'a> {
         while byte < end {
             let count = BLOCK.min((end - byte).min(usize::MAX as u64) as usize);
             let bytes = self.read_exact_at(byte, &mut buffer[..count])?;
-            lines += memchr_iter(b'\n', bytes).count() as u64;
+            lines += self.encoding.line_breaks(bytes).count() as u64;
             byte += count as u64;
         }
         Ok(Position {
@@ -285,7 +323,7 @@ impl<'a> Reader<'a> {
         let mut buffer = [0; BLOCK];
         loop {
             let count = self.read_at(from.byte, &mut buffer)?;
-            from = from.after(&buffer[..count]);
+            from = from.after(&buffer[..count], self.encoding);
             if count < BLOCK {
                 return Ok(from);
             }
@@ -329,37 +367,84 @@ impl<'a> Reader<'a> {
     }
 }
 
-fn split_at(bytes: &[u8], nominal: usize) -> usize {
-    if nominal == 0 || nominal >= bytes.len() || bytes[nominal - 1] == b'\n' {
+fn aligned_find(bytes: &[u8], finder: &memmem::Finder<'_>, width: usize) -> Option<usize> {
+    let mut offset = 0;
+    while let Some(relative) = finder.find(&bytes[offset..]) {
+        let index = offset + relative;
+        if index.is_multiple_of(width) {
+            return Some(index);
+        }
+        offset = index + 1;
+    }
+    None
+}
+
+fn aligned_rfind(bytes: &[u8], finder: &memmem::FinderRev<'_>, width: usize) -> Option<usize> {
+    let mut end = bytes.len();
+    while let Some(index) = finder.rfind(&bytes[..end]) {
+        if index.is_multiple_of(width) {
+            return Some(index);
+        }
+        end = index + finder.needle().len() - 1;
+    }
+    None
+}
+
+fn split_at(bytes: &[u8], nominal: usize, encoding: Codec) -> usize {
+    let width = encoding.width();
+    if nominal < width
+        || nominal >= bytes.len()
+        || encoding
+            .line_breaks(&bytes[nominal - width..nominal])
+            .next()
+            .is_some()
+    {
         return nominal.min(bytes.len());
     }
     let tail = &bytes[nominal..bytes.len().min(nominal + LINE_LOOKAHEAD)];
-    if let Some(newline) = memchr(b'\n', tail) {
-        return nominal + newline + 1;
+    if let Some(end) = encoding.line_breaks(tail).next() {
+        return nominal + end;
     }
-    nominal
-        + tail
-            .iter()
+    let increment = if encoding == Codec::Utf8 {
+        tail.iter()
             .take(3)
             .take_while(|&&byte| byte & 0xc0 == 0x80)
             .count()
+    } else if width == 2
+        && tail.len() >= width
+        && (0xd800..=0xdbff).contains(&encoding.unit(&bytes[nominal - width..nominal]))
+        && (0xdc00..=0xdfff).contains(&encoding.unit(tail))
+    {
+        width
+    } else {
+        0
+    };
+    nominal + increment
 }
 
 impl PageText {
     pub(super) fn local_range(&self, range: Range<u64>) -> Option<Range<usize>> {
         let start = usize::try_from(range.start.checked_sub(self.origin)?).ok()?;
         let end = usize::try_from(range.end.checked_sub(self.origin)?).ok()?;
+        let (start, end) = if let Some((encoding, bytes)) = &self.encoded {
+            (
+                encoding.decode(bytes.get(..start)?)?.len(),
+                encoding.decode(bytes.get(..end)?)?.len(),
+            )
+        } else {
+            (start, end)
+        };
         (start <= end && self.text.is_char_boundary(start) && self.text.is_char_boundary(end))
             .then_some(start..end)
+    }
+
+    pub(super) fn forget_encoded(&mut self) {
+        self.encoded = None;
     }
 }
 
 pub(super) fn changed() -> String {
     crate::i18n::text("Текстовый файл изменился. Откройте быстрый просмотр заново.").into()
-}
-
-fn invalid_text() -> String {
-    crate::i18n::text("Не удалось показать этот фрагмент как текст UTF-8.").into()
 }
 
 pub(super) fn read_error(error: io::Error) -> String {
@@ -390,7 +475,7 @@ mod tests {
         bytes.extend_from_slice(b"\nLast short line\n");
         let (_file, mut source) = fixture(&bytes);
         let cancel = Cancellation::default();
-        let mut reader = Reader::new(&mut source, None, &cancel);
+        let mut reader = Reader::new(&mut source, None, Codec::Utf8, &cancel);
         let mut reconstructed = Vec::new();
         let mut near = Position::START;
         for index in 0..4 {
@@ -401,7 +486,7 @@ mod tests {
             assert!(page.text.len() <= PAGE_BYTES as usize + LINE_LOOKAHEAD);
             reconstructed.extend_from_slice(page.text.as_bytes());
         }
-        assert_eq!(reconstructed, bytes[BOM.len()..]);
+        assert_eq!(reconstructed, bytes[3..]);
         let previous = reader.page(2, near, None).unwrap();
         assert_eq!(previous.start.byte, PAGE_BYTES * 2);
         let eof_line = reader.line(4, previous.start).unwrap().unwrap();
@@ -424,7 +509,7 @@ mod tests {
         bytes.resize(second_at + 3 + BLOCK + 128, b'z');
         let (_file, mut source) = fixture(&bytes);
         let cancel = Cancellation::default();
-        let mut reader = Reader::new(&mut source, Some(bytes.len() as u64), &cancel);
+        let mut reader = Reader::new(&mut source, Some(bytes.len() as u64), Codec::Utf8, &cancel);
 
         let first = reader
             .find(Position::START, query, Direction::Forward)
@@ -512,11 +597,76 @@ mod tests {
             checks += 1;
             checks == 12
         });
-        let mut reader = Reader::new(&mut source, Some(data.len() as u64), &cancel);
+        let mut reader = Reader::new(&mut source, Some(data.len() as u64), Codec::Utf8, &cancel);
         assert!(reader
             .find(Position::START, "absent", Direction::Forward)
             .is_err());
         assert!(cancel.is_requested());
         assert!(reader.offset < data.len() as u64);
+    }
+
+    #[test]
+    fn utf16_pages_and_search_use_aligned_offsets_in_both_byte_orders() {
+        for (encoding, bom, unaligned) in [
+            (Codec::Utf16Le, b"\xff\xfe", "\u{4100}\u{4200}\u{0400}"),
+            (Codec::Utf16Be, b"\xfe\xff", "\u{ff00}\u{4100}\u{4201}"),
+        ] {
+            let mut bytes = bom.to_vec();
+            bytes.extend_from_slice(
+                &encoding
+                    .encode(&format!("Первый\r\n{unaligned}\u{410a}\u{0a41}"))
+                    .unwrap(),
+            );
+            let pad = encoding.encode("x").unwrap();
+            let surrogate = PAGE_BYTES as usize - 2;
+            bytes.extend_from_slice(&pad.repeat((surrogate - bytes.len()) / 2));
+            bytes.extend_from_slice(&encoding.encode("🙂").unwrap());
+            let first_at = BLOCK - 2;
+            bytes.extend_from_slice(&pad.repeat((first_at - bytes.len()) / 2));
+            bytes.extend_from_slice(&encoding.encode("AB").unwrap());
+            bytes.extend_from_slice(&pad.repeat(1700));
+            bytes.extend_from_slice(&encoding.encode("\r\n").unwrap());
+            let third_line = bytes.len() as u64;
+            bytes.extend_from_slice(&encoding.encode("Последний AB\r\n").unwrap());
+            let (_file, mut source) = fixture(&bytes);
+            let cancel = Cancellation::default();
+            let mut reader = Reader::new(&mut source, Some(bytes.len() as u64), encoding, &cancel);
+
+            let first_page = reader.page(0, Position::START, None).unwrap();
+            assert!(first_page.text.ends_with("🙂"));
+            let second_page = reader.page(1, first_page.start, None).unwrap();
+            assert_eq!(
+                second_page.start,
+                Position {
+                    byte: PAGE_BYTES + 2,
+                    line: 2
+                }
+            );
+
+            let hit = reader
+                .find(Position::START, "AB", Direction::Forward)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                hit.start,
+                Position {
+                    byte: first_at as u64,
+                    line: 2
+                }
+            );
+            let shown = reader.page_at(hit.start, Some(hit.end.byte)).unwrap();
+            let range = shown.local_range(hit.start.byte..hit.end.byte).unwrap();
+            assert_eq!(&shown.text[range], "AB");
+            let last = reader
+                .find(hit.start, "AB", Direction::Backward)
+                .unwrap()
+                .unwrap();
+            assert_eq!(last.start.line, 3);
+            assert_eq!(
+                reader.find(last.start, "AB", Direction::Backward).unwrap(),
+                Some(hit)
+            );
+            assert_eq!(reader.line(3, hit.start).unwrap().unwrap().byte, third_line);
+        }
     }
 }

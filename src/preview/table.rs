@@ -2,6 +2,7 @@ mod records;
 mod view;
 mod worker;
 
+use super::encoding::Codec;
 pub(super) use view::Document;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

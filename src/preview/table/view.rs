@@ -1,6 +1,6 @@
 use super::{
     worker::{Bookmark, Scan, Settings, Worker},
-    Position, Row, Separator,
+    Codec, Position, Row, Separator,
 };
 use crate::{i18n::text, vfs::Location};
 use eframe::egui;
@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 pub(in crate::preview) struct Document {
     location: Location,
     preferred: Separator,
+    encoding: Codec,
     settings: Settings,
     filter_id: Option<egui::Id>,
     filter_due: Option<Instant>,
@@ -31,10 +32,15 @@ struct Page {
 }
 
 impl Document {
-    pub(in crate::preview) fn new(location: Location, preferred: Separator) -> Self {
+    pub(in crate::preview) fn new(
+        location: Location,
+        preferred: Separator,
+        encoding: Codec,
+    ) -> Self {
         Self {
             location,
             preferred,
+            encoding,
             settings: Settings {
                 separator: None,
                 header: true,
@@ -48,6 +54,10 @@ impl Document {
             previous: Vec::new(),
             reset_scroll: true,
         }
+    }
+
+    pub(in crate::preview) fn encoding(&self) -> Codec {
+        self.encoding
     }
 
     pub(in crate::preview) fn text_input(&self, ctx: &egui::Context) -> bool {
@@ -195,7 +205,12 @@ impl Document {
         self.reset_scroll = true;
         let result = (|| {
             if self.worker.is_none() {
-                self.worker = Some(Worker::start(self.location.clone(), self.preferred, ctx)?);
+                self.worker = Some(Worker::start(
+                    self.location.clone(),
+                    self.preferred,
+                    self.encoding,
+                    ctx,
+                )?);
             }
             self.worker
                 .as_ref()

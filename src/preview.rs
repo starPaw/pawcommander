@@ -1,6 +1,7 @@
 #[cfg(test)]
 use crate::test_ui::ContextExt as _;
 mod code;
+mod encoding;
 #[cfg(target_os = "macos")]
 mod helper;
 mod large_text;
@@ -12,6 +13,7 @@ mod pdf;
 mod source;
 mod table;
 
+use self::encoding::Codec;
 use crate::operations::Cancellation;
 use crate::vfs::{self, Location};
 use std::{
@@ -45,6 +47,7 @@ struct Request {
     context: egui::Context,
     viewport: egui::ViewportId,
     cancel: Cancellation,
+    encoding: Option<Codec>,
 }
 
 struct Response {
@@ -63,6 +66,7 @@ struct Loaded {
 enum Content {
     Directory,
     Text {
+        encoding: Codec,
         body: String,
         truncated: bool,
         code: code::Code,
@@ -79,7 +83,19 @@ enum Content {
     Media(Box<media::Player>),
     Table(Box<table::Document>),
     LargeText(Box<large_text::Document>),
+    TextError(Codec, String),
     Message(String),
+}
+
+impl Content {
+    fn encoding(&self) -> Option<Codec> {
+        match self {
+            Self::Text { encoding, .. } | Self::TextError(encoding, _) => Some(*encoding),
+            Self::Table(document) => Some(document.encoding()),
+            Self::LargeText(document) => Some(document.encoding()),
+            _ => None,
+        }
+    }
 }
 
 /// A read-only preview with one background reader and a bounded image decoder.
@@ -91,6 +107,7 @@ pub struct Preview {
     result: Option<Result<Loaded, String>>,
     texture: Option<egui::TextureHandle>,
     text: TextView,
+    encoding: Option<Codec>,
     dirty: bool,
     fingerprint: Option<(u64, Option<std::time::SystemTime>)>,
     cancel: Cancellation,
@@ -124,7 +141,8 @@ impl Preview {
                 if request.cancel.is_requested() {
                     continue;
                 }
-                let result = load_location(&request.path, &request.cancel, quick_look);
+                let result =
+                    load_location(&request.path, &request.cancel, quick_look, request.encoding);
                 if request.cancel.is_requested() {
                     continue;
                 }
@@ -148,6 +166,7 @@ impl Preview {
             result: None,
             texture: None,
             text: TextView::default(),
+            encoding: None,
             dirty: false,
             fingerprint: None,
             cancel: Cancellation::default(),
@@ -224,6 +243,9 @@ impl Preview {
         self.upload_texture(ui.ctx());
         ui.add(egui::Label::new(RichText::new(path.name()).heading()).truncate());
         ui.add_space(8.0);
+        if self.encoding_picker(ui) {
+            return;
+        }
         if let Some(Ok(loaded)) = &mut self.result {
             match &mut loaded.content {
                 Content::Table(table) => {
@@ -271,6 +293,7 @@ impl Preview {
                         truncated,
                         code,
                         markup,
+                        ..
                     } => {
                         ui.push_id(self.generation, |ui| {
                             draw_text(
@@ -291,6 +314,9 @@ impl Preview {
                     }
                     Content::Message(message) => {
                         ui.label(message);
+                    }
+                    Content::TextError(_, error) => {
+                        ui.colored_label(ui.visuals().error_fg_color, error);
                     }
                     Content::Directory => {
                         ui.label(&loaded.kind);
@@ -339,7 +365,11 @@ impl Preview {
         path: Option<&Location>,
         fingerprint: Option<(u64, Option<std::time::SystemTime>)>,
     ) {
-        if self.path.as_ref() != path || self.fingerprint != fingerprint || self.dirty {
+        let changed_path = self.path.as_ref() != path;
+        if changed_path {
+            self.encoding = None;
+        }
+        if changed_path || self.fingerprint != fingerprint || self.dirty {
             self.cancel.request();
             self.cancel = Cancellation::default();
             self.fingerprint = fingerprint;
@@ -361,6 +391,7 @@ impl Preview {
                         context: ctx.clone(),
                         viewport: ctx.viewport_id(),
                         cancel: self.cancel.clone(),
+                        encoding: self.encoding,
                     })
                     .is_err()
                 {
@@ -376,6 +407,41 @@ impl Preview {
                 self.texture = None;
             }
         }
+    }
+
+    fn encoding_picker(&mut self, ui: &mut egui::Ui) -> bool {
+        let Some(actual) = self
+            .result
+            .as_ref()
+            .and_then(|result| result.as_ref().ok())
+            .and_then(|loaded| loaded.content.encoding())
+        else {
+            return false;
+        };
+        let before = self.encoding;
+        let caption = before.map_or_else(
+            || crate::tr_format!("Авто ({})", "Auto ({})", actual.name()),
+            |codec| codec.name().to_owned(),
+        );
+        ui.horizontal_wrapped(|ui| {
+            let label = ui.label(crate::i18n::text("Кодировка"));
+            egui::ComboBox::from_id_salt("preview-text-encoding")
+                .selected_text(caption)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.encoding, None, crate::i18n::text("Авто"));
+                    for encoding in Codec::ALL {
+                        ui.selectable_value(&mut self.encoding, Some(encoding), encoding.name());
+                    }
+                })
+                .response
+                .labelled_by(label.id);
+        });
+        if self.encoding != before {
+            self.refresh();
+            ui.ctx().request_repaint();
+            return true;
+        }
+        false
     }
 
     fn upload_texture(&mut self, ctx: &egui::Context) {
@@ -450,6 +516,9 @@ impl Preview {
                     }
                 }
                 detail(ui, crate::i18n::text("Расположение"), &path.display());
+                if self.encoding_picker(ui) {
+                    return;
+                }
 
                 if let Some(Ok(loaded)) = &self.result {
                     match &loaded.content {
@@ -458,6 +527,7 @@ impl Preview {
                             truncated,
                             code,
                             markup,
+                            ..
                         } => {
                             ui.add_space(10.0);
                             ui.separator();
@@ -484,6 +554,10 @@ impl Preview {
                         Content::Message(message) => {
                             ui.add_space(12.0);
                             ui.colored_label(muted, message);
+                        }
+                        Content::TextError(_, error) => {
+                            ui.add_space(12.0);
+                            ui.colored_label(ui.visuals().error_fg_color, error);
                         }
                         #[cfg(target_os = "macos")]
                         Content::Media(_) => {
@@ -618,15 +692,16 @@ fn load_location(
     location: &Location,
     cancel: &Cancellation,
     quick_look: bool,
+    encoding: Option<Codec>,
 ) -> Result<Loaded, String> {
     if let Some(path) = location.local() {
-        return load(path, cancel, quick_look);
+        return load(path, cancel, quick_look, encoding);
     }
     let separator = quick_look
         .then(|| table::Separator::from_path(location.path()))
         .flatten();
     let limit = if separator.is_some() {
-        0
+        3
     } else if image_path_format(location.path()).is_some() {
         IMAGE_LIMIT as usize
     } else {
@@ -644,10 +719,14 @@ fn load_location(
     let content = if stat.is_dir() {
         Content::Directory
     } else if let Some(separator) = separator {
-        Content::Table(Box::new(table::Document::new(location.clone(), separator)))
+        Content::Table(Box::new(table::Document::new(
+            location.clone(),
+            separator,
+            Codec::choose(encoding, &bytes),
+        )))
     } else {
         let length = stat.size.unwrap_or(bytes.len() as u64);
-        remote_file_preview(location, bytes, length, cancel, quick_look)
+        remote_file_preview(location, bytes, length, cancel, quick_look, encoding)
             .unwrap_or_else(Content::Message)
     };
     Ok(Loaded {
@@ -678,6 +757,7 @@ fn remote_file_preview(
     length: u64,
     cancel: &Cancellation,
     quick_look: bool,
+    encoding: Option<Codec>,
 ) -> Result<Content, String> {
     #[cfg(target_os = "macos")]
     if media::supported(location.path()) {
@@ -690,15 +770,20 @@ fn remote_file_preview(
         return pdf_content(bytes, length, cancel);
     }
     if image_path_format(location.path()).is_none() {
-        return text_content(location, bytes, quick_look);
+        return Ok(text_content(location, bytes, quick_look, encoding));
     }
     let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
     let path = directory.path().join(location.name());
     fs::write(&path, bytes).map_err(|e| e.to_string())?;
-    load_content(&path, length, cancel, false)
+    load_content(&path, length, cancel, false, None)
 }
 
-fn load(path: &Path, cancel: &Cancellation, quick_look: bool) -> Result<Loaded, String> {
+fn load(
+    path: &Path,
+    cancel: &Cancellation,
+    quick_look: bool,
+    encoding: Option<Codec>,
+) -> Result<Loaded, String> {
     let link_metadata = fs::symlink_metadata(path).map_err(|e| {
         crate::tr_format!(
             "Не удалось прочитать сведения: {e}",
@@ -737,12 +822,17 @@ fn load(path: &Path, cancel: &Cancellation, quick_look: bool) -> Result<Loaded, 
         // Do not open sockets, devices or named pipes: a read may never finish.
         Content::Message(crate::i18n::text("Предпросмотр специальных файлов недоступен.").into())
     } else if quick_look && let Some(separator) = table::Separator::from_path(path) {
-        Content::Table(Box::new(table::Document::new(
-            path.to_path_buf().into(),
-            separator,
-        )))
+        match read_bounded(path, 3) {
+            Ok(prefix) => Content::Table(Box::new(table::Document::new(
+                path.to_path_buf().into(),
+                separator,
+                Codec::choose(encoding, &prefix),
+            ))),
+            Err(error) => Content::Message(error),
+        }
     } else {
-        load_content(path, metadata.len(), cancel, quick_look).unwrap_or_else(Content::Message)
+        load_content(path, metadata.len(), cancel, quick_look, encoding)
+            .unwrap_or_else(Content::Message)
     };
     Ok(Loaded {
         kind: kind.into(),
@@ -772,6 +862,7 @@ fn load_content(
     length: u64,
     cancel: &Cancellation,
     quick_look: bool,
+    encoding: Option<Codec>,
 ) -> Result<Content, String> {
     cancel.check().map_err(|error| error.to_string())?;
     #[cfg(target_os = "macos")]
@@ -830,36 +921,46 @@ fn load_content(
             rgba: thumbnail.into_raw(),
         });
     }
-    text_content(
+    Ok(text_content(
         &Location::Local(path.into()),
         read_bounded(path, TEXT_LIMIT)?,
         quick_look,
-    )
+        encoding,
+    ))
 }
 
 fn text_content(
     location: &Location,
     mut bytes: Vec<u8>,
     quick_look: bool,
-) -> Result<Content, String> {
+    encoding: Option<Codec>,
+) -> Content {
     let truncated = bytes.len() > TEXT_LIMIT;
     bytes.truncate(TEXT_LIMIT);
-    let mut body = utf8_prefix(&bytes, truncated)?;
+    let encoding = Codec::choose(encoding, &bytes);
+    let Some(mut body) = encoding
+        .prefix(&bytes, truncated)
+        .filter(|text| preview_text_chars(text))
+    else {
+        return Content::TextError(encoding, encoding.error());
+    };
     let truncated = code::bound(&mut body) || truncated;
     let markup = markup::parse(location.path(), &body);
     if quick_look && truncated {
-        return Ok(Content::LargeText(Box::new(large_text::Document::new(
+        return Content::LargeText(Box::new(large_text::Document::new(
             location.clone(),
             markup,
-        ))));
+            encoding,
+        )));
     }
     let code = code::Code::new(location.path(), &body);
-    Ok(Content::Text {
+    Content::Text {
+        encoding,
         body,
         truncated,
         code,
         markup,
-    })
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -909,29 +1010,9 @@ fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-fn utf8_prefix(bytes: &[u8], truncated: bool) -> Result<String, String> {
-    let text = match std::str::from_utf8(bytes) {
-        Ok(text) => text,
-        Err(error) if truncated && error.error_len().is_none() => {
-            // The byte limit can fall in the middle of a UTF-8 character.
-            std::str::from_utf8(&bytes[..error.valid_up_to()]).unwrap_or("")
-        }
-        Err(_) => {
-            return Err(crate::i18n::text(
-                "Предпросмотр доступен для текста UTF-8 и изображений PNG, JPEG, GIF, WebP.",
-            )
-            .into())
-        }
-    };
-    if !preview_text_chars(text) {
-        return Err(crate::i18n::text("Для этого формата предпросмотр недоступен.").into());
-    }
-    Ok(text.trim_start_matches('\u{feff}').to_owned())
-}
-
 fn preview_text_chars(text: &str) -> bool {
     text.chars()
-        .all(|ch| !ch.is_control() || matches!(ch, '\n' | '\r' | '\t'))
+        .all(|ch| (!ch.is_control() && ch != '\u{fffe}') || matches!(ch, '\n' | '\r' | '\t'))
 }
 
 fn format_size(bytes: u64) -> String {
@@ -969,7 +1050,7 @@ mod tests {
         let path = dir.path().join("document.MARKDOWN");
         let original = format!("# Заголовок\n\n{}", "я".repeat(TEXT_LIMIT));
         fs::write(&path, &original).unwrap();
-        let loaded = load(&path, &Cancellation::default(), false).unwrap();
+        let loaded = load(&path, &Cancellation::default(), false, None).unwrap();
         assert!(matches!(
             loaded.content,
             Content::Text {
@@ -1012,10 +1093,107 @@ mod tests {
 
     #[test]
     fn truncated_multibyte_character_is_not_reported_as_binary() {
-        assert_eq!(utf8_prefix(&[b'a', 0xd0], true).unwrap(), "a");
-        assert!(utf8_prefix(&[b'a', 0xd0], false).is_err());
-        assert!(utf8_prefix(&[b'a', 0xff], true).is_err());
-        assert!(utf8_prefix(b"binary\0data", false).is_err());
+        assert_eq!(Codec::Utf8.prefix(&[b'a', 0xd0], true).unwrap(), "a");
+        assert!(Codec::Utf8.prefix(&[b'a', 0xd0], false).is_none());
+        assert!(Codec::Utf8.prefix(&[b'a', 0xff], true).is_none());
+        assert!(!preview_text_chars("binary\0data"));
+    }
+
+    #[test]
+    fn quick_look_encoding_menu_recovers_legacy_text_and_resets_on_file_change() {
+        let directory = tempfile::tempdir().unwrap();
+        let legacy = directory.path().join("legacy.txt");
+        let next = directory.path().join("next.txt");
+        let original = b"\xcf\xf0\xe8\xe2\xe5\xf2";
+        fs::write(&legacy, original).unwrap();
+        fs::write(&next, "A new UTF-8 file").unwrap();
+        let legacy_location = Location::Local(legacy.clone());
+        let next_location = Location::Local(next);
+        let ctx = egui::Context::default();
+        let mut preview = Preview::new_quick_look();
+        let draw = |preview: &mut Preview, location: &Location, events| {
+            ctx.run_test_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(760.0, 540.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| preview.show_quick_look(ui, location, (0, None)),
+            )
+        };
+        let settle = |preview: &mut Preview, location: &Location| {
+            for _ in 0..200 {
+                let output = draw(preview, location, vec![]);
+                if preview.result.is_some() && !preview.dirty {
+                    return output;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(4));
+            }
+            panic!("preview did not load the selected encoding");
+        };
+        fn label(output: egui::FullOutput, matches: impl Fn(&str) -> bool) -> egui::Pos2 {
+            output
+                .shapes
+                .into_iter()
+                .find_map(|clipped| match clipped.shape {
+                    egui::Shape::Text(text) if matches(&text.galley.job.text) => {
+                        Some(text.pos + text.galley.size() * 0.5)
+                    }
+                    _ => None,
+                })
+                .expect("encoding menu label")
+        }
+        let click = |preview: &mut Preview, pos| {
+            draw(
+                preview,
+                &legacy_location,
+                vec![egui::Event::PointerMoved(pos)],
+            );
+            for pressed in [true, false] {
+                draw(
+                    preview,
+                    &legacy_location,
+                    vec![egui::Event::PointerButton {
+                        pos,
+                        pressed,
+                        button: egui::PointerButton::Primary,
+                        modifiers: egui::Modifiers::NONE,
+                    }],
+                );
+            }
+        };
+        let initial = settle(&mut preview, &legacy_location);
+        assert!(matches!(
+            &preview.result,
+            Some(Ok(Loaded {
+                content: Content::TextError(Codec::Utf8, _),
+                ..
+            }))
+        ));
+        click(
+            &mut preview,
+            label(initial, |text| text.ends_with(" (UTF-8)")),
+        );
+        let popup = draw(&mut preview, &legacy_location, vec![]);
+        click(
+            &mut preview,
+            label(popup, |text| text == Codec::Windows1251.name()),
+        );
+        settle(&mut preview, &legacy_location);
+        assert!(matches!(
+            &preview.result,
+            Some(Ok(Loaded { content: Content::Text { encoding: Codec::Windows1251, body, .. }, .. }))
+            if body == "Привет"
+        ));
+        preview.refresh();
+        settle(&mut preview, &legacy_location);
+        assert_eq!(preview.encoding, Some(Codec::Windows1251));
+        settle(&mut preview, &next_location);
+        assert_eq!(preview.encoding, None);
+        assert_eq!(fs::read(legacy).unwrap(), original);
     }
 
     #[test]
@@ -1023,7 +1201,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("large.txt");
         fs::write(&path, "я".repeat(TEXT_LIMIT)).unwrap();
-        let loaded = load(&path, &Cancellation::default(), false).unwrap();
+        let loaded = load(&path, &Cancellation::default(), false, None).unwrap();
         match loaded.content {
             Content::Text {
                 body, truncated, ..
@@ -1043,14 +1221,14 @@ mod tests {
         image::RgbaImage::new(IMAGE_EDGE_LIMIT + 1, 1)
             .save(&path)
             .unwrap();
-        let loaded = load(&path, &Cancellation::default(), false).unwrap();
+        let loaded = load(&path, &Cancellation::default(), false, None).unwrap();
         assert!(matches!(loaded.content, Content::Message(_)));
     }
 
     #[test]
     fn directory_does_not_get_a_recursive_size_or_text_preview() {
         let directory = tempfile::tempdir().unwrap();
-        let loaded = load(directory.path(), &Cancellation::default(), false).unwrap();
+        let loaded = load(directory.path(), &Cancellation::default(), false, None).unwrap();
         assert!(loaded.is_dir);
         assert!(loaded.size.is_none());
         assert!(matches!(loaded.content, Content::Directory));

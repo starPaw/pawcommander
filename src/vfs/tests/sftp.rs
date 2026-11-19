@@ -1088,13 +1088,19 @@ fn openssh_round_trip_and_host_verification() {
         assert_eq!(tail, "SFTP!\n");
     }
     {
-        let location = uploaded.join("large preview.txt");
-        let mut bytes = b"ordinary remote line\r\n".repeat(4096);
-        bytes.extend_from_slice(b"REMOTE PREVIEW MARKER\r\n");
-        fs::write(location.path(), &bytes).unwrap();
-        crate::preview::check_sftp_large_text(&location);
-        assert_eq!(fs::read(location.path()).unwrap(), bytes);
-        fs::remove_file(location.path()).unwrap();
+        let text = "ordinary remote line\r\n".repeat(4096) + "REMOTE PREVIEW MARKER\r\n";
+        let mut utf16 = vec![0xff, 0xfe];
+        utf16.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+        for (name, bytes) in [
+            ("large UTF-8 preview.txt", text.into_bytes()),
+            ("large UTF-16 preview.txt", utf16),
+        ] {
+            let location = uploaded.join(name);
+            fs::write(location.path(), &bytes).unwrap();
+            crate::preview::check_sftp_large_text(&location);
+            assert_eq!(fs::read(location.path()).unwrap(), bytes);
+            fs::remove_file(location.path()).unwrap();
+        }
     }
     #[cfg(target_os = "macos")]
     {

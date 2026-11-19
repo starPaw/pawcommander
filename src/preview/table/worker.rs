@@ -1,6 +1,6 @@
 use super::{
     records::{self, read_error, Records, SAMPLE_BYTES},
-    Position, Row, Separator,
+    Codec, Position, Row, Separator,
 };
 use crate::{
     operations::Cancellation,
@@ -89,6 +89,7 @@ impl Worker {
     pub(super) fn start(
         location: Location,
         preferred: Separator,
+        encoding: Codec,
         ctx: &egui::Context,
     ) -> Result<Self, String> {
         let (sender, incoming) = mpsc::channel::<Request>();
@@ -109,7 +110,7 @@ impl Worker {
                         ctx: &ctx,
                         viewport,
                     };
-                    let result = read_page(&location, preferred, &reporter);
+                    let result = read_page(&location, preferred, encoding, &reporter);
                     reporter.send(|update| update.finished = Some(result));
                 }
             })
@@ -137,13 +138,14 @@ impl Worker {
 fn read_page(
     location: &Location,
     preferred: Separator,
+    encoding: Codec,
     reporter: &Reporter<'_>,
 ) -> Result<Option<Position>, String> {
     let request = reporter.request;
     request.cancel.check().map_err(read_error)?;
     let mut source = Source::open(location)?;
     let version = source.version().map_err(read_error)?;
-    let position = request
+    let mut position = request
         .start
         .as_ref()
         .map_or_else(Position::default, |start| start.position);
@@ -174,6 +176,7 @@ fn read_page(
             &sample[..sample.len().min(SAMPLE_BYTES)],
             sample.len() <= SAMPLE_BYTES,
             preferred,
+            encoding,
             &request.cancel,
         )
     });
@@ -182,9 +185,15 @@ fn read_page(
     let remaining = version.size.map_or(u64::MAX, |size| {
         size.saturating_sub(position.byte + prefix_len)
     });
-    let input = sample.as_slice().chain((&mut source).take(remaining));
+    let bom = if position.byte == 0 && encoding.width() == 2 {
+        encoding.bom(&sample)
+    } else {
+        0
+    };
+    position.byte += bom as u64;
+    let input = (&sample[bom..]).chain((&mut source).take(remaining));
     let buffer = BufReader::with_capacity(64 * 1024, input);
-    let mut records = Records::new(buffer, separator, position, true);
+    let mut records = Records::new(buffer, separator, position, true, encoding);
     let layout = if let Some(bookmark) = &request.start {
         bookmark.layout.clone()
     } else {
@@ -320,6 +329,7 @@ mod tests {
         query: &str,
         start: Option<Bookmark>,
         separator: Option<Separator>,
+        encoding: Codec,
     ) -> (Update, Result<Option<Position>, String>) {
         let request = Request {
             settings: Settings {
@@ -337,7 +347,7 @@ mod tests {
             ctx: &ctx,
             viewport: ctx.viewport_id(),
         };
-        let result = read_page(location, Separator::Comma, &reporter);
+        let result = read_page(location, Separator::Comma, encoding, &reporter);
         let update = std::mem::take(&mut *request.updates.lock().unwrap());
         (update, result)
     }
@@ -366,7 +376,7 @@ mod tests {
         let location = Location::Local(path.clone());
         let original_size = path.metadata().unwrap().len();
 
-        let (first, next) = load(&location, "", None, None);
+        let (first, next) = load(&location, "", None, None, Codec::Utf8);
         let next = next.unwrap().unwrap();
         let first_bookmark = first.ready.unwrap();
         assert_eq!(first_bookmark.layout.separator, Separator::Semicolon);
@@ -378,7 +388,8 @@ mod tests {
         );
         assert!(next.byte < original_size / 4);
 
-        let (manual, after_manual) = load(&location, "", None, Some(Separator::Semicolon));
+        let (manual, after_manual) =
+            load(&location, "", None, Some(Separator::Semicolon), Codec::Utf8);
         assert_eq!(after_manual.unwrap(), Some(next));
         assert_eq!(
             manual.ready.unwrap().layout.headers,
@@ -394,6 +405,7 @@ mod tests {
                 position: next,
             }),
             None,
+            Codec::Utf8,
         );
         assert_eq!(second.rows[0].number, PAGE_ROWS as u64 + 2);
         assert_eq!(second.rows[0].cells[0], "\u{feff}Next page");
@@ -406,13 +418,14 @@ mod tests {
                 position: first_bookmark.position,
             }),
             None,
+            Codec::Utf8,
         );
         assert_eq!(
             previous.rows.last().unwrap().number,
             first.rows.last().unwrap().number
         );
 
-        let (filtered, next_filtered) = load(&location, "глубже[1]", None, None);
+        let (filtered, next_filtered) = load(&location, "глубже[1]", None, None, Codec::Utf8);
         assert_eq!(next_filtered.unwrap(), None);
         assert_eq!(filtered.rows.len(), 1);
         assert_eq!(filtered.rows[0].number, 2502);
@@ -428,8 +441,56 @@ mod tests {
                 position: next,
             }),
             None,
+            Codec::Utf8,
         );
         assert!(result.is_err());
         assert!(changed_page.rows.is_empty());
+    }
+
+    #[test]
+    fn encoded_tables_filter_and_resume_at_original_byte_offsets() {
+        for (encoding, bom) in [
+            (Codec::Utf16Be, b"\xfe\xff".as_slice()),
+            (Codec::Windows1251, b""),
+        ] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let mut text =
+                "Город;Описание\r\nПрага;\"Первая строка\r\nПродолжение\"\r\n".to_owned();
+            for number in 2..=420 {
+                text.push_str(&format!("{number};{}\r\n", "проверка".repeat(8)));
+            }
+            text.push_str("Конец;ПОЗДНИЙ[1]");
+            let mut raw = bom.to_vec();
+            raw.extend_from_slice(&encoding.encode(&text).unwrap());
+            std::fs::write(file.path(), &raw).unwrap();
+            let location = Location::Local(file.path().to_owned());
+
+            let (first, next) = load(&location, "", None, None, encoding);
+            assert_eq!(
+                first.rows[0].cells,
+                ["Прага", "Первая строка\r\nПродолжение"]
+            );
+            let start = first.ready.unwrap();
+            assert_eq!(start.layout.headers, ["Город", "Описание"]);
+            assert_eq!(start.layout.separator, Separator::Semicolon);
+            let next = next.unwrap().unwrap();
+            assert!(next.byte.is_multiple_of(encoding.width() as u64));
+            let (second, _) = load(
+                &location,
+                "",
+                Some(Bookmark {
+                    layout: start.layout,
+                    position: next,
+                }),
+                None,
+                encoding,
+            );
+            assert_eq!(second.rows[0].number, 130);
+            assert_eq!(second.rows[0].cells[0], "129");
+            let (filtered, next) = load(&location, "поздний[1]", None, None, encoding);
+            assert_eq!(next.unwrap(), None);
+            assert_eq!(filtered.rows[0].cells, ["Конец", "ПОЗДНИЙ[1]"]);
+            assert_eq!(std::fs::read(file.path()).unwrap(), raw);
+        }
     }
 }

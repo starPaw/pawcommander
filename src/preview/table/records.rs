@@ -1,6 +1,7 @@
-use super::{Position, Separator};
+use super::{Codec, Position, Separator};
 use crate::operations::Cancellation;
 use csv_core::{ReadRecordResult, Reader, ReaderBuilder};
+use encoding_rs::{Decoder, DecoderResult};
 use std::io::{self, BufRead, Cursor};
 
 pub(super) const SAMPLE_BYTES: usize = 32 * 1024;
@@ -8,12 +9,84 @@ const RECORD_BYTES: usize = 256 * 1024;
 const COLUMNS: usize = 256;
 
 pub(super) struct Records<R> {
-    input: R,
+    input: TextInput<R>,
     reader: Reader,
     output: Vec<u8>,
     ends: [usize; COLUMNS + 1],
     position: Position,
     complete_input: bool,
+}
+
+struct TextInput<R> {
+    raw: R,
+    encoding: Codec,
+    decoder: Option<Decoder>,
+    text: String,
+    consumed: usize,
+    eof: bool,
+    malformed: bool,
+}
+
+impl<R: BufRead> TextInput<R> {
+    fn new(raw: R, encoding: Codec) -> Self {
+        Self {
+            raw,
+            encoding,
+            decoder: (encoding != Codec::Utf8).then(|| encoding.decoder()),
+            text: String::new(),
+            consumed: 0,
+            eof: false,
+            malformed: false,
+        }
+    }
+
+    fn fill(&mut self, cancel: &Cancellation) -> Result<&[u8], String> {
+        cancel.check().map_err(read_error)?;
+        let Some(decoder) = self.decoder.as_mut() else {
+            return self.raw.fill_buf().map_err(read_error);
+        };
+        while self.consumed == self.text.len() && !self.eof && !self.malformed {
+            cancel.check().map_err(read_error)?;
+            let bytes = self.raw.fill_buf().map_err(read_error)?;
+            let last = bytes.is_empty();
+            self.consumed = 0;
+            self.text.clear();
+            self.text.reserve(
+                decoder
+                    .max_utf8_buffer_length_without_replacement(bytes.len())
+                    .ok_or_else(|| self.encoding.error())?,
+            );
+            let (status, read) =
+                decoder.decode_to_string_without_replacement(bytes, &mut self.text, last);
+            self.raw.consume(read);
+            match status {
+                DecoderResult::Malformed(..) => self.malformed = true,
+                DecoderResult::InputEmpty => self.eof = last,
+                DecoderResult::OutputFull if self.text.is_empty() => {
+                    return Err(self.encoding.error())
+                }
+                DecoderResult::OutputFull => {}
+            }
+        }
+        if self.consumed == self.text.len() && self.malformed {
+            return Err(self.encoding.error());
+        }
+        Ok(&self.text.as_bytes()[self.consumed..])
+    }
+
+    fn consume(&mut self, count: usize) -> usize {
+        if self.decoder.is_none() {
+            self.raw.consume(count);
+            return count;
+        }
+        let start = self.consumed;
+        self.consumed += count;
+        // Record boundaries and full input buffers end at a UTF-8 boundary.
+        // A parser output limit can stop mid-character and is a terminal error.
+        self.text
+            .get(start..self.consumed)
+            .map_or(0, |text| self.encoding.raw_len(text))
+    }
 }
 
 pub(super) struct Record<'a> {
@@ -39,6 +112,7 @@ impl<R: BufRead> Records<R> {
         separator: Separator,
         position: Position,
         complete_input: bool,
+        encoding: Codec,
     ) -> Self {
         let mut reader = ReaderBuilder::new().delimiter(separator.byte()).build();
         if position.byte != 0 {
@@ -46,7 +120,7 @@ impl<R: BufRead> Records<R> {
             reader.read_record(b"\n", &mut [0], &mut [0]);
         }
         Self {
-            input,
+            input: TextInput::new(input, encoding),
             reader,
             output: vec![0; RECORD_BYTES + 1],
             ends: [0; COLUMNS + 1],
@@ -64,8 +138,7 @@ impl<R: BufRead> Records<R> {
         let mut written = 0;
         let mut fields = 0;
         loop {
-            cancel.check().map_err(read_error)?;
-            let input = self.input.fill_buf().map_err(read_error)?;
+            let input = self.input.fill(cancel)?;
             if input.is_empty() && !self.complete_input {
                 return Ok(None);
             }
@@ -74,8 +147,7 @@ impl<R: BufRead> Records<R> {
                 &mut self.output[written..],
                 &mut self.ends[fields..],
             );
-            self.input.consume(consumed);
-            self.position.byte += consumed as u64;
+            self.position.byte += self.input.consume(consumed) as u64;
             written += bytes;
             fields += columns;
             if written > RECORD_BYTES || status == ReadRecordResult::OutputFull {
@@ -98,11 +170,13 @@ impl<R: BufRead> Records<R> {
                         .filter(|text| {
                             ends.iter().all(|&end| text.is_char_boundary(end))
                                 && !text.as_bytes().contains(&0)
+                                && !text.contains('\u{fffe}')
                         })
                         .ok_or_else(|| {
                             crate::tr_format!(
-                                "Запись {number} содержит недопустимый текст UTF-8.",
-                                "Record {number} contains invalid UTF-8 text."
+                                "Запись {number} содержит недопустимый текст {}.",
+                                "Record {number} contains invalid {} text.",
+                                self.input.encoding.name()
                             )
                         })?;
                     self.position.records = number;
@@ -119,6 +193,7 @@ pub(super) fn detect(
     sample: &[u8],
     complete: bool,
     preferred: Separator,
+    encoding: Codec,
     cancel: &Cancellation,
 ) -> Separator {
     let mut best = (0, 0);
@@ -128,12 +203,21 @@ pub(super) fn detect(
             .into_iter()
             .filter(|&value| value != preferred),
     );
+    let bom = if encoding.width() == 2 {
+        encoding.bom(sample)
+    } else {
+        0
+    };
     for candidate in options {
         let mut records = Records::new(
-            Cursor::new(sample),
+            Cursor::new(&sample[bom..]),
             candidate,
-            Position::default(),
+            Position {
+                byte: bom as u64,
+                records: 0,
+            },
             complete,
+            encoding,
         );
         let mut widths = [0; 8];
         let mut count = 0;
@@ -180,11 +264,23 @@ mod tests {
         let source = "\u{feff}A\tB\tC\r\n\"one\ttwo\"\t\"say \"\"hi\"\"\r\nagain\"\t";
         let cancel = Cancellation::default();
         assert_eq!(
-            detect(source.as_bytes(), true, Separator::Tab, &cancel),
+            detect(
+                source.as_bytes(),
+                true,
+                Separator::Tab,
+                Codec::Utf8,
+                &cancel
+            ),
             Separator::Tab
         );
         let input = BufReader::with_capacity(5, Cursor::new(source.as_bytes()));
-        let mut records = Records::new(input, Separator::Tab, Position::default(), true);
+        let mut records = Records::new(
+            input,
+            Separator::Tab,
+            Position::default(),
+            true,
+            Codec::Utf8,
+        );
         assert_eq!(
             records
                 .next(&cancel)
@@ -216,6 +312,7 @@ mod tests {
             Separator::Comma,
             Position::default(),
             true,
+            Codec::Utf8,
         );
         let row = records.next(&cancel).unwrap().unwrap();
         assert_eq!(row.len(), RECORD_BYTES);
@@ -231,8 +328,30 @@ mod tests {
                 Separator::Comma,
                 Position::default(),
                 true,
+                Codec::Utf8,
             );
             assert!(records.next(&cancel).is_err());
         }
+    }
+
+    #[test]
+    fn utf16_table_decoder_keeps_good_rows_before_a_malformed_tail() {
+        let source = "Город;\"строка 🙂\"\r\n";
+        let encoding = Codec::Utf16Le;
+        let mut bytes = encoding.encode(source).unwrap().into_owned();
+        let good_length = bytes.len();
+        bytes.extend_from_slice(&[0x3d, 0xd8]);
+        let cancel = Cancellation::default();
+        let mut records = Records::new(
+            BufReader::with_capacity(3, Cursor::new(bytes)),
+            Separator::Semicolon,
+            Position::default(),
+            true,
+            encoding,
+        );
+        let first = records.next(&cancel).unwrap().unwrap();
+        assert_eq!(first.cells().collect::<Vec<_>>(), ["Город", "строка 🙂"]);
+        assert!(records.position().byte >= (good_length - 2) as u64);
+        assert!(records.next(&cancel).is_err());
     }
 }
