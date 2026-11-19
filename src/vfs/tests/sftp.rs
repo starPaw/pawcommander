@@ -1115,6 +1115,7 @@ fn openssh_round_trip_and_host_verification() {
     }
     #[cfg(target_os = "macos")]
     {
+        crate::preview::check_sftp_image_metadata(&uploaded.join("Photo with EXIF.jpg"));
         let location = uploaded.join("hello world.txt");
         let mut destination = Vec::new();
         let cancel = crate::operations::Cancellation::default();

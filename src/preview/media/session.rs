@@ -1,4 +1,6 @@
-use super::{frame_size, media_error, Command, Frame, Reply, State, MEDIA_WORKER_ARG, SFTP_LIMIT};
+use super::{
+    frame_size, media_error, Command, Frame, Reply, Snapshot, MEDIA_WORKER_ARG, SFTP_LIMIT,
+};
 use crate::{
     operations::Cancellation,
     preview::helper::{read_message, write_blob, write_message, Process},
@@ -43,10 +45,14 @@ impl Session {
         &mut self,
         command: Command,
         cancel: &Cancellation,
-    ) -> Result<(State, Option<Frame>), String> {
+    ) -> Result<Snapshot, String> {
         let (mut input, mut output) = self.process.pipes(TIMEOUT, cancel);
         write_message(&mut input, &command).map_err(helper_error)?;
-        let Reply::Snapshot { state, size } = read_message(&mut output).map_err(helper_error)?
+        let Reply::Snapshot {
+            state,
+            size,
+            metadata,
+        } = read_message(&mut output).map_err(helper_error)?
         else {
             return Err(media_error());
         };
@@ -60,7 +66,11 @@ impl Session {
         } else {
             None
         };
-        Ok((state, frame))
+        Ok(Snapshot {
+            state,
+            frame,
+            metadata,
+        })
     }
 }
 

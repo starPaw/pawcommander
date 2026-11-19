@@ -60,12 +60,33 @@ impl State {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+struct Metadata {
+    video: Option<VideoMetadata>,
+    audio: Option<AudioMetadata>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+struct VideoMetadata {
+    dimensions: Option<[u32; 2]>,
+    codec: Option<u32>,
+    fps: Option<f64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+struct AudioMetadata {
+    codec: Option<u32>,
+    sample_rate: Option<f64>,
+    channels: Option<u32>,
+}
+
 #[derive(Serialize, Deserialize)]
 enum Reply {
     Opened,
     Snapshot {
         state: State,
         size: Option<[u32; 2]>,
+        metadata: Option<Metadata>,
     },
     Failed,
 }
@@ -73,6 +94,12 @@ enum Reply {
 struct Frame {
     size: [u32; 2],
     rgba: Vec<u8>,
+}
+
+struct Snapshot {
+    state: State,
+    frame: Option<Frame>,
+    metadata: Option<Metadata>,
 }
 
 fn frame_size([width, height]: [u32; 2]) -> Option<usize> {

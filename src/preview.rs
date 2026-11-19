@@ -10,6 +10,8 @@ mod markup;
 #[cfg(target_os = "macos")]
 mod media;
 #[cfg(target_os = "macos")]
+mod metadata;
+#[cfg(target_os = "macos")]
 mod pdf;
 mod read_worker;
 mod source;
@@ -40,6 +42,8 @@ pub(crate) use large_text::check_sftp_large_text;
 pub(crate) use media::{run_media_worker, MEDIA_WORKER_ARG};
 #[cfg(target_os = "macos")]
 pub(crate) use pdf::{run_pdf_worker, PDF_WORKER_ARG};
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) use tests::check_sftp_image_metadata;
 
 const TEXT_LIMIT: usize = 32 * 1024;
 const IMAGE_LIMIT: u64 = 20 * 1024 * 1024;
@@ -80,6 +84,8 @@ enum Content {
         size: [usize; 2],
         original_size: [u32; 2],
         rgba: Vec<u8>,
+        #[cfg(target_os = "macos")]
+        exif: Option<Box<metadata::Exif>>,
     },
     #[cfg(target_os = "macos")]
     Pdf(Box<pdf::Document>),
@@ -299,6 +305,19 @@ impl Preview {
                 }
                 _ => {}
             }
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(Ok(Loaded {
+            content:
+                Content::Image {
+                    original_size,
+                    exif,
+                    ..
+                },
+            ..
+        })) = &self.result
+        {
+            metadata::show_image(ui, *original_size, exif.as_deref());
         }
         let image_height = ui.available_height().max(1.0);
         let mut scroll = egui::ScrollArea::vertical().id_salt((
@@ -596,6 +615,10 @@ impl Preview {
                             ui.colored_label(ui.visuals().error_fg_color, error);
                         }
                         #[cfg(target_os = "macos")]
+                        Content::Image { exif, .. } => {
+                            metadata::section(ui, |ui| metadata::exif_fields(ui, exif.as_deref()));
+                        }
+                        #[cfg(target_os = "macos")]
                         Content::Media(_) => {
                             ui.add_space(12.0);
                             ui.colored_label(
@@ -808,10 +831,10 @@ fn remote_file_preview(
     if image_path_format(location.path()).is_none() {
         return Ok(text_content(location, bytes, quick_look, encoding));
     }
-    let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
-    let path = directory.path().join(location.name());
-    fs::write(&path, bytes).map_err(|e| e.to_string())?;
-    load_content(&path, length, cancel, false, None)
+    if length > IMAGE_LIMIT {
+        return Err(image_too_large());
+    }
+    image_content(&bytes, cancel)
 }
 
 fn load(
@@ -921,41 +944,10 @@ fn load_content(
     }
     if image_path_format(path).is_some() {
         if length > IMAGE_LIMIT {
-            return Err(crate::i18n::text(
-                "Изображение больше 20 МиБ. Откройте его во внешнем приложении.",
-            )
-            .into());
+            return Err(image_too_large());
         }
         let bytes = read_bounded(path, IMAGE_LIMIT as usize)?;
-        if bytes.len() > IMAGE_LIMIT as usize {
-            return Err(crate::i18n::text("Изображение больше 20 МиБ.").into());
-        }
-        let mut reader = image::ImageReader::new(Cursor::new(bytes))
-            .with_guessed_format()
-            .map_err(|e| {
-                crate::tr_format!(
-                    "Не удалось определить формат изображения: {e}",
-                    "Could not detect image format: {e}"
-                )
-            })?;
-        let mut limits = image::Limits::default();
-        limits.max_image_width = Some(IMAGE_EDGE_LIMIT);
-        limits.max_image_height = Some(IMAGE_EDGE_LIMIT);
-        limits.max_alloc = Some(128 * 1024 * 1024);
-        reader.limits(limits);
-        let decoded = reader.decode().map_err(|e| {
-            crate::tr_format!(
-                "Предпросмотр изображения недоступен: {e}",
-                "Image preview unavailable: {e}"
-            )
-        })?;
-        let original_size = [decoded.width(), decoded.height()];
-        let thumbnail = decoded.thumbnail(1200, 1200).to_rgba8();
-        return Ok(Content::Image {
-            size: [thumbnail.width() as usize, thumbnail.height() as usize],
-            original_size,
-            rgba: thumbnail.into_raw(),
-        });
+        return image_content(&bytes, cancel);
     }
     Ok(text_content(
         &Location::Local(path.into()),
@@ -963,6 +955,46 @@ fn load_content(
         quick_look,
         encoding,
     ))
+}
+
+fn image_too_large() -> String {
+    crate::i18n::text("Изображение больше 20 МиБ. Откройте его во внешнем приложении.").into()
+}
+
+fn image_content(bytes: &[u8], cancel: &Cancellation) -> Result<Content, String> {
+    if bytes.len() > IMAGE_LIMIT as usize {
+        return Err(crate::i18n::text("Изображение больше 20 МиБ.").into());
+    }
+    cancel.check().map_err(|error| error.to_string())?;
+    let mut reader = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| {
+            crate::tr_format!(
+                "Не удалось определить формат изображения: {e}",
+                "Could not detect image format: {e}"
+            )
+        })?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(IMAGE_EDGE_LIMIT);
+    limits.max_image_height = Some(IMAGE_EDGE_LIMIT);
+    limits.max_alloc = Some(128 * 1024 * 1024);
+    reader.limits(limits);
+    let decoded = reader.decode().map_err(|e| {
+        crate::tr_format!(
+            "Предпросмотр изображения недоступен: {e}",
+            "Image preview unavailable: {e}"
+        )
+    })?;
+    let original_size = [decoded.width(), decoded.height()];
+    let thumbnail = decoded.thumbnail(1200, 1200).to_rgba8();
+    cancel.check().map_err(|error| error.to_string())?;
+    Ok(Content::Image {
+        size: [thumbnail.width() as usize, thumbnail.height() as usize],
+        original_size,
+        rgba: thumbnail.into_raw(),
+        #[cfg(target_os = "macos")]
+        exif: metadata::Exif::read(bytes),
+    })
 }
 
 fn text_content(
@@ -1358,6 +1390,165 @@ mod tests {
         assert!(!preview.hex_mode);
         assert!(preview.hex.is_none());
         assert_eq!(fs::read(first).unwrap(), bytes);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn photo_fixture() -> Vec<u8> {
+        use image::{codecs::jpeg::JpegEncoder, ExtendedColorType, ImageEncoder};
+
+        fn entry(tiff: &mut Vec<u8>, tag: u16, kind: u16, count: u32, value: u32) {
+            tiff.extend(tag.to_le_bytes());
+            tiff.extend(kind.to_le_bytes());
+            tiff.extend(count.to_le_bytes());
+            tiff.extend(value.to_le_bytes());
+        }
+
+        let make = b"Paw Labs\0";
+        let model = b"PC-70\0";
+        let date = b"2026:01:02 03:04:05\0";
+        let make_offset = 8 + 2 + 3 * 12 + 4;
+        let model_offset = (make_offset + make.len()).next_multiple_of(2);
+        let exif_offset = model_offset + model.len();
+        let date_offset = exif_offset + 2 + 2 * 12 + 4;
+
+        let mut tiff = b"II\x2a\0\x08\0\0\0".to_vec();
+        tiff.extend(3u16.to_le_bytes());
+        entry(&mut tiff, 0x010f, 2, make.len() as u32, make_offset as u32);
+        entry(
+            &mut tiff,
+            0x0110,
+            2,
+            model.len() as u32,
+            model_offset as u32,
+        );
+        entry(&mut tiff, 0x8769, 4, 1, exif_offset as u32);
+        tiff.extend(0u32.to_le_bytes());
+        tiff.extend(make);
+        tiff.resize(model_offset, 0);
+        tiff.extend(model);
+        tiff.extend(2u16.to_le_bytes());
+        entry(&mut tiff, 0x8827, 3, 1, 400);
+        entry(&mut tiff, 0x9003, 2, date.len() as u32, date_offset as u32);
+        tiff.extend(0u32.to_le_bytes());
+        tiff.extend(date);
+
+        let mut bytes = Vec::new();
+        let mut jpeg = JpegEncoder::new(&mut bytes);
+        jpeg.set_exif_metadata(tiff).unwrap();
+        jpeg.encode(&[80; 31 * 19 * 3], 31, 19, ExtendedColorType::Rgb8)
+            .unwrap();
+        bytes
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn check_sftp_image_metadata(location: &Location) {
+        let fixture = photo_fixture();
+        fs::write(location.path(), &fixture).unwrap();
+        let loaded = load_location(location, &Cancellation::default(), true, None).unwrap();
+        assert!(matches!(
+            loaded.content,
+            Content::Image {
+                original_size: [31, 19],
+                exif: Some(_),
+                ..
+            }
+        ));
+        assert_eq!(fs::read(location.path()).unwrap(), fixture);
+        fs::remove_file(location.path()).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn quick_look_displays_exif_dimensions_and_unavailable_fields() {
+        let directory = tempfile::tempdir().unwrap();
+        let photo = directory.path().join("photo.jpg");
+        let plain = directory.path().join("plain.png");
+        let fixture = photo_fixture();
+        fs::write(&photo, &fixture).unwrap();
+        image::RgbImage::from_pixel(16, 9, image::Rgb([53, 64, 75]))
+            .save(&plain)
+            .unwrap();
+        let photo_location = Location::Local(photo.clone());
+        let plain_location = Location::Local(plain);
+        let ctx = egui::Context::default();
+        let mut preview = Preview::new_quick_look();
+        let draw = |preview: &mut Preview, path: &Location, events| {
+            ctx.run_test_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(760.0, 540.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    ui.style_mut().animation_time = 0.0;
+                    preview.show_quick_look(ui, path, (0, None));
+                },
+            )
+            .shapes
+            .into_iter()
+            .filter_map(|clipped| match clipped.shape {
+                egui::Shape::Text(label) => Some((
+                    label.galley.job.text.clone(),
+                    label.pos + label.galley.size() * 0.5,
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+        };
+        let wait = |preview: &mut Preview, path: &Location, value: &str| {
+            for _ in 0..200 {
+                let labels = draw(preview, path, vec![]);
+                if labels.iter().any(|(label, _)| label == value) {
+                    return labels;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(4));
+            }
+            panic!("Quick Look did not show {value}");
+        };
+
+        let section = crate::i18n::text("Метаданные");
+        let labels = wait(&mut preview, &photo_location, section);
+        let pos = labels.iter().find(|(label, _)| label == section).unwrap().1;
+        draw(
+            &mut preview,
+            &photo_location,
+            vec![egui::Event::PointerMoved(pos)],
+        );
+        for pressed in [true, false] {
+            draw(
+                &mut preview,
+                &photo_location,
+                vec![egui::Event::PointerButton {
+                    pos,
+                    pressed,
+                    button: egui::PointerButton::Primary,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+        }
+        let labels = wait(&mut preview, &photo_location, "400");
+        for expected in [
+            "31 × 19",
+            "Paw Labs PC-70",
+            "2026:01:02 03:04:05",
+            crate::i18n::text("Недоступно"),
+        ] {
+            assert!(
+                labels.iter().any(|(label, _)| label == expected),
+                "expected {expected} among {labels:?}"
+            );
+        }
+
+        let labels = wait(&mut preview, &plain_location, "16 × 9");
+        assert!(labels.iter().any(|(label, _)| label == "EXIF"));
+        assert!(labels
+            .iter()
+            .any(|(label, _)| label == crate::i18n::text("Недоступно")));
+        assert!(labels.iter().all(|(label, _)| label != "Paw Labs PC-70"));
+        assert_eq!(fs::read(photo).unwrap(), fixture);
     }
 
     #[test]
