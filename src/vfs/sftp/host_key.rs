@@ -68,6 +68,13 @@ impl<'a> HostNames<'a> {
 
 impl TrustFiles {
     pub(super) fn user() -> Result<Self, String> {
+        #[cfg(test)]
+        if std::env::var_os("PAWCOMMANDER_TEST_SFTP_RECONNECT").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+            && let Some(root) = std::env::var_os("PAWCOMMANDER_TEST_SFTP_ROOT")
+        {
+            return Ok(Self::new(PathBuf::from(root).join("known_hosts"), None));
+        }
         let home = dirs::home_dir().ok_or_else(|| text("Не найдена домашняя папка"))?;
         Ok(Self::new(
             home.join(".ssh/known_hosts"),

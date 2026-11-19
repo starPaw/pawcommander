@@ -39,6 +39,8 @@ mod interactive_ssh;
 mod local;
 mod location;
 mod pause;
+#[cfg(unix)]
+mod reconnect;
 mod retry;
 mod sftp;
 mod source;

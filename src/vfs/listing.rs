@@ -1,6 +1,6 @@
 use super::err;
 use super::location::{validate_name, Location};
-use super::sftp::{remote, sessions};
+use super::sftp::{cached_channel, remote, sessions};
 use crate::{archive, fs_ops};
 use ssh2::{ErrorCode, Sftp};
 use std::path::Path;
@@ -97,7 +97,10 @@ pub fn read_automatic_directory(
     let Some(session) = session else {
         return Ok(None);
     };
-    read_sftp_directory(location, &session.sftp().map_err(err)?, cancelled).map(Some)
+    let Some(channel) = cached_channel(endpoint, &session)? else {
+        return Ok(None);
+    };
+    read_sftp_directory(location, &channel, cancelled).map(Some)
 }
 
 /// Browse an exact existing session without initiating authentication.
@@ -116,10 +119,14 @@ pub fn visit_connected_directory(
     if cancelled() {
         return Ok(());
     }
-    let session = session.ok_or_else(|| {
+    let channel = match session {
+        Some(session) => cached_channel(endpoint, &session)?,
+        None => None,
+    };
+    let channel = channel.ok_or_else(|| {
         crate::i18n::text("Для просмотра дерева подключитесь по SFTP.").to_owned()
     })?;
-    visit_sftp_directory(location, &session.sftp().map_err(err)?, cancelled, visit)
+    visit_sftp_directory(location, &channel, cancelled, visit)
 }
 
 /// Completion may browse an existing session without initiating authentication.
@@ -151,12 +158,14 @@ pub fn visit_address_directory(
         });
         matched.map(|(endpoint, session)| (endpoint.clone(), session.clone()))
     };
-    if let Some((endpoint, session)) = connected.filter(|_| !cancelled()) {
+    if let Some((endpoint, session)) = connected.filter(|_| !cancelled())
+        && let Some(channel) = cached_channel(&endpoint, &session)?
+    {
         let location = Location::Sftp {
             endpoint,
             path: path.clone(),
         };
-        visit_sftp_directory(&location, &session.sftp().map_err(err)?, cancelled, visit)?;
+        visit_sftp_directory(&location, &channel, cancelled, visit)?;
     }
     Ok(())
 }

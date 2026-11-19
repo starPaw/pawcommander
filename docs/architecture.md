@@ -94,6 +94,10 @@ The SFTP connection worker checks OpenSSH records and PawCommander's host-and-po
 
 Host-key confirmation and keyboard-interactive rounds travel to the active connection dialog through a channel. The worker waits for each reply with a deadline and uses a separate TCP handle to abort a cancelled or expired attempt. It releases the shutdown handle before publishing the session to the shared cache.
 
+A foreground operation can replace a disconnected cached SSH session before opening its SFTP channel. Connections to one endpoint share a reconnect gate. Background folder polling only opens channels on existing sessions. Requests issued on a channel and its open file handles remain tied to that connection.
+
+The in-session transfer retry plan tracks the actual destination, its prior metadata, and any staging or held-source paths. For an unconfirmed SFTP publication, a read-only job checks those locations and records the observed state in result history. It offers a retry only for objects that pass the source and destination checks. The retry worker validates the evidence again before writing.
+
 Password-protected ZIP creation streams AES-256 to the same private staging file used for plain archives. Encrypted extraction matches the decoder's entry offsets and sizes against the bounded index and reads through EOF before publishing. The dialog passes the password directly to its queued work. The operation description, result history and recovery record use file locations and outcomes.
 
 Archive edits run through the file-operation queue. They check the resulting member paths, reuse the archive creation path for additions, and preserve retained ZIP payloads or intact TAR record ranges. The worker closes and validates the staged archive before handing it to the checked replacement and rollback flow.

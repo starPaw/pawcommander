@@ -28,6 +28,7 @@ pub(crate) enum Outcome {
     Failed,
     Cancelled,
     PublicationUnconfirmed,
+    RetryReady,
     #[default]
     NotStarted,
 }
@@ -42,6 +43,7 @@ impl Outcome {
             Self::Failed => "Ошибка",
             Self::Cancelled => "Отменено",
             Self::PublicationUnconfirmed => "Публикация не подтверждена",
+            Self::RetryReady => "Готово к повтору",
             Self::NotStarted => "Не начато",
         })
     }
@@ -687,6 +689,7 @@ pub(crate) struct History {
     loaded: bool,
     detail: Option<ItemResult>,
     pub retryable: HashSet<String>,
+    pub inspectable: HashSet<String>,
     pub retry_requested: Option<String>,
     pub undoable: HashMap<String, usize>,
     pub undo_requested: Option<String>,
@@ -812,8 +815,8 @@ impl History {
                     "Choose Details to read the complete paths and reason."
                 ));
                 ui.label(crate::tr_format!(
-                    "Повтор доступен для незавершённых копирований и переносов этого сеанса. Опубликованные и неподтверждённые элементы исключены.",
-                    "Retry is available for unfinished copies and moves from this session. Published and unconfirmed items are excluded."
+                    "Для прерванных передач SFTP проверка показывает состояние источника, назначения и сохранённых временных файлов.",
+                    "For interrupted SFTP transfers, inspection shows the state of the source, destination and retained temporary files."
                 ));
                 ui.label(crate::tr_format!(
                     "Undo возвращает подтверждённые переименования и переносы этого сеанса без перезаписи. Замены, копирования, удаления, непроверенные элементы и операции после перезапуска недоступны. Перед возвратом проверяются файлы и папки.",
@@ -866,6 +869,11 @@ impl History {
                                     ui.label(crate::i18n::text("Undo недоступен для этой операции"));
                                 }
                                 if self.retryable.contains(&record.id) && ui.button(crate::tr_format!("Проверить и повторить незавершённое", "Check and retry unfinished items")).clicked() {
+                                    self.retry_requested = Some(record.id.clone());
+                                }
+                                if self.inspectable.contains(&record.id)
+                                    && ui.button(crate::i18n::text("Проверить прерванную операцию SFTP")).clicked()
+                                {
                                     self.retry_requested = Some(record.id.clone());
                                 }
                                 if record.omitted != 0 {
@@ -1175,6 +1183,60 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_sftp_history_offers_inspection_before_retry() {
+        let ctx = egui::Context::default();
+        let mut entry = record();
+        entry.id = "interrupted".into();
+        entry.items[0].outcome = Outcome::PublicationUnconfirmed;
+        let mut history = History {
+            records: vec![entry],
+            loaded: true,
+            inspectable: HashSet::from(["interrupted".into()]),
+            ..History::default()
+        };
+        let mut open = true;
+        let mut draw = |events| {
+            ctx.run_test_ui(
+                egui::RawInput {
+                    events,
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(960., 700.),
+                    )),
+                    ..Default::default()
+                },
+                |ui| history.show(ui.ctx(), &mut open),
+            )
+        };
+        draw(Vec::new());
+        let output = draw(Vec::new());
+        let mut check_button = None;
+        for clipped in output.shapes {
+            if let egui::Shape::Text(label) = clipped.shape {
+                assert_ne!(label.galley.text(), "Check and retry unfinished items");
+                if label.galley.text() == crate::i18n::text("Проверить прерванную операцию SFTP")
+                {
+                    check_button = Some(label.pos + label.galley.size() * 0.5);
+                }
+            }
+        }
+        let pos = check_button.expect("inspection button is visible");
+        for pressed in [true, false] {
+            draw(vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]);
+        }
+        assert_eq!(history.retry_requested.as_deref(), Some("interrupted"));
+        assert!(history.retryable.is_empty());
+    }
+
+    #[test]
     fn save_round_trip_reopens_all_outcomes_and_recovery_text() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("history.json");
@@ -1185,6 +1247,7 @@ mod tests {
             Outcome::Skipped,
             Outcome::Failed,
             Outcome::Cancelled,
+            Outcome::RetryReady,
             Outcome::NotStarted,
         ] {
             item.items.push(ItemResult {
@@ -1202,7 +1265,7 @@ mod tests {
         save(&path, &saved).unwrap();
         drop(lock);
         let (reopened, _lock) = open_store(&path).unwrap();
-        assert_eq!(reopened.records[0].items.len(), 6);
+        assert_eq!(reopened.records[0].items.len(), 7);
         assert_eq!(
             reopened.records[0].items[1].outcome,
             Outcome::CompletedWithWarning

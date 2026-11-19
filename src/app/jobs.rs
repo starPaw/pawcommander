@@ -455,7 +455,12 @@ impl PawCommander {
         // same attempt, even while this job waits behind another operation.
         let job = self.retry_jobs.remove(index).unwrap();
         self.history.retryable.remove(id);
+        self.history.inspectable.remove(id);
         self.show_history = false;
+        if job.transfer.needs_inspection() {
+            self.check_interrupted_transfer(ctx, job);
+            return;
+        }
         self.submit_transfer(
             ctx,
             TransferRequest {
@@ -466,6 +471,73 @@ impl PawCommander {
                 cut_generation: job.cut_generation,
                 verify_copies: job.verify_copies,
                 retry: Some(job),
+            },
+        );
+    }
+
+    fn check_interrupted_transfer(&mut self, ctx: &egui::Context, mut job: RetryJob) {
+        let (publish, events) = mpsc::channel();
+        let repaint = ctx.clone();
+        let retry_origin = Some(job.clone());
+        let label = crate::i18n::text("Проверка прерванной операции SFTP");
+        let description = format!("{label} · {}", job.transfer.destination);
+        self.submit_job(
+            ctx,
+            PendingJob {
+                label: label.into(),
+                description,
+                work: Box::new(move |progress| {
+                    let id = crate::result_history::operation_id();
+                    progress.results.id = id.clone();
+                    let send = |job| {
+                        let _ = publish.send(TransferEvent::RetryReady(Box::new(job)));
+                        repaint.request_repaint();
+                    };
+                    let checked = job.transfer.len();
+                    match job.transfer.inspect(progress) {
+                        Ok((ready, pending)) => {
+                            let ready_count =
+                                ready.as_ref().map_or(0, crate::vfs::RetryTransfer::len);
+                            if let Some(transfer) = ready {
+                                send(RetryJob {
+                                    id,
+                                    transfer,
+                                    cut_generation: job.cut_generation,
+                                    verify_copies: job.verify_copies,
+                                });
+                            }
+                            if let Some(transfer) = pending {
+                                job.transfer = transfer;
+                                send(job);
+                            }
+                            Ok(crate::tr_format!(
+                                "Проверено объектов {checked}. Готово к повтору {ready_count}.",
+                                "Checked {checked} items. Ready to retry {ready_count}."
+                            ))
+                        }
+                        Err(crate::operations::TransferError::Cancelled) => {
+                            send(job);
+                            progress.results.cancelled = true;
+                            Ok(
+                                crate::i18n::text("Проверка прерванной операции SFTP отменена.")
+                                    .into(),
+                            )
+                        }
+                        Err(error) => {
+                            send(job);
+                            Err(error.to_string())
+                        }
+                    }
+                }),
+                transfer: Some(TransferInteraction {
+                    events,
+                    cut_generation: None,
+                    conflict: None,
+                    can_pause: false,
+                }),
+                cut: None,
+                retry_origin,
+                undo_origin: None,
             },
         );
     }
@@ -600,18 +672,30 @@ impl PawCommander {
     }
 
     fn remember_retry(&mut self, job: RetryJob) {
+        self.retry_jobs.retain(|saved| saved.id != job.id);
         self.retry_jobs.push_back(job);
         while self.retry_jobs.len() > 100
             || self
                 .retry_jobs
                 .iter()
-                .map(|job| job.transfer.len())
+                .map(|job| job.transfer.weight())
                 .sum::<usize>()
                 > 100_000
         {
             self.retry_jobs.pop_front();
         }
-        self.history.retryable = self.retry_jobs.iter().map(|job| job.id.clone()).collect();
+        self.history.retryable = self
+            .retry_jobs
+            .iter()
+            .filter(|job| !job.transfer.needs_inspection())
+            .map(|job| job.id.clone())
+            .collect();
+        self.history.inspectable = self
+            .retry_jobs
+            .iter()
+            .filter(|job| job.transfer.needs_inspection())
+            .map(|job| job.id.clone())
+            .collect();
     }
 
     fn remember_undo(&mut self, job: UndoJob) {

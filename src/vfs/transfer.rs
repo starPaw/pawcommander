@@ -383,7 +383,12 @@ pub(super) fn transfer_run(
     summary: &mut TransferSummary,
 ) -> Result<(), TransferError> {
     progress.checkpoint()?;
-    let plan = transfer_plan(sources, destination, kind, progress)?;
+    let mut plan = transfer_plan(sources, destination, kind, progress)?;
+    if let Some(retry) = &progress.retry {
+        for item in &mut plan {
+            retry.use_previous_target(item);
+        }
+    }
     progress.results.plan(
         plan.iter()
             .map(|item| (item.original.clone(), Some(item.target.display()))),
@@ -503,7 +508,7 @@ pub(super) fn transfer_run(
         progress.checkpoint()?;
         let copy_move = kind == TransferKind::Move && super::cross_move::required(&item)?;
         let mut history_warning = None;
-        let move_manifest = if kind == TransferKind::Move && !copy_move {
+        let mut move_manifest = if kind == TransferKind::Move && !copy_move {
             let scan = cancel.clone().pausable_scan();
             let captured = TransferSourceManifest::capture_move_observed(
                 &item.source,
@@ -565,6 +570,9 @@ pub(super) fn transfer_run(
         {
             retry.verify(&item, &cancel)?;
         }
+        if let Some(retry) = &mut progress.retry {
+            retry.begin_attempt(&item, kind == TransferKind::Copy || copy_move);
+        }
         let mut result = match kind {
             TransferKind::Copy => copy_item_cancellable(&item, expected, progress, published),
             TransferKind::Move if copy_move => super::cross_move::run(
@@ -575,10 +583,17 @@ pub(super) fn transfer_run(
                 || source_removed = true,
                 &mut |_, _| Ok(()),
             ),
-            TransferKind::Move => move_item(&item, expected, count != 0, &cancel, published),
+            TransferKind::Move => move_item(&item, expected, count != 0, progress, published),
         };
         if copy_move && source_removed {
             moved(&item.original, &item.covered);
+        }
+        if !committed
+            && !copy_move
+            && matches!(&result, Err(TransferError::PublicationUnconfirmed(_)))
+            && let Some(retry) = &mut progress.retry
+        {
+            retry.note_source_manifest(&item.original, move_manifest.take());
         }
         let undo_entry = if committed
             && result.is_ok()
@@ -758,7 +773,7 @@ pub(super) fn move_item(
     item: &TransferItem,
     expected: Option<&EntryMetadata>,
     had_conflicts: bool,
-    cancel: &Cancellation,
+    progress: &mut Progress,
     moved: impl FnOnce(),
 ) -> Result<(), TransferError> {
     // The batch waits for every conflict before moving anything. Use the same
@@ -774,8 +789,18 @@ pub(super) fn move_item(
         )
         .into());
     }
-    cancel.check()?;
-    publish_item_typed(&item.source, &item.target, expected, moved)
+    progress.checkpoint()?;
+    publish_item_typed(
+        &item.source,
+        &item.target,
+        expected,
+        |staging| {
+            if let Some(retry) = &mut progress.retry {
+                retry.note_staging(&item.original, staging);
+            }
+        },
+        moved,
+    )
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -831,7 +856,10 @@ pub(super) fn copy_transfer_cancellable(
         )?;
     }
     progress.checkpoint()?;
-    with_staging_typed(&item.target, Some(&cancel), |staging, preserve| {
+    let result = with_staging_typed(&item.target, Some(&cancel), |staging, preserve| {
+        if let Some(retry) = &mut progress.retry {
+            retry.note_staging(&item.original, staging);
+        }
         // Finish the probe handle lifecycle before checking cancellation.
         check_copy_space(manifest.bytes, &item.target, staging)?;
         progress.checkpoint()?;
@@ -856,7 +884,7 @@ pub(super) fn copy_transfer_cancellable(
             retry.verify(item, &cancel)?;
         }
         cancel.check()?;
-        if let Some(expected) = expected {
+        let publication = if let Some(expected) = expected {
             let mut attempted = false;
             publish_replacement_with_backup_rename(
                 &payload,
@@ -867,13 +895,29 @@ pub(super) fn copy_transfer_cancellable(
                 &mut attempted,
                 rename_without_replacing,
             )
-            .map_err(|error| publication_error(&item.target, attempted, error))?;
+            .map_err(|error| publication_error(&item.target, attempted, error))
         } else {
-            rename_for_publication(&payload, &item.target)?;
+            rename_for_publication(&payload, &item.target)
+        };
+        match publication {
+            Err(TransferError::PublicationUnconfirmed(error)) => {
+                *preserve = true;
+                return Err(TransferError::PublicationUnconfirmed(crate::tr_format!(
+                    "{error}. Для проверки сохранена временная папка {staging}.",
+                    "{error}. Temporary folder retained for inspection at {staging}."
+                )));
+            }
+            result => result?,
         }
         published();
         Ok(())
-    })
+    });
+    if matches!(&result, Err(TransferError::PublicationUnconfirmed(_)))
+        && let Some(retry) = &mut progress.retry
+    {
+        retry.note_source_manifest(&item.original, Some(manifest));
+    }
+    result
 }
 
 // The old destination remains allocated throughout staging: do not subtract its
@@ -969,10 +1013,12 @@ pub(super) fn publish_item_typed(
     payload: &Location,
     target: &Location,
     expected: Option<&EntryMetadata>,
+    planned_backup: impl FnOnce(&Location),
     published: impl FnOnce(),
 ) -> Result<(), TransferError> {
     if let Some(expected) = expected {
         with_staging_typed(target, None, |staging, preserve| {
+            planned_backup(staging);
             let mut attempted = false;
             publish_replacement_with_backup_rename(
                 payload,

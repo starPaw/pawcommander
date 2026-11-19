@@ -244,6 +244,9 @@ pub(super) fn run(
         with_preserved_staging(&item.source, &cancel, |staging, preserve| {
             let staging_meta = metadata(staging)?;
             let held = staging.join("source");
+            if let Some(retry) = &mut progress.retry {
+                retry.note_held_source(&item.original, &held);
+            }
             // This directory is registered for crash recovery and retained
             // even on panic or an unacknowledged remote rename.
             if let Err(error) = rename_for_publication(&item.source, &held) {
