@@ -259,6 +259,7 @@ impl PawCommander {
             } else {
                 Progress::tracked()
             };
+            progress.set_transfer_limits(&self.settings.transfer_limits);
             let started = Instant::now();
             let history = self.history.sender();
             let history_label = label.clone();

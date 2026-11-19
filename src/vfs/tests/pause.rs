@@ -142,7 +142,7 @@ pub(super) fn check_copy_pause(
     );
 }
 
-fn wait_for_pause(view: &ProgressView) {
+pub(super) fn wait_for_pause(view: &ProgressView) {
     let start = Instant::now();
     while view.pause_state() != Some(PauseState::Paused) && start.elapsed() < TIMEOUT {
         thread::sleep(Duration::from_millis(1));

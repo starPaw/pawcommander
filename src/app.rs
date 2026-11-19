@@ -28,6 +28,7 @@ mod state;
 mod tab_strip;
 mod tabs;
 mod toolbar;
+mod transfer_limits;
 
 use crate::command_palette::CommandPalette;
 use crate::directory_tree::DirectoryTree;

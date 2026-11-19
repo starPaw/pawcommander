@@ -1063,6 +1063,136 @@ fn transfer_pause_controls_resume_or_stop_the_active_job_before_the_queue_advanc
 }
 
 #[test]
+fn transfer_speed_dialog_updates_the_running_job_and_persists_connection_limits() {
+    use egui::accesskit::{Action as AxAction, ActionData, ActionRequest, TreeId};
+    use std::fs;
+
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("payload.bin");
+    let to = root.path().join("destination");
+    let data = vec![0x38; 512 * 1024];
+    fs::write(&source, &data).unwrap();
+    fs::create_dir(&to).unwrap();
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+    let mut app = PawCommander::new(&cc, Some(root.path().into()));
+    let saved_connection = Endpoint {
+        host: "transfer.example".into(),
+        port: 2222,
+        user: "test".into(),
+        key: Some("/test/key-filename".into()),
+    };
+    app.settings.sftp_profiles.push(Location::Sftp {
+        endpoint: saved_connection.clone(),
+        path: "/".into(),
+    });
+    assert_eq!(app.settings.transfer_limits.global_kib, 0);
+    app.settings.transfer_limits.global_kib = 4;
+    app.start_transfer(
+        &ctx,
+        "paced copy",
+        vec![source.clone().into()],
+        to.clone().into(),
+        TransferKind::Copy,
+        false,
+    );
+    poll_queue_until(&mut app, &ctx, |_| {
+        fs::read_dir(&to).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .path()
+                .join("payload")
+                .metadata()
+                .is_ok_and(|meta| meta.len() > 0)
+        })
+    });
+
+    let request = |target_node, action, data| {
+        egui::Event::AccessKitActionRequest(ActionRequest {
+            action,
+            target_tree: TreeId::ROOT,
+            target_node,
+            data,
+        })
+    };
+    operation_footer_frame(&mut app, &ctx, vec![]);
+    let footer = operation_footer_frame(&mut app, &ctx, vec![]);
+    let speed = footer
+        .platform_output
+        .accesskit_update
+        .unwrap()
+        .nodes
+        .into_iter()
+        .find(|(_, node)| node.label() == Some("Speed…"))
+        .unwrap()
+        .0;
+    operation_footer_frame(&mut app, &ctx, vec![request(speed, AxAction::Click, None)]);
+    assert!(matches!(&app.dialog, Some(Dialog::TransferLimits { .. })));
+
+    let dialog_frame = |app: &mut PawCommander, events| {
+        ctx.run_test_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(960.0, 600.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ui| app.dialogs(ui.ctx()),
+        )
+        .platform_output
+        .accesskit_update
+        .unwrap()
+    };
+    dialog_frame(&mut app, vec![]);
+    let dialog = dialog_frame(&mut app, vec![]);
+    let field = |value| {
+        dialog
+            .nodes
+            .iter()
+            .find(|(_, node)| node.numeric_value() == Some(value))
+            .unwrap()
+            .0
+    };
+    let global = field(4.0);
+    let endpoint = field(0.0);
+    let save = dialog
+        .nodes
+        .iter()
+        .find(|(_, node)| node.label() == Some("Save"))
+        .unwrap()
+        .0;
+    dialog_frame(
+        &mut app,
+        vec![
+            request(
+                global,
+                AxAction::SetValue,
+                Some(ActionData::NumericValue(0.0)),
+            ),
+            request(
+                endpoint,
+                AxAction::SetValue,
+                Some(ActionData::NumericValue(12.0)),
+            ),
+        ],
+    );
+    assert_eq!(app.settings.transfer_limits.global_kib, 4);
+    dialog_frame(&mut app, vec![request(save, AxAction::Click, None)]);
+    assert_eq!(app.settings.transfer_limits.global_kib, 0);
+    assert!(app.dialog.is_none());
+    poll_queue_until(&mut app, &ctx, |app| app.job.is_none());
+    assert!(fs::read(to.join(source.file_name().unwrap())).unwrap() == data);
+
+    let saved = serde_json::to_string(&app.settings.transfer_limits).unwrap();
+    assert!(!saved.contains("key-filename"));
+    let restored: crate::operations::TransferLimits = serde_json::from_str(&saved).unwrap();
+    assert_eq!(restored.connection_kib(&saved_connection), 12);
+}
+
+#[test]
 fn shift_escape_stops_a_conflict_without_starting_the_batch() {
     let root = tempfile::tempdir().unwrap();
     let source_dir = root.path().join("source");

@@ -1313,6 +1313,8 @@ fn openssh_round_trip_and_host_verification() {
         super::pause::PauseAction::Stop,
         false,
     );
+    super::bandwidth::check_transfer_speed(&local_root, &remote_root, "upload", false);
+    super::bandwidth::check_transfer_speed(&remote_root, &local_root, "download", true);
     check_sftp_retry(&local_root, &remote_root);
     check_cross_connection_partial_move(&local_root, &remote_root);
     check_sftp_copy_hash_verification(&local_root, &remote_root);

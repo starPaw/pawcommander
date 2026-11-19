@@ -143,6 +143,12 @@ impl PawCommander {
                             });
                             paint_focus(ui, &language_menu.response, 5);
                             ui.separator();
+                            let speed = ui.button(crate::i18n::text("Скорость передачи…"));
+                            paint_focus(ui, &speed, 5);
+                            if speed.clicked() {
+                                self.open_transfer_limits(ctx);
+                                ui.close();
+                            }
                             let verification = ui.checkbox(
                                 &mut self.settings.verify_copies,
                                 crate::i18n::text("Проверять копии (SHA-256)"),

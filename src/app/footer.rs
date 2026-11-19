@@ -118,6 +118,7 @@ impl PawCommander {
         let colors = Palette::from_ctx(ctx);
         let mut stop_requested = false;
         let mut pause_requested = None;
+        let mut speed_requested = false;
         let conflict_open = self.conflict_open();
         let mut archive_add_requested = false;
         let history_error = self.history.error.is_some();
@@ -165,6 +166,12 @@ impl PawCommander {
                             if response.clicked() {
                                 pause_requested = Some(running);
                             }
+                            let speed = ui.add_enabled(
+                                !conflict_open,
+                                egui::Button::new(crate::i18n::text("Скорость…")),
+                            );
+                            paint_focus(ui, &speed, 5);
+                            speed_requested = speed.clicked();
                         }
                         if self.transfer.is_some() {
                             let response = ui
@@ -277,6 +284,8 @@ impl PawCommander {
         } else if let (Some(paused), Some(job)) = (pause_requested, &self.job) {
             job.progress.set_paused(paused);
             ctx.request_repaint();
+        } else if speed_requested {
+            self.open_transfer_limits(ctx);
         }
         if archive_add_requested {
             self.action(super::actions::Action::AddToArchive, ctx);

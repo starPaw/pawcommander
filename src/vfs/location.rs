@@ -25,7 +25,7 @@ impl Endpoint {
             .unwrap_or(&self.host)
     }
 
-    pub(super) fn same_authority(&self, other: &Self) -> bool {
+    pub(crate) fn same_authority(&self, other: &Self) -> bool {
         let left = self.host_name();
         let right = other.host_name();
         let same_host = left == right
@@ -72,6 +72,12 @@ impl Location {
     }
     pub fn remote(&self) -> bool {
         matches!(self, Self::Sftp { .. })
+    }
+    pub(crate) fn sftp_endpoint(&self) -> Option<&Endpoint> {
+        match self {
+            Self::Sftp { endpoint, .. } => Some(endpoint),
+            _ => None,
+        }
     }
     pub(crate) fn archive_source(&self) -> Option<&Path> {
         match self {

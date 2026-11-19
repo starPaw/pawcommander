@@ -51,6 +51,10 @@ impl SelectionScan {
 }
 
 pub(super) enum Dialog {
+    TransferLimits {
+        draft: crate::operations::TransferLimits,
+        endpoints: Vec<Endpoint>,
+    },
     SelectionRule {
         command: Command,
         kind: RuleKind,
@@ -420,6 +424,7 @@ impl PawCommander {
         let mut cancel = false;
         let mut confirm = false;
         let title = match &dialog {
+            Dialog::TransferLimits { .. } => crate::i18n::text("Скорость передачи"),
             Dialog::SelectionRule { command, .. } => command.label(),
             Dialog::NewFolder { .. } => crate::i18n::text("Новая папка"),
             Dialog::Rename { .. } => crate::i18n::text("Переименовать"),
@@ -450,6 +455,9 @@ impl PawCommander {
             ui.heading(title);
             ui.add_space(12.0);
             match &mut dialog {
+                Dialog::TransferLimits { draft, endpoints } => {
+                    super::transfer_limits::show_fields(ui, draft, endpoints);
+                }
                 Dialog::SelectionRule { kind, input, scan, .. } => {
                     let (field, hint) = match kind {
                         RuleKind::Mask => (crate::i18n::text("Маска имени файла"), "photo-?.jpg"),
@@ -670,7 +678,7 @@ impl PawCommander {
                 Dialog::WorkspaceName { editing, name } => {
                     !name.trim().is_empty() && !self.workspace_name_taken(name, *editing)
                 }
-                Dialog::Trash { .. } | Dialog::VerifyArchive { .. } | Dialog::ArchiveEdit { .. } => true,
+                Dialog::TransferLimits { .. } | Dialog::Trash { .. } | Dialog::VerifyArchive { .. } | Dialog::ArchiveEdit { .. } => true,
             };
             ui.horizontal(|ui| {
                 let cancel_button = ui.button(crate::i18n::text("Отмена"));
@@ -708,7 +716,7 @@ impl PawCommander {
                 confirm = ui.add_enabled(valid, button).clicked();
             });
             let submit_on_enter = match dialog {
-                Dialog::Trash { .. } | Dialog::BatchRename(_) | Dialog::CreateArchive { .. } | Dialog::ExtractArchive { .. } | Dialog::VerifyArchive { .. } | Dialog::ArchiveEdit { .. } => false,
+                Dialog::TransferLimits { .. } | Dialog::Trash { .. } | Dialog::BatchRename(_) | Dialog::CreateArchive { .. } | Dialog::ExtractArchive { .. } | Dialog::VerifyArchive { .. } | Dialog::ArchiveEdit { .. } => false,
                 // The Enter that opens the dialog belongs to its sidebar control.
                 Dialog::WorkspaceName { .. } | Dialog::SelectionRule { .. } | Dialog::CreateChecksumManifest { .. } => !self.dialog_focus,
                 _ => true,
@@ -783,6 +791,7 @@ impl PawCommander {
         }
         if confirm && !cancel {
             match dialog {
+                Dialog::TransferLimits { draft, .. } => self.apply_transfer_limits(draft, ctx),
                 Dialog::SelectionRule { .. } => unreachable!("rule handled above"),
                 Dialog::NewFolder { parent, name } => self.start_described_job(
                     ctx,
