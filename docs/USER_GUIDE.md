@@ -213,6 +213,12 @@ Select local items and use **Properties** or `Alt+Enter` to calculate their comb
 
 Properties show available dates and permissions for selected roots. Unix permissions, UID, and GID do not represent ACLs or effective access; Windows shows read-only state. Properties are read-only and are not available for SFTP. While counting, **Stop calculation** receives initial keyboard focus; press `Space` or `Enter` to stop. You can also close the window or press `Esc` to request cancellation. Results can be partial when files disappear or access fails. Cancellation does not interrupt a blocked OS call.
 
+## SHA-256 manifests
+
+Select regular files in a local or SFTP folder and choose **Create SHA-256 manifest**. Enter a new filename to save their checksums in the same folder. The default is `SHA256SUMS`. The operation preserves existing files and publishes the manifest after reading all selected inputs. The output uses the [GNU checksum format](https://www.gnu.org/software/coreutils/manual/html_node/cksum-output-modes.html).
+
+Select a manifest and choose **Verify SHA-256 manifest** from the command palette. The context menu also offers this action for `SHA256SUMS` and `.sha256` files. Verification reads paths relative to the manifest's folder and accepts standard untagged and tagged SHA-256 records. Paths through symlinks receive a read error. Invalid paths and duplicate entries cause a manifest error. Up to 16 MiB and 50,000 entries are supported. Use **Stop** to cancel and **Result history** to see matches, changed files, missing files and read errors.
+
 ## Search and Zed
 
 `Cmd/Ctrl+F` filters names in the current folder. `Cmd/Ctrl+Shift+F` opens search. **Folder and subfolders** walks the local folder open when you start Search. Enter a name fragment or a wildcard such as `*.rs`. Comma-separated exclusion masks skip matching names and prune matching directories. Folder search skips symlink branches and returns up to 1,000 results. It reports incomplete coverage if it cannot read a branch or reaches the built-in traversal limit. You can cancel the search and reveal a result in its parent folder.

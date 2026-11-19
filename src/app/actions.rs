@@ -67,6 +67,8 @@ pub(super) enum Action {
     CreateArchive,
     ExtractArchive,
     VerifyArchive,
+    CreateChecksumManifest,
+    VerifyChecksumManifest,
     AddToArchive,
     RemoveFromArchive,
     Trash,
@@ -503,6 +505,35 @@ impl PawCommander {
                     self.dialog_focus = true;
                 }
             }
+            Action::CreateChecksumManifest if !self.conflict_open() => {
+                let tab = self.tab();
+                if tab
+                    .selected_file_count(&tab.visible(self.folder_view(self.active)))
+                    .is_some()
+                {
+                    let directory = tab.path.clone();
+                    let sources = self.selected();
+                    self.remember_dialog_file_focus(ctx);
+                    self.dialog = Some(Dialog::CreateChecksumManifest {
+                        sources,
+                        directory,
+                        name: "SHA256SUMS".into(),
+                    });
+                    self.dialog_focus = true;
+                }
+            }
+            Action::VerifyChecksumManifest if !self.conflict_open() => {
+                let tab = self.tab();
+                if tab.selected_file_count(&tab.visible(self.folder_view(self.active))) == Some(1)
+                    && let Some(manifest) = self.selected().into_iter().next()
+                {
+                    let label = Command::VerifyChecksumManifest.label();
+                    let description = format!("{label} · {manifest}");
+                    self.start_stoppable_job(ctx, label, description, move |progress| {
+                        crate::vfs::verify_checksum_manifest(&manifest, progress)
+                    });
+                }
+            }
             Action::Trash if !self.conflict_open() => {
                 let paths = self.selected();
                 if !paths.is_empty() {
@@ -799,6 +830,8 @@ impl PawCommander {
                         | Action::Shortcut(
                             Command::Rename
                                 | Command::CreateArchive
+                                | Command::CreateChecksumManifest
+                                | Command::VerifyChecksumManifest
                                 | Command::ExtractArchive
                                 | Command::RemoveFromArchive
                                 | Command::Trash

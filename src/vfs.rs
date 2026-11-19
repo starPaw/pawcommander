@@ -5,6 +5,7 @@ mod archive_create;
 mod archive_edit;
 mod archive_extract;
 mod batch_rename;
+mod checksum;
 mod cross_move;
 mod listing;
 mod location;
@@ -22,6 +23,10 @@ pub(crate) use archive_create::{archive_file_name, create_archive};
 pub(crate) use archive_edit::{edit_archive, ArchiveEdit};
 pub(crate) use archive_extract::extract_archive;
 pub(crate) use batch_rename::{BatchRenamePreview, BatchRenameRules};
+pub(crate) use checksum::{
+    checksum_manifest_name, create_checksum_manifest, looks_like_checksum_manifest,
+    verify_checksum_manifest,
+};
 pub use listing::{
     read_automatic_directory, read_directory, visit_address_directory, visit_connected_directory,
     visit_directory, FileEntry,

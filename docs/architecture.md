@@ -31,6 +31,7 @@ PawCommander is a single Rust binary using eframe/egui. Start at the module that
 | ZIP/TAR creation | [`archive/writer.rs`](../src/archive/writer.rs), [`vfs/archive_create.rs`](../src/vfs/archive_create.rs) | `app/dialogs.rs`, `operations.rs` |
 | ZIP/TAR extraction | [`archive/extraction.rs`](../src/archive/extraction.rs), [`vfs/archive_extract.rs`](../src/vfs/archive_extract.rs) | `app/jobs.rs`, `vfs/staged_file.rs`, `conflict.rs` |
 | ZIP/TAR editing | [`archive/edit.rs`](../src/archive/edit.rs), [`vfs/archive_edit.rs`](../src/vfs/archive_edit.rs) | `app/dialogs.rs`, `vfs/archive_create.rs`, `vfs/transfer.rs` |
+| SHA-256 checksum manifests | [`vfs/checksum.rs`](../src/vfs/checksum.rs), [`vfs/checksum/manifest.rs`](../src/vfs/checksum/manifest.rs) | Job queue and result history, streaming SHA-256 reader, staged publication without replacement |
 | Password-protected ZIP | [`archive/protected_zip.rs`](../src/archive/protected_zip.rs), [`archive/writer.rs`](../src/archive/writer.rs) | `app/dialogs.rs`, `vfs/staged_file.rs` |
 | Recovery and operation history | [`recovery.rs`](../src/recovery.rs), [`result_history.rs`](../src/result_history.rs) | `app/jobs.rs` |
 | Native integrations and file properties | [`native_drag.rs`](../src/native_drag.rs), [`properties.rs`](../src/properties.rs) | `native_drag/{macos,desktop,windows,linux}.rs`, `native_drag/linux/`, `properties/{unix,windows}.rs`, `macos_about.rs`, `tools.rs`, `zed.rs` |
