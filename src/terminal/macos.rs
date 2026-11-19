@@ -65,7 +65,7 @@ fn launch_error(error: io::Error) -> String {
     )
 }
 
-fn ssh_command(endpoint: &Endpoint, path: &Path) -> Result<Command, String> {
+pub(super) fn ssh_command(endpoint: &Endpoint, path: &Path) -> Result<Command, String> {
     let host = endpoint.host_name();
     if host.is_empty()
         || host.starts_with('-')

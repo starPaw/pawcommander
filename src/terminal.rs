@@ -8,4 +8,10 @@ pub(crate) fn available(folder: &Location) -> bool {
 mod macos;
 
 #[cfg(target_os = "macos")]
+pub(crate) mod embedded;
+
+#[cfg(target_os = "macos")]
+mod pty;
+
+#[cfg(target_os = "macos")]
 pub(crate) use macos::open;

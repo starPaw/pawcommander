@@ -51,6 +51,7 @@ pub(super) enum Action {
     Open(usize, Location),
     OpenInZed(usize, Location),
     OpenTerminal(Location),
+    OpenEmbeddedTerminal(Location),
     Back,
     Forward,
     History(usize, isize),
@@ -351,6 +352,34 @@ impl PawCommander {
                     crate::i18n::text("Открытие терминала…"),
                     move || crate::terminal::open(&folder),
                 );
+            }
+            Action::OpenEmbeddedTerminal(folder) => {
+                if !crate::terminal::available(&folder) {
+                    return;
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    if let Some(terminal) = self
+                        .embedded_terminal
+                        .as_mut()
+                        .filter(|terminal| !terminal.finished())
+                    {
+                        terminal.focus(ctx);
+                        return;
+                    }
+                    match crate::terminal::embedded::Panel::open(folder, ctx) {
+                        Ok(terminal) => self.embedded_terminal = Some(terminal),
+                        Err(error) => {
+                            self.notice = Some((
+                                crate::tr_format!(
+                                    "Не удалось открыть встроенный терминал. {error}",
+                                    "Could not open the embedded terminal. {error}"
+                                ),
+                                true,
+                            ))
+                        }
+                    }
+                }
             }
             Action::Open(i, p) => {
                 self.active = i;

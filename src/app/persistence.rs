@@ -189,6 +189,8 @@ impl PawCommander {
             connection: None,
             native_drag: Default::default(),
             application_job: None,
+            #[cfg(target_os = "macos")]
+            embedded_terminal: None,
             tools: crate::tools::Tools::detect(),
             search: crate::search::Search::load(cc.storage),
         }
