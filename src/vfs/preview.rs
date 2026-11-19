@@ -18,6 +18,12 @@ pub fn preview_data(
     Ok((stat, bytes))
 }
 
+pub(crate) fn open_preview_stream(location: &Location) -> Result<ssh2::File, String> {
+    preview_input(location)?
+        .1
+        .ok_or_else(|| crate::i18n::text("Файл изменился перед чтением").into())
+}
+
 fn preview_input(location: &Location) -> Result<(ssh2::FileStat, Option<ssh2::File>), String> {
     let sftp = remote(location)?;
     let stat = sftp.lstat(location.path()).map_err(err)?;

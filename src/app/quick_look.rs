@@ -322,7 +322,9 @@ impl PawCommander {
                 // DirectoryView always orders directories before files.
                 let previous = position.checked_sub(1).filter(|&row| !entry_at(row).is_dir);
                 let next = (position + 1 < visible.len()).then_some(position + 1);
-                let preview = self.quick_look_preview.get_or_insert_with(Preview::new);
+                let preview = self
+                    .quick_look_preview
+                    .get_or_insert_with(Preview::new_quick_look);
                 let action = quick_look.show(
                     ctx,
                     preview,

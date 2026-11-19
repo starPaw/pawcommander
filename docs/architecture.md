@@ -21,6 +21,7 @@ PawCommander is a single Rust binary using eframe/egui. Start at the module that
 | Preview, Quick Look, thumbnails | [`preview.rs`](../src/preview.rs), [`app/quick_look.rs`](../src/app/quick_look.rs) | `preview/code.rs`, `preview/markup.rs`, `thumbnails.rs`, `vfs/preview.rs` |
 | PDF preview on macOS | [`preview/pdf.rs`](../src/preview/pdf.rs), [`preview/pdf/view.rs`](../src/preview/pdf/view.rs) | `preview/pdf/protocol.rs`, `preview/pdf/worker.rs`, `preview/pdf/macos.m` |
 | Audio and video preview on macOS | [`preview/media.rs`](../src/preview/media.rs), [`preview/media/view.rs`](../src/preview/media/view.rs) | `preview/media/session.rs`, `preview/media/worker.rs`, `preview/media/macos.m`, `vfs/preview.rs` |
+| CSV and TSV preview | [`preview/table.rs`](../src/preview/table.rs), [`preview/table/view.rs`](../src/preview/table/view.rs) | `preview/table/records.rs`, `preview/table/worker.rs`, `vfs/preview.rs` |
 | Search and result actions | [`search.rs`](../src/search.rs), [`search/panel.rs`](../src/search/panel.rs), [`app/search.rs`](../src/app/search.rs) | `search/{content,directory,filters,index,saved}.rs`, `name_match.rs` |
 | ZIP/TAR browsing | [`archive.rs`](../src/archive.rs) | `vfs/location.rs`, `app/tabs.rs` |
 | ZIP/TAR creation | [`archive/writer.rs`](../src/archive/writer.rs), [`vfs/archive_create.rs`](../src/vfs/archive_create.rs) | `app/dialogs.rs`, `operations.rs` |
@@ -57,6 +58,8 @@ Directory reads use bounded channels and progressive batches. Dropping a directo
 The macOS PDF preview passes a bounded byte snapshot to a helper process. Its native renderer uses PDFKit for document text and selections and Core Graphics for page rasters. The preview worker owns the helper, enforces response sizes and deadlines, and ends the session when the preview changes. The UI uploads only the current page texture.
 
 Quick Look starts an AVFoundation player in a helper process and polls its clock and video output from a background thread. The interface consumes only the latest state and frame. Local files play from disk and SFTP files use a bounded temporary copy. Clearing the preview cancels the controller and reaps the helper before discarding its temporary file. PDF and media share the bounded, cancellable helper transport in [`preview/helper.rs`](../src/preview/helper.rs).
+
+Quick Look parses CSV and TSV from a bounded input buffer on a worker thread and publishes batches into one page. Page navigation seeks by logical record offsets in the opened local or SFTP file. It verifies the source metadata before reusing an offset. A new filter or separator cancels the current request and scans from the beginning. Closing the preview drops the worker request and releases the input.
 
 ## Trace a transfer
 
