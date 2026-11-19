@@ -1,5 +1,5 @@
 use super::{
-    worker::{Page, Pending, ResultPage, Work, Worker},
+    worker::{self, Page, Pending, ResultPage, Work, Worker},
     Codec, Direction, Position, QUERY_CHARS,
 };
 use crate::{
@@ -90,14 +90,14 @@ struct Viewer {
 
 impl Viewer {
     fn new(location: Location, encoding: Codec, ctx: &egui::Context) -> Result<Self, String> {
-        let worker = Worker::start(location, encoding, ctx)?;
-        let pending = worker.load(
+        let worker = worker::start(location, encoding, ctx)?;
+        let pending = worker.load((
             Work::Page {
                 index: 0,
                 near: Position::START,
             },
             None,
-        )?;
+        ))?;
         Ok(Self {
             worker,
             version: None,
@@ -315,7 +315,7 @@ impl Viewer {
         self.error = None;
         self.pending = None;
         self.searching = matches!(work, Work::Match { .. });
-        match self.worker.load(work, self.version) {
+        match self.worker.load((work, self.version)) {
             Ok(pending) => self.pending = Some(pending),
             Err(error) => {
                 self.error = Some(error);

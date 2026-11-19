@@ -1102,6 +1102,17 @@ fn openssh_round_trip_and_host_verification() {
             fs::remove_file(location.path()).unwrap();
         }
     }
+    {
+        let location = uploaded.join("binary preview.bin");
+        let marker = b"\xde\xad\xbe\xef";
+        let offset = 65535;
+        let mut bytes = vec![0; 131_077];
+        bytes[offset..offset + marker.len()].copy_from_slice(marker);
+        fs::write(location.path(), &bytes).unwrap();
+        crate::preview::check_sftp_hex(&location, offset as u64, marker);
+        assert_eq!(fs::read(location.path()).unwrap(), bytes);
+        fs::remove_file(location.path()).unwrap();
+    }
     #[cfg(target_os = "macos")]
     {
         let location = uploaded.join("hello world.txt");

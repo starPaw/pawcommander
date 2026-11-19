@@ -23,6 +23,7 @@ PawCommander is a single Rust binary using eframe/egui. Start at the module that
 | Audio and video preview on macOS | [`preview/media.rs`](../src/preview/media.rs), [`preview/media/view.rs`](../src/preview/media/view.rs) | `preview/media/session.rs`, `preview/media/worker.rs`, `preview/media/macos.m`, `vfs/preview.rs` |
 | CSV and TSV preview | [`preview/table.rs`](../src/preview/table.rs), [`preview/table/view.rs`](../src/preview/table/view.rs) | `preview/table/records.rs`, `preview/table/worker.rs`, `vfs/preview.rs` |
 | Large text preview | [`preview/large_text.rs`](../src/preview/large_text.rs), [`preview/large_text/view.rs`](../src/preview/large_text/view.rs) | `preview/large_text/reader.rs`, `preview/large_text/worker.rs`, `preview/source.rs` |
+| Hex preview | [`preview/hex.rs`](../src/preview/hex.rs), [`preview/hex/view.rs`](../src/preview/hex/view.rs) | `preview/hex/worker.rs`, `preview/source.rs`, `preview/read_worker.rs` |
 | Preview encoding | [`preview/encoding.rs`](../src/preview/encoding.rs) | Text and table workers share encoding selection and decoding |
 | Search and result actions | [`search.rs`](../src/search.rs), [`search/panel.rs`](../src/search/panel.rs), [`app/search.rs`](../src/app/search.rs) | `search/{content,directory,filters,index,saved}.rs`, `name_match.rs` |
 | ZIP/TAR browsing | [`archive.rs`](../src/archive.rs) | `vfs/location.rs`, `app/tabs.rs` |
@@ -66,6 +67,8 @@ Quick Look parses CSV and TSV from a bounded input buffer on a worker thread and
 Large text Quick Look reads one page near a 32 KiB boundary at a time. The worker aligns boundaries to nearby line endings or complete characters and tracks original line numbers while seeking. Literal search uses 64 KiB buffers with enough overlap for matches that cross read boundaries. Only the displayed page and current match are retained. The text and table previews share the seekable local/SFTP source and check its metadata before using saved offsets.
 
 The selected encoding is fixed for each preview generation. Large text workers search in the source encoding and map match locations to the decoded page. Table workers decode in bounded chunks and count source bytes when recording the next page offset. Changing the encoding discards the previous generation and starts the read again.
+
+Hex mode reads aligned 4 KiB pages through the shared seekable source. Literal byte search shares the bounded block reader and cancellation used by large text. A match near the end of a page includes just enough bytes from the next page to display the full match. Leaving hex mode drops the reader request.
 
 ## Trace a transfer
 

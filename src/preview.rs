@@ -4,12 +4,14 @@ mod code;
 mod encoding;
 #[cfg(target_os = "macos")]
 mod helper;
+mod hex;
 mod large_text;
 mod markup;
 #[cfg(target_os = "macos")]
 mod media;
 #[cfg(target_os = "macos")]
 mod pdf;
+mod read_worker;
 mod source;
 mod table;
 
@@ -30,6 +32,8 @@ use crate::{
 };
 use chrono::{DateTime, Local};
 use eframe::egui::{self, RichText};
+#[cfg(test)]
+pub(crate) use hex::check_sftp_hex;
 #[cfg(test)]
 pub(crate) use large_text::check_sftp_large_text;
 #[cfg(target_os = "macos")]
@@ -109,6 +113,8 @@ pub struct Preview {
     text: TextView,
     encoding: Option<Codec>,
     dirty: bool,
+    hex_mode: bool,
+    hex: Option<Result<Box<hex::Document>, String>>,
     fingerprint: Option<(u64, Option<std::time::SystemTime>)>,
     cancel: Cancellation,
 }
@@ -168,6 +174,8 @@ impl Preview {
             text: TextView::default(),
             encoding: None,
             dirty: false,
+            hex_mode: false,
+            hex: None,
             fingerprint: None,
             cancel: Cancellation::default(),
         }
@@ -239,10 +247,31 @@ impl Preview {
         fingerprint: (u64, Option<std::time::SystemTime>),
     ) {
         let changed_path = self.path.as_ref() != Some(path);
-        self.update(ui.ctx(), Some(path), Some(fingerprint));
-        self.upload_texture(ui.ctx());
         ui.add(egui::Label::new(RichText::new(path.name()).heading()).truncate());
+        if !path.is_archive() {
+            let previous = self.hex_mode;
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.hex_mode, false, crate::i18n::text("Предпросмотр"));
+                ui.selectable_value(&mut self.hex_mode, true, "Hex");
+            });
+            if self.hex_mode != previous {
+                self.refresh();
+            }
+        }
         ui.add_space(8.0);
+        self.update(ui.ctx(), Some(path), Some(fingerprint));
+        if let Some(hex) = &mut self.hex {
+            match hex {
+                Ok(document) => {
+                    ui.push_id(("hex", self.generation), |ui| document.show(ui));
+                }
+                Err(error) => {
+                    ui.colored_label(ui.visuals().error_fg_color, error.as_str());
+                }
+            }
+            return;
+        }
+        self.upload_texture(ui.ctx());
         if self.encoding_picker(ui) {
             return;
         }
@@ -329,6 +358,9 @@ impl Preview {
     }
 
     pub fn text_input(&self, ctx: &egui::Context) -> bool {
+        if let Some(Ok(document)) = &self.hex {
+            return document.text_input(ctx);
+        }
         if let Some(Ok(loaded)) = &self.result {
             match &loaded.content {
                 Content::Table(table) => return table.text_input(ctx),
@@ -356,6 +388,7 @@ impl Preview {
     }
 
     pub fn clear(&mut self, ctx: &egui::Context) {
+        self.hex_mode = false;
         self.update(ctx, None, None);
     }
 
@@ -377,12 +410,15 @@ impl Preview {
             self.path = path.cloned();
             self.generation = self.generation.wrapping_add(1);
             self.result = None;
+            self.hex = None;
             self.text.find.clear(ctx);
             self.text = TextView::default();
             self.texture = None;
             if let Some(path) = path {
                 if path.is_archive() {
                     self.result = Some(Err(crate::archive::readonly().into()));
+                } else if self.hex_mode {
+                    self.hex = Some(hex::Document::start(path.clone(), ctx).map(Box::new));
                 } else if self
                     .requests
                     .send(Request {
@@ -1194,6 +1230,134 @@ mod tests {
         settle(&mut preview, &next_location);
         assert_eq!(preview.encoding, None);
         assert_eq!(fs::read(legacy).unwrap(), original);
+    }
+
+    #[test]
+    fn quick_look_hex_mode_displays_binary_bytes_and_jumps_to_a_search_hit() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("binary.bin");
+        let next = directory.path().join("next.bin");
+        let hit = 64 * 1024 - 2;
+        let mut bytes = vec![0; 128 * 1024 + 5];
+        bytes[..3].copy_from_slice(b"\0A\xff");
+        bytes[hit..hit + 4].copy_from_slice(b"\xde\xad\xbe\xef");
+        fs::write(&first, &bytes).unwrap();
+        fs::write(&next, b"\xffZ").unwrap();
+        let mut preview = Preview::new_quick_look();
+        let location = Location::Local(first.clone());
+        let other = Location::Local(next);
+        let ctx = egui::Context::default();
+        let draw = |preview: &mut Preview, path: &Location, events| {
+            ctx.run_test_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(760.0, 520.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| preview.show_quick_look(ui, path, (0, None)),
+            )
+            .shapes
+            .into_iter()
+            .filter_map(|clipped| {
+                if let egui::Shape::Text(text) = clipped.shape {
+                    Some((
+                        text.galley.job.text.clone(),
+                        text.pos + text.galley.size() * 0.5,
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+        };
+        let click = |preview: &mut Preview, pos| {
+            draw(preview, &location, vec![egui::Event::PointerMoved(pos)]);
+            for pressed in [true, false] {
+                draw(
+                    preview,
+                    &location,
+                    vec![egui::Event::PointerButton {
+                        pos,
+                        pressed,
+                        button: egui::PointerButton::Primary,
+                        modifiers: egui::Modifiers::NONE,
+                    }],
+                );
+            }
+        };
+        let wait = |preview: &mut Preview, path: &Location, phrase: &str| {
+            for _ in 0..200 {
+                let labels = draw(preview, path, vec![]);
+                if labels.iter().any(|(text, _)| text.contains(phrase)) {
+                    return labels;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(4));
+            }
+            panic!("hex view never displayed {phrase}");
+        };
+        let key = |key, modifiers| {
+            [true, false]
+                .map(|pressed| egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers,
+                })
+                .to_vec()
+        };
+
+        let labels = draw(&mut preview, &location, vec![]);
+        let toggle = labels.iter().find(|(text, _)| text == "Hex").unwrap().1;
+        click(&mut preview, toggle);
+        let labels = wait(&mut preview, &location, "0000000000000000  00 41 FF");
+        assert!(labels.iter().any(|(text, _)| text.contains("|.A.")));
+        let query = labels
+            .iter()
+            .find(|(text, _)| text.ends_with("(DE AD)"))
+            .unwrap()
+            .1;
+        click(&mut preview, query);
+        assert!(preview.text_input(&ctx));
+        draw(
+            &mut preview,
+            &location,
+            vec![egui::Event::Text("de ad be ef".into())],
+        );
+        draw(
+            &mut preview,
+            &location,
+            key(egui::Key::Enter, egui::Modifiers::NONE),
+        );
+        wait(&mut preview, &location, "0xFFFE");
+        let labels = wait(&mut preview, &location, "0000000000010000  BE EF");
+        assert!(labels
+            .iter()
+            .any(|(text, _)| text.starts_with("000000000000FFF0")));
+
+        let offset = labels.iter().find(|(text, _)| text == "FFFE").unwrap().1;
+        click(&mut preview, offset);
+        assert!(preview.text_input(&ctx));
+        let mut events = key(egui::Key::A, egui::Modifiers::COMMAND);
+        events.push(egui::Event::Text("10001".into()));
+        draw(&mut preview, &location, events);
+        draw(
+            &mut preview,
+            &location,
+            key(egui::Key::Enter, egui::Modifiers::NONE),
+        );
+        let labels = wait(&mut preview, &location, "0x10000–0x10FFF");
+        assert!(labels.iter().any(|(text, _)| text == "10001"));
+
+        wait(&mut preview, &other, "0000000000000000  FF 5A");
+        assert!(preview.hex_mode);
+        preview.clear(&ctx);
+        assert!(!preview.hex_mode);
+        assert!(preview.hex.is_none());
+        assert_eq!(fs::read(first).unwrap(), bytes);
     }
 
     #[test]
