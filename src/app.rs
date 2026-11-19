@@ -120,7 +120,7 @@ pub struct PawCommander {
     sftp_form: Option<SftpForm>,
     connection: Option<ConnectionJob>,
     native_drag: crate::native_drag::NativeDrag,
-    editor_job: Option<Receiver<Result<String, String>>>,
+    application_job: Option<Receiver<Result<String, String>>>,
     tools: crate::tools::Tools,
     search: crate::search::Search,
 }
@@ -559,7 +559,7 @@ impl eframe::App for PawCommander {
             self.reveal_search_result(path, ctx);
         }
         if self.job.is_some()
-            || self.editor_job.is_some()
+            || self.application_job.is_some()
             || self.connection.is_some()
             || self
                 .panes

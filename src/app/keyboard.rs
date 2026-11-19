@@ -144,6 +144,7 @@ impl PawCommander {
                 Action::OpenInZed(self.active, path.clone())
             }
             Command::Refresh => Action::Refresh,
+            Command::OpenTerminal => Action::OpenTerminal(self.tab().path.clone()),
             Command::Properties => Action::Properties,
             Command::ChangePermissions => Action::ChangePermissions,
             Command::Rename => Action::Rename,

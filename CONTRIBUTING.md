@@ -47,6 +47,8 @@ The reconnect mode starts a temporary SSH agent and uses an OpenSSH SFTP subsyst
 
 The metadata-denied mode disables `setstat` and `fsetstat` on the temporary server. It checks that copies complete with field-specific warnings and that **Change permissions** reports the server's refusal. The standard mode also checks that numeric and symbolic permission changes match their preview, skips changed entries and symbolic links, and honors cancellation before sending a permission update.
 
+On macOS, run `PAWCOMMANDER_TEST_SFTP_TERMINAL=1 bash scripts/test-sftp.sh` to execute the SSH launch document against a disposable OpenSSH server. The test verifies the interactive shell, PTY, exact folder and identity path, and refusal when the folder is missing or the host is unknown.
+
 Run `bash scripts/test-ssh-interactive.sh` with a C compiler, `pkg-config`, OpenSSH key generation tools and a libssh build with server support. The loopback fixture exercises first-use trust, cancellation, hashed OpenSSH host records, key rotation, keyboard-interactive rounds and a second factor after key authentication. It compares the fingerprints with `ssh-keygen` and writes trust records only in its temporary directory.
 
 For local moves, set `PAWCOMMANDER_TEST_MOVE_SOURCE_ROOT` and `PAWCOMMANDER_TEST_MOVE_TARGET_ROOT` to writable directories on **different filesystems**, then run `cargo test --locked actual_cross_volume_routing_counts_only_removed_sources -- --ignored`. The test creates its own disposable subdirectories, checks replacement and a nested move, and stops a later move after publication to verify that its source remains and cannot be retried automatically. It refuses two paths on the same volume. This filesystem check does not replace native GUI acceptance.

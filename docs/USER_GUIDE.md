@@ -270,6 +270,12 @@ Choose **Show in results pane** to keep the current results visible while you br
 
 Zed establishes its own SSH connection using its SSH configuration and authentication. PawCommander's stored secrets are not passed to Zed. A server must allow full SSH access and execution of Zed's helper; SFTP-only access is insufficient. Zed may install its remote server under `~/.zed_server`. Edits are saved on the server; the visible folder updates automatically, or use `F5` to refresh immediately. See [Zed Remote Development](https://zed.dev/docs/remote-development).
 
+## Open a terminal in the current folder
+
+On macOS, right-click the current folder in the pane's address bar and choose **Open Terminal Here**. The same command is available in the command palette (`Cmd+Shift+P`). Apple Terminal opens in the current local folder.
+
+From an SFTP folder, the command opens a separate interactive OpenSSH session in Terminal. The server must allow an SSH shell and a PTY. OpenSSH uses the host, port, account and optional key-file path from the SFTP location. It handles host trust and authentication using its own configuration, agent and prompts. You can enter the password or unlock the key in Terminal if prompted. Key-file names containing OpenSSH expansion syntax use its `IdentityFile` environment expansion, available in OpenSSH 8.4 and later.
+
 ## Accessibility
 
 Open **Settings → Accessibility** to choose an interface scale from 90% to 150% or enable high contrast. Both choices are saved. `Cmd/Ctrl+=` and `Cmd/Ctrl+-` change the scale, and `Cmd/Ctrl+0` resets it to 100%.

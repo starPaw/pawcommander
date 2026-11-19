@@ -29,6 +29,7 @@ PawCommander is a single Rust binary using eframe/egui. Start at the module that
 | Preview encoding | [`preview/encoding.rs`](../src/preview/encoding.rs) | Text and table workers share encoding selection and decoding |
 | Search and result actions | [`search.rs`](../src/search.rs), [`search/panel.rs`](../src/search/panel.rs), [`app/search.rs`](../src/app/search.rs) | `search/{content,directory,filters,index,remote,saved}.rs`, `name_match.rs` |
 | Bounded SFTP search walk | [`vfs/search.rs`](../src/vfs/search.rs) | One directory handle on an existing session. Limits depth, entries and pending path bytes, and checks the deadline and cancellation between requests. |
+| Open Terminal in a folder on macOS | [`terminal/macos.rs`](../src/terminal/macos.rs), [`app/address_bar.rs`](../src/app/address_bar.rs) | An application launch worker passes the local folder or a private SSH launch document to Apple Terminal. OpenSSH owns the new session. |
 | ZIP/TAR browsing | [`archive.rs`](../src/archive.rs) | `vfs/location.rs`, `app/tabs.rs` |
 | ZIP/TAR creation | [`archive/writer.rs`](../src/archive/writer.rs), [`vfs/archive_create.rs`](../src/vfs/archive_create.rs) | `app/dialogs.rs`, `operations.rs` |
 | ZIP/TAR extraction | [`archive/extraction.rs`](../src/archive/extraction.rs), [`vfs/archive_extract.rs`](../src/vfs/archive_extract.rs) | `app/jobs.rs`, `vfs/staged_file.rs`, `conflict.rs` |

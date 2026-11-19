@@ -859,13 +859,12 @@ impl PawCommander {
         if self.conflict_open() && self.dialog_file_focus.is_none() {
             self.remember_dialog_file_focus(ctx);
         }
-        if let Some(rx) = &self.editor_job {
+        if let Some(rx) = &self.application_job {
             let result = match rx.try_recv() {
                 Ok(result) => Some(result),
-                Err(mpsc::TryRecvError::Disconnected) => Some(Err(crate::i18n::text(
-                    "Задача открытия в Zed завершилась неожиданно",
-                )
-                .into())),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Some(Err(crate::i18n::text("Запуск приложения прервался.").into()))
+                }
                 Err(mpsc::TryRecvError::Empty) => None,
             };
             if let Some(result) = result {
@@ -873,7 +872,7 @@ impl PawCommander {
                     Ok(message) => (message, false),
                     Err(error) => (error, true),
                 });
-                self.editor_job = None;
+                self.application_job = None;
             }
         }
         if let Some(job) = &self.connection {

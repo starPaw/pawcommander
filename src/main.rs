@@ -27,6 +27,7 @@ mod search;
 mod shortcuts;
 mod ssh_config;
 mod tab_drag;
+mod terminal;
 #[cfg(test)]
 mod test_ui;
 mod theme;

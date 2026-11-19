@@ -17,7 +17,7 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-    pub(super) fn host_name(&self) -> &str {
+    pub(crate) fn host_name(&self) -> &str {
         self.host
             .strip_prefix('[')
             .and_then(|host| host.strip_suffix(']'))

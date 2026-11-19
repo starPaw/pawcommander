@@ -30,6 +30,7 @@ pub enum Command {
     Preview,
     QuickLook,
     EditInZed,
+    OpenTerminal,
     Refresh,
     Properties,
     ChangePermissions,
@@ -54,7 +55,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Self; 43] = [
+    pub const ALL: [Self; 43 + cfg!(target_os = "macos") as usize] = [
         Self::EditPath,
         Self::Filter,
         Self::Search,
@@ -78,6 +79,8 @@ impl Command {
         Self::Preview,
         Self::QuickLook,
         Self::EditInZed,
+        #[cfg(target_os = "macos")]
+        Self::OpenTerminal,
         Self::Refresh,
         Self::Properties,
         Self::ChangePermissions,
@@ -125,6 +128,7 @@ impl Command {
             Self::Preview => "Панель сведений",
             Self::QuickLook => "Быстрый просмотр",
             Self::EditInZed => "Открыть в Zed",
+            Self::OpenTerminal => "Открыть терминал здесь",
             Self::Refresh => "Обновить",
             Self::Properties => "Свойства",
             Self::ChangePermissions => "Изменить права доступа",
@@ -217,6 +221,7 @@ impl Profile {
             FolderJump => (CMD_SHIFT, Key::J),
             Preview
             | EditInZed
+            | OpenTerminal
             | CopyToPane
             | MoveToPane
             | TogglePinTab
