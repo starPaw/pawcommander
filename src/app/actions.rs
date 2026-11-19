@@ -84,6 +84,7 @@ pub(super) enum Action {
     CopyPath,
     ConnectSftp,
     Properties,
+    ChangePermissions,
 }
 
 pub(super) enum SelectionChange {
@@ -453,6 +454,16 @@ impl PawCommander {
                             selected,
                         )))
                     });
+                    self.dialog_focus = true;
+                }
+            }
+            Action::ChangePermissions if !self.conflict_open() && self.tab().path.remote() => {
+                let sources = self.selected();
+                if !sources.is_empty() && sources.iter().all(Location::remote) {
+                    self.remember_dialog_file_focus(ctx);
+                    self.dialog = Some(Dialog::ChangePermissions(Box::new(
+                        super::permissions::PermissionsDialog::new(sources),
+                    )));
                     self.dialog_focus = true;
                 }
             }
@@ -840,6 +851,7 @@ impl PawCommander {
                                 | Command::RemoveFromArchive
                                 | Command::Trash
                                 | Command::Properties
+                                | Command::ChangePermissions
                                 | Command::CopyToPane
                                 | Command::MoveToPane
                                 | Command::EditInZed

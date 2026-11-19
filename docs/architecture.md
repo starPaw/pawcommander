@@ -17,6 +17,7 @@ PawCommander is a single Rust binary using eframe/egui. Start at the module that
 | Retry unfinished transfers | [`vfs/retry.rs`](../src/vfs/retry.rs) | `app/jobs.rs` owns session retry requests; `result_history.rs` presents actions without replaying stored display paths |
 | Undo renames and moves | [`vfs/undo.rs`](../src/vfs/undo.rs) | Typed session receipts capture parents and moved entries; `app/jobs.rs` serializes inverse renames and owns remaining work, `result_history.rs` exposes eligible actions |
 | Location parsing, listing, SSH sessions | [`vfs/location.rs`](../src/vfs/location.rs), [`vfs/listing.rs`](../src/vfs/listing.rs), [`vfs/sftp.rs`](../src/vfs/sftp.rs) | `credentials.rs`, `app/dialogs.rs` |
+| SFTP permissions | [`vfs/permissions.rs`](../src/vfs/permissions.rs), [`app/permissions.rs`](../src/app/permissions.rs) | An independent reader previews proposed modes. The mutation worker checks the previewed metadata and records each result. |
 | Copy/cut/paste | [`app/clipboard.rs`](../src/app/clipboard.rs), [`file_clipboard.rs`](../src/file_clipboard.rs) | `file_clipboard/{macos,windows,linux}.rs` |
 | Preview, Quick Look, thumbnails | [`preview.rs`](../src/preview.rs), [`app/quick_look.rs`](../src/app/quick_look.rs) | `preview/code.rs`, `preview/markup.rs`, `thumbnails.rs`, `vfs/preview.rs` |
 | PDF preview on macOS | [`preview/pdf.rs`](../src/preview/pdf.rs), [`preview/pdf/view.rs`](../src/preview/pdf/view.rs) | `preview/pdf/protocol.rs`, `preview/pdf/worker.rs`, `preview/pdf/macos.m` |

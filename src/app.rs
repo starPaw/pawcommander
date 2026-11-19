@@ -18,6 +18,7 @@ mod footer;
 mod jobs;
 mod keyboard;
 mod pane_view;
+mod permissions;
 mod persistence;
 mod pickers;
 mod quick_look;

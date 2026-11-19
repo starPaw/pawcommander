@@ -421,8 +421,13 @@ pub(super) fn entry_widget(
                     Action::Trash,
                     idle,
                 ),
-                (crate::i18n::text("Свойства…"), Action::Properties,
-                    !tab.selected.is_empty() && tab.selected.iter().all(|path| !path.remote())),
+                if path.remote() {
+                    (crate::i18n::text("Изменить права доступа…"), Action::ChangePermissions,
+                        idle && !tab.selected.is_empty())
+                } else {
+                    (crate::i18n::text("Свойства…"), Action::Properties,
+                        !tab.selected.is_empty() && tab.selected.iter().all(|path| !path.remote()))
+                },
                 (crate::i18n::text("Копировать путь"), Action::CopyPath, true),
                 (crate::i18n::text("Показать в системе"), Action::Reveal, !path.remote()),
             ] {

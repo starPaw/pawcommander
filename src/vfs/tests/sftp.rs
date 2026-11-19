@@ -840,9 +840,12 @@ fn openssh_round_trip_and_host_verification() {
     #[cfg(unix)]
     if std::env::var("PAWCOMMANDER_TEST_SFTP_METADATA_DENIED").as_deref() == Ok("1") {
         super::metadata::server_rejected(&local_root, &remote_root);
+        super::permissions::check(&remote_root, true);
         sessions().lock().unwrap().remove(&endpoint);
         return;
     }
+    #[cfg(unix)]
+    super::permissions::check(&remote_root, false);
     super::undo::sftp_undo(&remote_root);
     check_sftp_archive_round_trip(&remote_root);
     let refresh_file = remote_root.join("external.txt");
