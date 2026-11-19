@@ -152,6 +152,21 @@ impl Search {
         self.focus = true;
     }
 
+    pub(crate) fn open_name_query(
+        &mut self,
+        folder: &Location,
+        query: String,
+        ctx: &egui::Context,
+    ) {
+        self.mode = Mode::Folder;
+        self.open(Some(folder));
+        self.folder_target = FolderTarget::Name;
+        self.query = query;
+        self.exclusions.clear();
+        self.filters = FilterInput::default();
+        self.start(None, ctx);
+    }
+
     fn clear(&mut self) {
         self.cancel_work();
         self.results = None;
@@ -750,10 +765,10 @@ fn validate_folder_query(
     target: FolderTarget,
     query: &str,
     exclusions: &str,
-    filters: &Filters,
+    has_filters: bool,
 ) -> Result<(), String> {
     let missing_query = match target {
-        FolderTarget::Name => query.trim().is_empty() && !filters.active(),
+        FolderTarget::Name => query.trim().is_empty() && !has_filters,
         FolderTarget::Text | FolderTarget::Regex => query.is_empty(),
     };
     if missing_query || query.contains('\0') {
@@ -768,6 +783,11 @@ fn validate_folder_query(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn validate_name_query(query: &str) -> Result<(), String> {
+    validate_folder_query(FolderTarget::Name, query, "", false)
+}
+
 impl<'a> FolderSearch<'a> {
     fn new(
         target: FolderTarget,
@@ -775,7 +795,7 @@ impl<'a> FolderSearch<'a> {
         exclusions: &str,
         filters: Filters,
     ) -> Result<Self, String> {
-        validate_folder_query(target, query, exclusions, &filters)?;
+        validate_folder_query(target, query, exclusions, filters.active())?;
         let matcher = match target {
             FolderTarget::Name => {
                 let query = if query.trim().is_empty() { "" } else { query };

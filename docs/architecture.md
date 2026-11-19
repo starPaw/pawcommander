@@ -7,6 +7,7 @@ PawCommander is a single Rust binary using eframe/egui. Start at the module that
 | Change | Start here | Related code |
 | --- | --- | --- |
 | Startup, window, frame lifecycle | [`main.rs`](../src/main.rs), [`app.rs`](../src/app.rs) | [`app/persistence.rs`](../src/app/persistence.rs) initializes and saves state |
+| macOS command-line launch | [`cli.rs`](../src/cli.rs) | Commands validate their operands before opening a window. Explicit launches use a temporary copy of the saved profile. |
 | Actions, keyboard, focus | [`app/actions.rs`](../src/app/actions.rs), [`app/keyboard.rs`](../src/app/keyboard.rs) | [`shortcuts.rs`](../src/shortcuts.rs), [`command_palette.rs`](../src/command_palette.rs) |
 | Panes, tabs, navigation, directory loading | [`app/tabs.rs`](../src/app/tabs.rs), [`app/directory.rs`](../src/app/directory.rs) | `app/pane_view.rs`, `app/column_view.rs`, `app/address_bar.rs`, `address.rs`, `directory_tree.rs` |
 | Git status on macOS | [`app/git_status.rs`](../src/app/git_status.rs) | Each visible pane schedules local, read-only libgit2 scans. Branch names and entry badges use snapshots of the current folder. |

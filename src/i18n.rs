@@ -23,6 +23,47 @@ pub fn text(russian: &'static str) -> &'static str {
     translate(is_english(), russian)
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn cli_help() -> &'static str {
+    if is_english() {
+        "PawCommander\n\n\
+        Usage\n  \
+        pawcommander [FOLDER]\n  \
+        pawcommander open FOLDER\n  \
+        pawcommander workspace NAME\n  \
+        pawcommander search QUERY [FOLDER]\n  \
+        pawcommander --help\n\n\
+        With no arguments, restore the saved session.\n\
+        Open a folder, restore a named workspace, or search for file names and masks.\n\
+        Search uses the current directory when FOLDER is omitted.\n\
+        The open, workspace and search commands use separate windows with temporary settings.\n\
+        Use -- before operands that start with a dash.\n\n\
+        Exit codes\n  \
+        0  Help displayed or window closed normally\n  \
+        1  Settings or application startup error\n  \
+        2  Invalid arguments\n  \
+        3  Folder or workspace unavailable"
+    } else {
+        "PawCommander\n\n\
+        Использование\n  \
+        pawcommander [ПАПКА]\n  \
+        pawcommander open ПАПКА\n  \
+        pawcommander workspace ИМЯ\n  \
+        pawcommander search ЗАПРОС [ПАПКА]\n  \
+        pawcommander --help\n\n\
+        При запуске без аргументов восстанавливается сохранённый сеанс.\n\
+        Откройте папку, сохранённое рабочее пространство или поиск имён и масок.\n\
+        Если папка поиска не указана, используется текущая директория.\n\
+        Команды open, workspace и search открывают отдельные окна с временными настройками.\n\
+        Укажите -- перед аргументами, начинающимися с дефиса.\n\n\
+        Коды завершения\n  \
+        0  Справка выведена или окно закрыто штатно\n  \
+        1  Ошибка настроек или запуска приложения\n  \
+        2  Недопустимые аргументы\n  \
+        3  Папка или рабочее пространство недоступны"
+    }
+}
+
 pub(crate) fn transfer_finished(
     completed: usize,
     skipped: usize,
@@ -239,6 +280,12 @@ fn translate(english: bool, russian: &'static str) -> &'static str {
         "Предпросмотр запуска" => "Launch preview",
         "Запустить" => "Run",
         "Запуск пользовательского действия…" => "Starting custom action…",
+        "Справка доступна через pawcommander --help." => "Run pawcommander --help for usage.",
+        "Неизвестная команда, отсутствующие или лишние аргументы." => "Unknown command or missing or extra arguments.",
+        "Введите имя рабочего пространства в UTF-8." => "Enter a workspace name in UTF-8.",
+        "Введите запрос поиска в UTF-8." => "Enter a search query in UTF-8.",
+        "Укажите путь к папке." => "Enter a folder path.",
+        "Не удалось прочитать сохранённые рабочие пространства." => "Could not read the saved workspaces.",
         "Не удалось запустить внешний инструмент сравнения" => "Could not launch the external diff tool",
         "Открываем внешний инструмент…" => "Opening external tool…",
         "Сравнение передано внешнему инструменту" => "Comparison handed to the external tool",

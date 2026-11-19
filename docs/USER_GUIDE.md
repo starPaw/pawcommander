@@ -24,6 +24,23 @@ Opening a local or SFTP folder shows entries progressively while **Reading folde
 
 Visible folders refresh in the background after the previous read finishes: approximately every two seconds locally and every ten seconds for SFTP. Selection is retained by path; filters, sorting, and scroll offsets are preserved. Hidden panes and inactive tabs are not polled. SFTP polling uses an existing authenticated session and skips a busy refresh or unavailable session without clearing the listing or prompting for credentials. Automatic refresh pauses during file operations and dragging. Large or slow folders may take longer. Use `F5` to refresh manually. The selected local file's preview reloads when observed metadata changes; this is not a content watcher.
 
+## Launch from Terminal on macOS
+
+Run the `pawcommander` executable from the app bundle at `/Applications/PawCommander.app/Contents/MacOS/pawcommander` or from your source build. Use the examples below if the executable is on your `PATH`.
+
+```sh
+pawcommander --help
+pawcommander open "$PWD"
+pawcommander workspace "My project"
+pawcommander search '*.rs' "$PWD"
+```
+
+`workspace` takes the saved name of a folder pair. `search` opens a file name or mask search in the given folder or, by default, the shell's current directory. Quote names and paths containing spaces, and put `--` before operands that start with a dash. A lone folder path is also accepted, and a launch with zero arguments restores the saved session.
+
+The `open`, `workspace` and `search` commands create a window with a temporary copy of saved settings. Changes to its settings and saved workspaces last for that window. The terminal process waits until the window closes.
+
+Exit status `0` means help displayed or the window closed normally. `1` reports settings or startup errors, `2` reports invalid arguments, and `3` reports an unavailable folder or workspace.
+
 ## ZIP and TAR archives
 
 Double-click a local `.zip` or uncompressed `.tar` file, or select it and press `Enter`. PawCommander opens the archive in the current pane and reads its directory structure and metadata. **Open** in the search results pane also opens the archive in the active pane. Browse nested folders from the file list. From the archive root, use **Parent folder** to return to the folder containing the archive. Use **Back** and **Forward** to revisit locations, and **Refresh** to reread an archive after it changes.

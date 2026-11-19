@@ -114,11 +114,13 @@ cd pawcommander
 cargo run --release --locked
 ```
 
-To open a specific folder, pass it as the first argument:
+Pass a folder to open it directly.
 
 ```sh
 cargo run --release --locked -- "/path/to/folder"
 ```
+
+On macOS, the executable also accepts `open`, `workspace` and `search` commands. See the [terminal usage guide](docs/USER_GUIDE.md#launch-from-terminal-on-macos).
 
 ### 3. Make a macOS app
 
