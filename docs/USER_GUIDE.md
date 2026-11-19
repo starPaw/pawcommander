@@ -219,6 +219,14 @@ Open the folders in the two panes and choose **Compare folders** from the comman
 
 **Size and modified time** compares file sizes and modification times. Comparisons involving SFTP use whole seconds. **By contents** compares the SHA-256 hashes of equal-length files. The comparison treats each symbolic link as a single entry and compares its target path. Comparing is read-only. Use **Stop** to end the scan. The scanner supports up to 100,000 entries across both folders, 32 MiB of path data and 128 directory levels.
 
+## Compare files
+
+Select one regular file in each pane and choose **Compare files** from the command palette or Settings. Local and SFTP files can be compared. The result shows both sizes and the first differing byte. For text, the dialog shows additions, removals and neighboring lines with their original line numbers. **Show matches** expands the rest of the text. Byte differences remain visible when decoded lines match across encodings or line endings.
+
+Text comparison accepts UTF-8 and auto-detects UTF-16 with a byte-order mark. It supports up to 2 MiB and 30,000 lines per file. The viewer shortens very long displayed lines and can group extensive edits into one block. Comparison by bytes also works for binary files and files beyond the text limits. Use **Stop** to end the comparison.
+
+For two local files, **Open in external tool** hands both paths to the executable set under **Settings → Tools**. The executable accepts the left and right paths as its two arguments. An empty setting uses FileMerge when PawCommander finds it. Use **Check again** to refresh automatic detection. [Apple's FileMerge command reference](https://developer.apple.com/documentation/xcode/xcode-command-line-tool-reference)
+
 ## SHA-256 manifests
 
 Select regular files in a local or SFTP folder and choose **Create SHA-256 manifest**. Enter a new filename to save their checksums in the same folder. The default is `SHA256SUMS`. The operation preserves existing files and publishes the manifest after reading all selected inputs. The output uses the [GNU checksum format](https://www.gnu.org/software/coreutils/manual/html_node/cksum-output-modes.html).

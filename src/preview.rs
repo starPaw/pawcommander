@@ -1083,6 +1083,12 @@ fn preview_text_chars(text: &str) -> bool {
         .all(|ch| (!ch.is_control() && ch != '\u{fffe}') || matches!(ch, '\n' | '\r' | '\t'))
 }
 
+pub(crate) fn decode_comparison_text(bytes: &[u8], truncated: bool) -> Option<String> {
+    Codec::choose(None, bytes)
+        .prefix(bytes, truncated)
+        .filter(|value| preview_text_chars(value))
+}
+
 fn format_size(bytes: u64) -> String {
     let units: [&str; 5] = [
         crate::i18n::text("Б"),

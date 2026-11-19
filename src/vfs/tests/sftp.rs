@@ -1126,6 +1126,10 @@ fn openssh_round_trip_and_host_verification() {
             local_compare.path().to_path_buf().into(),
             remote_compare.clone(),
         ]);
+        super::super::file_compare::file_comparison_round_trip(&[
+            local_compare.path().join("left compare.txt").into(),
+            remote_compare.join("right compare.txt"),
+        ]);
         fs::remove_dir_all(remote_compare.path()).unwrap();
         let location = uploaded.join("hello world.txt");
         let mut destination = Vec::new();

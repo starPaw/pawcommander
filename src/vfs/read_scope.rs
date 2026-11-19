@@ -19,6 +19,33 @@ pub(super) struct ReadScope {
     pub(super) descriptor: Option<OwnedFd>,
 }
 
+pub(super) struct CheckedFile<'a> {
+    scope: &'a ReadScope,
+    path: &'a Path,
+    source: Location,
+    stamp: TransferSourceEntry,
+    input: SourceReader,
+}
+
+impl CheckedFile<'_> {
+    pub(super) fn stream(&mut self) -> (&Location, u64, &mut SourceReader) {
+        (&self.source, self.stamp.size(), &mut self.input)
+    }
+
+    pub(super) fn verify(&mut self, cancel: &Cancellation) -> Result<(), TransferError> {
+        cancel.check()?;
+        self.stamp
+            .verify_metadata(&self.source, &self.input.metadata()?)
+            .map_err(|_| changed_during_read())?;
+        let Some(mut current) = self.scope.input(self.path, cancel)? else {
+            return Err(changed_during_read());
+        };
+        self.stamp
+            .verify_metadata(&self.source, &current.metadata()?)
+            .map_err(|_| changed_during_read())
+    }
+}
+
 impl ReadScope {
     pub(super) fn open(location: &Location) -> Result<Self, TransferError> {
         if location.is_archive() {
@@ -60,6 +87,20 @@ impl ReadScope {
         cancel: &Cancellation,
         read: impl FnOnce(&Location, u64, &mut SourceReader) -> Result<T, TransferError>,
     ) -> Result<Option<T>, TransferError> {
+        let Some(mut file) = self.open_file(path, cancel)? else {
+            return Ok(None);
+        };
+        let (source, size, input) = file.stream();
+        let output = read(source, size, input)?;
+        file.verify(cancel)?;
+        Ok(Some(output))
+    }
+
+    pub(super) fn open_file<'a>(
+        &'a self,
+        path: &'a Path,
+        cancel: &Cancellation,
+    ) -> Result<Option<CheckedFile<'a>>, TransferError> {
         let Some(mut input) = self.input(path, cancel)? else {
             return Ok(None);
         };
@@ -72,22 +113,16 @@ impl ReadScope {
         {
             return Err(text("Сервер не передал размер или время изменения файла").into());
         }
-        let entry = TransferSourceEntry {
-            metadata,
-            children: None,
-        };
-        let output = read(&source, entry.size(), &mut input)?;
-        cancel.check()?;
-        entry
-            .verify_metadata(&source, &input.metadata()?)
-            .map_err(|_| changed_during_read())?;
-        let Some(mut current) = self.input(path, cancel)? else {
-            return Err(changed_during_read());
-        };
-        entry
-            .verify_metadata(&source, &current.metadata()?)
-            .map_err(|_| changed_during_read())?;
-        Ok(Some(output))
+        Ok(Some(CheckedFile {
+            scope: self,
+            path,
+            source,
+            stamp: TransferSourceEntry {
+                metadata,
+                children: None,
+            },
+            input,
+        }))
     }
 
     fn input(

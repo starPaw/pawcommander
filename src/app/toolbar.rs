@@ -113,16 +113,18 @@ impl PawCommander {
                                 self.open_command_palette(ctx, Some(button.id));
                                 ui.close();
                             }
-                            let compare = ui.add_enabled(
-                                self.can_compare_folders(),
-                                egui::Button::new(self.settings.shortcuts.hint(
-                                    ctx, Command::CompareFolders, Command::CompareFolders.label(),
-                                )),
-                            );
-                            paint_focus(ui, &compare, 5);
-                            if compare.clicked() {
-                                actions.push(Action::CompareFolders);
-                                ui.close();
+                            for (command, action, enabled) in [
+                                (Command::CompareFolders, Action::CompareFolders, self.can_compare_folders()),
+                                (Command::CompareFiles, Action::CompareFiles, self.files_to_compare().is_some()),
+                            ] {
+                                let compare = ui.add_enabled(enabled, egui::Button::new(
+                                    self.settings.shortcuts.hint(ctx, command, command.label()),
+                                ));
+                                paint_focus(ui, &compare, 5);
+                                if compare.clicked() {
+                                    actions.push(action);
+                                    ui.close();
+                                }
                             }
                             let about = ui.button(crate::i18n::text("О PawCommander"));
                             paint_focus(ui, &about, 5);
@@ -199,7 +201,7 @@ impl PawCommander {
                             }
                             ui.separator();
                             let tools_menu = ui.menu_button(crate::i18n::text("Инструменты"), |ui| {
-                                for (name, path) in [("locate", &self.tools.locate), ("Zed", &self.tools.zed)] {
+                                for (name, path) in [("locate", &self.tools.locate), ("Zed", &self.tools.zed), ("FileMerge", &self.tools.diff)] {
                                     if let Some(path) = path {
                                         ui.label(crate::tr_format!("{name}: найден", "{name}: found")).on_hover_text(path.display().to_string());
                                     } else {
@@ -208,6 +210,14 @@ impl PawCommander {
                                 }
                                 ui.small(crate::i18n::text("locate: установите locate/plocate и создайте индекс средствами ОС."));
                                 ui.small(crate::i18n::text("Zed: установите редактор; для нестандартного пути — cli: install cli binary."));
+                                let diff = ui.label(crate::i18n::text("Внешний инструмент сравнения"));
+                                ui.add(egui::TextEdit::singleline(&mut self.settings.diff_tool)
+                                    .hint_text(crate::i18n::text("Авто (FileMerge при наличии)"))
+                                    .desired_width(290.0)).labelled_by(diff.id);
+                                let configured = self.settings.diff_tool.trim();
+                                if !configured.is_empty() && !std::path::Path::new(configured).is_absolute() {
+                                    ui.colored_label(ui.visuals().warn_fg_color, crate::i18n::text("Укажите абсолютный путь к исполняемому файлу"));
+                                }
                                 if ui.button(crate::i18n::text("Проверить снова")).clicked() { self.tools = crate::tools::Tools::detect(); }
                             });
                             paint_focus(ui, &tools_menu.response, 5);

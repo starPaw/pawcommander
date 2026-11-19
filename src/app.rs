@@ -6,12 +6,14 @@ mod batch_rename;
 mod bookmarks;
 mod clipboard;
 mod column_view;
+mod comparison;
 mod dialogs;
 mod directory;
 mod directory_compare;
 #[cfg(any(target_os = "windows", test))]
 mod drives;
 mod entry_widget;
+mod file_compare;
 mod footer;
 mod jobs;
 mod keyboard;
@@ -44,9 +46,9 @@ use crate::{shortcuts, vfs as fs_ops};
 use actions::{Action, ColumnNavigation};
 use bookmarks::{validate_bookmark_shortcuts, Bookmark, BookmarkEditor, SavedBookmark};
 use clipboard::Clipboard;
+use comparison::ComparisonDialog;
 use dialogs::{ConnectionJob, Dialog, SftpForm};
 use directory::DirectoryEntries;
-use directory_compare::DirectoryComparison;
 use eframe::egui;
 use entry_widget::{entry_widget, EntryOptions, COMPACT_FILE_ROW_HEIGHT};
 use jobs::{CutRequest, Job, PendingJob, RetryJob, TransferInteraction, UndoJob};
@@ -80,7 +82,7 @@ pub struct PawCommander {
     quick_look: Option<QuickLook>,
     quick_look_preview: Option<Preview>,
     properties: Option<crate::properties::Properties>,
-    comparison: Option<DirectoryComparison>,
+    comparison: Option<ComparisonDialog>,
     clipboard: Option<Clipboard>,
     system_clipboard: SystemClipboard,
     dialog: Option<Dialog>,
@@ -521,7 +523,7 @@ impl eframe::App for PawCommander {
             ctx.request_repaint();
         }
         self.dialogs(ctx);
-        self.show_directory_comparison(ctx);
+        self.show_comparison(ctx);
         if self
             .properties
             .as_ref()
