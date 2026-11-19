@@ -357,7 +357,7 @@ pub(super) struct TabSession {
 // Local paths or SFTP connection coordinates and a key-file reference. Secrets
 // belong to SFTP sessions and the credential store, never to saved locations.
 #[derive(Clone, Serialize, Deserialize)]
-pub(super) enum SavedLocation {
+pub(crate) enum SavedLocation {
     Local(SavedPath),
     Sftp {
         host: String,
@@ -400,7 +400,7 @@ impl From<&Location> for SavedLocation {
 }
 
 impl SavedLocation {
-    pub(super) fn into_location(self) -> Option<Location> {
+    pub(crate) fn into_location(self) -> Option<Location> {
         Some(match self {
             Self::Local(path) => Location::Local(path.into_path()?),
             Self::Archive { archive, path } => Location::Archive {

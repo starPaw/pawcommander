@@ -5,26 +5,25 @@ use crate::fs_ops::TransferKind;
 use crate::search::panel::{ReadyAction, TabTarget};
 use crate::vfs::Location;
 use eframe::egui;
-use std::path::PathBuf;
 
 impl PawCommander {
     pub(super) fn open_search(&mut self) {
-        self.search.open(self.panes[self.active].tab().path.local());
+        self.search.open(Some(&self.panes[self.active].tab().path));
     }
 
-    pub(super) fn reveal_search_result(&mut self, path: PathBuf, ctx: &egui::Context) {
+    pub(super) fn reveal_search_result(&mut self, path: Location, ctx: &egui::Context) {
         let Some(parent) = path.parent() else {
             return;
         };
-        self.tab_mut().navigate(parent.to_path_buf().into(), ctx);
+        self.tab_mut().navigate(parent, ctx);
         // A hidden result needs to be visible in its destination folder.
-        if is_dot_file(&path) && !self.folder_view(self.active).hidden {
+        if is_dot_file(path.path()) && !self.folder_view(self.active).hidden {
             self.change_folder_view(self.active, FolderViewChange::Hidden(true));
         }
         let tab = self.tab_mut();
         tab.filter.clear();
         tab.selected.clear();
-        tab.reveal_after_load = Some(path.into());
+        tab.reveal_after_load = Some(path);
     }
 
     pub(super) fn show_search_results(&mut self, ui: &mut egui::Ui) {
@@ -81,12 +80,12 @@ impl PawCommander {
                 directory: false,
                 target,
             } => {
-                if crate::archive::Format::from_path(&path).is_some() {
+                if path.remote() || crate::archive::Format::from_path(path.path()).is_some() {
                     if self.search_target_is_current(&target, ctx) {
                         Self::restore_focus(ctx, None);
-                        self.action(Action::Open(target.pane, Location::Local(path)), ctx);
+                        self.action(Action::Open(target.pane, path), ctx);
                     }
-                } else {
+                } else if let Location::Local(path) = path {
                     self.search.panel.open_file(path, ctx);
                 }
             }
@@ -97,11 +96,10 @@ impl PawCommander {
             } => {
                 if self.search_target_is_current(&target, ctx) {
                     Self::restore_focus(ctx, None);
-                    let location = path.into();
                     if self.folder_view(target.pane).mode == FolderMode::Columns {
-                        self.navigate_columns(target.pane, ColumnNavigation::Browse(location), ctx);
+                        self.navigate_columns(target.pane, ColumnNavigation::Browse(path), ctx);
                     } else {
-                        self.tab_mut().navigate(location, ctx);
+                        self.tab_mut().navigate(path, ctx);
                     }
                 }
             }
@@ -115,7 +113,7 @@ impl PawCommander {
                 self.start_transfer(
                     ctx,
                     crate::i18n::text("Копирование в соседнюю панель"),
-                    paths.into_iter().map(Location::from).collect(),
+                    paths,
                     destination,
                     TransferKind::Copy,
                     false,

@@ -17,6 +17,7 @@ mod permissions;
 mod preview;
 mod read_scope;
 mod retry;
+pub(crate) mod search;
 mod sftp;
 mod staged_file;
 mod transfer;

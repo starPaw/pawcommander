@@ -363,7 +363,14 @@ impl Filters {
     }
 
     pub fn matches_metadata(&self, metadata: EntryMetadata) -> io::Result<bool> {
-        if !self.matches_kind(Some(metadata.kind)) || !self.size.includes(metadata.size) {
+        if !self.matches_kind(Some(metadata.kind)) {
+            return Ok(false);
+        }
+        if self.size.active()
+            && !self
+                .size
+                .includes(metadata.size.ok_or(io::ErrorKind::InvalidData)?)
+        {
             return Ok(false);
         }
         if !self.modified.active() {
@@ -383,7 +390,10 @@ impl Filters {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::search::{run_folder, FolderSearch, Search};
+    use crate::{
+        search::{run_folder, FolderSearch, Search},
+        vfs::Location,
+    };
     use chrono::TimeZone;
     use std::{fs, io::Write};
 
@@ -449,7 +459,7 @@ mod tests {
             .unwrap();
             let results = run_folder(root.path(), search, &|| false).unwrap();
             assert_eq!(results.matches.len(), 1);
-            assert_eq!(results.matches[0].path, matching_path);
+            assert_eq!(results.matches[0].path.path(), matching_path);
             assert!(results.warning.is_empty(), "{}", results.warning);
         }
     }
@@ -474,7 +484,7 @@ mod tests {
         .unwrap();
         let results = run_folder(root.path(), search, &|| false).unwrap();
         assert_eq!(results.matches.len(), 1);
-        assert_eq!(results.matches[0].path, folder);
+        assert_eq!(results.matches[0].path.path(), folder);
         assert!(results.warning.is_empty());
     }
 
@@ -530,7 +540,7 @@ mod tests {
     fn validates_before_starting_and_limits_queryless_search_to_name() {
         let root = tempfile::tempdir().unwrap();
         let mut search = Search::default();
-        search.open(Some(root.path()));
+        search.open(Some(&Location::Local(root.path().to_path_buf())));
         search.filters.depth = "0".into();
         assert!(search.can_start(None));
         search.start(None, &egui::Context::default());

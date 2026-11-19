@@ -41,6 +41,8 @@ PAWCOMMANDER_TEST_SFTP_METADATA_DENIED=1 bash scripts/test-sftp.sh
 
 The script creates a temporary loopback-only SSH server, generates disposable keys, and cleans up on exit. It does not change your SSH configuration. Local OS policy may prevent launching `sshd`.
 
+The standard fixture covers SFTP name search with filters, depth and time limits, cancellation, and a branch replaced with a symlink during the walk. It also checks the traversal and result caps using disposable files.
+
 The reconnect mode starts a temporary SSH agent and uses an OpenSSH SFTP subsystem wrapper to withhold rename replies. It checks reconnect and inspection after disconnects before or after publication. It uses `/usr/libexec/sftp-server` by default. Set `SFTP_SERVER_BIN` if your OpenSSH server uses another path.
 
 The metadata-denied mode disables `setstat` and `fsetstat` on the temporary server. It checks that copies complete with field-specific warnings and that **Change permissions** reports the server's refusal. The standard mode also checks that numeric and symbolic permission changes match their preview, skips changed entries and symbolic links, and honors cancellation before sending a permission update.

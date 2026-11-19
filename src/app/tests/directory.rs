@@ -188,7 +188,7 @@ fn archive_open_navigation_session_refresh_and_search_use_the_pane() {
     assert!(app.tab().path.local().is_some());
     app.dispatch_search_result(
         ReadyAction::Open {
-            path: path.clone(),
+            path: path.clone().into(),
             directory: false,
             target: target.clone(),
         },
@@ -199,7 +199,7 @@ fn archive_open_navigation_session_refresh_and_search_use_the_pane() {
     wait_for_directory(app.tab_mut());
     app.dispatch_search_result(
         ReadyAction::Open {
-            path,
+            path: path.into(),
             directory: false,
             target,
         },

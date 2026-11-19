@@ -252,15 +252,17 @@ Select a manifest and choose **Verify SHA-256 manifest** from the command palett
 
 ## Search and Zed
 
-`Cmd/Ctrl+F` filters names in the current folder. `Cmd/Ctrl+Shift+F` opens search. **Folder and subfolders** walks the local folder open when you start Search. Enter a name fragment or a wildcard such as `*.rs`. Comma-separated exclusion masks skip matching names and prune matching directories. Folder search skips symlink branches and returns up to 1,000 results. It reports incomplete coverage if it cannot read a branch or reaches the built-in traversal limit. You can cancel the search and reveal a result in its parent folder.
+`Cmd/Ctrl+F` filters names in the current folder. `Cmd/Ctrl+Shift+F` opens search. **Folder and subfolders** starts in the local or SFTP folder that was open when you opened Search. Enter a name fragment or a wildcard such as `*.rs`. Comma-separated exclusion masks skip matching names and prune matching directories. Folder search skips symlink branches and returns up to 1,000 results. It reports incomplete coverage if it cannot read a branch or reaches the traversal limit. You can cancel the search and reveal a result in its parent folder.
+
+SFTP search matches names and uses the existing authenticated SFTP connection. Results show server-resolved paths. The default depth is 8, with direct children at depth 1. Change it under **Filters**. Set **SFTP search time limit** to 1–60 seconds, with 15 seconds as the default. A search examines up to 20,000 directory entries. At the time or traversal limit, PawCommander shows the results collected so far. Cancel and the time limit stop the walk between SFTP requests. An in-flight request can still take its normal SFTP timeout.
 
 **Locate index** uses `locate` or `plocate`, with a 15-second wait limit for the query. After a search, PawCommander shows the database paths it can determine and their file modification times as freshness estimates. The index can omit restricted folders and contain stale paths. When you try to reveal a missing result, PawCommander removes it from the current list and keeps the search open. Check **Settings → Tools** to see detected tools. On Windows, compatible command-line tools must be available in `PATH`.
 
-In **Folder and subfolders**, choose **File text** for a literal query or **Regular expression** for a regex. Matching runs line by line and is case-sensitive by default. Results show the path, line number, and a text excerpt. Search skips files over 1 MiB, files containing a NUL byte, and files with invalid UTF-8. Regex search also skips lines over 64 KiB. The result list holds up to 1,000 matching lines.
+In a local folder, choose **File text** for a literal query or **Regular expression** for a regex. Matching runs line by line and is case-sensitive by default. Results show the path, line number, and a text excerpt. Search skips files over 1 MiB, files containing a NUL byte, and files with invalid UTF-8. Regex search also skips lines over 64 KiB. The result list holds up to 1,000 matching lines.
 
 Open **Filters** to combine entry type, extension, size, modification date, and depth with your query and exclusions. Size and extension apply to regular files. Size bounds are inclusive and share the selected unit. Enter dates as `YYYY-MM-DD` in local time. The **Modified through** date includes the whole day. Set a maximum depth from `1` to `64`, where `1` searches the starting folder's immediate children. You can leave the **File name** query empty when a filter is set.
 
-Choose **Save search…** and enter a name to reuse the query, scope, exclusions, and filters after restarting PawCommander. Select the name under **Saved searches** to run it again. Folder searches scan the saved folder even when a pane is open elsewhere. A saved Locate search queries the currently configured index. Use the **…** menu to rename or remove a saved search.
+Choose **Save search…** and enter a name to reuse the query, scope, exclusions, and filters after restarting PawCommander. Select the name under **Saved searches** to run it again. Folder searches scan the saved folder even when a pane is open elsewhere. A saved SFTP search also restores its time limit and requires a connection to the saved server. A saved Locate search queries the currently configured index. Use the **…** menu to rename or remove a saved search.
 
 Choose **Show in results pane** to keep the current results visible while you browse other folders. Select a result to open it or show it in the active pane. Select one or more files and choose **Copy to the other pane** to copy to the displayed destination. Multiple matching lines from a file select it once. If a selected path has disappeared, its rows are removed. Review the remaining selection before retrying a copy.
 
@@ -298,7 +300,7 @@ Choosing another profile replaces custom bindings in the editor. **Reset to defa
 | Parent folder | `Alt+Up` |
 | Enter a path | `Cmd/Ctrl+L` |
 | Filter current folder | `Cmd/Ctrl+F` |
-| Search local folders or indexed paths | `Cmd/Ctrl+Shift+F` |
+| Search local or SFTP folders, or indexed paths | `Cmd/Ctrl+Shift+F` |
 | Open the command palette | `Cmd/Ctrl+Shift+P` |
 | Show / hide hidden files | `Cmd/Ctrl+H` |
 | Refresh | `F5` |
