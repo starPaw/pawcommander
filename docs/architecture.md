@@ -90,7 +90,9 @@ The active copy route selects the lowest nonzero transfer limit for its endpoint
 
 The SFTP form can resolve an alias with [`ssh_config.rs`](../src/ssh_config.rs) on a background worker. The importer reads a bounded user configuration file and reports unsupported directives without evaluating command or conditional blocks. The connection uses the reviewed endpoint fields and the existing known-host verification and authentication flow.
 
-The SFTP connection worker verifies the host key before negotiating authentication. Keyboard-interactive rounds travel to the active connection dialog through a channel. The worker waits for that round's replies with a deadline and uses a separate TCP handle to abort a cancelled or expired attempt. It releases the shutdown handle before publishing the session to the shared cache.
+The SFTP connection worker checks OpenSSH records and PawCommander's host-and-port fingerprints before negotiating authentication. An unknown key in the SFTP dialog requires explicit approval. The worker rechecks both sources and publishes the fingerprint in the local application-data directory with a non-replacing file operation. Background connections require an existing trust record.
+
+Host-key confirmation and keyboard-interactive rounds travel to the active connection dialog through a channel. The worker waits for each reply with a deadline and uses a separate TCP handle to abort a cancelled or expired attempt. It releases the shutdown handle before publishing the session to the shared cache.
 
 Password-protected ZIP creation streams AES-256 to the same private staging file used for plain archives. Encrypted extraction matches the decoder's entry offsets and sizes against the bounded index and reads through EOF before publishing. The dialog passes the password directly to its queued work. The operation description, result history and recovery record use file locations and outcomes.
 

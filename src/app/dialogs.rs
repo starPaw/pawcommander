@@ -347,7 +347,7 @@ impl PawCommander {
                 ui.checkbox(&mut form.save_key, crate::i18n::text("Сохранить ключ и фразу после подключения"));
                 ui.weak(crate::i18n::text("Ключ и его фраза сохраняются в системном хранилище секретов. Пароль аккаунта не сохраняется. При сохранении читается выбранный файл ключа."));
                 forget = ui.button(crate::i18n::text("Удалить сохранённый секрет")).clicked();
-                ui.weak(crate::i18n::text("Ключ сервера должен быть проверен и сохранён в ~/.ssh/known_hosts через OpenSSH."));
+                ui.weak(crate::i18n::text("При первом подключении сравните отпечаток ключа SSH с данными администратора."));
             });
             form.show_config_result(ui);
             if let Some(error) = &form.error { ui.colored_label(colors.error, error); }

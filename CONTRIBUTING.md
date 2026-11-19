@@ -39,7 +39,7 @@ PAWCOMMANDER_TEST_DISABLE_STATVFS=1 bash scripts/test-sftp.sh
 
 The script creates a temporary loopback-only SSH server, generates disposable keys, and cleans up on exit. It does not change your SSH configuration. Local OS policy may prevent launching `sshd`.
 
-Run `bash scripts/test-ssh-interactive.sh` with a C compiler, `pkg-config`, OpenSSH key generation tools and a libssh build with server support. The loopback fixture uses synthetic prompts and disposable keys to exercise keyboard-interactive rounds, a key followed by a second factor, cancellation, timeout and host verification.
+Run `bash scripts/test-ssh-interactive.sh` with a C compiler, `pkg-config`, OpenSSH key generation tools and a libssh build with server support. The loopback fixture exercises first-use trust, cancellation, hashed OpenSSH host records, key rotation, keyboard-interactive rounds and a second factor after key authentication. It compares the fingerprints with `ssh-keygen` and writes trust records only in its temporary directory.
 
 For local moves, set `PAWCOMMANDER_TEST_MOVE_SOURCE_ROOT` and `PAWCOMMANDER_TEST_MOVE_TARGET_ROOT` to writable directories on **different filesystems**, then run `cargo test --locked actual_cross_volume_routing_counts_only_removed_sources -- --ignored`. The test creates its own disposable subdirectories, checks replacement and a nested move, and stops a later move after publication to verify that its source remains and cannot be retried automatically. It refuses two paths on the same volume. This filesystem check does not replace native GUI acceptance.
 

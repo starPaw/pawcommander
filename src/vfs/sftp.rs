@@ -1,7 +1,7 @@
 use super::err;
 use super::location::{Endpoint, Location};
 use crate::{archive, i18n::text};
-use ssh2::{CheckResult, KnownHostFileKind, Session, Sftp};
+use ssh2::{Session, Sftp};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
@@ -11,8 +11,14 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use zeroize::Zeroizing;
 
+mod host_key;
 mod interactive;
-pub(crate) use interactive::{AuthRequest, ConnectionControl, InteractiveAuth};
+#[cfg(test)]
+pub(crate) use host_key::HostKey;
+pub(super) use host_key::TrustFiles;
+pub(crate) use interactive::{
+    AuthRequest, ConnectionControl, ConnectionPrompt, HostKeyRequest, InteractiveAuth,
+};
 
 const IO_TIMEOUT_MS: u32 = 20_000;
 
@@ -46,6 +52,7 @@ pub fn connect(
     connect_with_key(endpoint, password, passphrase, known_hosts, None)
 }
 
+#[cfg(test)]
 pub(super) fn connect_with_key(
     endpoint: &Endpoint,
     password: &str,
@@ -53,25 +60,40 @@ pub(super) fn connect_with_key(
     known_hosts: &Path,
     private_key: Option<&str>,
 ) -> Result<Session, String> {
-    let session = open_verified(endpoint, known_hosts, None)?;
-    PrimaryAuth::new(endpoint, password, passphrase, private_key)
-        .attempt(&session, &endpoint.user)?;
+    let trust = TrustFiles::new(known_hosts.to_owned(), None);
+    let session = open_verified(endpoint, &trust, None)?;
+    login_primary(
+        &session,
+        &endpoint.user,
+        PrimaryAuth::new(endpoint, password, passphrase, private_key),
+    )?;
+    Ok(session)
+}
+
+fn login_primary(session: &Session, user: &str, primary: PrimaryAuth<'_>) -> Result<(), String> {
+    primary.attempt(session, user)?;
     if !session.authenticated() {
         return Err(text("Сервер не подтвердил аутентификацию").into());
     }
-    Ok(session)
+    Ok(())
 }
 
 fn open_verified(
     endpoint: &Endpoint,
-    known_hosts: &Path,
-    control: Option<&ConnectionControl>,
+    trust: &TrustFiles,
+    interactive: Option<&InteractiveAuth>,
 ) -> Result<Session, String> {
-    if endpoint.host.trim().is_empty() || endpoint.user.trim().is_empty() || endpoint.port == 0 {
+    let host = endpoint.host_name();
+    if host.is_empty()
+        || host.chars().any(|ch| ch.is_control() || ch.is_whitespace())
+        || endpoint.user.trim().is_empty()
+        || endpoint.port == 0
+    {
         return Err("Укажите сервер, пользователя и порт 1–65535".into());
     }
     // Bound TCP and SSH I/O waits. DNS resolution uses the OS resolver.
-    let host = endpoint.host_name();
+    let control = interactive.map(InteractiveAuth::control);
+    let control = control.as_ref();
     let addresses = (host, endpoint.port)
         .to_socket_addrs()
         .map_err(|e| format!("Не удалось найти сервер: {e}"))?;
@@ -96,15 +118,7 @@ fn open_verified(
     session.set_tcp_stream(tcp);
     session.set_timeout(IO_TIMEOUT_MS);
     session.handshake().map_err(err)?;
-    let mut known = session.known_hosts().map_err(err)?;
-    known.read_file(known_hosts, KnownHostFileKind::OpenSSH)
-        .map_err(|e| format!("Не удалось прочитать {}: {e}. Сначала подключитесь к серверу через OpenSSH и проверьте его ключ.", known_hosts.display()))?;
-    let (key, _) = session.host_key().ok_or("Сервер не предоставил ключ SSH")?;
-    match known.check_port(host, endpoint.port, key) {
-        CheckResult::Match => {},
-        CheckResult::Mismatch => return Err("Ключ сервера SSH изменился. Подключение отклонено; проверьте ключ сервера в known_hosts.".into()),
-        _ => return Err("Ключ сервера SSH не подтверждён. Сначала подключитесь через OpenSSH, проверьте fingerprint и сохраните ключ в ~/.ssh/known_hosts.".into()),
-    }
+    trust.verify(&session, endpoint, interactive)?;
     Ok(session)
 }
 
@@ -226,19 +240,16 @@ pub(crate) fn connect_location(
     request: ConnectRequest,
     auth: InteractiveAuth,
 ) -> Result<ConnectedLocation, String> {
-    let known_hosts = dirs::home_dir()
-        .ok_or("Не найдена домашняя папка")?
-        .join(".ssh/known_hosts");
-    connect_location_at(request, auth, &known_hosts)
+    connect_location_at(request, auth, &TrustFiles::user()?)
 }
 
 pub(super) fn connect_location_at(
     request: ConnectRequest,
     mut auth: InteractiveAuth,
-    known_hosts: &Path,
+    trust: &TrustFiles,
 ) -> Result<ConnectedLocation, String> {
     let control = auth.control();
-    let result = connect_reviewed(request, &mut auth, &control, known_hosts);
+    let result = connect_reviewed(request, &mut auth, &control, trust);
     control.finalize()?;
     result
 }
@@ -247,7 +258,7 @@ fn connect_reviewed(
     request: ConnectRequest,
     auth: &mut InteractiveAuth,
     control: &ConnectionControl,
-    known_hosts: &Path,
+    trust: &TrustFiles,
 ) -> Result<ConnectedLocation, String> {
     let ConnectRequest {
         endpoint,
@@ -257,6 +268,8 @@ fn connect_reviewed(
         use_saved,
         save_key,
     } = request;
+    control.check()?;
+    let session = open_verified(&endpoint, trust, Some(auth))?;
     control.check()?;
     let saved = if use_saved && !save_key && password.is_empty() && endpoint.key.is_some() {
         crate::credentials::load(&endpoint)?
@@ -295,7 +308,6 @@ fn connect_reviewed(
     } else {
         saved.as_ref().map(|s| s.passphrase.as_str()).unwrap_or("")
     };
-    let session = open_verified(&endpoint, known_hosts, Some(control))?;
     let used_key = authenticate(
         &session,
         &endpoint.user,
@@ -341,20 +353,21 @@ pub(super) fn remote(location: &Location) -> Result<Sftp, String> {
     let session = match existing {
         Some(session) => session,
         None => {
-            let known_hosts = dirs::home_dir()
-                .ok_or("Не найдена домашняя папка")?
-                .join(".ssh/known_hosts");
+            let session = open_verified(endpoint, &TrustFiles::user()?, None)?;
             let saved = if endpoint.key.is_some() {
                 crate::credentials::load(endpoint)?
             } else {
                 None
             };
-            let session = connect_with_key(
-                endpoint,
-                "",
-                saved.as_ref().map(|s| s.passphrase.as_str()).unwrap_or(""),
-                &known_hosts,
-                saved.as_ref().map(|s| s.private_key.as_str()),
+            login_primary(
+                &session,
+                &endpoint.user,
+                PrimaryAuth::new(
+                    endpoint,
+                    "",
+                    saved.as_ref().map(|s| s.passphrase.as_str()).unwrap_or(""),
+                    saved.as_ref().map(|s| s.private_key.as_str()),
+                ),
             )?;
             sessions()
                 .lock()

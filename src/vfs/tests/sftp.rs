@@ -773,10 +773,14 @@ fn openssh_round_trip_and_host_verification() {
     let known = root.join("known_hosts");
     let empty = root.join("empty_hosts");
     fs::write(&empty, "").unwrap();
-    assert!(connect(&endpoint, "", "test-passphrase", &empty)
-        .err()
-        .unwrap()
-        .contains("не подтверждён"));
+    assert_eq!(
+        connect(&endpoint, "", "test-passphrase", &empty)
+            .err()
+            .unwrap(),
+        crate::i18n::text(
+            "Ключ сервера SSH не подтверждён. Откройте форму SFTP и проверьте отпечаток."
+        ),
+    );
     let mismatch = root.join("mismatch_hosts");
     let other_key = fs::read_to_string(root.join("other.pub")).unwrap();
     fs::write(
@@ -787,7 +791,7 @@ fn openssh_round_trip_and_host_verification() {
     assert!(connect(&endpoint, "", "test-passphrase", &mismatch)
         .err()
         .unwrap()
-        .contains("изменился"));
+        .starts_with(crate::i18n::text("Ключ сервера SSH изменился.")));
     assert!(connect(&endpoint, "", "wrong-passphrase", &known).is_err());
     let memory_key = fs::read_to_string(root.join("client")).unwrap();
     let absent_key = Endpoint {

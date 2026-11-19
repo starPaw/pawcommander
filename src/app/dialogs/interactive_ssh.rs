@@ -1,7 +1,10 @@
 use crate::{
     i18n::text,
     theme::paint_focus,
-    vfs::{AuthRequest, ConnectRequest, ConnectedLocation, ConnectionControl, InteractiveAuth},
+    vfs::{
+        AuthRequest, ConnectRequest, ConnectedLocation, ConnectionControl, ConnectionPrompt,
+        HostKeyRequest, InteractiveAuth,
+    },
 };
 use eframe::egui;
 use std::{
@@ -15,9 +18,14 @@ pub(in crate::app) struct ConnectionJob {
     pub result: mpsc::Receiver<Result<ConnectedLocation, String>>,
     target: String,
     control: ConnectionControl,
-    requests: mpsc::Receiver<AuthRequest>,
-    prompt: Option<PromptForm>,
+    requests: mpsc::Receiver<ConnectionPrompt>,
+    prompt: Option<PendingPrompt>,
     round: u64,
+}
+
+enum PendingPrompt {
+    HostKey(HostKeyRequest),
+    Authentication(PromptForm),
 }
 
 struct PromptForm {
@@ -69,34 +77,55 @@ impl ConnectionJob {
             if !self.control.can_cancel() {
                 continue;
             }
-            self.round = self.round.wrapping_add(1);
-            let answers = request
-                .questions
-                .iter()
-                .map(|_| Zeroizing::new(String::new()))
-                .collect();
-            self.prompt = Some(PromptForm {
-                request,
-                answers,
-                focus_first: true,
+            self.prompt = Some(match request {
+                ConnectionPrompt::HostKey(request) => PendingPrompt::HostKey(request),
+                ConnectionPrompt::Authentication(request) => {
+                    self.round = self.round.wrapping_add(1);
+                    let answers = request
+                        .questions
+                        .iter()
+                        .map(|_| Zeroizing::new(String::new()))
+                        .collect();
+                    PendingPrompt::Authentication(PromptForm {
+                        request,
+                        answers,
+                        focus_first: true,
+                    })
+                }
             });
         }
         let can_cancel = self.control.can_cancel();
+        let action = match &self.prompt {
+            Some(PendingPrompt::HostKey(request)) => {
+                Some((text("Доверять и подключиться"), request.deadline))
+            }
+            Some(PendingPrompt::Authentication(form)) if !form.answers.is_empty() => {
+                Some((text("Отправить ответы"), form.request.deadline))
+            }
+            _ => None,
+        };
+        let remaining =
+            action.map(|(_, deadline)| deadline.saturating_duration_since(Instant::now()));
+        let can_submit = can_cancel && remaining.is_some_and(|remaining| !remaining.is_zero());
         let mut submit = false;
         let mut cancel = false;
         egui::Modal::new(egui::Id::unique("sftp_authentication")).show(ctx, |ui| {
             ui.set_width((ctx.content_rect().width() - 32.0).clamp(180.0, 470.0));
-            ui.heading(text("Подключение SFTP"));
-            ui.label(&self.target);
-            let mut waiting_for_answer = false;
-            let mut allow_answer = false;
-            if let Some(form) = &mut self.prompt {
-                waiting_for_answer = !form.answers.is_empty();
-                let remaining = form
-                    .request
-                    .deadline
-                    .saturating_duration_since(Instant::now());
-                allow_answer = waiting_for_answer && can_cancel && !remaining.is_zero();
+            if let Some(PendingPrompt::HostKey(request)) = &self.prompt {
+                ui.heading(text("Проверка ключа сервера"));
+                ui.label(format!("{} · {}", request.key.address, request.key.algorithm));
+                ui.monospace(&request.key.fingerprint);
+                let copy = ui.button(text("Копировать отпечаток"));
+                paint_focus(ui, &copy, 5);
+                if copy.clicked() {
+                    ctx.copy_text(request.key.fingerprint.clone());
+                }
+                ui.label(text("Сверьте отпечаток с администратором сервера. PawCommander запомнит его для этого адреса."));
+            } else {
+                ui.heading(text("Подключение SFTP"));
+                ui.label(&self.target);
+            }
+            if let Some(PendingPrompt::Authentication(form)) = &mut self.prompt {
                 egui::ScrollArea::vertical()
                     .max_height((ctx.content_rect().height() - 190.0).clamp(65.0, 360.0))
                     .show(ui, |ui| {
@@ -106,7 +135,7 @@ impl ConnectionJob {
                         if !form.request.instructions.is_empty() {
                             ui.label(&form.request.instructions);
                         }
-                        ui.add_enabled_ui(allow_answer, |ui| {
+                        ui.add_enabled_ui(can_submit, |ui| {
                             for (index, (question, answer)) in form
                                 .request
                                 .questions
@@ -126,16 +155,16 @@ impl ConnectionJob {
                         });
                         form.focus_first = false;
                     });
-                if allow_answer {
-                    let seconds = remaining.as_secs_f64().ceil() as u64;
-                    ui.label(crate::tr_format!(
-                        "На ответ {seconds} с",
-                        "{seconds} s to respond"
-                    ));
-                    ctx.request_repaint_after(Duration::from_secs(1));
-                }
             }
-            if !waiting_for_answer {
+            if let Some(remaining) = remaining.filter(|_| can_submit) {
+                let seconds = remaining.as_secs_f64().ceil() as u64;
+                ui.label(crate::tr_format!(
+                    "На ответ {seconds} с",
+                    "{seconds} s to respond"
+                ));
+                ctx.request_repaint_after(Duration::from_secs(1));
+            }
+            if action.is_none() {
                 ui.horizontal(|ui| {
                     ui.spinner();
                     ui.label(text("Подключение…"));
@@ -145,9 +174,8 @@ impl ConnectionJob {
                 let response = ui.add_enabled(can_cancel, egui::Button::new(text("Отмена")));
                 paint_focus(ui, &response, 5);
                 cancel = response.clicked();
-                if waiting_for_answer {
-                    let response =
-                        ui.add_enabled(allow_answer, egui::Button::new(text("Отправить ответы")));
+                if let Some((label, _)) = action {
+                    let response = ui.add_enabled(can_submit, egui::Button::new(label));
                     paint_focus(ui, &response, 5);
                     submit = response.clicked();
                 }
@@ -158,8 +186,11 @@ impl ConnectionJob {
                 self.prompt = None;
                 ctx.request_repaint();
             }
-        } else if submit && let Some(form) = self.prompt.take() {
-            form.request.answer(form.answers);
+        } else if submit && let Some(prompt) = self.prompt.take() {
+            match prompt {
+                PendingPrompt::HostKey(request) => request.approve(),
+                PendingPrompt::Authentication(form) => form.request.answer(form.answers),
+            }
             ctx.request_repaint();
         }
     }
@@ -184,7 +215,7 @@ mod tests {
     use ssh2::{KeyboardInteractivePrompt, Prompt};
 
     #[test]
-    fn ssh_interactive_dialog_masks_answers_and_cancels_the_next_round() {
+    fn sftp_dialog_verifies_the_host_before_showing_authentication_prompts() {
         let ctx = egui::Context::default();
         let (mut auth, requests) = InteractiveAuth::new(|| {});
         let control = auth.control();
@@ -200,7 +231,14 @@ mod tests {
         };
         let (done, observed) = mpsc::channel();
         let secret = "fixture-hidden-answer";
+        let fingerprint = "SHA256:S6lYGeQoZIplz77dGwpz2PVGsIbn0xk5qqYia5tDR2U";
         let worker = std::thread::spawn(move || {
+            auth.confirm_host_key(crate::vfs::HostKey {
+                address: "[fixture]:2222".into(),
+                algorithm: "ssh-ed25519".into(),
+                fingerprint: fingerprint.into(),
+            })
+            .unwrap();
             let first = auth.prompt(
                 "Sign-in",
                 "First line\nSecond line",
@@ -256,6 +294,48 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(2));
             }
         };
+        let click = |job: &mut ConnectionJob, pos| {
+            for pressed in [true, false] {
+                draw(
+                    job,
+                    vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+        };
+        let trust = wait(&mut job, "Trust and connect");
+        assert!(trust.iter().any(|(label, _)| label == fingerprint));
+        assert!(trust
+            .iter()
+            .any(|(label, _)| label == "[fixture]:2222 · ssh-ed25519"));
+        assert!(!trust.iter().any(|(label, _)| label == "One-time code"));
+        let enter = draw(
+            &mut job,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(enter.iter().any(|(label, _)| label == "Trust and connect"));
+        assert!(matches!(job.prompt, Some(PendingPrompt::HostKey(_))));
+        click(
+            &mut job,
+            trust
+                .iter()
+                .find(|(label, _)| label == "Trust and connect")
+                .unwrap()
+                .1,
+        );
         let first = wait(&mut job, "One-time code");
         assert!(first
             .iter()
@@ -263,28 +343,23 @@ mod tests {
         draw(&mut job, vec![]);
         let typed = draw(&mut job, vec![egui::Event::Text(secret.into())]);
         assert!(!typed.iter().any(|(label, _)| label.contains(secret)));
-        assert!(job.prompt.as_ref().unwrap().answers[0].as_str() == secret);
-        let pos = typed
-            .iter()
-            .find(|(label, _)| label == "Send answers")
-            .unwrap()
-            .1;
-        for pressed in [true, false] {
-            draw(
-                &mut job,
-                vec![
-                    egui::Event::PointerMoved(pos),
-                    egui::Event::PointerButton {
-                        pos,
-                        button: egui::PointerButton::Primary,
-                        pressed,
-                        modifiers: egui::Modifiers::NONE,
-                    },
-                ],
-            );
-        }
+        let Some(PendingPrompt::Authentication(form)) = &job.prompt else {
+            panic!("Expected an authentication prompt");
+        };
+        assert_eq!(form.answers[0].as_str(), secret);
+        click(
+            &mut job,
+            typed
+                .iter()
+                .find(|(label, _)| label == "Send answers")
+                .unwrap()
+                .1,
+        );
         wait(&mut job, "Confirmation");
-        assert!(job.prompt.as_ref().unwrap().answers[0].is_empty());
+        let Some(PendingPrompt::Authentication(form)) = &job.prompt else {
+            panic!("Expected the second authentication prompt");
+        };
+        assert!(form.answers[0].is_empty());
         draw(
             &mut job,
             vec![egui::Event::Key {

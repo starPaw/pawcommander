@@ -152,22 +152,19 @@ Undo uses the exact original paths and evidence kept in memory. Before each rena
 
 ## SFTP connections
 
-1. Verify the server's fingerprint through a trusted channel. Connect with OpenSSH and accept only the verified host key so it is recorded in `~/.ssh/known_hosts`:
-
-   ```sh
-   ssh -p 22 user@example.com
-   ```
-
-2. Choose **SFTP** in PawCommander. Enter host, port, user, and starting folder. `.` means the server's home folder.
-3. Supply an account password, a private-key file and optional passphrase, or leave password/key empty to use an SSH agent. An account password takes priority over the key.
+1. Choose **SFTP** in PawCommander. Enter host, port, user, and starting folder. `.` means the server's home folder.
+2. Supply an account password, a private-key file and optional passphrase, or leave password/key empty to use an SSH agent. An account password takes priority over the key.
+3. When prompted to **Verify server key**, compare the displayed SHA-256 fingerprint with one obtained from the server administrator through a trusted channel. Select **Trust and connect** when they match. **Cancel** or `Esc` ends the attempt without recording that key.
 
 Enter a hostname or `Host` alias in **Server** and select **Load SSH alias** to fill the SFTP form from `~/.ssh/config`. The importer reads `Host`, `HostName`, `User`, `Port`, and `IdentityFile`. Host patterns support `*`, `?`, and `!` exclusions. The first matching hostname, user, and port take precedence. When several identity files apply, use **Key files from SSH config** to choose one. You can review and edit the resolved fields before connecting. [OpenSSH client configuration](https://man.openbsd.org/ssh_config)
 
-The form lists unsupported directives with line numbers, including `Include`, `Match`, and `ProxyJump`. **Connect directly** uses the displayed fields. Server keys are verified against `~/.ssh/known_hosts`, and unknown and changed keys are rejected. Connect with a password, a selected private key, or an SSH-agent key added with `ssh-add`.
+The form lists unsupported directives with line numbers, including `Include`, `Match`, and `ProxyJump`. **Connect directly** uses the displayed fields. An existing key in `~/.ssh/known_hosts` can verify the endpoint. For ports other than 22, use the OpenSSH `[host]:port` form. [OpenSSH known hosts file](https://man.openbsd.org/sshd#SSH_KNOWN_HOSTS_FILE_FORMAT)
+
+PawCommander remembers a key you approve for that host and port before sending authentication. On macOS these records are stored in `~/Library/Application Support/PawCommander/ssh-host-keys`. If the key changes, the connection stops and shows the received fingerprint and the relevant record path. For a planned rotation, verify the replacement fingerprint with the administrator, update the corresponding OpenSSH entry or remove the individual PawCommander record indicated by the error, then connect again and verify the fingerprint. When both sources contain an entry for the endpoint, both must agree.
 
 When a verified SFTP server requests keyboard-interactive authentication, the connection dialog displays its instructions and questions. This also works when the server asks for a second factor after authenticating a key. Enter the answers in order and choose **Send answers**. The dialog hides input for questions that request hidden answers and shows how much time remains to respond. Each round allows up to 60 seconds within a three-minute interactive exchange. **Cancel** or `Esc` ends the attempt. The dialog uses answers for the current SSH exchange only. [SSH keyboard-interactive authentication](https://www.rfc-editor.org/rfc/rfc4256#section-3)
 
-The address bar also accepts `sftp://user@example.com:22/path` with agent authentication or an existing connection. Passwords in URLs are rejected. Remote absolute and relative paths belong to the server; use a local sidebar location to return to local files.
+The address bar also accepts `sftp://user@example.com:22/path` with agent authentication or an existing connection. Use the SFTP form to approve a first-use key. Passwords in URLs are rejected. Remote absolute and relative paths belong to the server; use a local sidebar location to return to local files.
 
 ### Saved keys and privacy
 

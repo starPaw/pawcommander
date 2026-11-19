@@ -1,3 +1,4 @@
+use super::host_key::HostKey;
 use crate::i18n::text;
 use ssh2::{KeyboardInteractivePrompt, Prompt, Session};
 use std::{
@@ -8,6 +9,7 @@ use std::{
 use zeroize::Zeroizing;
 
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(60);
+const HOST_KEY_TIMEOUT: Duration = Duration::from_secs(120);
 const EXCHANGE_TIMEOUT_MS: u32 = 180_000;
 const CANCEL_POLL: Duration = Duration::from_millis(50);
 
@@ -30,6 +32,7 @@ impl Default for Attempt {
 enum Abort {
     Cancelled,
     TimedOut,
+    HostKeyTimedOut,
 }
 
 impl Abort {
@@ -37,6 +40,7 @@ impl Abort {
         text(match self {
             Self::Cancelled => "Подключение отменено",
             Self::TimedOut => "Время интерактивной SSH-аутентификации истекло",
+            Self::HostKeyTimedOut => "Время проверки ключа сервера SSH истекло",
         })
     }
 }
@@ -100,6 +104,23 @@ impl ConnectionControl {
 
 type Answers = Vec<Zeroizing<String>>;
 
+pub(crate) enum ConnectionPrompt {
+    HostKey(HostKeyRequest),
+    Authentication(AuthRequest),
+}
+
+pub(crate) struct HostKeyRequest {
+    pub key: HostKey,
+    pub deadline: Instant,
+    reply: mpsc::Sender<()>,
+}
+
+impl HostKeyRequest {
+    pub(crate) fn approve(self) {
+        let _ = self.reply.send(());
+    }
+}
+
 pub(crate) struct Question {
     pub label: String,
     pub echo: bool,
@@ -123,14 +144,16 @@ impl AuthRequest {
 
 pub(crate) struct InteractiveAuth {
     control: ConnectionControl,
-    requests: mpsc::Sender<AuthRequest>,
+    requests: mpsc::Sender<ConnectionPrompt>,
     notify: Box<dyn Fn() + Send>,
     timeout: Duration,
     exchange_deadline: Option<Instant>,
 }
 
 impl InteractiveAuth {
-    pub(crate) fn new(notify: impl Fn() + Send + 'static) -> (Self, mpsc::Receiver<AuthRequest>) {
+    pub(crate) fn new(
+        notify: impl Fn() + Send + 'static,
+    ) -> (Self, mpsc::Receiver<ConnectionPrompt>) {
         let (requests, receive) = mpsc::channel();
         (
             Self {
@@ -146,6 +169,17 @@ impl InteractiveAuth {
 
     pub(crate) fn control(&self) -> ConnectionControl {
         self.control.clone()
+    }
+
+    pub(crate) fn confirm_host_key(&self, key: HostKey) -> Result<(), String> {
+        let (reply, receive) = mpsc::channel();
+        let deadline = Instant::now() + HOST_KEY_TIMEOUT;
+        self.send(ConnectionPrompt::HostKey(HostKeyRequest {
+            key,
+            deadline,
+            reply,
+        }));
+        self.wait(receive, deadline, Abort::HostKeyTimedOut)
     }
 
     pub(super) fn authenticate(&mut self, session: &Session, user: &str) {
@@ -186,37 +220,47 @@ impl InteractiveAuth {
             deadline,
             reply: (!prompts.is_empty()).then_some(send),
         };
-        if self.requests.send(request).is_err() {
-            self.control.cancel();
-            return None;
-        }
-        (self.notify)();
+        self.send(ConnectionPrompt::Authentication(request));
         if prompts.is_empty() {
-            return Some(Vec::new());
+            return self.control.check().ok().map(|()| Vec::new());
         }
+        let answers = self.wait(receive, deadline, Abort::TimedOut).ok()?;
+        if answers.len() == prompts.len() {
+            Some(answers)
+        } else {
+            self.control.cancel();
+            None
+        }
+    }
+
+    fn send(&self, request: ConnectionPrompt) {
+        if self.requests.send(request).is_ok() {
+            (self.notify)();
+        } else {
+            self.control.cancel();
+        }
+    }
+
+    fn wait<T>(
+        &self,
+        receive: mpsc::Receiver<T>,
+        deadline: Instant,
+        on_timeout: Abort,
+    ) -> Result<T, String> {
         loop {
-            if self.control.check().is_err() {
-                return None;
-            }
+            self.control.check()?;
             let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                self.control.stop(Abort::TimedOut);
-                return None;
-            }
-            match receive.recv_timeout(remaining.min(CANCEL_POLL)) {
-                Ok(answers) if answers.len() == prompts.len() => {
-                    if Instant::now() >= deadline {
-                        self.control.stop(Abort::TimedOut);
-                        return None;
-                    }
-                    return self.control.check().ok().map(|()| answers);
+            let abort = match receive.recv_timeout(remaining.min(CANCEL_POLL)) {
+                Ok(reply) if Instant::now() < deadline => {
+                    return self.control.check().map(|()| reply);
                 }
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                _ => {
-                    self.control.cancel();
-                    return None;
-                }
-            }
+                Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() < deadline => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => Abort::Cancelled,
+                _ => on_timeout,
+            };
+            self.control.stop(abort);
+            self.control.check()?;
+            return Err(abort.message().into());
         }
     }
 }
@@ -258,7 +302,11 @@ mod tests {
                 }],
             )
         });
-        let prompt = requests.recv_timeout(Duration::from_secs(5)).unwrap();
+        let ConnectionPrompt::Authentication(prompt) =
+            requests.recv_timeout(Duration::from_secs(5)).unwrap()
+        else {
+            panic!("Expected an authentication prompt");
+        };
         assert_eq!(prompt.deadline, deadline);
         prompt.answer(vec![Zeroizing::new("fixture-answer".into())]);
         assert_eq!(worker.join().unwrap(), ["fixture-answer"]);
