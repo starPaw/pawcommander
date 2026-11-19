@@ -35,6 +35,12 @@ pub(super) struct Code {
     numbers: String,
 }
 
+pub(super) struct Highlights<'a> {
+    pub ranges: &'a [Range<usize>],
+    pub current: usize,
+    pub jump_to: Option<usize>,
+}
+
 pub(super) fn bound(body: &mut String) -> bool {
     let mut start = 0;
     for (index, line) in body.split_inclusive('\n').enumerate() {
@@ -60,6 +66,10 @@ pub(super) fn bound(body: &mut String) -> bool {
 
 impl Code {
     pub(super) fn new(path: &Path, body: &str) -> Self {
+        Self::numbered(path, body, 1)
+    }
+
+    pub(super) fn numbered(path: &Path, body: &str, first: u64) -> Self {
         let ext = path
             .extension()
             .and_then(|s| s.to_str())
@@ -75,13 +85,13 @@ impl Code {
         Self {
             language,
             spans: lex(body, language),
-            numbers: (1..=body.split('\n').count())
-                .map(|n| n.to_string())
+            numbers: (0..body.split('\n').count())
+                .map(|n| (first + n as u64).to_string())
                 .collect::<Vec<_>>()
                 .join("\n"),
         }
     }
-    fn name(&self) -> &'static str {
+    pub(super) fn name(&self) -> &'static str {
         match self.language {
             Language::Plain => text("Текст"),
             Language::Rust => "Rust",
@@ -148,6 +158,82 @@ impl Code {
             );
         }
         job
+    }
+
+    pub(super) fn show_text(
+        &self,
+        ui: &mut egui::Ui,
+        body: &str,
+        font_size: f32,
+        highlights: Highlights<'_>,
+        reset: bool,
+    ) -> Option<egui::Response> {
+        if body.is_empty() {
+            ui.label(text("Пустой файл"));
+            return None;
+        }
+        let palette = Palette::from_ctx(ui.ctx());
+        let mut scroll = egui::ScrollArea::both()
+            .id_salt("code-preview")
+            .max_height(ui.available_height().max(100.0))
+            .auto_shrink([false, true]);
+        if reset {
+            scroll = scroll
+                .horizontal_scroll_offset(0.0)
+                .vertical_scroll_offset(0.0);
+        }
+        let output = scroll.show(ui, |ui| {
+            ui.horizontal_top(|ui| {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(&self.numbers)
+                            .monospace()
+                            .size(font_size)
+                            .color(palette.muted),
+                    )
+                    .selectable(false)
+                    .extend(),
+                );
+                let mut layouter = |ui: &egui::Ui, _: &dyn egui::TextBuffer, _: f32| {
+                    ui.fonts_mut(|fonts| {
+                        fonts.layout_job(self.job(
+                            body,
+                            font_size,
+                            &palette,
+                            highlights.ranges,
+                            highlights.current,
+                        ))
+                    })
+                };
+                // An immutable TextBuffer supports selection and copying.
+                let mut buffer = body;
+                let id = ui.make_persistent_id("preview-text-editor");
+                if reset {
+                    egui::text_edit::TextEditState::default().store(ui.ctx(), id);
+                    ui.memory_mut(|memory| memory.surrender_focus(id));
+                }
+                let output = egui::TextEdit::multiline(&mut buffer)
+                    .id(id)
+                    .font(FontId::monospace(font_size))
+                    .desired_width(f32::INFINITY)
+                    .layouter(&mut layouter)
+                    .frame(egui::Frame::NONE)
+                    .margin(egui::Vec2::ZERO)
+                    .show(ui);
+                if let Some(byte) = highlights.jump_to {
+                    let index = body[..byte].chars().count();
+                    let cursor = egui::text::CCursor::new(index);
+                    let rect = output
+                        .galley
+                        .pos_from_cursor(cursor)
+                        .translate(output.galley_pos.to_vec2());
+                    ui.scroll_to_rect(rect.expand(20.0), Some(egui::Align::Center));
+                }
+                output.response
+            })
+            .inner
+        });
+        Some(output.inner.response)
     }
 }
 
@@ -277,57 +363,21 @@ impl Find {
             .inner;
         self.focused = ui.memory(|m| m.has_focus(search));
         self.editors = Some((ui.ctx().viewport_id(), [search, egui::Id::NULL]));
-        let p = Palette::from_ctx(ui.ctx());
-        if body.is_empty() {
-            ui.label(text("Пустой файл"));
-            return search;
+        let jump_to = self
+            .matches
+            .get(self.current)
+            .filter(|_| self.jump)
+            .map(|range| range.start);
+        let highlights = Highlights {
+            ranges: &self.matches,
+            current: self.current,
+            jump_to,
+        };
+        if let Some(response) = code.show_text(ui, body, font_size, highlights, false) {
+            self.editors = Some((ui.ctx().viewport_id(), [search, response.id]));
+            self.focused |= response.has_focus();
         }
-        egui::ScrollArea::both()
-            .id_salt("code-preview")
-            .max_height(ui.available_height().max(100.0))
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
-                ui.horizontal_top(|ui| {
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(&code.numbers)
-                                .monospace()
-                                .size(font_size)
-                                .color(p.muted),
-                        )
-                        .selectable(false)
-                        .extend(),
-                    );
-                    let mut layouter = |ui: &egui::Ui, _: &dyn egui::TextBuffer, _: f32| {
-                        ui.fonts_mut(|f| {
-                            f.layout_job(code.job(body, font_size, &p, &self.matches, self.current))
-                        })
-                    };
-                    // Immutable TextBuffer preserves normal selection/copy without permitting edits.
-                    let mut buffer = body;
-                    let output = egui::TextEdit::multiline(&mut buffer)
-                        .font(FontId::monospace(font_size))
-                        .desired_width(f32::INFINITY)
-                        .layouter(&mut layouter)
-                        .frame(egui::Frame::NONE)
-                        .margin(egui::Vec2::ZERO)
-                        .show(ui);
-                    self.editors = Some((ui.ctx().viewport_id(), [search, output.response.id]));
-                    self.focused |= output.response.has_focus();
-                    if self.jump {
-                        if let Some(m) = self.matches.get(self.current) {
-                            let index = body[..m.start].chars().count();
-                            let cursor = egui::text::CCursor::new(index);
-                            let rect = output
-                                .galley
-                                .pos_from_cursor(cursor)
-                                .translate(output.galley_pos.to_vec2());
-                            ui.scroll_to_rect(rect.expand(20.0), Some(egui::Align::Center));
-                        }
-                        self.jump = false;
-                    }
-                });
-            });
+        self.jump = false;
         search
     }
 }

@@ -2,14 +2,17 @@ use super::{
     records::{self, read_error, Records, SAMPLE_BYTES},
     Position, Row, Separator,
 };
-use crate::{operations::Cancellation, vfs::Location};
+use crate::{
+    operations::Cancellation,
+    preview::source::{Source, Version},
+    vfs::Location,
+};
 use eframe::egui;
 use std::{
-    fs::File,
-    io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
+    io::{self, BufRead, BufReader, Read},
     sync::{mpsc, Arc, Mutex},
     thread,
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, Instant},
 };
 
 pub(super) const PAGE_ROWS: usize = 128;
@@ -303,73 +306,6 @@ fn read_prefix(
     Ok(sample)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct Version {
-    size: Option<u64>,
-    changed: Option<SystemTime>,
-    identity: Option<(u64, u64)>,
-}
-
-enum Source {
-    Local(File),
-    Sftp(ssh2::File),
-}
-
-impl Source {
-    fn open(location: &Location) -> Result<Self, String> {
-        if let Some(path) = location.local() {
-            return crate::preview::open_regular(path).map(Self::Local);
-        }
-        crate::vfs::open_preview_stream(location).map(Self::Sftp)
-    }
-
-    fn version(&mut self) -> io::Result<Version> {
-        match self {
-            Self::Local(file) => {
-                let metadata = file.metadata()?;
-                #[cfg(unix)]
-                let identity = {
-                    use std::os::unix::fs::MetadataExt;
-                    Some((metadata.dev(), metadata.ino()))
-                };
-                #[cfg(not(unix))]
-                let identity = None;
-                Ok(Version {
-                    size: Some(metadata.len()),
-                    changed: metadata.modified().ok(),
-                    identity,
-                })
-            }
-            Self::Sftp(file) => {
-                let stat = file.stat().map_err(io::Error::other)?;
-                Ok(Version {
-                    size: stat.size,
-                    changed: stat.mtime.and_then(|time| {
-                        SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(time))
-                    }),
-                    identity: None,
-                })
-            }
-        }
-    }
-
-    fn seek_to(&mut self, byte: u64) -> io::Result<u64> {
-        match self {
-            Self::Local(file) => file.seek(SeekFrom::Start(byte)),
-            Self::Sftp(file) => file.seek(SeekFrom::Start(byte)),
-        }
-    }
-}
-
-impl Read for Source {
-    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
-        match self {
-            Self::Local(file) => file.read(bytes),
-            Self::Sftp(file) => file.read(bytes),
-        }
-    }
-}
-
 fn changed() -> String {
     crate::i18n::text("Таблица изменилась. Откройте быстрый просмотр заново.").into()
 }
@@ -377,7 +313,7 @@ fn changed() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use std::{fs::File, io::Write};
 
     fn load(
         location: &Location,
