@@ -563,6 +563,19 @@ impl Tab {
         (count > 0).then_some(count)
     }
 
+    pub(super) fn selected_regular_file(&self, view: FolderView) -> Option<Location> {
+        if self.path.is_archive() {
+            return None;
+        }
+        let visible = self.visible(view);
+        let mut selection = visible
+            .iter()
+            .map(|&index| &self.entries[index])
+            .filter(|entry| self.selected.contains(&entry.path));
+        let file = selection.next()?;
+        (!file.is_dir && !file.is_symlink && selection.next().is_none()).then(|| file.path.clone())
+    }
+
     pub(super) fn remember_selection(&mut self, visible: &[usize]) {
         self.previous_selection = Some(
             visible

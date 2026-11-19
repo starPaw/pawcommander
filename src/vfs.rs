@@ -8,6 +8,7 @@ mod batch_rename;
 mod checksum;
 mod compare;
 mod cross_move;
+mod file_compare;
 mod listing;
 mod location;
 mod mutations;
@@ -30,6 +31,9 @@ pub(crate) use checksum::{
     verify_checksum_manifest,
 };
 pub(crate) use compare::{compare_folders, Comparison, ComparisonMode, ComparisonStatus};
+pub(crate) use file_compare::{
+    compare_files, DiffKind, DiffRow, FileComparison, FileDifference, TextDifference,
+};
 pub use listing::{
     read_automatic_directory, read_directory, visit_address_directory, visit_connected_directory,
     visit_directory, FileEntry,

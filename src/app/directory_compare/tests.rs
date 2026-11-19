@@ -1,6 +1,9 @@
 use super::*;
 use crate::test_ui::ContextExt as _;
-use std::{fs, time::UNIX_EPOCH};
+use std::{
+    fs,
+    time::{Duration, UNIX_EPOCH},
+};
 
 #[test]
 fn directory_comparison_dialog_runs_both_modes_and_displays_differences() {
@@ -45,7 +48,7 @@ fn directory_comparison_dialog_runs_both_modes_and_displays_differences() {
                 events,
                 ..Default::default()
             },
-            |ui| app.show_directory_comparison(ui.ctx()),
+            |ui| app.show_comparison(ui.ctx()),
         )
         .shapes
         .into_iter()
@@ -82,8 +85,8 @@ fn directory_comparison_dialog_runs_both_modes_and_displays_differences() {
         for _ in 0..200 {
             eframe::App::logic(app, &ctx, &mut eframe::Frame::_new_kittest());
             if matches!(
-                app.comparison.as_ref().map(|comparison| &comparison.phase),
-                Some(Phase::Finished(_))
+                app.comparison.as_ref().map(|comparison| &comparison.body),
+                Some(ComparisonBody::Folders(view)) if matches!(&view.phase, Phase::Finished(_))
             ) {
                 draw(app, vec![]);
                 return draw(app, vec![]);

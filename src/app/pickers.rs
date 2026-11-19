@@ -98,6 +98,7 @@ impl PawCommander {
                 Command::CreateChecksumManifest => idle && has_selection && file_count.is_some(),
                 Command::VerifyChecksumManifest => idle && has_selection && file_count == Some(1),
                 Command::CompareFolders => self.can_compare_folders(),
+                Command::CompareFiles => self.files_to_compare().is_some(),
                 Command::AddToArchive => {
                     idle && !writable && !self.archive_add_sources().is_empty()
                 }

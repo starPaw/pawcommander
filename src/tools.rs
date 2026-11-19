@@ -1,10 +1,15 @@
 //! Locate optional executables without invoking a shell or running them.
+mod diff;
+
 use std::path::{Path, PathBuf};
+
+pub(crate) use diff::launch_diff;
 
 #[derive(Default)]
 pub struct Tools {
     pub locate: Option<PathBuf>,
     pub zed: Option<PathBuf>,
+    pub diff: Option<PathBuf>,
 }
 
 impl Tools {
@@ -12,7 +17,17 @@ impl Tools {
         Self {
             locate: find(&["locate", "plocate"], []),
             zed: zed_cli(),
+            diff: diff::detect(),
         }
+    }
+
+    pub(crate) fn diff_tool(&self, configured: &str) -> Option<PathBuf> {
+        let configured = configured.trim();
+        if configured.is_empty() {
+            return self.diff.clone();
+        }
+        let path = PathBuf::from(configured);
+        path.is_absolute().then_some(path)
     }
 }
 
