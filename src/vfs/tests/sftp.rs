@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(target_os = "macos")]
+use crate::vfs::cache_media_preview;
 
 fn check_sftp_retry(local_root: &Location, remote_root: &Location) {
     for (name, source_root, target_root, kind) in [
@@ -1076,6 +1078,24 @@ fn openssh_round_trip_and_host_verification() {
             .1,
         "Привет, SFTP!\n".as_bytes()
     );
+    #[cfg(target_os = "macos")]
+    {
+        let location = uploaded.join("hello world.txt");
+        let mut destination = Vec::new();
+        let cancel = crate::operations::Cancellation::default();
+        assert!(cache_media_preview(&location, &mut destination, 5, &cancel).is_err());
+        assert!(destination.is_empty());
+        cache_media_preview(&location, &mut destination, 1024, &cancel).unwrap();
+        assert_eq!(destination, "Привет, SFTP!\n".as_bytes());
+        let mut checks = 0;
+        let cancel = crate::operations::Cancellation::at_checkpoint(move || {
+            checks += 1;
+            checks == 3
+        });
+        destination.clear();
+        assert!(cache_media_preview(&location, &mut destination, 1024, &cancel).is_err());
+        assert!(destination.is_empty());
+    }
     fs::write(file_source.path(), "replacement").unwrap();
     transfer_with_conflicts(
         std::slice::from_ref(&file_source),

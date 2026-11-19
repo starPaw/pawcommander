@@ -1,8 +1,7 @@
 use super::{
-    accepts_query, image_bytes,
-    protocol::{read_message, read_size, write_message},
-    Command, Image, Problem, Reply, FILE_LIMIT, MAX_EDGE, PAGE_LIMIT,
+    accepts_query, image_bytes, Command, Image, Problem, Reply, FILE_LIMIT, MAX_EDGE, PAGE_LIMIT,
 };
+use crate::preview::helper::{read_message, read_size, write_message};
 use std::{
     ffi::c_void,
     io::{self, BufReader, BufWriter, Read, Write},
@@ -202,7 +201,7 @@ impl Drop for Pdf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::preview::pdf::protocol::write_blob;
+    use crate::preview::helper::write_blob;
     use std::io::Cursor;
 
     #[test]

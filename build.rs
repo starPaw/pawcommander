@@ -15,5 +15,14 @@ fn main() {
             .compile("paw_pdf");
         println!("cargo:rustc-link-lib=framework=PDFKit");
         println!("cargo:rustc-link-lib=framework=CoreGraphics");
+        let media = "src/preview/media/macos.m";
+        println!("cargo:rerun-if-changed={media}");
+        cc::Build::new()
+            .file(media)
+            .flag("-fobjc-arc")
+            .compile("paw_media");
+        for framework in ["AVFoundation", "CoreMedia", "CoreVideo", "QuartzCore"] {
+            println!("cargo:rustc-link-lib=framework={framework}");
+        }
     }
 }

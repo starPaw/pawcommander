@@ -43,6 +43,7 @@ fn main() -> eframe::Result {
         match mode {
             "--paw-drag-escape-listener" => std::process::exit(native_drag::listen_for_escape()),
             preview::PDF_WORKER_ARG => std::process::exit(preview::run_pdf_worker()),
+            preview::MEDIA_WORKER_ARG => std::process::exit(preview::run_media_worker()),
             _ => {}
         }
     }
