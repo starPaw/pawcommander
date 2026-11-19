@@ -8,6 +8,7 @@ mod markup;
 mod media;
 #[cfg(target_os = "macos")]
 mod pdf;
+mod table;
 
 use crate::operations::Cancellation;
 use crate::vfs::{self, Location};
@@ -72,6 +73,7 @@ enum Content {
     Pdf(Box<pdf::Document>),
     #[cfg(target_os = "macos")]
     Media(Box<media::Player>),
+    Table(Box<table::Document>),
     Message(String),
 }
 
@@ -98,6 +100,14 @@ struct TextView {
 
 impl Preview {
     pub fn new() -> Self {
+        Self::with_tables(false)
+    }
+
+    pub(crate) fn new_quick_look() -> Self {
+        Self::with_tables(true)
+    }
+
+    fn with_tables(tables: bool) -> Self {
         let (requests, receiver) = mpsc::channel::<Request>();
         let (sender, responses) = mpsc::channel();
         thread::spawn(move || {
@@ -109,7 +119,7 @@ impl Preview {
                 if request.cancel.is_requested() {
                     continue;
                 }
-                let result = load_location(&request.path, &request.cancel);
+                let result = load_location(&request.path, &request.cancel, tables);
                 if request.cancel.is_requested() {
                     continue;
                 }
@@ -209,13 +219,18 @@ impl Preview {
         self.upload_texture(ui.ctx());
         ui.add(egui::Label::new(RichText::new(path.name()).heading()).truncate());
         ui.add_space(8.0);
-        #[cfg(target_os = "macos")]
         if let Some(Ok(loaded)) = &mut self.result {
             match &mut loaded.content {
+                Content::Table(table) => {
+                    ui.push_id(("table-preview", self.generation), |ui| table.show(ui));
+                    return;
+                }
+                #[cfg(target_os = "macos")]
                 Content::Pdf(document) => {
                     ui.push_id(("pdf-preview", self.generation), |ui| document.show(ui));
                     return;
                 }
+                #[cfg(target_os = "macos")]
                 Content::Media(player) => {
                     ui.push_id(("media-preview", self.generation), |ui| {
                         player.show(ui, &self.cancel)
@@ -271,6 +286,7 @@ impl Preview {
                     Content::Directory => {
                         ui.label(&loaded.kind);
                     }
+                    Content::Table(_) => {}
                     #[cfg(target_os = "macos")]
                     Content::Pdf(_) | Content::Media(_) => {}
                 },
@@ -278,13 +294,13 @@ impl Preview {
     }
 
     pub fn text_input(&self, ctx: &egui::Context) -> bool {
-        #[cfg(target_os = "macos")]
-        if let Some(Ok(Loaded {
-            content: Content::Pdf(document),
-            ..
-        })) = &self.result
-        {
-            return document.text_input(ctx);
+        if let Some(Ok(loaded)) = &self.result {
+            match &loaded.content {
+                Content::Table(table) => return table.text_input(ctx),
+                #[cfg(target_os = "macos")]
+                Content::Pdf(document) => return document.text_input(ctx),
+                _ => {}
+            }
         }
         self.text.find.text_input(ctx)
     }
@@ -584,11 +600,20 @@ fn draw_icon(ui: &mut egui::Ui, is_dir: bool, name: &str) {
     );
 }
 
-fn load_location(location: &Location, cancel: &Cancellation) -> Result<Loaded, String> {
+fn load_location(
+    location: &Location,
+    cancel: &Cancellation,
+    tables: bool,
+) -> Result<Loaded, String> {
+    let separator = tables
+        .then(|| table::Separator::from_path(location.path()))
+        .flatten();
     if let Some(path) = location.local() {
-        return load(path, cancel);
+        return load(path, cancel, separator);
     }
-    let limit = if image_path_format(location.path()).is_some() {
+    let limit = if separator.is_some() {
+        0
+    } else if image_path_format(location.path()).is_some() {
         IMAGE_LIMIT as usize
     } else {
         TEXT_LIMIT
@@ -604,6 +629,8 @@ fn load_location(location: &Location, cancel: &Cancellation) -> Result<Loaded, S
     let (stat, bytes) = vfs::preview_data(location, limit)?;
     let content = if stat.is_dir() {
         Content::Directory
+    } else if let Some(separator) = separator {
+        Content::Table(Box::new(table::Document::new(location.clone(), separator)))
     } else {
         let length = stat.size.unwrap_or(bytes.len() as u64);
         remote_file_preview(location, bytes, length, cancel).unwrap_or_else(Content::Message)
@@ -652,7 +679,11 @@ fn remote_file_preview(
     load_content(&path, length, cancel)
 }
 
-fn load(path: &Path, cancel: &Cancellation) -> Result<Loaded, String> {
+fn load(
+    path: &Path,
+    cancel: &Cancellation,
+    separator: Option<table::Separator>,
+) -> Result<Loaded, String> {
     let link_metadata = fs::symlink_metadata(path).map_err(|e| {
         crate::tr_format!(
             "Не удалось прочитать сведения: {e}",
@@ -690,6 +721,11 @@ fn load(path: &Path, cancel: &Cancellation) -> Result<Loaded, String> {
     } else if !metadata.is_file() {
         // Do not open sockets, devices or named pipes: a read may never finish.
         Content::Message(crate::i18n::text("Предпросмотр специальных файлов недоступен.").into())
+    } else if let Some(separator) = separator {
+        Content::Table(Box::new(table::Document::new(
+            path.to_path_buf().into(),
+            separator,
+        )))
     } else {
         load_content(path, metadata.len(), cancel).unwrap_or_else(Content::Message)
     };
@@ -726,24 +762,10 @@ fn load_content(path: &Path, length: u64, cancel: &Cancellation) -> Result<Conte
     }
     #[cfg(target_os = "macos")]
     if pdf::is_pdf(path) {
-        use std::os::unix::fs::OpenOptionsExt;
         if length > pdf::FILE_LIMIT as u64 {
             return Err(pdf_too_large());
         }
-        // The name can change after the metadata lookup. Never wait on a
-        // FIFO or read a special file in the preview worker.
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NONBLOCK)
-            .open(path)
-            .map_err(|error| error.to_string())?;
-        if !file
-            .metadata()
-            .map_err(|error| error.to_string())?
-            .is_file()
-        {
-            return Err(crate::i18n::text("Предпросмотр специальных файлов недоступен.").into());
-        }
+        let file = open_regular(path)?;
         let mut bytes = Vec::new();
         file.take(pdf::FILE_LIMIT as u64 + 1)
             .read_to_end(&mut bytes)
@@ -814,6 +836,27 @@ fn pdf_content(bytes: Vec<u8>, length: u64, cancel: &Cancellation) -> Result<Con
 #[cfg(target_os = "macos")]
 fn pdf_too_large() -> String {
     crate::i18n::text("PDF больше 64 МиБ. Откройте его во внешнем приложении.").into()
+}
+
+fn open_regular(path: &Path) -> Result<File, String> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    // The name can change after the metadata lookup. Opening a FIFO must not
+    // wait for a writer while the preview verifies the opened file type.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options.open(path).map_err(|error| error.to_string())?;
+    if !file
+        .metadata()
+        .map_err(|error| error.to_string())?
+        .is_file()
+    {
+        return Err(crate::i18n::text("Предпросмотр специальных файлов недоступен.").into());
+    }
+    Ok(file)
 }
 
 fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
@@ -887,7 +930,7 @@ mod tests {
         let path = dir.path().join("document.MARKDOWN");
         let original = format!("# Заголовок\n\n{}", "я".repeat(TEXT_LIMIT));
         fs::write(&path, &original).unwrap();
-        let loaded = load(&path, &Cancellation::default()).unwrap();
+        let loaded = load(&path, &Cancellation::default(), None).unwrap();
         assert!(matches!(
             loaded.content,
             Content::Text {
@@ -941,7 +984,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("large.txt");
         fs::write(&path, "я".repeat(TEXT_LIMIT)).unwrap();
-        let loaded = load(&path, &Cancellation::default()).unwrap();
+        let loaded = load(&path, &Cancellation::default(), None).unwrap();
         match loaded.content {
             Content::Text {
                 body, truncated, ..
@@ -961,14 +1004,14 @@ mod tests {
         image::RgbaImage::new(IMAGE_EDGE_LIMIT + 1, 1)
             .save(&path)
             .unwrap();
-        let loaded = load(&path, &Cancellation::default()).unwrap();
+        let loaded = load(&path, &Cancellation::default(), None).unwrap();
         assert!(matches!(loaded.content, Content::Message(_)));
     }
 
     #[test]
     fn directory_does_not_get_a_recursive_size_or_text_preview() {
         let directory = tempfile::tempdir().unwrap();
-        let loaded = load(directory.path(), &Cancellation::default()).unwrap();
+        let loaded = load(directory.path(), &Cancellation::default(), None).unwrap();
         assert!(loaded.is_dir);
         assert!(loaded.size.is_none());
         assert!(matches!(loaded.content, Content::Directory));

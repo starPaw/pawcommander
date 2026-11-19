@@ -1078,6 +1078,15 @@ fn openssh_round_trip_and_host_verification() {
             .1,
         "Привет, SFTP!\n".as_bytes()
     );
+    {
+        use std::io::{Read, Seek, SeekFrom};
+        let location = uploaded.join("hello world.txt");
+        let mut file = crate::vfs::open_preview_stream(&location).unwrap();
+        file.seek(SeekFrom::Start("Привет, ".len() as u64)).unwrap();
+        let mut tail = String::new();
+        file.read_to_string(&mut tail).unwrap();
+        assert_eq!(tail, "SFTP!\n");
+    }
     #[cfg(target_os = "macos")]
     {
         let location = uploaded.join("hello world.txt");
