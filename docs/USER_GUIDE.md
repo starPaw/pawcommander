@@ -161,7 +161,9 @@ Undo uses the exact original paths and evidence kept in memory. Before each rena
 2. Choose **SFTP** in PawCommander. Enter host, port, user, and starting folder. `.` means the server's home folder.
 3. Supply an account password, a private-key file and optional passphrase, or leave password/key empty to use an SSH agent. An account password takes priority over the key.
 
-Unknown and changed host keys are rejected. Host, port, and key path must be supplied explicitly: PawCommander does not interpret `~/.ssh/config`, ProxyJump, interactive MFA, or automatic key-file discovery. Add agent keys with `ssh-add`.
+Enter a hostname or `Host` alias in **Server** and select **Load SSH alias** to fill the SFTP form from `~/.ssh/config`. The importer reads `Host`, `HostName`, `User`, `Port`, and `IdentityFile`. Host patterns support `*`, `?`, and `!` exclusions. The first matching hostname, user, and port take precedence. When several identity files apply, use **Key files from SSH config** to choose one. You can review and edit the resolved fields before connecting. [OpenSSH client configuration](https://man.openbsd.org/ssh_config)
+
+The form lists unsupported directives with line numbers, including `Include`, `Match`, and `ProxyJump`. **Connect directly** uses the displayed fields. Server keys are verified against `~/.ssh/known_hosts`, and unknown and changed keys are rejected. Connect with a password, a selected private key, or an SSH-agent key added with `ssh-add`.
 
 The address bar also accepts `sftp://user@example.com:22/path` with agent authentication or an existing connection. Passwords in URLs are rejected. Remote absolute and relative paths belong to the server; use a local sidebar location to return to local files.
 

@@ -160,7 +160,6 @@ fn extraction_destination(
     }
 }
 
-#[derive(Clone)]
 pub(super) struct SftpForm {
     pub(super) host: String,
     pub(super) port: u16,
@@ -172,6 +171,8 @@ pub(super) struct SftpForm {
     pub(super) use_saved: bool,
     pub(super) save_key: bool,
     pub(super) error: Option<String>,
+    pub(super) ssh_config: Option<crate::ssh_config::ResolvedHost>,
+    pub(super) ssh_config_job: Option<Receiver<Result<crate::ssh_config::ResolvedHost, String>>>,
 }
 
 impl Default for SftpForm {
@@ -187,9 +188,13 @@ impl Default for SftpForm {
             use_saved: true,
             save_key: false,
             error: None,
+            ssh_config: None,
+            ssh_config_job: None,
         }
     }
 }
+
+mod ssh_import;
 
 pub(super) struct ConnectionJob {
     pub(super) pane: usize,
@@ -279,15 +284,18 @@ impl PawCommander {
         let Some(form) = &mut self.sftp_form else {
             return;
         };
+        form.poll_ssh_config();
         let busy = self.connection.is_some() || self.job.is_some();
+        let loading_config = form.ssh_config_job.is_some();
         let mut submit = false;
         let mut cancel = false;
         let mut forget = false;
+        let mut load_config = false;
         egui::Modal::new(egui::Id::unique("sftp_connect")).show(ctx, |ui| {
             ui.set_width(470.0);
             ui.heading(crate::i18n::text("Подключение SFTP"));
             ui.add_space(10.0);
-            ui.add_enabled_ui(!busy, |ui| {
+            ui.add_enabled_ui(!busy && !loading_config, |ui| {
                 egui::ComboBox::from_id_salt("saved_sftp_profiles").selected_text(crate::i18n::text("Сохранённые подключения")).show_ui(ui, |ui| {
                     for profile in &self.settings.sftp_profiles {
                         if ui.selectable_label(false, profile.display()).clicked()
@@ -296,12 +304,24 @@ impl PawCommander {
                                 form.key = endpoint.key.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
                                 form.path = path.display().to_string(); form.password.clear(); form.passphrase.clear();
                                 form.use_saved = true; form.save_key = false; form.error = None;
+                                form.ssh_config = None;
                             }
                     }
                 });
                 egui::Grid::new("sftp_fields").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
                     let label = ui.label(crate::i18n::text("Сервер"));
-                    ui.text_edit_singleline(&mut form.host).labelled_by(label.id);
+                    ui.horizontal(|ui| {
+                        let host = ui.add(egui::TextEdit::singleline(&mut form.host)
+                            .desired_width(145.0)
+                            .hint_text(crate::i18n::text("Имя или SSH-алиас"))).labelled_by(label.id);
+                        if host.changed() {
+                            form.clear_ssh_config();
+                        }
+                        load_config = ui.add_enabled(
+                            !form.host.trim().is_empty(),
+                            egui::Button::new(crate::i18n::text("Загрузить SSH-алиас")),
+                        ).clicked();
+                    });
                     ui.end_row();
                     let label = ui.label(crate::i18n::text("Порт"));
                     ui.add(egui::DragValue::new(&mut form.port).range(1..=65535)).labelled_by(label.id);
@@ -322,35 +342,32 @@ impl PawCommander {
                     ui.add(egui::TextEdit::singleline(&mut form.passphrase).password(true)).labelled_by(label.id);
                     ui.end_row();
                 });
+                form.show_identity_files(ui);
                 ui.add_space(10.0);
                 ui.checkbox(&mut form.use_saved, crate::i18n::text("Использовать сохранённый ключ и фразу"));
                 ui.checkbox(&mut form.save_key, crate::i18n::text("Сохранить ключ и фразу после подключения"));
-                ui.weak(crate::i18n::text("Ключ и его фраза сохраняются в системном хранилище секретов. Пароль аккаунта не сохраняется. При сохранении читается выбранный файл ключа. ~/.ssh/config не читается."));
+                ui.weak(crate::i18n::text("Ключ и его фраза сохраняются в системном хранилище секретов. Пароль аккаунта не сохраняется. При сохранении читается выбранный файл ключа."));
                 forget = ui.button(crate::i18n::text("Удалить сохранённый секрет")).clicked();
                 ui.weak(crate::i18n::text("Ключ сервера должен быть проверен и сохранён в ~/.ssh/known_hosts через OpenSSH."));
-                if let Some(error) = &form.error { ui.colored_label(colors.error, error); }
-                ui.horizontal(|ui| {
-                    cancel = ui.button(crate::i18n::text("Отмена")).clicked();
-                    submit = ui.add_enabled(!form.host.trim().is_empty() && !form.user.trim().is_empty(), egui::Button::new(crate::i18n::text("Подключиться"))).clicked();
-                });
+            });
+            form.show_config_result(ui);
+            if let Some(error) = &form.error { ui.colored_label(colors.error, error); }
+            ui.horizontal(|ui| {
+                cancel = ui.add_enabled(!busy, egui::Button::new(crate::i18n::text("Отмена"))).clicked();
+                let label = if form.ssh_config.as_ref().is_some_and(|config| config.matched && !config.unsupported.is_empty()) {
+                    "Подключиться напрямую"
+                } else {
+                    "Подключиться"
+                };
+                submit = ui.add_enabled(!busy && !loading_config && !form.host.trim().is_empty() && !form.user.trim().is_empty(), egui::Button::new(crate::i18n::text(label))).clicked();
             });
             if busy { ui.horizontal(|ui| { ui.spinner(); ui.label(crate::i18n::text("Подключение…")); }); }
+            if loading_config { ui.horizontal(|ui| { ui.spinner(); ui.label(crate::i18n::text("Читаем SSH config…")); }); }
         });
-        if submit {
-            let endpoint = Endpoint {
-                host: form.host.trim().into(),
-                port: form.port,
-                user: form.user.trim().into(),
-                key: if form.key.is_empty() {
-                    None
-                } else {
-                    Some(if let Some(rest) = form.key.strip_prefix("~/") {
-                        dirs::home_dir().unwrap_or_default().join(rest)
-                    } else {
-                        PathBuf::from(&form.key)
-                    })
-                },
-            };
+        if load_config {
+            form.start_ssh_config(ctx, crate::ssh_config::load_user_config);
+        } else if submit {
+            let endpoint = form.endpoint();
             let path = form.path.clone();
             let password = std::mem::take(&mut form.password);
             let passphrase = std::mem::take(&mut form.passphrase);
@@ -373,20 +390,7 @@ impl PawCommander {
         } else if cancel {
             self.sftp_form = None;
         } else if forget {
-            let endpoint = Endpoint {
-                host: form.host.trim().into(),
-                port: form.port,
-                user: form.user.trim().into(),
-                key: if form.key.is_empty() {
-                    None
-                } else {
-                    Some(if let Some(rest) = form.key.strip_prefix("~/") {
-                        dirs::home_dir().unwrap_or_default().join(rest)
-                    } else {
-                        PathBuf::from(&form.key)
-                    })
-                },
-            };
+            let endpoint = form.endpoint();
             form.passphrase.clear();
             self.sftp_form = None;
             self.start_job(ctx, crate::i18n::text("Удаление сохранённого секрета"), move || {
