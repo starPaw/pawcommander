@@ -48,7 +48,7 @@ impl QuickLook {
         focused
     }
 
-    fn take_keys(&mut self, ctx: &egui::Context, typing: bool) -> Option<Action> {
+    fn take_keys(&mut self, ctx: &egui::Context, typing: bool, seeking: bool) -> Option<Action> {
         let mut action = None;
         let viewport = ctx.viewport_id();
         ctx.input_mut(|input| {
@@ -92,10 +92,10 @@ impl QuickLook {
                             self.closing_key = Some((viewport, key));
                         }
                     }
-                    Key::ArrowLeft => {
+                    Key::ArrowLeft if !seeking => {
                         action.get_or_insert(Action::Previous);
                     }
-                    Key::ArrowRight => {
+                    Key::ArrowRight if !seeking => {
                         action.get_or_insert(Action::Next);
                     }
                     _ => return true,
@@ -118,7 +118,7 @@ impl QuickLook {
         let (action, native) = if ctx.embed_viewports() {
             // egui now wraps embedded viewports in its own Window. Keep our
             // modal fallback outside that API so it owns the backdrop/focus.
-            let keys = self.take_keys(ctx, preview.text_input(ctx));
+            let keys = self.take_keys(ctx, preview.text_input(ctx), preview.seek_focused(ctx));
             let modal = egui::Modal::new(egui::Id::unique("quick-look")).show(ctx, |ui| {
                 let size = ctx.content_rect().size() * 0.8;
                 ui.set_width(size.x.min(760.0));
@@ -142,7 +142,11 @@ impl QuickLook {
                         super::clipboard::macos_clipboard_events(&mut input.events);
                     });
                 }
-                let keys = self.take_keys(&viewport_ctx, preview.text_input(&viewport_ctx));
+                let keys = self.take_keys(
+                    &viewport_ctx,
+                    preview.text_input(&viewport_ctx),
+                    preview.seek_focused(&viewport_ctx),
+                );
                 let buttons = egui::CentralPanel::default()
                     .show(ui, |ui| {
                         Self::show_content(ui, preview, entry, has_previous, has_next)
@@ -159,7 +163,8 @@ impl QuickLook {
         let mut action = action;
         if native {
             // The OS may activate the main window while Quick Look remains open.
-            action = action.or(self.take_keys(ctx, preview.text_input(ctx)));
+            action =
+                action.or(self.take_keys(ctx, preview.text_input(ctx), preview.seek_focused(ctx)));
             if action != Some(Action::Close) {
                 let backdrop = egui::Modal::new(egui::Id::unique("quick-look-backdrop"))
                     .frame(egui::Frame::new())
@@ -463,7 +468,7 @@ mod tests {
                     ..Default::default()
                 },
                 |ctx| {
-                    assert_eq!(quick_look.take_keys(ctx, true), None);
+                    assert_eq!(quick_look.take_keys(ctx, true, false), None);
                     assert_eq!(ctx.input(|i| i.events.len()), 2);
                     egui::CentralPanel::default().show(ctx, |ui| {
                         ui.add(egui::TextEdit::singleline(&mut query).id(id))

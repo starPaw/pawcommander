@@ -1,7 +1,11 @@
 #[cfg(test)]
 use crate::test_ui::ContextExt as _;
 mod code;
+#[cfg(target_os = "macos")]
+mod helper;
 mod markup;
+#[cfg(target_os = "macos")]
+mod media;
 #[cfg(target_os = "macos")]
 mod pdf;
 
@@ -21,6 +25,8 @@ use crate::{
 };
 use chrono::{DateTime, Local};
 use eframe::egui::{self, RichText};
+#[cfg(target_os = "macos")]
+pub(crate) use media::{run_media_worker, MEDIA_WORKER_ARG};
 #[cfg(target_os = "macos")]
 pub(crate) use pdf::{run_pdf_worker, PDF_WORKER_ARG};
 
@@ -64,6 +70,8 @@ enum Content {
     },
     #[cfg(target_os = "macos")]
     Pdf(Box<pdf::Document>),
+    #[cfg(target_os = "macos")]
+    Media(Box<media::Player>),
     Message(String),
 }
 
@@ -202,13 +210,20 @@ impl Preview {
         ui.add(egui::Label::new(RichText::new(path.name()).heading()).truncate());
         ui.add_space(8.0);
         #[cfg(target_os = "macos")]
-        if let Some(Ok(Loaded {
-            content: Content::Pdf(document),
-            ..
-        })) = &mut self.result
-        {
-            ui.push_id(("pdf-preview", self.generation), |ui| document.show(ui));
-            return;
+        if let Some(Ok(loaded)) = &mut self.result {
+            match &mut loaded.content {
+                Content::Pdf(document) => {
+                    ui.push_id(("pdf-preview", self.generation), |ui| document.show(ui));
+                    return;
+                }
+                Content::Media(player) => {
+                    ui.push_id(("media-preview", self.generation), |ui| {
+                        player.show(ui, &self.cancel)
+                    });
+                    return;
+                }
+                _ => {}
+            }
         }
         let image_height = ui.available_height().max(1.0);
         let mut scroll = egui::ScrollArea::vertical().id_salt((
@@ -257,7 +272,7 @@ impl Preview {
                         ui.label(&loaded.kind);
                     }
                     #[cfg(target_os = "macos")]
-                    Content::Pdf(_) => {}
+                    Content::Pdf(_) | Content::Media(_) => {}
                 },
             });
     }
@@ -272,6 +287,20 @@ impl Preview {
             return document.text_input(ctx);
         }
         self.text.find.text_input(ctx)
+    }
+
+    pub fn seek_focused(&self, ctx: &egui::Context) -> bool {
+        #[cfg(target_os = "macos")]
+        if let Some(Ok(Loaded {
+            content: Content::Media(player),
+            ..
+        })) = &self.result
+        {
+            return player.seek_focused(ctx);
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = ctx;
+        false
     }
 
     pub fn clear(&mut self, ctx: &egui::Context) {
@@ -430,6 +459,16 @@ impl Preview {
                             ui.add_space(12.0);
                             ui.colored_label(muted, message);
                         }
+                        #[cfg(target_os = "macos")]
+                        Content::Media(_) => {
+                            ui.add_space(12.0);
+                            ui.colored_label(
+                                muted,
+                                crate::i18n::text(
+                                    "Откройте быстрый просмотр, чтобы воспроизвести файл.",
+                                ),
+                            );
+                        }
                         _ => {}
                     }
                 }
@@ -555,7 +594,9 @@ fn load_location(location: &Location, cancel: &Cancellation) -> Result<Loaded, S
         TEXT_LIMIT
     };
     #[cfg(target_os = "macos")]
-    let limit = if pdf::is_pdf(location.path()) {
+    let limit = if media::supported(location.path()) {
+        0
+    } else if pdf::is_pdf(location.path()) {
         pdf::FILE_LIMIT
     } else {
         limit
@@ -565,8 +606,7 @@ fn load_location(location: &Location, cancel: &Cancellation) -> Result<Loaded, S
         Content::Directory
     } else {
         let length = stat.size.unwrap_or(bytes.len() as u64);
-        load_remote_content(&location.name(), bytes, length, cancel)
-            .unwrap_or_else(Content::Message)
+        remote_file_preview(location, bytes, length, cancel).unwrap_or_else(Content::Message)
     };
     Ok(Loaded {
         kind: if stat.is_dir() {
@@ -590,18 +630,24 @@ fn load_location(location: &Location, cancel: &Cancellation) -> Result<Loaded, S
     })
 }
 
-fn load_remote_content(
-    name: &str,
+fn remote_file_preview(
+    location: &Location,
     bytes: Vec<u8>,
     length: u64,
     cancel: &Cancellation,
 ) -> Result<Content, String> {
     #[cfg(target_os = "macos")]
-    if pdf::is_pdf(Path::new(name)) {
+    if media::supported(location.path()) {
+        return Ok(Content::Media(Box::new(media::Player::new(
+            location.clone(),
+        ))));
+    }
+    #[cfg(target_os = "macos")]
+    if pdf::is_pdf(location.path()) {
         return pdf_content(bytes, length, cancel);
     }
     let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
-    let path = directory.path().join(name);
+    let path = directory.path().join(location.name());
     fs::write(&path, bytes).map_err(|e| e.to_string())?;
     load_content(&path, length, cancel)
 }
@@ -672,6 +718,12 @@ pub(crate) fn image_path_format(path: &Path) -> Option<image::ImageFormat> {
 
 fn load_content(path: &Path, length: u64, cancel: &Cancellation) -> Result<Content, String> {
     cancel.check().map_err(|error| error.to_string())?;
+    #[cfg(target_os = "macos")]
+    if media::supported(path) {
+        return Ok(Content::Media(Box::new(media::Player::new(
+            Location::Local(path.into()),
+        ))));
+    }
     #[cfg(target_os = "macos")]
     if pdf::is_pdf(path) {
         use std::os::unix::fs::OpenOptionsExt;

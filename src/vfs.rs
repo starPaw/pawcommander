@@ -30,6 +30,8 @@ pub use location::{resolve, Endpoint, Location};
 pub use mutations::{create_directory, trash_entries_with_progress};
 #[cfg(test)]
 pub use mutations::{rename_entry, trash_entries};
+#[cfg(target_os = "macos")]
+pub(crate) use preview::cache_media_preview;
 pub use preview::preview_data;
 pub(crate) use retry::RetryTransfer;
 #[cfg(test)]
