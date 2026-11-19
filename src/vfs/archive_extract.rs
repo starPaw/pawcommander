@@ -199,7 +199,13 @@ fn extract(
             archive.verify_source()?;
             verify_destination(&parent, directory)?;
             cancel.check()?;
-            publish_item_typed(&payload, &target, replace.as_ref(), || published = true)
+            publish_item_typed(
+                &payload,
+                &target,
+                replace.as_ref(),
+                |_| {},
+                || published = true,
+            )
         });
         let (outcome, reason) = match &result {
             Ok(()) => (Outcome::Completed, None),

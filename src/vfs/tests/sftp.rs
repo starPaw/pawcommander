@@ -626,14 +626,23 @@ fn check_cross_connection_partial_move(local_root: &Location, remote_root: &Loca
                 .collect::<Vec<_>>(),
             vec![Outcome::Completed, Outcome::CopiedSourceRemaining]
         );
-        assert!(progress
+        assert_eq!(progress.undo.len(), 0);
+        assert!(progress.results.cancelled);
+        let check = progress
             .retry
             .take()
             .unwrap()
             .unfinished(&progress.results)
-            .is_none());
-        assert_eq!(progress.undo.len(), 0);
-        assert!(progress.results.cancelled);
+            .unwrap();
+        assert!(check.needs_inspection());
+        assert_eq!(check.sources(), [source.join("late")]);
+        let mut review = Progress::default();
+        let (ready, pending) = check.inspect(&mut review).unwrap();
+        assert!(ready.is_none() && pending.is_none());
+        assert_eq!(
+            review.results.items[0].outcome,
+            Outcome::CopiedSourceRemaining
+        );
         assert!(fs::read_dir(source.path()).unwrap().all(|e| !e
             .unwrap()
             .file_name()
@@ -821,7 +830,10 @@ fn openssh_round_trip_and_host_verification() {
     .unwrap();
     assert!(!sessions().lock().unwrap().contains_key(&endpoint));
     let session = connect(&endpoint, "", "test-passphrase", &known).unwrap();
-    sessions().lock().unwrap().insert(endpoint.clone(), session);
+    sessions()
+        .lock()
+        .unwrap()
+        .insert(endpoint.clone(), session.into());
     let local_root = Location::Local(root.join("local"));
     fs::create_dir(local_root.path()).unwrap();
     fs::create_dir(remote_root.path()).unwrap();

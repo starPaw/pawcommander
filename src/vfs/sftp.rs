@@ -1,13 +1,18 @@
 use super::err;
 use super::location::{Endpoint, Location};
 use crate::{archive, i18n::text};
-use ssh2::{Session, Sftp};
+use libssh2_sys::{
+    LIBSSH2_ERROR_CHANNEL_CLOSED, LIBSSH2_ERROR_CHANNEL_FAILURE, LIBSSH2_ERROR_SOCKET_DISCONNECT,
+    LIBSSH2_ERROR_SOCKET_RECV, LIBSSH2_ERROR_SOCKET_SEND, LIBSSH2_ERROR_SOCKET_TIMEOUT,
+    LIBSSH2_ERROR_TIMEOUT, LIBSSH2_FX_CONNECTION_LOST, LIBSSH2_FX_NO_CONNECTION,
+};
+use ssh2::{ErrorCode, Session, Sftp};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 use zeroize::Zeroizing;
 
@@ -36,9 +41,11 @@ pub(crate) struct ConnectedLocation {
     pub saved_profile: bool,
 }
 
-pub(super) static SESSIONS: OnceLock<Mutex<HashMap<Endpoint, Session>>> = OnceLock::new();
+static SESSIONS: OnceLock<Mutex<HashMap<Endpoint, Arc<Session>>>> = OnceLock::new();
+type OpeningGate = Mutex<()>;
+static OPENING: OnceLock<Mutex<HashMap<Endpoint, Weak<OpeningGate>>>> = OnceLock::new();
 
-pub(super) fn sessions() -> &'static Mutex<HashMap<Endpoint, Session>> {
+pub(super) fn sessions() -> &'static Mutex<HashMap<Endpoint, Arc<Session>>> {
     SESSIONS.get_or_init(Default::default)
 }
 
@@ -332,14 +339,79 @@ fn connect_reviewed(
             },
         )?;
     }
-    sessions()
+    let replaced = sessions()
         .lock()
         .map_err(err)?
-        .insert(endpoint.clone(), session);
+        .insert(endpoint.clone(), Arc::new(session));
+    drop(replaced);
     Ok(ConnectedLocation {
         location: Location::Sftp { endpoint, path },
         saved_profile,
     })
+}
+
+fn should_reopen(error: &ssh2::Error) -> bool {
+    // libssh2's SFTP initializer can report CHANNEL_FAILURE for an
+    // underlying transport error while it is opening the SSH channel.
+    matches!(
+        error.code(),
+        ErrorCode::Session(
+            LIBSSH2_ERROR_SOCKET_SEND
+                | LIBSSH2_ERROR_SOCKET_RECV
+                | LIBSSH2_ERROR_SOCKET_DISCONNECT
+                | LIBSSH2_ERROR_SOCKET_TIMEOUT
+                | LIBSSH2_ERROR_TIMEOUT
+                | LIBSSH2_ERROR_CHANNEL_CLOSED
+                | LIBSSH2_ERROR_CHANNEL_FAILURE
+        ) | ErrorCode::SFTP(LIBSSH2_FX_NO_CONNECTION | LIBSSH2_FX_CONNECTION_LOST)
+    )
+}
+
+pub(super) fn cached_channel(
+    endpoint: &Endpoint,
+    session: &Arc<Session>,
+) -> Result<Option<Sftp>, String> {
+    match session.sftp() {
+        Ok(channel) => Ok(Some(channel)),
+        Err(error) if should_reopen(&error) => {
+            let mut cache = sessions().lock().map_err(err)?;
+            if cache
+                .get(endpoint)
+                .is_some_and(|current| Arc::ptr_eq(current, session))
+            {
+                cache.remove(endpoint);
+            }
+            Ok(None)
+        }
+        Err(error) => Err(sftp_open_error(error)),
+    }
+}
+
+fn sftp_open_error(error: impl std::fmt::Display) -> String {
+    crate::tr_format!(
+        "Не удалось открыть соединение SFTP ({error}). Для входа с паролем или MFA воспользуйтесь формой SFTP.",
+        "Could not open the SFTP connection ({error}). Use the SFTP dialog to sign in with a password or MFA."
+    )
+}
+
+fn opening_gate(endpoint: &Endpoint) -> Result<Arc<OpeningGate>, String> {
+    let mut opening = OPENING.get_or_init(Default::default).lock().map_err(err)?;
+    opening.retain(|_, gate| gate.strong_count() != 0);
+    let slot = opening.entry(endpoint.clone()).or_default();
+    if let Some(gate) = slot.upgrade() {
+        return Ok(gate);
+    }
+    let gate = Arc::new(Mutex::new(()));
+    *slot = Arc::downgrade(&gate);
+    Ok(gate)
+}
+
+fn cached(endpoint: &Endpoint) -> Result<Option<Sftp>, String> {
+    let session = sessions().lock().map_err(err)?.get(endpoint).cloned();
+    match session {
+        Some(session) => cached_channel(endpoint, &session),
+        None => Ok(None),
+    }
 }
 
 pub(super) fn remote(location: &Location) -> Result<Sftp, String> {
@@ -349,37 +421,41 @@ pub(super) fn remote(location: &Location) -> Result<Sftp, String> {
         }
         return Err("Ожидалось подключение SFTP".into());
     };
-    let existing = sessions().lock().map_err(err)?.get(endpoint).cloned();
-    let session = match existing {
-        Some(session) => session,
-        None => {
-            let session = open_verified(endpoint, &TrustFiles::user()?, None)?;
-            let saved = if endpoint.key.is_some() {
-                crate::credentials::load(endpoint)?
-            } else {
-                None
-            };
-            login_primary(
-                &session,
-                &endpoint.user,
-                PrimaryAuth::new(
-                    endpoint,
-                    "",
-                    saved.as_ref().map(|s| s.passphrase.as_str()).unwrap_or(""),
-                    saved.as_ref().map(|s| s.private_key.as_str()),
-                ),
-            )?;
-            sessions()
-                .lock()
-                .map_err(err)?
-                .insert(endpoint.clone(), session.clone());
-            session
-        }
+    if let Some(channel) = cached(endpoint)? {
+        return Ok(channel);
+    }
+    let gate = opening_gate(endpoint)?;
+    let _opening = gate.lock().map_err(err)?;
+    if let Some(channel) = cached(endpoint)? {
+        return Ok(channel);
+    }
+    // Reopen a channel before the caller issues a request. Never retry the
+    // request itself or move an existing file handle to another SSH session.
+    let session = open_verified(endpoint, &TrustFiles::user()?, None)?;
+    let saved = if endpoint.key.is_some() {
+        crate::credentials::load(endpoint)?
+    } else {
+        None
     };
-    session.sftp().map_err(|e| {
-        crate::tr_format!(
-            "SFTP: {e}. Для повторного подключения используйте кнопку SFTP.",
-            "SFTP: {e}. Use the SFTP button to reconnect."
-        )
-    })
+    login_primary(
+        &session,
+        &endpoint.user,
+        PrimaryAuth::new(
+            endpoint,
+            "",
+            saved.as_ref().map(|s| s.passphrase.as_str()).unwrap_or(""),
+            saved.as_ref().map(|s| s.private_key.as_str()),
+        ),
+    )
+    .map_err(sftp_open_error)?;
+    let channel = session.sftp().map_err(sftp_open_error)?;
+    // The SFTP dialog may have published a manually authenticated session
+    // while this worker was opening its own channel.
+    let session = Arc::new(session);
+    sessions()
+        .lock()
+        .map_err(err)?
+        .entry(endpoint.clone())
+        .or_insert_with(|| Arc::clone(&session));
+    Ok(channel)
 }

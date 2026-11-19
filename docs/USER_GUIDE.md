@@ -140,7 +140,11 @@ For a copy or move from the current session, expand its result and choose **Chec
 
 Before doing any writes, the worker checks the original source metadata and destination location. It checks each source again after conflict decisions. A missing or replaced source or destination stops the retry with an explanation; inspect the files and start a new selection if the change was intentional. Existing destinations still use the normal conflict dialog. The copy-verification setting from the original attempt is retained, and retries use the same queue and Stop controls. A second click cannot enqueue the same attempt twice. A partly completed retry produces its own result and a new retry action for its remaining objects.
 
-An unconfirmed publication, such as a lost SFTP rename reply, is never retried automatically. Check both locations and the recovery report. SFTP source checks use the metadata the server provides; they do not establish a filesystem snapshot. Retry evidence stays in memory, bounded to 100 operations and 100,000 selected roots. After restarting the app, or for rename, create-folder and deletion results, review the saved history and select the intended files explicitly; saved display paths are not replayed.
+If an SFTP copy or move loses its publication reply, choose **Check interrupted SFTP transfer** in its result history entry. The check opens the connection, reads the original source and exact destination, and reports any retained staging, previous destination, or held source. A copy whose current contents match the source is reported without repeating the copy. For a move whose source has disappeared, the check can compare the destination tree with the metadata recorded before the rename. Matching metadata is evidence of the current state, and the original server reply remains unconfirmed.
+
+If the check reports **Ready to retry**, use **Check and retry unfinished items** on the new check result. PawCommander verifies the source and destination again before writing and keeps the original destination name, including a name chosen with **Keep both**. A retained backup or a possible remaining source from a published move requires review. SFTP metadata describes the objects observed at each check.
+
+Retry evidence stays in memory and is bounded by operation and item limits. After restarting the app, or for rename, create-folder and deletion results, review the saved history and select the intended files explicitly.
 
 ### Undo renames and moves
 
@@ -180,7 +184,7 @@ Regular files and folders can be copied recursively in either direction and betw
 
 The server must support `fstatvfs@openssh.com` free-space reporting and provide the metadata required for source checks. Unsupported reporting stops the current item before data transfer. Destination space checks may create and remove an empty probe in a private temporary directory.
 
-A lost connection may leave a `.pawcommander-sftp-*` staging directory; the error identifies its path. Inspect the destination and staging directory before retrying. Reconnect with the SFTP dialog. There is no transfer resume. SSH operations use a 20-second timeout; TCP connection attempts use 10 seconds per address. DNS resolution is handled by the OS.
+A foreground request on a lost connection opens a fresh verified SSH session when the key or SSH agent can authenticate. Use the **SFTP** dialog to reconnect when a password, passphrase or MFA response is needed. A lost connection may leave a `.pawcommander-sftp-*` staging directory. Use the result history to inspect the recorded paths before retrying. SSH operations use a 20-second timeout and TCP connection attempts use 10 seconds per address. DNS resolution is handled by the OS.
 
 If a connection fails during replacement or restoration, the server may have completed the rename before its reply was lost. Check both the original destination and the possible backup named in the error before retrying.
 

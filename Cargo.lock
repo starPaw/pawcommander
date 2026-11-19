@@ -2926,6 +2926,7 @@ dependencies = [
  "image",
  "keyring-core",
  "libc",
+ "libssh2-sys",
  "memchr",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",

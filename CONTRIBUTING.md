@@ -35,9 +35,12 @@ On macOS/Linux with OpenSSH server tools and Python 3:
 bash scripts/test-sftp.sh
 PAWCOMMANDER_TEST_SFTP_HOST=::1 bash scripts/test-sftp.sh
 PAWCOMMANDER_TEST_DISABLE_STATVFS=1 bash scripts/test-sftp.sh
+PAWCOMMANDER_TEST_SFTP_RECONNECT=1 bash scripts/test-sftp.sh
 ```
 
 The script creates a temporary loopback-only SSH server, generates disposable keys, and cleans up on exit. It does not change your SSH configuration. Local OS policy may prevent launching `sshd`.
+
+The reconnect mode starts a temporary SSH agent and uses an OpenSSH SFTP subsystem wrapper to withhold rename replies. It checks reconnect and inspection after disconnects before or after publication. It uses `/usr/libexec/sftp-server` by default. Set `SFTP_SERVER_BIN` if your OpenSSH server uses another path.
 
 Run `bash scripts/test-ssh-interactive.sh` with a C compiler, `pkg-config`, OpenSSH key generation tools and a libssh build with server support. The loopback fixture exercises first-use trust, cancellation, hashed OpenSSH host records, key rotation, keyboard-interactive rounds and a second factor after key authentication. It compares the fingerprints with `ssh-keygen` and writes trust records only in its temporary directory.
 
