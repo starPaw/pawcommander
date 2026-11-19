@@ -49,6 +49,12 @@ pub(super) fn entry_widget(
     let entry = &tab.entries[index];
     let is_dir = entry.is_dir;
     let path = entry.path.clone();
+    #[cfg(target_os = "macos")]
+    let git_status = tab.git_snapshot().and_then(|git| git.entry(&path));
+    #[cfg(target_os = "macos")]
+    let git_label = git_status.map(|status| status.label());
+    #[cfg(not(target_os = "macos"))]
+    let git_label: Option<&str> = None;
     let archive_member = path.is_archive();
     let selected = tab.selected.contains(&path);
     let list_width = columns.map_or_else(|| ui.available_width(), |columns| columns.width);
@@ -160,11 +166,22 @@ pub(super) fn entry_widget(
             colors.ink,
         );
     }
+    #[cfg(target_os = "macos")]
+    if let Some(status) = git_status {
+        let center = if grid && compact {
+            rect.right_center() - Vec2::new(9.0, 0.0)
+        } else if grid {
+            rect.right_top() + Vec2::new(-10.0, 10.0)
+        } else {
+            icon_rect.right_top() + Vec2::new(-2.0, 3.0)
+        };
+        status.paint(ui, center, colors);
+    }
     let name_color = colors.ink;
     if grid && compact {
         let clip = egui::Rect::from_min_max(
             rect.left_top() + Vec2::new(23.0, 0.0),
-            rect.right_bottom() - Vec2::new(3.0, 0.0),
+            rect.right_bottom() - Vec2::new(if git_label.is_some() { 17.0 } else { 3.0 }, 0.0),
         );
         ui.painter().with_clip_rect(clip).text(
             clip.left_center(),
@@ -315,15 +332,25 @@ pub(super) fn entry_widget(
         } else {
             "Файл"
         });
+        let mut label = format!("{}, {kind}", entry.name);
+        if let Some(status) = git_label {
+            label.push_str(", ");
+            label.push_str(status);
+        }
         egui::WidgetInfo::selected(
             egui::Role::CheckBox,
             ui.is_enabled(),
             tab.selected.contains(&path),
-            format!("{}, {kind}", entry.name),
+            label,
         )
     });
+    let tooltip = if let Some(status) = git_label {
+        format!("{}\n{status}", path.display())
+    } else {
+        path.display()
+    };
     response
-        .on_hover_text(path.display().to_string())
+        .on_hover_text(tooltip)
         .context_menu(|ui| {
             if (!archive_member || is_dir) && ui.button(crate::i18n::text("Открыть")).clicked() {
                 actions.push(open());

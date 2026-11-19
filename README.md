@@ -37,6 +37,8 @@ PawCommander brings a familiar two-pane workflow to a calm, colorful desktop app
 
 Visible local and connected SFTP folders refresh automatically. On macOS, you can also drag local files out to Finder and other apps.
 
+On macOS, a local Git working tree shows its branch beside the folder path. The current folder marks modified (`M`), untracked (`?`) and ignored (`!`) entries. Git status refreshes in the background without writing to the repository.
+
 Use the arrow beside the breadcrumbs to type a path. Folder suggestions work for local paths and connected SFTP servers. Use Up or Down to select a suggestion, Tab to complete the path, Enter to open it, or Esc to return to the breadcrumbs.
 
 Open **Go to Folder** from the sidebar or command palette, or press `Ctrl+Shift+J` (`Cmd+Shift+J` on macOS). Type part of a folder name or path to search your last 128 distinct visited folders. Results rank by match quality, recency, and visit frequency. Select a folder to open it in the active pane.
