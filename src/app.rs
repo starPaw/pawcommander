@@ -29,6 +29,8 @@ mod quick_look;
 mod search;
 mod selection;
 mod sidebar;
+#[cfg(target_os = "macos")]
+mod smb_connections;
 mod state;
 mod tab_strip;
 mod tabs;
@@ -129,6 +131,8 @@ pub struct PawCommander {
     native_drag: crate::native_drag::NativeDrag,
     application_job: Option<Receiver<Result<String, String>>>,
     #[cfg(target_os = "macos")]
+    smb: smb_connections::Connections,
+    #[cfg(target_os = "macos")]
     embedded_terminal: Option<crate::terminal::embedded::Panel>,
     tools: crate::tools::Tools,
     search: crate::search::Search,
@@ -183,6 +187,8 @@ impl eframe::App for PawCommander {
         #[cfg(target_os = "windows")]
         self.windows_drives.poll(ctx);
         self.poll(ctx);
+        #[cfg(target_os = "macos")]
+        self.poll_smb(ctx);
         #[cfg(target_os = "macos")]
         if self
             .embedded_terminal

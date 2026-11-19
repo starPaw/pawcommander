@@ -430,6 +430,8 @@ pub(super) fn transfer_run(
                 && !source_meta.same_object(&target_meta)
                 && (!item.source.same_backend(&item.target)
                     || canonical(&item.source)? != canonical(&item.target)?);
+            #[cfg(target_os = "macos")]
+            let can_replace = can_replace && !mounted_smb(&item.target);
             #[cfg(windows)]
             let can_replace = can_replace
                 && !matches!((item.source.local(), item.target.local()),
@@ -477,6 +479,10 @@ pub(super) fn transfer_run(
                     item.replacement = Some((source_meta, target_meta))
                 }
                 Decision::Replace => {
+                    #[cfg(target_os = "macos")]
+                    if mounted_smb(&item.target) {
+                        return Err(crate::i18n::text(crate::smb::REPLACE_UNAVAILABLE).into());
+                    }
                     return Err("Замена доступна только для двух разных обычных файлов".into());
                 }
             }
@@ -766,6 +772,13 @@ pub(super) fn copy_item_cancellable(
     published: impl FnOnce(),
 ) -> Result<(), TransferError> {
     progress.set_copy_endpoints(&item.source, &item.target);
+    #[cfg(target_os = "macos")]
+    if mounted_smb(&item.target) {
+        if expected.is_some() {
+            return Err(crate::i18n::text(crate::smb::REPLACE_UNAVAILABLE).into());
+        }
+        return copy_to_smb(item, progress, published);
+    }
     if let (Some(source), Some(target)) = (item.source.local(), item.target.local()) {
         return fs_ops::copy_atomically_cancellable(
             source,
@@ -790,6 +803,94 @@ pub(super) fn copy_item_cancellable(
         metadata,
         published,
     )
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn mounted_smb(location: &Location) -> bool {
+    location.local().is_some_and(crate::smb::is_smb_path)
+}
+
+#[cfg(target_os = "macos")]
+fn copy_to_smb(
+    item: &TransferItem,
+    progress: &mut Progress,
+    published: impl FnOnce(),
+) -> Result<(), TransferError> {
+    use std::io::{Seek, SeekFrom};
+
+    let target = &item.target;
+    let target_path = target.local().expect("mounted SMB path");
+    let cancel = progress.cancellation();
+    progress.checkpoint()?;
+    let metadata = entry_metadata(&item.source)?.ok_or_else(|| changed_source(&item.source))?;
+    if !metadata.is_file() {
+        return Err(crate::i18n::text(
+            "В SMB можно скопировать обычные файлы со свободными именами.",
+        )
+        .into());
+    }
+    if matches!(&metadata, EntryMetadata::Remote(stat) if stat.size.is_none()) {
+        return Err(changed_source(&item.source).into());
+    }
+    if let Some(retry) = &progress.retry {
+        retry.verify_snapshot(item, Some(&metadata))?;
+    }
+    let source = TransferSourceEntry {
+        metadata,
+        children: None,
+    };
+    let size = source.size();
+    check_copy_space(size, &item.target, &item.target)?;
+    let mut input = SourceReader::open(&item.source)?;
+    source.verify_metadata(&item.source, &input.metadata()?)?;
+    source.verify(&item.source, &cancel, true)?;
+    progress.checkpoint()?;
+    let unconfirmed = |error: &dyn std::fmt::Display| {
+        TransferError::PublicationUnconfirmed(crate::tr_format!(
+            "Копирование на SMB не подтверждено. Проверьте возможную неполную копию {target} перед повтором ({error})",
+            "SMB copy is unconfirmed. Check {target} for an incomplete copy before retrying ({error})",
+        ))
+    };
+    let mut file = crate::smb::open_upload(target_path).map_err(|error| match error.kind() {
+        io::ErrorKind::AlreadyExists
+        | io::ErrorKind::PermissionDenied
+        | io::ErrorKind::InvalidInput
+        | io::ErrorKind::NotFound
+        | io::ErrorKind::Unsupported => TransferError::Failed(err(error)),
+        _ => unconfirmed(&error),
+    })?;
+    let result = (|| -> Result<(), TransferError> {
+        let identity = EntryMetadata::Local(LocalEntryMetadata::from_file(&file, file.metadata()?));
+        let mut data = CopyReader::new((&mut input).take(size), progress.copy_verification());
+        let written = progress.copy(item.source.path(), Some(size), &mut data, &mut file)?;
+        crate::smb::sync_upload(&file)?;
+        if written != size || file.metadata()?.len() != size {
+            return Err(changed_source(&item.source).into());
+        }
+        if let Some(hash) = data.finish() {
+            file.seek(SeekFrom::Start(0))?;
+            progress.verify_copy(item.source.path(), size, hash, &mut file)?;
+        }
+        source.verify_metadata(&item.source, &input.metadata()?)?;
+        source.verify(&item.source, &cancel, true)?;
+        let warning = copy_metadata::finish_file(
+            &item.target,
+            &source.metadata,
+            &mut SourceReader::Local(file),
+        )?;
+        progress
+            .results
+            .note_metadata(&item.source, warning.as_deref());
+        if !entry_metadata(&item.target)?.is_some_and(|current| identity.same_object(&current)) {
+            return Err(changed_source(&item.target).into());
+        }
+        Ok(())
+    })();
+    // The destination was created exclusively. A failed upload can leave a
+    // new partial file, and deleting its name could race another SMB client.
+    result.map_err(|error| unconfirmed(&error))?;
+    published();
+    Ok(())
 }
 
 pub(super) fn move_item(

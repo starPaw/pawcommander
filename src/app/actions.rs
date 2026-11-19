@@ -91,6 +91,12 @@ pub(super) enum Action {
     Reveal,
     CopyPath,
     ConnectSftp,
+    #[cfg(target_os = "macos")]
+    ConnectSmb,
+    #[cfg(target_os = "macos")]
+    OpenSmb(usize),
+    #[cfg(target_os = "macos")]
+    DisconnectSmb(usize),
     Properties,
     ChangePermissions,
 }
@@ -305,6 +311,23 @@ impl PawCommander {
                     self.navigate_columns(pane, navigation, ctx);
                 }
             }
+            #[cfg(target_os = "macos")]
+            Action::ConnectSmb => {
+                if !self.smb.busy() {
+                    self.remember_dialog_file_focus(ctx);
+                    self.dialog = Some(Dialog::ConnectSmb(Box::new(self.smb.form())));
+                    self.dialog_focus = true;
+                }
+            }
+            #[cfg(target_os = "macos")]
+            Action::OpenSmb(index) => {
+                if let Some(share) = self.smb.shares.get(index) {
+                    let location = share.path.clone().into();
+                    self.tab_mut().navigate(location, ctx);
+                }
+            }
+            #[cfg(target_os = "macos")]
+            Action::DisconnectSmb(index) => self.disconnect_smb(index, ctx),
             Action::ConnectSftp => {
                 let mut form = SftpForm::default();
                 if let Location::Sftp { endpoint, path } = &self.tab().path {

@@ -227,6 +227,8 @@ impl PawCommander {
             native_drag: Default::default(),
             application_job: None,
             #[cfg(target_os = "macos")]
+            smb: super::smb_connections::Connections::load(&cc.egui_ctx),
+            #[cfg(target_os = "macos")]
             embedded_terminal: None,
             tools: crate::tools::Tools::detect(),
             search,

@@ -906,6 +906,39 @@ fn translate(english: bool, russian: &'static str) -> &'static str {
         "Отправить ответы" => "Send answers",
         "Удалить сохранённый секрет" => "Remove saved secret",
         "Подключиться" => "Connect",
+        "Адрес SMB" => "SMB address",
+        "Подключение SMB" => "SMB connection",
+        "SMB · Подключиться" => "SMB · Connect",
+        "Гостевой доступ" => "Guest access",
+        "Имя пользователя" => "Username",
+        "Сохранить пароль в Связке ключей" => "Save password in Keychain",
+        "Пустое поле пароля использует сохранённый пароль для этого адреса и пользователя." => "Leave the password blank to use the one saved for this address and username.",
+        "Введите SMB-адрес вида smb://сервер/папка без учётных данных." => "Enter a share address such as smb://server/share. Use the separate fields for credentials.",
+        "Введите имя пользователя SMB." => "Enter the SMB username.",
+        "Пароль SMB содержит нулевой байт." => "The SMB password contains a null byte.",
+        "Безопасная замена файла на SMB недоступна. Выберите свободное имя." => {
+            "Safe replacement is unavailable on SMB. Choose an unused name."
+        }
+        "В SMB можно скопировать обычные файлы со свободными именами." => {
+            "SMB uploads support regular files with unused names."
+        }
+        "Для передачи файлов через SMB используйте копирование." => {
+            "Use Copy to transfer files through SMB."
+        }
+        "Выберите свободное имя или пропустите этот объект." => {
+            "Choose an unused name or skip this item."
+        }
+        "Не удалось открыть или обновить пароль SMB в Связке ключей." => "Could not read or update the SMB password in Keychain.",
+        "Нет папки данных для подключения SMB." => "The SMB connection needs an application data folder.",
+        "macOS не вернула ожидаемую точку монтирования SMB." => "macOS returned an unexpected SMB mount point.",
+        "Подключение SMB изменилось. Обновите список подключений." => "The SMB mount has changed. Reopen the connections list.",
+        "Папка уже подключена. Отключите её перед сменой пароля." => "Disconnect the existing SMB share before changing its password.",
+        "Подключение к SMB…" => "Connecting to SMB…",
+        "Отключение SMB…" => "Disconnecting SMB…",
+        "Отключить SMB" => "Disconnect SMB",
+        "Задача SMB завершилась без результата." => "The SMB worker stopped without a result.",
+        "Папка SMB подключена." => "SMB share connected.",
+        "Папка SMB отключена." => "SMB share disconnected.",
         "Подключение…" => "Connecting…",
         "Удаление сохранённого секрета" => "Removing saved secret",
         "Сохранённый ключ и фраза удалены. Исходный файл ключа и открытое SSH-соединение сохранены." => "Saved key and passphrase removed. The original key file and active SSH connection are preserved.",
