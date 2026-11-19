@@ -734,6 +734,7 @@ pub(super) fn copy_item_cancellable(
     progress: &mut Progress,
     published: impl FnOnce(),
 ) -> Result<(), TransferError> {
+    progress.set_copy_endpoints(&item.source, &item.target);
     if let (Some(source), Some(target)) = (item.source.local(), item.target.local()) {
         return fs_ops::copy_atomically_cancellable(
             source,
