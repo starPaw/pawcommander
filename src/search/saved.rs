@@ -106,7 +106,7 @@ impl Search {
                 })?;
                 let target = self.target();
                 let filters = self.filters.parse(target)?;
-                validate_folder_query(target, &self.query, &self.exclusions, &filters)?;
+                validate_folder_query(target, &self.query, &self.exclusions, filters.active())?;
                 if folder.remote() {
                     Scope::Sftp(Box::new(SftpScope {
                         location: folder.into(),

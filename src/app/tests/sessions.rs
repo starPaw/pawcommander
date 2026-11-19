@@ -239,6 +239,48 @@ fn named_workspace_opens_both_folders_in_existing_tabs_after_restart() {
     assert_eq!(reopened.tab().path, base);
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn cli_workspace_loads_the_saved_pair_instead_of_the_last_session() {
+    use super::super::{find_saved_workspace, Startup, WorkspaceError};
+
+    let root = tempfile::tempdir().unwrap();
+    let folders = ["First project", "Вторая папка"].map(|name| {
+        let folder = root.path().join(name);
+        std::fs::create_dir(&folder).unwrap();
+        Location::from(folder)
+    });
+    let ctx = egui::Context::default();
+    let mut cc = eframe::CreationContext::_new_kittest(ctx.clone());
+    let mut app = PawCommander::new(&cc, Some(root.path().to_owned()));
+    for (pane, path) in folders.iter().enumerate() {
+        app.action(Action::Navigate(pane, path.clone()), &ctx);
+    }
+    app.save_workspace_name(None, "Two named folders".into());
+    for pane in 0..2 {
+        app.action(Action::Navigate(pane, root.path().to_owned().into()), &ctx);
+    }
+    app.settings.split = false;
+    let mut storage = MemoryStorage::default();
+    eframe::App::save(&mut app, &mut storage);
+    let profile = ron::to_string(&storage.0).unwrap();
+    let saved = find_saved_workspace(Some(profile.as_bytes()), "Two named folders").unwrap();
+    cc.storage = Some(&storage);
+    let opened = PawCommander::start(&cc, Startup::Workspace(saved));
+    assert!(opened.settings.split);
+    for (pane, path) in opened.panes.iter().zip(folders) {
+        assert_eq!(pane.tab().path, path);
+    }
+    assert_eq!(
+        find_saved_workspace(Some(profile.as_bytes()), "Missing"),
+        Err(WorkspaceError::Missing)
+    );
+    assert_eq!(
+        find_saved_workspace(Some(b"broken profile"), "Missing"),
+        Err(WorkspaceError::Corrupt)
+    );
+}
+
 #[test]
 fn bookmark_and_workspace_settings_round_trip_native_paths() {
     #[cfg(unix)]

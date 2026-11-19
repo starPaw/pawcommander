@@ -59,6 +59,9 @@ use eframe::egui;
 use entry_widget::{entry_widget, EntryOptions, COMPACT_FILE_ROW_HEIGHT};
 use jobs::{CutRequest, Job, PendingJob, RetryJob, TransferInteraction, UndoJob};
 use pane_view::{list_notice, render_pane, workspace_card, PaneOptions};
+pub(crate) use persistence::Startup;
+#[cfg(target_os = "macos")]
+pub(crate) use persistence::{find_saved_workspace, WorkspaceError};
 use quick_look::QuickLook;
 use state::{
     FolderMode, FolderView, FolderViewChange, FolderViews, NamedWorkspace, SavedFolderView,

@@ -3,6 +3,8 @@
 mod address;
 mod app;
 mod archive;
+#[cfg(target_os = "macos")]
+mod cli;
 mod command_palette;
 mod conflict;
 mod credentials;
@@ -38,10 +40,12 @@ mod vfs;
 mod windows_file_id;
 mod zed;
 
-fn main() -> eframe::Result {
-    let argument = std::env::args_os().nth(1);
-    #[cfg(target_os = "macos")]
-    if let Some(mode) = argument.as_deref().and_then(std::ffi::OsStr::to_str) {
+const APP_ID: &str = "dev.pawcommander.filemanager";
+
+#[cfg(target_os = "macos")]
+fn main() -> std::process::ExitCode {
+    let mut arguments = std::env::args_os().skip(1).peekable();
+    if let Some(mode) = arguments.peek().and_then(|arg| arg.to_str()) {
         match mode {
             "--paw-drag-escape-listener" => std::process::exit(native_drag::listen_for_escape()),
             preview::PDF_WORKER_ARG => std::process::exit(preview::run_pdf_worker()),
@@ -49,7 +53,16 @@ fn main() -> eframe::Result {
             _ => {}
         }
     }
-    let start = argument.map(std::path::PathBuf::from);
+    cli::run(arguments)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn main() -> eframe::Result {
+    let folder = std::env::args_os().nth(1).map(std::path::PathBuf::from);
+    run_gui(folder.into(), None)
+}
+
+fn run_gui(start: app::Startup, persistence_path: Option<std::path::PathBuf>) -> eframe::Result {
     let viewport = eframe::egui::ViewportBuilder::default()
         .with_inner_size([1440.0, 860.0])
         .with_min_inner_size([960.0, 600.0])
@@ -57,7 +70,7 @@ fn main() -> eframe::Result {
             eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png"))
                 .expect("bundled app icon"),
         )
-        .with_app_id("dev.pawcommander.filemanager");
+        .with_app_id(APP_ID);
     #[cfg(target_os = "macos")]
     let viewport = viewport
         .with_fullsize_content_view(true)
@@ -65,6 +78,7 @@ fn main() -> eframe::Result {
         .with_title_shown(false);
     let options = eframe::NativeOptions {
         viewport,
+        persistence_path,
         // macOS file paste needs the modifiers from the press, including Option.
         // The app restores text clipboard events in the root and Quick Look viewports.
         clipboard_shortcuts: !cfg!(target_os = "macos"),
@@ -76,7 +90,7 @@ fn main() -> eframe::Result {
         Box::new(move |cc| {
             #[cfg(target_os = "macos")]
             macos_about::install(&cc.egui_ctx);
-            Ok(Box::new(app::PawCommander::new(cc, start)))
+            Ok(Box::new(app::PawCommander::start(cc, start)))
         }),
     )
 }

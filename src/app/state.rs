@@ -339,6 +339,13 @@ pub(super) struct NamedWorkspace {
     pub(super) folders: [SavedLocation; 2],
 }
 
+impl NamedWorkspace {
+    pub(super) fn locations(&self) -> Option<[Location; 2]> {
+        let [left, right] = self.folders.clone().map(SavedLocation::into_location);
+        Some([left?, right?])
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub(super) struct PaneSession {
     pub(super) tabs: Vec<TabSession>,
