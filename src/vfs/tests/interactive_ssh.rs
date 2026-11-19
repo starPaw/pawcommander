@@ -1,6 +1,8 @@
 use super::*;
+use crate::vfs::sftp::TrustFiles;
 use crate::vfs::{
-    AuthRequest, ConnectRequest, ConnectedLocation, ConnectionControl, InteractiveAuth,
+    AuthRequest, ConnectRequest, ConnectedLocation, ConnectionControl, ConnectionPrompt,
+    HostKeyRequest, InteractiveAuth,
 };
 use std::{sync::mpsc, thread};
 use zeroize::Zeroizing;
@@ -12,13 +14,13 @@ struct Fixture {
 
 struct Attempt {
     user: String,
-    prompts: mpsc::Receiver<AuthRequest>,
+    prompts: mpsc::Receiver<ConnectionPrompt>,
     control: ConnectionControl,
     result: mpsc::Receiver<Result<ConnectedLocation, String>>,
 }
 
 impl Fixture {
-    fn start(&self, user: &str, trust: bool, timeout: Duration) -> Attempt {
+    fn start(&self, user: &str, use_known_hosts: bool, timeout: Duration) -> Attempt {
         let (mut auth, prompts) = InteractiveAuth::new(|| {});
         auth.set_timeout(timeout);
         let control = auth.control();
@@ -35,12 +37,17 @@ impl Fixture {
             use_saved: false,
             save_key: false,
         };
-        let known_hosts = self
-            .root
-            .join(if trust { "known_hosts" } else { "empty_hosts" });
+        let trust = if use_known_hosts {
+            TrustFiles::new(
+                self.root.join("known_hosts"),
+                Some(self.root.join("legacy-pins")),
+            )
+        } else {
+            TrustFiles::new(self.root.join("absent_hosts"), Some(self.root.join("pins")))
+        };
         let (done, result) = mpsc::channel();
         thread::spawn(move || {
-            let connected = super::super::sftp::connect_location_at(request, auth, &known_hosts);
+            let connected = super::super::sftp::connect_location_at(request, auth, &trust);
             let _ = done.send(connected);
         });
         Attempt {
@@ -53,7 +60,7 @@ impl Fixture {
 }
 
 impl Attempt {
-    fn prompt(&self) -> AuthRequest {
+    fn request(&self) -> ConnectionPrompt {
         self.prompts
             .recv_timeout(Duration::from_secs(5))
             .unwrap_or_else(|error| {
@@ -63,6 +70,20 @@ impl Attempt {
                     self.user
                 );
             })
+    }
+
+    fn prompt(&self) -> AuthRequest {
+        let ConnectionPrompt::Authentication(prompt) = self.request() else {
+            panic!("Expected an authentication prompt for {}", self.user);
+        };
+        prompt
+    }
+
+    fn host_key(&self) -> HostKeyRequest {
+        let ConnectionPrompt::HostKey(prompt) = self.request() else {
+            panic!("Expected a host key prompt for {}", self.user);
+        };
+        prompt
     }
 
     fn finish(&self) -> Result<ConnectedLocation, String> {
@@ -91,18 +112,34 @@ fn ssh_interactive_round_trip() {
             .parse()
             .unwrap(),
     };
-    fs::write(fixture.root.join("empty_hosts"), "").unwrap();
+    let fingerprints = fs::read_to_string(fixture.root.join("fingerprints")).unwrap();
+    let fingerprints: Vec<_> = fingerprints.lines().collect();
+    let pins = fixture.root.join("pins");
     let timeout = Duration::from_secs(3);
     let unverified = fixture.start("unknown-host", false, timeout);
-    assert!(unverified
-        .finish()
-        .err()
-        .unwrap()
-        .contains("не подтверждён"));
+    let offered = unverified.host_key();
+    assert_eq!(offered.key.fingerprint, fingerprints[0]);
+    assert!(unverified.control.cancel());
+    drop(offered);
+    assert_eq!(
+        unverified.finish().err().unwrap(),
+        crate::i18n::text("Подключение отменено")
+    );
     assert!(unverified.prompts.try_recv().is_err());
+    assert!(!pins.exists());
 
     for user in ["mfa-fixture", "interactive-fixture"] {
-        let attempt = fixture.start(user, true, timeout);
+        let attempt = fixture.start(user, false, timeout);
+        if user == "mfa-fixture" {
+            let host_key = attempt.host_key();
+            assert_eq!(
+                host_key.key.address,
+                format!("[127.0.0.1]:{}", fixture.port)
+            );
+            assert_eq!(host_key.key.algorithm, "ssh-ed25519");
+            assert_eq!(host_key.key.fingerprint, fingerprints[0]);
+            host_key.approve();
+        }
         let prompt = attempt.prompt();
         assert_eq!(prompt.instructions, "First round\nTwo answers");
         assert_eq!(prompt.questions.len(), 2);
@@ -155,6 +192,19 @@ fn ssh_interactive_round_trip() {
         crate::i18n::text("Сервер не подтвердил интерактивную аутентификацию")
     );
     assert!(!error.contains("fixture-rejected-answer"));
+    assert!(!fixture.root.join("legacy-pins").exists());
+    assert!(!fixture.root.join("absent_hosts").exists());
+
+    let mut records = fs::read_dir(&pins).unwrap();
+    let record = records.next().unwrap().unwrap().path();
+    assert!(records.next().is_none());
+    let before = fs::read(&record).unwrap();
+    let changed = fixture.start("changed-host", false, timeout);
+    let error = changed.finish().err().unwrap();
+    assert!(error.starts_with(crate::i18n::text("Ключ сервера SSH изменился.")));
+    assert!(error.contains(fingerprints[0]) && error.contains(fingerprints[1]));
+    assert!(changed.prompts.try_recv().is_err());
+    assert_eq!(fs::read(&record).unwrap(), before);
     assert!(!sessions()
         .lock()
         .unwrap()

@@ -49,9 +49,11 @@ pub use preview::preview_data;
 pub(crate) use retry::RetryTransfer;
 #[cfg(test)]
 pub use sftp::connect;
+#[cfg(test)]
+pub(crate) use sftp::HostKey;
 pub(crate) use sftp::{
     connect_location, AuthRequest, ConnectRequest, ConnectedLocation, ConnectionControl,
-    InteractiveAuth,
+    ConnectionPrompt, HostKeyRequest, InteractiveAuth,
 };
 #[cfg(test)]
 pub use transfer::transfer;

@@ -35,7 +35,8 @@ static bool authenticate(ssh_session session, ssh_key client) {
         // Keyboard-interactive response packets omit the user field.
         const char *user = account;
         require(user[0] != '\0', "Fixture did not receive an authentication user");
-        require(strcmp(user, "unknown-host") != 0, "Authentication started before host verification");
+        require(strcmp(user, "unknown-host") != 0 && strcmp(user, "changed-host") != 0,
+                "Authentication started before host verification");
         bool needs_key = strcmp(user, "mfa-fixture") == 0;
         int selected = ssh_message_subtype(message);
         int allowed = needs_key && !key_accepted ? SSH_AUTH_METHOD_PUBLICKEY : SSH_AUTH_METHOD_INTERACTIVE;
@@ -141,7 +142,7 @@ static bool serve_directory(ssh_session session) {
 }
 
 int main(int argc, char **argv) {
-    require(argc == 3, "Expected a disposable host key and a client public key");
+    require(argc == 4, "Expected two disposable host keys and a client public key");
     ssh_bind server = ssh_bind_new();
     ssh_key host = NULL;
     ssh_key client = NULL;
@@ -160,7 +161,13 @@ int main(int argc, char **argv) {
             "Fixture could not listen on loopback");
     printf("%u\n", (unsigned int)ntohs(address.sin_port));
     fflush(stdout);
-    for (int attempt = 0; attempt < 6; ++attempt) {
+    for (int attempt = 0; attempt < 7; ++attempt) {
+        if (attempt == 6) {
+            ssh_key rotated = NULL;
+            require(ssh_pki_import_privkey_file(argv[3], NULL, NULL, NULL, &rotated) == SSH_OK &&
+                    ssh_bind_options_set(server, SSH_BIND_OPTIONS_IMPORT_KEY, rotated) == SSH_OK,
+                    "Fixture could not rotate the host key");
+        }
         int fd = accept(listener, NULL, NULL);
         ssh_session session = ssh_new();
         require(fd >= 0 && session != NULL && ssh_bind_accept_fd(server, session, fd) == SSH_OK,
