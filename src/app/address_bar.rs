@@ -108,6 +108,22 @@ pub(super) fn address_bar(
                                         if response.clicked() {
                                             actions.push(Action::Navigate(index, (*path).clone()));
                                         }
+                                        if current && crate::terminal::available(path) {
+                                            response.context_menu(|ui| {
+                                                if ui
+                                                    .button(
+                                                        crate::shortcuts::Command::OpenTerminal
+                                                            .label(),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    actions.push(Action::OpenTerminal(
+                                                        (*path).clone(),
+                                                    ));
+                                                    ui.close();
+                                                }
+                                            });
+                                        }
                                         response.on_hover_text(crate::tr_format!(
                                             "Перейти в {}",
                                             "Go to {}",

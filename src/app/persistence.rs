@@ -188,7 +188,7 @@ impl PawCommander {
             sftp_form: None,
             connection: None,
             native_drag: Default::default(),
-            editor_job: None,
+            application_job: None,
             tools: crate::tools::Tools::detect(),
             search: crate::search::Search::load(cc.storage),
         }

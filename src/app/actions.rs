@@ -50,6 +50,7 @@ pub(super) enum Action {
     BookmarkSlot(u8),
     Open(usize, Location),
     OpenInZed(usize, Location),
+    OpenTerminal(Location),
     Back,
     Forward,
     History(usize, isize),
@@ -150,21 +151,49 @@ impl PawCommander {
     }
 
     pub(super) fn open_in_zed(&mut self, path: Location, text_only: bool, ctx: &egui::Context) {
-        if self.editor_job.is_some() {
+        if self.application_job.is_some() {
             return;
         }
         if path.is_archive() {
             self.notice = Some((crate::archive::readonly().into(), true));
             return;
         }
+        self.launch_application(
+            ctx,
+            crate::i18n::text("Открытие файла в Zed…"),
+            move || crate::zed::open(&path, text_only),
+        );
+    }
+
+    fn launch_application(
+        &mut self,
+        ctx: &egui::Context,
+        status: &str,
+        launch: impl FnOnce() -> Result<String, String> + Send + 'static,
+    ) {
+        if self.application_job.is_some() {
+            return;
+        }
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
-        self.editor_job = Some(rx);
-        self.notice = Some((crate::i18n::text("Открытие файла в Zed…").into(), false));
-        std::thread::spawn(move || {
-            let _ = tx.send(crate::zed::open(&path, text_only));
+        match std::thread::Builder::new().spawn(move || {
+            let _ = tx.send(launch());
             ctx.request_repaint();
-        });
+        }) {
+            Ok(_) => {
+                self.application_job = Some(rx);
+                self.notice = Some((status.into(), false));
+            }
+            Err(error) => {
+                self.notice = Some((
+                    crate::tr_format!(
+                        "Не удалось запустить приложение. {error}",
+                        "Could not start the application. {error}"
+                    ),
+                    true,
+                ));
+            }
+        }
     }
 
     pub(super) fn action(&mut self, action: Action, ctx: &egui::Context) {
@@ -311,6 +340,17 @@ impl PawCommander {
             Action::OpenInZed(i, path) => {
                 self.active = i;
                 self.open_in_zed(path, false, ctx);
+            }
+            Action::OpenTerminal(folder) => {
+                if !crate::terminal::available(&folder) {
+                    return;
+                }
+                #[cfg(target_os = "macos")]
+                self.launch_application(
+                    ctx,
+                    crate::i18n::text("Открытие терминала…"),
+                    move || crate::terminal::open(&folder),
+                );
             }
             Action::Open(i, p) => {
                 self.active = i;

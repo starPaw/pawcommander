@@ -82,7 +82,9 @@ impl PawCommander {
                             .entries
                             .iter()
                             .any(|entry| entry.path == *path && entry.is_dir)
-                        || (path.remote() && self.tools.zed.is_some() && self.editor_job.is_none())
+                        || (path.remote()
+                            && self.tools.zed.is_some()
+                            && self.application_job.is_none())
                 }),
                 Command::OtherPane => self.settings.split,
                 Command::QuickLook => can_quick_look,
@@ -107,6 +109,9 @@ impl PawCommander {
                     has_selection && selected.iter().all(|path| path.local().is_some())
                 }
                 Command::ChangePermissions => idle && tab.path.remote() && has_selection,
+                Command::OpenTerminal => {
+                    crate::terminal::available(&tab.path) && self.application_job.is_none()
+                }
                 Command::CopyToPane | Command::MoveToPane => {
                     idle && writable
                         && self.settings.split
@@ -118,7 +123,7 @@ impl PawCommander {
                         && has_selection
                         && selected.len() == 1
                         && self.tools.zed.is_some()
-                        && self.editor_job.is_none()
+                        && self.application_job.is_none()
                         && tab
                             .entries
                             .iter()

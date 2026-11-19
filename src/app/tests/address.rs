@@ -1,5 +1,33 @@
 use super::*;
 
+#[cfg(target_os = "macos")]
+#[test]
+fn terminal_command_uses_the_current_folder_and_reports_a_launch_error() {
+    let fixture = tempfile::tempdir().unwrap();
+    let file = fixture.path().join("no longer a folder.txt");
+    std::fs::write(&file, b"fixture").unwrap();
+    let ctx = egui::Context::default();
+    let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+    let mut app = PawCommander::new(&cc, Some(fixture.path().into()));
+    wait_for_directory(app.tab_mut());
+    app.tab_mut().path = Location::Local(file);
+    app.run_shortcut(Command::OpenTerminal, &ctx);
+    assert!(app.application_job.is_some());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while app.application_job.is_some() && Instant::now() < deadline {
+        app.poll(&ctx);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(app.application_job.is_none());
+    assert_eq!(
+        app.notice,
+        Some((
+            crate::i18n::text("Выберите папку для открытия терминала.").into(),
+            true
+        ))
+    );
+}
+
 #[test]
 fn address_editor_submits_typed_paths_completes_folders_and_cancels() {
     let ctx = egui::Context::default();

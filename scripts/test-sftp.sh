@@ -7,6 +7,7 @@ test_root="$(mktemp -d /tmp/pawcommander-sftp.XXXXXX)"
 server_pid=""
 agent_pid=""
 reconnect="${PAWCOMMANDER_TEST_SFTP_RECONNECT:-0}"
+terminal_test="${PAWCOMMANDER_TEST_SFTP_TERMINAL:-0}"
 test_host="${PAWCOMMANDER_TEST_SFTP_HOST:-127.0.0.1}"
 # Keep this disposable server loopback-only, including the IPv6 test mode.
 case "$test_host" in 127.0.0.1|::1) ;; *) exit 2 ;; esac
@@ -38,6 +39,10 @@ if [[ "$reconnect" == "1" ]]; then
   done
   export SSH_AUTH_SOCK="$test_root/agent.sock"
   ssh-add "$test_root/client"
+elif [[ "$terminal_test" == "1" ]]; then
+  export PAWCOMMANDER_TEST_TERMINAL_KEY="$test_root/client key '%h \${USER}'"
+  ssh-keygen -q -t ed25519 -N '' -f "$PAWCOMMANDER_TEST_TERMINAL_KEY"
+  cp "$PAWCOMMANDER_TEST_TERMINAL_KEY.pub" "$test_root/client.pub"
 else
   ssh-keygen -q -t ed25519 -N 'test-passphrase' -f "$test_root/client"
 fi
@@ -69,6 +74,12 @@ AllowUsers $(id -un)
 Subsystem sftp $subsystem
 LogLevel ERROR
 CONFIG
+if [[ "$terminal_test" == "1" ]]; then
+  cat >> "$test_root/sshd_config" <<CONFIG
+PermitUserRC no
+SetEnv SHELL=/bin/sh ENV=/dev/null ZDOTDIR=$test_root
+CONFIG
+fi
 "$sshd_bin" -D -e -f "$test_root/sshd_config" > "$test_root/sshd.log" 2>&1 &
 server_pid=$!
 for attempt in {1..50}; do
@@ -82,6 +93,8 @@ export PAWCOMMANDER_TEST_SFTP_PORT="$test_port"
 export PAWCOMMANDER_TEST_SFTP_USER="$(id -un)"
 if [[ "$reconnect" == "1" ]]; then
   cargo test --locked sftp_reconnect_checks_lost_publication_replies -- --ignored --nocapture
+elif [[ "$terminal_test" == "1" ]]; then
+  cargo test --locked openssh_terminal_starts_interactively_in_the_exact_folder -- --ignored --nocapture
 else
   cargo test --locked openssh_round_trip_and_host_verification -- --ignored --nocapture
 fi
