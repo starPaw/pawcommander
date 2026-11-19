@@ -201,6 +201,8 @@ impl PawCommander {
                                             .push(Action::Navigate(self.active, profile.clone()));
                                     }
                                 }
+                                #[cfg(target_os = "macos")]
+                                self.smb_sidebar(ui, &current, actions);
                             });
                         ui.add_space(6.0);
                         egui::CollapsingHeader::new(crate::i18n::text("Избранное"))

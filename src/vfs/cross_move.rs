@@ -19,6 +19,12 @@ use std::path::PathBuf;
 mod tests;
 
 pub(super) fn required(item: &TransferItem) -> Result<bool, TransferError> {
+    #[cfg(target_os = "macos")]
+    if super::transfer::mounted_smb(&item.source) || super::transfer::mounted_smb(&item.target) {
+        return Err(
+            crate::i18n::text("Для передачи файлов через SMB используйте копирование.").into(),
+        );
+    }
     if !item.source.same_backend(&item.target) {
         return Ok(true);
     }

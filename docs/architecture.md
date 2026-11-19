@@ -19,6 +19,7 @@ PawCommander is a single Rust binary using eframe/egui. Start at the module that
 | Retry unfinished transfers | [`vfs/retry.rs`](../src/vfs/retry.rs) | `app/jobs.rs` owns session retry requests; `result_history.rs` presents actions without replaying stored display paths |
 | Undo renames and moves | [`vfs/undo.rs`](../src/vfs/undo.rs) | Typed session receipts capture parents and moved entries; `app/jobs.rs` serializes inverse renames and owns remaining work, `result_history.rs` exposes eligible actions |
 | Location parsing, listing, SSH sessions | [`vfs/location.rs`](../src/vfs/location.rs), [`vfs/listing.rs`](../src/vfs/listing.rs), [`vfs/sftp.rs`](../src/vfs/sftp.rs) | `credentials.rs`, `app/dialogs.rs` |
+| SMB connections on macOS | [`smb.rs`](../src/smb.rs), [`app/smb_connections.rs`](../src/app/smb_connections.rs) | `smb/macos.m` mounts shares through NetFS. The connection worker uses Keychain for optional password storage. |
 | SFTP permissions | [`vfs/permissions.rs`](../src/vfs/permissions.rs), [`app/permissions.rs`](../src/app/permissions.rs) | An independent reader previews proposed modes. The mutation worker checks the previewed metadata and records each result. |
 | Copy/cut/paste | [`app/clipboard.rs`](../src/app/clipboard.rs), [`file_clipboard.rs`](../src/file_clipboard.rs) | `file_clipboard/{macos,windows,linux}.rs` |
 | Preview, Quick Look, thumbnails | [`preview.rs`](../src/preview.rs), [`app/quick_look.rs`](../src/app/quick_look.rs) | `preview/code.rs`, `preview/markup.rs`, `thumbnails.rs`, `vfs/preview.rs` |
@@ -68,6 +69,8 @@ flowchart TD
 The main thread owns application state. `App::logic` polls worker channels and advances the mutation queue even when the window is hidden; `App::ui` renders widgets. Mutation jobs capture their inputs when queued; one active job serializes filesystem changes, including changes to overlapping paths. Pending jobs do not perform filesystem work before dispatch. Do not add direct filesystem or network work to widget rendering or bypass the mutation queue for a new write action.
 
 Directory reads use bounded channels and progressive batches. Dropping a directory load cancels it and disconnects its producer. Previews coalesce pending requests and use generations to reject stale results. Search and thumbnails have their own worker lifecycles. Preserve cancellation, stale-result protection and repaint notifications when extending these paths.
+
+NetFS mounts SMB shares on demand in a private directory for each connection. The empty directory underneath the share is write-protected so an old tab cannot send data to a local folder after the mount disappears. The file queue uses normal mounted paths for browsing and downloads. SMB uploads create regular files exclusively through an open SMB directory handle because macOS SMB volumes lack exclusive rename. A failure after creation records the result as unconfirmed and leaves the new name for inspection.
 
 The macOS PDF preview passes a bounded byte snapshot to a helper process. Its native renderer uses PDFKit for document text and selections and Core Graphics for page rasters. The preview worker owns the helper, enforces response sizes and deadlines, and ends the session when the preview changes. The UI uploads only the current page texture.
 

@@ -27,6 +27,8 @@ mod recovery;
 mod result_history;
 mod search;
 mod shortcuts;
+#[cfg(target_os = "macos")]
+mod smb;
 mod ssh_config;
 mod tab_drag;
 mod terminal;

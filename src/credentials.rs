@@ -11,16 +11,20 @@ pub struct SavedKey {
 }
 fn entry(endpoint: &Endpoint) -> Result<keyring::Entry, String> {
     let account = account(endpoint)?;
+    system_entry(SERVICE, &account).map_err(vault_error)
+}
+
+pub(crate) fn system_entry(service: &str, account: &str) -> Result<keyring::Entry, keyring::Error> {
     // Open a store per operation: a temporarily unavailable service must be
     // retryable without restarting the application or changing global state.
     #[cfg(target_os = "macos")]
-    let store = apple_native_keyring_store::keychain::Store::new().map_err(vault_error)?;
+    let store = apple_native_keyring_store::keychain::Store::new()?;
     #[cfg(target_os = "windows")]
-    let store = windows_native_keyring_store::Store::new().map_err(vault_error)?;
+    let store = windows_native_keyring_store::Store::new()?;
     #[cfg(target_os = "linux")]
-    let store = zbus_secret_service_keyring_store::Store::new().map_err(vault_error)?;
+    let store = zbus_secret_service_keyring_store::Store::new()?;
 
-    store.build(SERVICE, &account, None).map_err(vault_error)
+    store.build(service, account, None)
 }
 fn account(endpoint: &Endpoint) -> Result<String, String> {
     // Structured identity avoids delimiter collisions and isolates users, ports and keys.

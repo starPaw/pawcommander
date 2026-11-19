@@ -57,11 +57,19 @@ cat > "$app_dir/Contents/Info.plist" <<PLIST
     <string>$MACOSX_DEPLOYMENT_TARGET</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSNetworkVolumesUsageDescription</key>
+    <string>PawCommander needs access to browse and transfer files in network folders you open.</string>
 </dict>
 </plist>
 PLIST
 
+mkdir -p "$app_dir/Contents/Resources/ru.lproj"
+cat > "$app_dir/Contents/Resources/ru.lproj/InfoPlist.strings" <<'STRINGS'
+"NSNetworkVolumesUsageDescription" = "PawCommander запрашивает доступ к открытым вами сетевым папкам для просмотра и передачи файлов.";
+STRINGS
+
 plutil -lint "$app_dir/Contents/Info.plist"
+plutil -lint "$app_dir/Contents/Resources/ru.lproj/InfoPlist.strings"
 if command -v codesign >/dev/null 2>&1; then
   codesign --force --sign - "$app_dir"
   codesign --verify "$app_dir"

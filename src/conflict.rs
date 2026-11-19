@@ -89,7 +89,7 @@ impl ConflictDialog {
             ui.add_space(12.0);
             if !conflict.can_replace {
                 ui.label(crate::i18n::text(
-                    "Замена доступна только для двух разных обычных файлов.",
+                    "Выберите свободное имя или пропустите этот объект.",
                 ));
             }
             if conflict.index < conflict.count {

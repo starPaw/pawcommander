@@ -215,6 +215,14 @@ Select files or folders in an SFTP pane and choose **Change permissions** from t
 
 The change applies to the selected regular files and folders. An unavailable item or a symbolic link is marked in the preview. If an item changes after the preview or the server denies access, the result history shows the reason for that item. Check any unconfirmed change before trying again after a disconnect.
 
+## SMB connections on macOS
+
+In the sidebar, choose **Connections → SMB · Connect** and enter a share address such as `smb://nas/Photos`. Enter the user name and password in their own fields, or select **Guest access**. If macOS requests access to network volumes, allow it to open the share in PawCommander.
+
+Select **Save password in Keychain** to keep the password after a successful connection. Leave the password field empty when reconnecting to look up the saved password for that share and user. Connected shares appear under **Connections** and can be reopened after restarting PawCommander while macOS keeps them mounted. Use **Disconnect SMB** in the share's context menu to unmount it.
+
+Use **Copy** to download files and folders from an SMB share. For uploads, select regular files and choose **Keep both** when an existing name matches. If a connection drops, wait for the operation to report its outcome and check the destination before retrying. An interrupted upload can leave an incomplete file with the chosen name. PawCommander preserves the source and existing destination files.
+
 ## Custom actions on macOS
 
 Choose **Settings → Tools → Custom actions…** to add a named action with an absolute path to its executable. Enter one argument per row. Use `{file}` in an argument for exactly one selected item, `{files}` on its own for one argument per selected item, or `{folder}` for the current folder. Use `{{` and `}}` to enter literal braces.

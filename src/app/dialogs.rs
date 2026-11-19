@@ -77,6 +77,8 @@ pub(super) enum Dialog {
     EditCustomActions(Box<super::custom_actions::Editor>),
     #[cfg(target_os = "macos")]
     RunCustomAction(Box<super::custom_actions::Preview>),
+    #[cfg(target_os = "macos")]
+    ConnectSmb(Box<super::smb_connections::Form>),
     CreateArchive {
         sources: Vec<Location>,
         directory: Location,
@@ -438,6 +440,8 @@ impl PawCommander {
             Dialog::EditCustomActions(_) => Command::CustomActions.label(),
             #[cfg(target_os = "macos")]
             Dialog::RunCustomAction(_) => crate::i18n::text("Предпросмотр запуска"),
+            #[cfg(target_os = "macos")]
+            Dialog::ConnectSmb(_) => crate::i18n::text("Подключение SMB"),
             Dialog::CreateArchive { .. } => Command::CreateArchive.label(),
             Dialog::ExtractArchive { .. } => Command::ExtractArchive.label(),
             Dialog::VerifyArchive { .. } => Command::VerifyArchive.label(),
@@ -533,6 +537,8 @@ impl PawCommander {
                 Dialog::EditCustomActions(editor) => editor.show(ui, self.dialog_focus),
                 #[cfg(target_os = "macos")]
                 Dialog::RunCustomAction(preview) => preview.show(ui),
+                #[cfg(target_os = "macos")]
+                Dialog::ConnectSmb(form) => form.show(ui, self.dialog_focus),
                 Dialog::CreateChecksumManifest { sources, directory, name } => {
                     ui.label(crate::tr_format!("Выбрано файлов: {}", "Selected files: {}", sources.len()));
                     let label = ui.label(crate::i18n::text("Имя манифеста"));
@@ -694,6 +700,8 @@ impl PawCommander {
                 Dialog::EditCustomActions(editor) => editor.can_save(),
                 #[cfg(target_os = "macos")]
                 Dialog::RunCustomAction(preview) => preview.can_run() && self.application_job.is_none(),
+                #[cfg(target_os = "macos")]
+                Dialog::ConnectSmb(form) => form.endpoint().is_ok() && !self.smb.busy(),
                 Dialog::CreateChecksumManifest { name, .. } => fs_ops::checksum_manifest_name(name).is_ok(),
                 Dialog::CreateArchive { name, format, .. } => fs_ops::archive_file_name(name, *format).is_ok(),
                 Dialog::ExtractArchive { address, archive_directory, other, .. } => extraction_destination(address, archive_directory, other.as_ref()).is_ok(),
@@ -739,6 +747,8 @@ impl PawCommander {
                     crate::i18n::text(match &dialog {
                         #[cfg(target_os = "macos")]
                         Dialog::RunCustomAction(_) => "Запустить",
+                        #[cfg(target_os = "macos")]
+                        Dialog::ConnectSmb(_) => "Подключиться",
                         _ => "Сохранить",
                     })
                 };
@@ -753,7 +763,7 @@ impl PawCommander {
             let submit_on_enter = match dialog {
                 Dialog::TransferLimits { .. } | Dialog::Trash { .. } | Dialog::BatchRename(_) | Dialog::ChangePermissions(_) | Dialog::CreateArchive { .. } | Dialog::ExtractArchive { .. } | Dialog::VerifyArchive { .. } | Dialog::ArchiveEdit { .. } => false,
                 #[cfg(target_os = "macos")]
-                Dialog::EditCustomActions(_) | Dialog::RunCustomAction(_) => false,
+                Dialog::EditCustomActions(_) | Dialog::RunCustomAction(_) | Dialog::ConnectSmb(_) => false,
                 // The Enter that opens the dialog belongs to its sidebar control.
                 Dialog::WorkspaceName { .. } | Dialog::SelectionRule { .. } | Dialog::CreateChecksumManifest { .. } => !self.dialog_focus,
                 _ => true,
@@ -769,7 +779,9 @@ impl PawCommander {
         let guard_close_key = match dialog {
             Dialog::SelectionRule { .. } => true,
             #[cfg(target_os = "macos")]
-            Dialog::EditCustomActions(_) | Dialog::RunCustomAction(_) => true,
+            Dialog::EditCustomActions(_) | Dialog::RunCustomAction(_) | Dialog::ConnectSmb(_) => {
+                true
+            }
             _ => false,
         };
         if guard_close_key && (confirm || cancel) {
@@ -846,6 +858,8 @@ impl PawCommander {
                         self.launch_custom_action(invocation, ctx);
                     }
                 }
+                #[cfg(target_os = "macos")]
+                Dialog::ConnectSmb(form) => self.connect_smb(*form, ctx),
                 Dialog::NewFolder { parent, name } => self.start_described_job(
                     ctx,
                     crate::i18n::text("Создание папки"),

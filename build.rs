@@ -28,6 +28,14 @@ fn main() {
             .file(media)
             .flag("-fobjc-arc")
             .compile("paw_media");
+        let smb = "src/smb/macos.m";
+        println!("cargo:rerun-if-changed={smb}");
+        cc::Build::new()
+            .file(smb)
+            .flag("-fobjc-arc")
+            .compile("paw_smb");
+        println!("cargo:rustc-link-lib=framework=NetFS");
+        println!("cargo:rustc-link-lib=framework=Foundation");
         for framework in ["AVFoundation", "CoreMedia", "CoreVideo", "QuartzCore"] {
             println!("cargo:rustc-link-lib=framework={framework}");
         }
