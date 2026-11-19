@@ -370,6 +370,22 @@ pub(super) fn entry_widget(
                 actions.push(Action::OpenInZed(pane, path.clone()));
                 ui.close();
             }
+            if let Some(count) = tab.selected_file_count(visible) {
+                if ui.add_enabled(idle, egui::Button::new(crate::i18n::text("Создать манифест SHA-256…"))).clicked() {
+                    actions.push(Action::Focus(pane));
+                    actions.push(Action::CreateChecksumManifest);
+                    ui.close();
+                }
+                if count == 1
+                    && tab.selected.contains(&path)
+                    && crate::vfs::looks_like_checksum_manifest(path.path())
+                    && ui.add_enabled(idle, egui::Button::new(crate::i18n::text("Проверить манифест SHA-256"))).clicked()
+                {
+                    actions.push(Action::Focus(pane));
+                    actions.push(Action::VerifyChecksumManifest);
+                    ui.close();
+                }
+            }
             ui.separator();
             if split {
             ui.menu_button(crate::i18n::text("В соседнюю панель"), |ui| {

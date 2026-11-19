@@ -36,6 +36,8 @@ pub enum Command {
     CreateArchive,
     ExtractArchive,
     VerifyArchive,
+    CreateChecksumManifest,
+    VerifyChecksumManifest,
     AddToArchive,
     RemoveFromArchive,
     NewFolder,
@@ -49,7 +51,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Self; 38] = [
+    pub const ALL: [Self; 40] = [
         Self::EditPath,
         Self::Filter,
         Self::Search,
@@ -79,6 +81,8 @@ impl Command {
         Self::CreateArchive,
         Self::ExtractArchive,
         Self::VerifyArchive,
+        Self::CreateChecksumManifest,
+        Self::VerifyChecksumManifest,
         Self::AddToArchive,
         Self::RemoveFromArchive,
         Self::NewFolder,
@@ -121,6 +125,8 @@ impl Command {
             Self::CreateArchive => "Создать архив",
             Self::ExtractArchive => "Распаковать выбранное",
             Self::VerifyArchive => "Проверить архив",
+            Self::CreateChecksumManifest => "Создать манифест SHA-256",
+            Self::VerifyChecksumManifest => "Проверить манифест SHA-256",
             Self::AddToArchive => "Добавить в архив",
             Self::RemoveFromArchive => "Удалить из архива",
             Self::NewFolder => "Создать папку",
@@ -200,11 +206,23 @@ impl Profile {
             FocusToolbar => (Modifiers::NONE, Key::F10),
             Palette => (CMD_SHIFT, Key::P),
             FolderJump => (CMD_SHIFT, Key::J),
-            Preview | EditInZed | CopyToPane | MoveToPane | TogglePinTab | DuplicateTab
-            | SelectByMask | SelectByExtension | InvertSelection | RestoreSelection
-            | CreateArchive | ExtractArchive | VerifyArchive | AddToArchive | RemoveFromArchive => {
-                return None
-            }
+            Preview
+            | EditInZed
+            | CopyToPane
+            | MoveToPane
+            | TogglePinTab
+            | DuplicateTab
+            | SelectByMask
+            | SelectByExtension
+            | InvertSelection
+            | RestoreSelection
+            | CreateArchive
+            | ExtractArchive
+            | VerifyArchive
+            | AddToArchive
+            | RemoveFromArchive
+            | CreateChecksumManifest
+            | VerifyChecksumManifest => return None,
         };
         Some(Chord::new(modifiers, key))
     }

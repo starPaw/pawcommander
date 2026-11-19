@@ -1,6 +1,108 @@
 use super::*;
 
 #[test]
+fn checksum_commands_save_a_manifest_and_keep_distinct_results_in_history() {
+    use std::fs;
+
+    let root = tempfile::tempdir().unwrap();
+    let folder = root.path().join("files");
+    fs::create_dir(&folder).unwrap();
+    let changed = folder.join("changed.txt");
+    let missing = folder.join("missing.txt");
+    fs::write(&changed, b"abc").unwrap();
+    fs::write(&missing, b"abc").unwrap();
+    let ctx = egui::Context::default();
+    let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+    let mut app = PawCommander::new(&cc, Some(folder.clone()));
+    let history_path = root.path().join("history.json");
+    app.history = History::for_test(history_path.clone(), &ctx);
+    wait_for_directory(app.tab_mut());
+    app.tab_mut()
+        .selected
+        .extend([changed.clone().into(), missing.clone().into()]);
+
+    let palette_frame = |app: &mut PawCommander, events, keys: &[egui::Key]| {
+        ctx.run_test_ui(
+            egui::RawInput {
+                events,
+                ..Default::default()
+            },
+            |ui| app.show_command_palette(ui.ctx(), keys),
+        );
+    };
+    let choose = |app: &mut PawCommander, command: Command| {
+        app.run_shortcut(Command::Palette, &ctx);
+        assert!(app.command_palette.is_some());
+        palette_frame(app, vec![], &[]);
+        palette_frame(app, vec![egui::Event::Text(command.label().into())], &[]);
+        palette_frame(app, vec![], &[egui::Key::Enter]);
+        assert!(app.command_palette.is_none());
+    };
+    choose(&mut app, Command::CreateChecksumManifest);
+    assert!(matches!(&app.dialog, Some(Dialog::CreateChecksumManifest {
+        sources, name, ..
+    }) if sources.len() == 2 && name == "SHA256SUMS"));
+    ctx.run_test_ui(egui::RawInput::default(), |ui| app.dialogs(ui.ctx()));
+    for pressed in [true, false] {
+        ctx.run_test_ui(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ui| app.dialogs(ui.ctx()),
+        );
+    }
+    assert!(app.dialog.is_none() && app.job.is_some());
+    poll_queue_until(&mut app, &ctx, |app| app.job.is_none());
+    wait_for_directory(app.tab_mut());
+    let manifest = folder.join("SHA256SUMS");
+    assert!(manifest.is_file());
+    fs::write(changed, b"xyz").unwrap();
+    fs::remove_file(missing).unwrap();
+    let listed = app
+        .tab()
+        .entries
+        .iter()
+        .find(|entry| entry.name == "SHA256SUMS")
+        .expect("newly created manifest is listed")
+        .path
+        .clone();
+    app.tab_mut().select_revealed(listed.clone());
+    assert_eq!(app.selected(), [listed]);
+    choose(&mut app, Command::VerifyChecksumManifest);
+    assert!(
+        app.job.is_some(),
+        "notice={:?}, address_open={}",
+        app.notice,
+        app.tab().edit_address
+    );
+    poll_queue_until(&mut app, &ctx, |app| app.job.is_none());
+    assert!(app.notice.as_ref().is_some_and(|(_, error)| *error));
+    let history: serde_json::Value =
+        serde_json::from_slice(&fs::read(history_path).unwrap()).unwrap();
+    let operation = history["records"].as_array().unwrap().last().unwrap();
+    assert_eq!(operation["label"], Command::VerifyChecksumManifest.label());
+    for (name, reason) in [
+        ("changed.txt", "Файл изменён (SHA-256 не совпала)"),
+        ("missing.txt", "Файл отсутствует"),
+    ] {
+        assert!(
+            operation["items"].as_array().unwrap().iter().any(|item| {
+                item["source"].as_str().unwrap().ends_with(name)
+                    && item["reason"] == crate::i18n::text(reason)
+            }),
+            "{operation:?}"
+        );
+    }
+}
+
+#[test]
 fn history_retry_owns_one_queued_attempt_and_keeps_completed_files_untouched() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("source");

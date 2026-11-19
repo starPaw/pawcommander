@@ -398,6 +398,19 @@ impl Progress {
         source_hash: [u8; 32],
         input: &mut impl Read,
     ) -> io::Result<()> {
+        if self.hash_file(path, expected, input)? != Some(source_hash) {
+            return Err(copy_hash_mismatch(path));
+        }
+        Ok(())
+    }
+
+    /// Hash a regular file at its captured length, with a one-byte growth probe.
+    pub(crate) fn hash_file(
+        &mut self,
+        path: &Path,
+        expected: u64,
+        input: &mut impl Read,
+    ) -> io::Result<Option<[u8; 32]>> {
         self.current.item = Some(path.to_owned());
         self.current.waiting_for_conflict = false;
         self.current.transfer = None;
@@ -419,7 +432,7 @@ impl Progress {
                 break;
             }
             if limit == 0 {
-                return Err(copy_hash_mismatch(path));
+                return Ok(None);
             }
             hash.update(&buffer[..count]);
             read += count as u64;
@@ -427,11 +440,11 @@ impl Progress {
             self.publish(Instant::now(), read == count as u64);
         }
         self.check_cancelled()?;
-        if read != expected || <[u8; 32]>::from(hash.finalize()) != source_hash {
-            return Err(copy_hash_mismatch(path));
+        if read != expected {
+            return Ok(None);
         }
         self.publish(Instant::now(), true);
-        Ok(())
+        Ok(Some(hash.finalize().into()))
     }
 
     fn copy_tracked(

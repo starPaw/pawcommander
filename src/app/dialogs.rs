@@ -86,6 +86,11 @@ pub(super) enum Dialog {
         archive: PathBuf,
         password: Zeroizing<String>,
     },
+    CreateChecksumManifest {
+        sources: Vec<Location>,
+        directory: Location,
+        name: String,
+    },
     ArchiveEdit {
         archive: PathBuf,
         edit: ArchiveEdit,
@@ -422,6 +427,7 @@ impl PawCommander {
             Dialog::CreateArchive { .. } => Command::CreateArchive.label(),
             Dialog::ExtractArchive { .. } => Command::ExtractArchive.label(),
             Dialog::VerifyArchive { .. } => Command::VerifyArchive.label(),
+            Dialog::CreateChecksumManifest { .. } => Command::CreateChecksumManifest.label(),
             Dialog::ArchiveEdit { edit, .. } => archive_edit_command(edit).label(),
             Dialog::WorkspaceName { editing, .. } => {
                 if editing.is_some() {
@@ -499,6 +505,19 @@ impl PawCommander {
                     }
                 }
                 Dialog::BatchRename(editor) => editor.show(ui, self.dialog_focus),
+                Dialog::CreateChecksumManifest { sources, directory, name } => {
+                    ui.label(crate::tr_format!("Выбрано файлов: {}", "Selected files: {}", sources.len()));
+                    let label = ui.label(crate::i18n::text("Имя манифеста"));
+                    let edit = ui.add(egui::TextEdit::singleline(name).desired_width(f32::INFINITY));
+                    if self.dialog_focus {
+                        edit.request_focus();
+                    }
+                    edit.labelled_by(label.id);
+                    match fs_ops::checksum_manifest_name(name) {
+                        Ok(file) => { ui.label(directory.join(file).display()); }
+                        Err(error) => { ui.label(error); }
+                    }
+                }
                 Dialog::CreateArchive { sources, directory, name, format, password } => {
                     ui.label(crate::tr_format!("Выбрано объектов: {}", "Selected items: {}", sources.len()));
                     let label = ui.label(crate::i18n::text("Имя архива"));
@@ -642,6 +661,7 @@ impl PawCommander {
                     !name.trim().is_empty()
                 }
                 Dialog::BatchRename(editor) => editor.can_apply(),
+                Dialog::CreateChecksumManifest { name, .. } => fs_ops::checksum_manifest_name(name).is_ok(),
                 Dialog::CreateArchive { name, format, .. } => fs_ops::archive_file_name(name, *format).is_ok(),
                 Dialog::ExtractArchive { address, archive_directory, other, .. } => extraction_destination(address, archive_directory, other.as_ref()).is_ok(),
                 Dialog::ArchiveEdit { edit: ArchiveEdit::Rename { entry, name }, .. } => {
@@ -664,7 +684,7 @@ impl PawCommander {
                     crate::i18n::text("Выделить")
                 } else if matches!(dialog, Dialog::BatchRename(_)) {
                     crate::i18n::text("Переименовать")
-                } else if matches!(dialog, Dialog::CreateArchive { .. }) {
+                } else if matches!(dialog, Dialog::CreateArchive { .. } | Dialog::CreateChecksumManifest { .. }) {
                     crate::i18n::text("Создать")
                 } else if matches!(dialog, Dialog::ExtractArchive { .. }) {
                     crate::i18n::text("Распаковать")
@@ -690,7 +710,7 @@ impl PawCommander {
             let submit_on_enter = match dialog {
                 Dialog::Trash { .. } | Dialog::BatchRename(_) | Dialog::CreateArchive { .. } | Dialog::ExtractArchive { .. } | Dialog::VerifyArchive { .. } | Dialog::ArchiveEdit { .. } => false,
                 // The Enter that opens the dialog belongs to its sidebar control.
-                Dialog::WorkspaceName { .. } | Dialog::SelectionRule { .. } => !self.dialog_focus,
+                Dialog::WorkspaceName { .. } | Dialog::SelectionRule { .. } | Dialog::CreateChecksumManifest { .. } => !self.dialog_focus,
                 _ => true,
             };
             if submit_on_enter && valid && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -865,6 +885,19 @@ impl PawCommander {
                     self.start_stoppable_job(ctx, label, description, move |progress| {
                         crate::archive::verify_archive(&archive, Some(password.as_str()), progress)
                     });
+                }
+                Dialog::CreateChecksumManifest {
+                    sources,
+                    directory,
+                    name,
+                } => {
+                    if let Ok(file) = fs_ops::checksum_manifest_name(&name) {
+                        let label = Command::CreateChecksumManifest.label();
+                        let description = format!("{label} · {}", directory.join(file));
+                        self.start_stoppable_job(ctx, label, description, move |progress| {
+                            fs_ops::create_checksum_manifest(&directory, &name, &sources, progress)
+                        });
+                    }
                 }
                 Dialog::ArchiveEdit {
                     archive,

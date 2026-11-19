@@ -545,6 +545,24 @@ impl Tab {
             .collect()
     }
 
+    pub(super) fn selected_file_count(&self, visible: &[usize]) -> Option<usize> {
+        if self.path.is_archive() {
+            return None;
+        }
+        let mut count = 0;
+        for entry in visible
+            .iter()
+            .map(|&index| &self.entries[index])
+            .filter(|entry| self.selected.contains(&entry.path))
+        {
+            if entry.is_dir || entry.is_symlink {
+                return None;
+            }
+            count += 1;
+        }
+        (count > 0).then_some(count)
+    }
+
     pub(super) fn remember_selection(&mut self, visible: &[usize]) {
         self.previous_selection = Some(
             visible

@@ -62,6 +62,7 @@ impl PawCommander {
         let can_quick_look = self.quick_look_entry(focused_file).is_some();
         let idle = !self.conflict_open();
         let writable = !tab.path.is_archive();
+        let file_count = tab.selected_file_count(&tab.visible(self.folder_view(self.active)));
         let outcome = palette.show(
             ctx,
             &self.settings.shortcuts,
@@ -94,6 +95,8 @@ impl PawCommander {
                     idle && (!writable || has_selection)
                         && self.archive_to_verify(&selected).is_some()
                 }
+                Command::CreateChecksumManifest => idle && has_selection && file_count.is_some(),
+                Command::VerifyChecksumManifest => idle && has_selection && file_count == Some(1),
                 Command::AddToArchive => {
                     idle && !writable && !self.archive_add_sources().is_empty()
                 }
