@@ -13,7 +13,6 @@ use eframe::egui::{Color32, RichText};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::mpsc;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 use zeroize::{Zeroize, Zeroizing};
@@ -194,13 +193,9 @@ impl Default for SftpForm {
     }
 }
 
+mod interactive_ssh;
 mod ssh_import;
-
-pub(super) struct ConnectionJob {
-    pub(super) pane: usize,
-    pub(super) save_profile: bool,
-    pub(super) result: Receiver<Result<Location, String>>,
-}
+pub(super) use interactive_ssh::ConnectionJob;
 
 impl PawCommander {
     pub(super) fn remember_dialog_file_focus(&mut self, ctx: &egui::Context) {
@@ -280,12 +275,16 @@ impl PawCommander {
     }
 
     pub(super) fn sftp_dialog(&mut self, ctx: &egui::Context) {
+        if let Some(job) = &mut self.connection {
+            job.show(ctx);
+            return;
+        }
         let colors = Palette::from_ctx(ctx);
         let Some(form) = &mut self.sftp_form else {
             return;
         };
         form.poll_ssh_config();
-        let busy = self.connection.is_some() || self.job.is_some();
+        let busy = self.job.is_some();
         let loading_config = form.ssh_config_job.is_some();
         let mut submit = false;
         let mut cancel = false;
@@ -333,13 +332,13 @@ impl PawCommander {
                     ui.text_edit_singleline(&mut form.path).labelled_by(label.id);
                     ui.end_row();
                     let label = ui.label(crate::i18n::text("Пароль"));
-                    ui.add(egui::TextEdit::singleline(&mut form.password).password(true)).labelled_by(label.id);
+                    interactive_ssh::answer_field(ui, &mut form.password, false).labelled_by(label.id);
                     ui.end_row();
                     let label = ui.label(crate::i18n::text("Приватный ключ"));
                     ui.add(egui::TextEdit::singleline(&mut form.key).hint_text(crate::i18n::text("Путь к ключу (необязательно)"))).labelled_by(label.id);
                     ui.end_row();
                     let label = ui.label(crate::i18n::text("Пароль ключа"));
-                    ui.add(egui::TextEdit::singleline(&mut form.passphrase).password(true)).labelled_by(label.id);
+                    interactive_ssh::answer_field(ui, &mut form.passphrase, false).labelled_by(label.id);
                     ui.end_row();
                 });
                 form.show_identity_files(ui);
@@ -367,26 +366,21 @@ impl PawCommander {
         if load_config {
             form.start_ssh_config(ctx, crate::ssh_config::load_user_config);
         } else if submit {
-            let endpoint = form.endpoint();
-            let path = form.path.clone();
-            let password = std::mem::take(&mut form.password);
-            let passphrase = std::mem::take(&mut form.passphrase);
-            form.error = None;
-            let (tx, rx) = mpsc::channel();
-            self.connection = Some(ConnectionJob {
-                pane: self.active,
-                save_profile: form.save_key,
-                result: rx,
-            });
-            let use_saved = form.use_saved;
-            let save_key = form.save_key;
-            let ctx = ctx.clone();
-            std::thread::spawn(move || {
-                let _ = tx.send(fs_ops::connect_location(
-                    endpoint, &path, password, passphrase, use_saved, save_key,
-                ));
-                ctx.request_repaint();
-            });
+            let request = crate::vfs::ConnectRequest {
+                endpoint: form.endpoint(),
+                path: form.path.clone(),
+                password: Zeroizing::new(std::mem::take(&mut form.password)),
+                passphrase: Zeroizing::new(std::mem::take(&mut form.passphrase)),
+                use_saved: form.use_saved,
+                save_key: form.save_key,
+            };
+            match ConnectionJob::launch(self.active, request, ctx) {
+                Ok(job) => {
+                    form.error = None;
+                    self.connection = Some(job);
+                }
+                Err(error) => form.error = Some(error),
+            }
         } else if cancel {
             self.sftp_form = None;
         } else if forget {
