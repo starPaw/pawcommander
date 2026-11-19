@@ -165,6 +165,8 @@ Enter a hostname or `Host` alias in **Server** and select **Load SSH alias** to 
 
 The form lists unsupported directives with line numbers, including `Include`, `Match`, and `ProxyJump`. **Connect directly** uses the displayed fields. Server keys are verified against `~/.ssh/known_hosts`, and unknown and changed keys are rejected. Connect with a password, a selected private key, or an SSH-agent key added with `ssh-add`.
 
+When a verified SFTP server requests keyboard-interactive authentication, the connection dialog displays its instructions and questions. This also works when the server asks for a second factor after authenticating a key. Enter the answers in order and choose **Send answers**. The dialog hides input for questions that request hidden answers and shows how much time remains to respond. Each round allows up to 60 seconds within a three-minute interactive exchange. **Cancel** or `Esc` ends the attempt. The dialog uses answers for the current SSH exchange only. [SSH keyboard-interactive authentication](https://www.rfc-editor.org/rfc/rfc4256#section-3)
+
 The address bar also accepts `sftp://user@example.com:22/path` with agent authentication or an existing connection. Passwords in URLs are rejected. Remote absolute and relative paths belong to the server; use a local sidebar location to return to local files.
 
 ### Saved keys and privacy

@@ -798,9 +798,12 @@ impl PawCommander {
             };
             if let Some(result) = result {
                 match result {
-                    Ok(location) => {
+                    Ok(crate::vfs::ConnectedLocation {
+                        location,
+                        saved_profile,
+                    }) => {
                         self.directory_tree.refresh();
-                        if job.save_profile {
+                        if saved_profile {
                             self.settings
                                 .sftp_profiles
                                 .retain(|p| match (p, &location) {

@@ -90,6 +90,8 @@ The active copy route selects the lowest nonzero transfer limit for its endpoint
 
 The SFTP form can resolve an alias with [`ssh_config.rs`](../src/ssh_config.rs) on a background worker. The importer reads a bounded user configuration file and reports unsupported directives without evaluating command or conditional blocks. The connection uses the reviewed endpoint fields and the existing known-host verification and authentication flow.
 
+The SFTP connection worker verifies the host key before negotiating authentication. Keyboard-interactive rounds travel to the active connection dialog through a channel. The worker waits for that round's replies with a deadline and uses a separate TCP handle to abort a cancelled or expired attempt. It releases the shutdown handle before publishing the session to the shared cache.
+
 Password-protected ZIP creation streams AES-256 to the same private staging file used for plain archives. Encrypted extraction matches the decoder's entry offsets and sizes against the bounded index and reads through EOF before publishing. The dialog passes the password directly to its queued work. The operation description, result history and recovery record use file locations and outcomes.
 
 Archive edits run through the file-operation queue. They check the resulting member paths, reuse the archive creation path for additions, and preserve retained ZIP payloads or intact TAR record ranges. The worker closes and validates the staged archive before handing it to the checked replacement and rollback flow.

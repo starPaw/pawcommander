@@ -35,6 +35,7 @@ mod bandwidth;
 mod cancellation;
 mod conflicts;
 mod history;
+mod interactive_ssh;
 mod local;
 mod location;
 mod pause;
