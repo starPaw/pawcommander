@@ -394,6 +394,7 @@ impl PawCommander {
             && self.quick_look.is_none()
             && self.dialog.is_none()
             && self.properties.is_none()
+            && self.comparison.is_none()
             && self.sftp_form.is_none()
             && !self.show_help
             && !self.show_history

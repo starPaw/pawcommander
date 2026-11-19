@@ -213,6 +213,12 @@ Select local items and use **Properties** or `Alt+Enter` to calculate their comb
 
 Properties show available dates and permissions for selected roots. Unix permissions, UID, and GID do not represent ACLs or effective access; Windows shows read-only state. Properties are read-only and are not available for SFTP. While counting, **Stop calculation** receives initial keyboard focus; press `Space` or `Enter` to stop. You can also close the window or press `Esc` to request cancellation. Results can be partial when files disappear or access fails. Cancellation does not interrupt a blocked OS call.
 
+## Compare folders
+
+Open the folders in the two panes and choose **Compare folders** from the command palette or the Settings menu. The comparison looks at exact relative names throughout both folder trees, including hidden files. Results show items present on one side, different files and type conflicts. **Show matches** includes the matching files and links. Unreadable folders appear as one error row for the affected branch.
+
+**Size and modified time** compares file sizes and modification times. Comparisons involving SFTP use whole seconds. **By contents** compares the SHA-256 hashes of equal-length files. The comparison treats each symbolic link as a single entry and compares its target path. Comparing is read-only. Use **Stop** to end the scan. The scanner supports up to 100,000 entries across both folders, 32 MiB of path data and 128 directory levels.
+
 ## SHA-256 manifests
 
 Select regular files in a local or SFTP folder and choose **Create SHA-256 manifest**. Enter a new filename to save their checksums in the same folder. The default is `SHA256SUMS`. The operation preserves existing files and publishes the manifest after reading all selected inputs. The output uses the [GNU checksum format](https://www.gnu.org/software/coreutils/manual/html_node/cksum-output-modes.html).

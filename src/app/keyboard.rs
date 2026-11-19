@@ -151,6 +151,7 @@ impl PawCommander {
             Command::VerifyArchive => Action::VerifyArchive,
             Command::CreateChecksumManifest => Action::CreateChecksumManifest,
             Command::VerifyChecksumManifest => Action::VerifyChecksumManifest,
+            Command::CompareFolders => Action::CompareFolders,
             Command::AddToArchive => Action::AddToArchive,
             Command::RemoveFromArchive => Action::RemoveFromArchive,
             Command::NewFolder => Action::NewFolder,
@@ -174,6 +175,7 @@ impl PawCommander {
             })
             || self.dialog.is_some()
             || self.properties.is_some()
+            || self.comparison.is_some()
             || self.conflict_open()
             || self.sftp_form.is_some()
             || self.show_help

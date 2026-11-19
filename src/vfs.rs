@@ -6,11 +6,13 @@ mod archive_edit;
 mod archive_extract;
 mod batch_rename;
 mod checksum;
+mod compare;
 mod cross_move;
 mod listing;
 mod location;
 mod mutations;
 mod preview;
+mod read_scope;
 mod retry;
 mod sftp;
 mod staged_file;
@@ -27,6 +29,7 @@ pub(crate) use checksum::{
     checksum_manifest_name, create_checksum_manifest, looks_like_checksum_manifest,
     verify_checksum_manifest,
 };
+pub(crate) use compare::{compare_folders, Comparison, ComparisonMode, ComparisonStatus};
 pub use listing::{
     read_automatic_directory, read_directory, visit_address_directory, visit_connected_directory,
     visit_directory, FileEntry,

@@ -38,6 +38,7 @@ pub enum Command {
     VerifyArchive,
     CreateChecksumManifest,
     VerifyChecksumManifest,
+    CompareFolders,
     AddToArchive,
     RemoveFromArchive,
     NewFolder,
@@ -51,7 +52,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Self; 40] = [
+    pub const ALL: [Self; 41] = [
         Self::EditPath,
         Self::Filter,
         Self::Search,
@@ -83,6 +84,7 @@ impl Command {
         Self::VerifyArchive,
         Self::CreateChecksumManifest,
         Self::VerifyChecksumManifest,
+        Self::CompareFolders,
         Self::AddToArchive,
         Self::RemoveFromArchive,
         Self::NewFolder,
@@ -127,6 +129,7 @@ impl Command {
             Self::VerifyArchive => "Проверить архив",
             Self::CreateChecksumManifest => "Создать манифест SHA-256",
             Self::VerifyChecksumManifest => "Проверить манифест SHA-256",
+            Self::CompareFolders => "Сравнить папки",
             Self::AddToArchive => "Добавить в архив",
             Self::RemoveFromArchive => "Удалить из архива",
             Self::NewFolder => "Создать папку",
@@ -222,7 +225,8 @@ impl Profile {
             | AddToArchive
             | RemoveFromArchive
             | CreateChecksumManifest
-            | VerifyChecksumManifest => return None,
+            | VerifyChecksumManifest
+            | CompareFolders => return None,
         };
         Some(Chord::new(modifiers, key))
     }

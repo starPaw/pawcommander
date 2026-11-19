@@ -1120,6 +1120,13 @@ fn openssh_round_trip_and_host_verification() {
         fs::create_dir(checksum_directory.path()).unwrap();
         super::super::checksum::checksum_round_trip(&checksum_directory);
         fs::remove_dir_all(checksum_directory.path()).unwrap();
+        let local_compare = tempfile::tempdir().unwrap();
+        let remote_compare = uploaded.join("comparison fixtures");
+        super::super::compare::comparison_round_trip(&[
+            local_compare.path().to_path_buf().into(),
+            remote_compare.clone(),
+        ]);
+        fs::remove_dir_all(remote_compare.path()).unwrap();
         let location = uploaded.join("hello world.txt");
         let mut destination = Vec::new();
         let cancel = crate::operations::Cancellation::default();

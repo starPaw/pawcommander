@@ -69,6 +69,7 @@ pub(super) enum Action {
     VerifyArchive,
     CreateChecksumManifest,
     VerifyChecksumManifest,
+    CompareFolders,
     AddToArchive,
     RemoveFromArchive,
     Trash,
@@ -534,6 +535,7 @@ impl PawCommander {
                     });
                 }
             }
+            Action::CompareFolders => self.open_directory_comparison(ctx),
             Action::Trash if !self.conflict_open() => {
                 let paths = self.selected();
                 if !paths.is_empty() {

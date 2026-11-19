@@ -171,6 +171,7 @@ impl PawCommander {
             #[cfg(any(target_os = "windows", test))]
             windows_drives: super::drives::WindowsDrives::default(),
             show_history: false,
+            comparison: None,
             shortcut_editor: None,
             command_palette: None,
             folder_jump: None,
