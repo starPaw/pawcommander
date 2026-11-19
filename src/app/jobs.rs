@@ -47,6 +47,7 @@ pub(super) struct TransferInteraction {
     pub(super) events: Receiver<TransferEvent>,
     pub(super) cut_generation: Option<u64>,
     pub(super) conflict: Option<Box<ConflictDialog>>,
+    pub(super) can_pause: bool,
 }
 
 pub(super) struct Job {
@@ -202,6 +203,7 @@ impl PawCommander {
                     events: receive,
                     cut_generation: None,
                     conflict: None,
+                    can_pause: false,
                 }),
                 cut: None,
                 retry_origin: None,
@@ -252,7 +254,11 @@ impl PawCommander {
             let (undo_send, undo_receive) = mpsc::channel();
             let undo_id = undo_origin.as_ref().map(|job| job.id.clone());
             let worker_ctx = ctx.clone();
-            let (mut reporter, progress) = Progress::tracked();
+            let (mut reporter, progress) = if transfer.as_ref().is_some_and(|job| job.can_pause) {
+                Progress::tracked_transfer()
+            } else {
+                Progress::tracked()
+            };
             let started = Instant::now();
             let history = self.history.sender();
             let history_label = label.clone();
@@ -583,6 +589,7 @@ impl PawCommander {
                     events: rx,
                     cut_generation,
                     conflict: None,
+                    can_pause: true,
                 }),
                 cut,
                 retry_origin,
@@ -673,6 +680,7 @@ impl PawCommander {
                     events,
                     cut_generation: None,
                     conflict: None,
+                    can_pause: false,
                 }),
                 cut: None,
                 retry_origin: None,

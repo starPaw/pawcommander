@@ -251,7 +251,7 @@ fn copy_verification_footer_distinguishes_reads_from_writes() {
     let mut output = None;
     for _ in 0..2 {
         output = Some(ctx.run_test_ui(egui::RawInput::default(), |ui| {
-            egui::CentralPanel::default().show(ui, |ui| operation_details(ui, &progress));
+            egui::CentralPanel::default().show(ui, |ui| operation_details(ui, &progress, false));
         }));
     }
     let text = operation_footer_text(&output.unwrap());
@@ -814,6 +814,7 @@ fn queue_active_notice_stays_bounded_and_keeps_stop_visible() {
         events,
         cut_generation: None,
         conflict: None,
+        can_pause: false,
     });
     app.notice = Some((
         (0..1000)
@@ -887,6 +888,7 @@ fn transfer_stop_button_keeps_pending_ownership_and_navigation_until_result() {
         events: receiver,
         cut_generation: None,
         conflict: None,
+        can_pause: false,
     });
     // A disconnected events channel precedes terminal-result publication.
     drop(events);
@@ -948,6 +950,116 @@ fn transfer_stop_button_keeps_pending_ownership_and_navigation_until_result() {
         app.notice,
         Some(("cleanup failed: /retained/private-staging".into(), true))
     );
+}
+
+#[test]
+fn transfer_pause_controls_resume_or_stop_the_active_job_before_the_queue_advances() {
+    use crate::operations::PauseState;
+    use std::fs;
+
+    for stop in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("file.txt");
+        let destination = root.path().join("destination");
+        let target = destination.join("file.txt");
+        fs::create_dir(&destination).unwrap();
+        fs::write(&source, b"new content").unwrap();
+        fs::write(&target, b"old content").unwrap();
+
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        app.start_transfer(
+            &ctx,
+            "copy to pause",
+            vec![source.clone().into()],
+            destination.into(),
+            TransferKind::Copy,
+            false,
+        );
+        poll_queue_until(&mut app, &ctx, PawCommander::conflict_open);
+        let (reached, boundary) = mpsc::channel();
+        let (release, checkpoint) = mpsc::channel();
+        let mut checkpoint = Some(checkpoint);
+        app.job
+            .as_ref()
+            .unwrap()
+            .progress
+            .cancel
+            .set_checkpoint(move || {
+                if let Some(checkpoint) = checkpoint.take() {
+                    reached.send(()).unwrap();
+                    checkpoint.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+                false
+            });
+        answer_queue_conflict(&mut app, &ctx, crate::i18n::text("Заменить"));
+        boundary.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        let pause_state =
+            |app: &PawCommander| app.job.as_ref().and_then(|job| job.progress.pause_state());
+        let click = |app: &mut PawCommander, label| {
+            operation_footer_frame(app, &ctx, vec![]);
+            let output = operation_footer_frame(app, &ctx, vec![]);
+            let pos = output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == label => {
+                        Some(text.pos + text.galley.size() * 0.5)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("Missing {label} in {}", operation_footer_text(&output)));
+            for pressed in [true, false] {
+                operation_footer_frame(
+                    app,
+                    &ctx,
+                    vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+        };
+        assert_eq!(pause_state(&app), Some(PauseState::Running));
+        click(&mut app, "Pause");
+        assert_eq!(pause_state(&app), Some(PauseState::Requested));
+        let waiting = operation_footer_frame(&mut app, &ctx, vec![]);
+        assert!(operation_footer_text(&waiting).contains("Pausing transfer…"));
+        release.send(()).unwrap();
+        poll_queue_until(&mut app, &ctx, |app| {
+            pause_state(app) == Some(PauseState::Paused)
+        });
+        let paused = operation_footer_frame(&mut app, &ctx, vec![]);
+        assert!(operation_footer_text(&paused).contains("Transfer paused"));
+
+        let queued_target = target.clone();
+        let (started, observed) = mpsc::channel();
+        app.start_progress_job(&ctx, "queued observer", move |_| {
+            started.send(fs::read(queued_target).unwrap()).unwrap();
+            Ok("observed".into())
+        });
+        app.poll(&ctx);
+        assert!(matches!(
+            observed.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        assert_eq!(app.pending_jobs.len(), 1);
+        click(&mut app, if stop { "Stop" } else { "Resume" });
+        poll_queue_until(&mut app, &ctx, |app| {
+            app.job.is_none() && app.pending_jobs.is_empty()
+        });
+        let transferred = observed.recv_timeout(Duration::from_secs(5)).unwrap();
+        let expected = if stop { b"old content" } else { b"new content" };
+        assert_eq!(transferred, expected);
+        assert_eq!(fs::read(source).unwrap(), b"new content");
+    }
 }
 
 #[test]
@@ -1075,6 +1187,7 @@ fn late_stop_keeps_final_success_and_consumes_committed_cut_events() {
         events: receiver,
         cut_generation: Some(generation),
         conflict: None,
+        can_pause: false,
     });
     let (next_started, next_observed) = mpsc::channel();
     let (next_release, next_wait) = mpsc::channel();

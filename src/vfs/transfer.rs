@@ -227,7 +227,7 @@ pub(super) fn transfer_plan(
         let guard_source = cfg!(target_os = "macos") && kind == TransferKind::Move;
         let plan = fs_ops::plan_transfer(&paths, dest, progress)?;
         for item in &plan {
-            progress.check_cancelled()?;
+            progress.checkpoint()?;
             if kind == TransferKind::Move && item.source == item.target {
                 return Err(crate::i18n::text("Элементы уже находятся в этой папке").into());
             }
@@ -253,7 +253,7 @@ pub(super) fn transfer_plan(
     let mut names = HashSet::new();
     let mut plan = Vec::new();
     for source in sources {
-        progress.check_cancelled()?;
+        progress.checkpoint()?;
         progress.item(source.path());
         let name = source
             .path()
@@ -382,13 +382,13 @@ pub(super) fn transfer_run(
     mut moved: impl FnMut(&Location, &[PathBuf]),
     summary: &mut TransferSummary,
 ) -> Result<(), TransferError> {
-    progress.check_cancelled()?;
+    progress.checkpoint()?;
     let plan = transfer_plan(sources, destination, kind, progress)?;
     progress.results.plan(
         plan.iter()
             .map(|item| (item.original.clone(), Some(item.target.display()))),
     );
-    let retry_cancel = progress.cancellation();
+    let retry_cancel = progress.cancellation().pausable_scan();
     if let Some(retry) = &mut progress.retry {
         retry.prepare(&plan, &retry_cancel)?;
     }
@@ -399,7 +399,7 @@ pub(super) fn transfer_run(
     let targets = plan
         .iter()
         .map(|item| {
-            cancel.check()?;
+            progress.checkpoint()?;
             progress.item(item.original.path());
             if kind == TransferKind::Move && item.source == item.target {
                 return Err(crate::i18n::text("Элементы уже находятся в этой папке").into());
@@ -412,7 +412,7 @@ pub(super) fn transfer_run(
     let mut group = None;
     let mut ready = Vec::with_capacity(plan.len());
     for (mut item, target_meta) in plan.into_iter().zip(targets) {
-        cancel.check()?;
+        progress.checkpoint()?;
         progress.results.begin(&item.original);
         if let Some(target_meta) = target_meta {
             progress.item(item.original.path());
@@ -483,7 +483,7 @@ pub(super) fn transfer_run(
         progress.results.clear_active();
     }
     for item in ready {
-        cancel.check()?;
+        progress.checkpoint()?;
         progress.results.begin(&item.original);
         progress.item(item.source.path());
         if let Some(retry) = &progress.retry {
@@ -500,13 +500,14 @@ pub(super) fn transfer_run(
             )
             .into());
         }
-        cancel.check()?;
+        progress.checkpoint()?;
         let copy_move = kind == TransferKind::Move && super::cross_move::required(&item)?;
         let mut history_warning = None;
         let move_manifest = if kind == TransferKind::Move && !copy_move {
+            let scan = cancel.clone().pausable_scan();
             let captured = TransferSourceManifest::capture_move_observed(
                 &item.source,
-                &cancel,
+                &scan,
                 &mut |source, error| {
                     if let Some(error) = error {
                         progress.results.staged(
@@ -801,10 +802,11 @@ pub(super) fn copy_transfer_cancellable(
     observe: &mut impl FnMut(&Location, CopyPhase) -> Result<(), String>,
     published: impl FnOnce(),
 ) -> Result<(), TransferError> {
-    progress.check_cancelled()?;
+    progress.checkpoint()?;
     let cancel = progress.cancellation();
+    let scan = cancel.clone().pausable_scan();
     let manifest =
-        TransferSourceManifest::capture_observed(&item.source, &cancel, &mut |source, error| {
+        TransferSourceManifest::capture_observed(&item.source, &scan, &mut |source, error| {
             if let Some(error) = error {
                 progress.results.staged(
                     source,
@@ -827,11 +829,11 @@ pub(super) fn copy_transfer_cancellable(
                 .map(|entry| &entry.metadata),
         )?;
     }
-    cancel.check()?;
+    progress.checkpoint()?;
     with_staging_typed(&item.target, Some(&cancel), |staging, preserve| {
         // Finish the probe handle lifecycle before checking cancellation.
         check_copy_space(manifest.bytes, &item.target, staging)?;
-        cancel.check()?;
+        progress.checkpoint()?;
         let payload = staging.join("payload");
         copy_tree(
             &item.source,
@@ -841,6 +843,7 @@ pub(super) fn copy_transfer_cancellable(
             &manifest,
             observe,
         )?;
+        progress.checkpoint()?;
         manifest.verify(&cancel, |source, error| {
             progress.results.staged(
                 source,
@@ -1670,7 +1673,7 @@ pub(super) fn copy_tree_entry(
     manifest: &TransferSourceManifest,
     observe: &mut impl FnMut(&Location, CopyPhase) -> Result<(), String>,
 ) -> Result<(), TransferError> {
-    progress.check_cancelled()?;
+    progress.checkpoint()?;
     progress.item(source.path());
     let cancel = progress.cancellation();
     let entry = manifest

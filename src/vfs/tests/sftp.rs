@@ -1299,6 +1299,20 @@ fn openssh_round_trip_and_host_verification() {
             .starts_with(".pawcommander-transfer-")
     }));
     check_sftp_cancellation(&local_root, &remote_root);
+    super::pause::check_copy_pause(
+        &local_root,
+        &remote_root,
+        "pause-upload",
+        super::pause::PauseAction::Resume,
+        true,
+    );
+    super::pause::check_copy_pause(
+        &remote_root,
+        &local_root,
+        "pause-download",
+        super::pause::PauseAction::Stop,
+        false,
+    );
     check_sftp_retry(&local_root, &remote_root);
     check_cross_connection_partial_move(&local_root, &remote_root);
     check_sftp_copy_hash_verification(&local_root, &remote_root);

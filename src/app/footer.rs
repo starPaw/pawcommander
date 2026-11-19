@@ -1,10 +1,11 @@
 use super::PawCommander;
+use crate::operations::{PauseState, Snapshot};
 use crate::theme::{paint_focus, Palette};
 use eframe::egui;
 use eframe::egui::RichText;
 use std::time::Instant;
 
-pub(super) fn operation_details(ui: &mut egui::Ui, progress: &crate::operations::Snapshot) {
+pub(super) fn operation_details(ui: &mut egui::Ui, progress: &Snapshot, paused: bool) {
     if let Some(item) = &progress.item {
         let name = item.file_name().map_or_else(
             || item.display().to_string(),
@@ -54,14 +55,14 @@ pub(super) fn operation_details(ui: &mut egui::Ui, progress: &crate::operations:
                     "Written: {written}"
                 ));
             }
-            if let Some(speed) = transfer.bytes_per_second(now) {
+            if !paused && let Some(speed) = transfer.bytes_per_second(now) {
                 ui.label(crate::tr_format!(
                     "{}/с",
                     "{}/s",
                     human_size(speed.round() as u64)
                 ));
             }
-            if let Some(seconds) = transfer.remaining_seconds(now) {
+            if !paused && let Some(seconds) = transfer.remaining_seconds(now) {
                 let time = if seconds < 60 {
                     crate::tr_format!("{seconds} с", "{seconds} s")
                 } else {
@@ -77,7 +78,7 @@ pub(super) fn operation_details(ui: &mut egui::Ui, progress: &crate::operations:
                     "File remaining: ≈ {time}"
                 ));
             }
-            if transfer.stream_finished {
+            if !paused && transfer.stream_finished {
                 ui.label(crate::i18n::text("Завершение записи…"));
             }
         });
@@ -116,6 +117,8 @@ impl PawCommander {
         let ctx = &ui.ctx().clone();
         let colors = Palette::from_ctx(ctx);
         let mut stop_requested = false;
+        let mut pause_requested = None;
+        let conflict_open = self.conflict_open();
         let mut archive_add_requested = false;
         let history_error = self.history.error.is_some();
         let history_button = |ui: &mut egui::Ui| {
@@ -134,17 +137,36 @@ impl PawCommander {
             )
             .show(ui, |ui| {
                 if let Some(job) = &mut self.job {
-                    ui.horizontal(|ui| {
+                    let stopping = job.progress.cancel.is_requested();
+                    let pause = job.progress.pause_state();
+                    let paused = pause == Some(PauseState::Paused);
+                    ui.horizontal_wrapped(|ui| {
                         self.show_history |= history_button(ui);
-                        ui.spinner();
+                        ui.add_visible(!paused || stopping, egui::Spinner::new());
                         ui.label(crate::tr_format!(
                             "Файловые операции: {} · {} с",
                             "File operations: {} · {} s",
                             job.label,
                             job.started.elapsed().as_secs()
                         ));
+                        if let Some(pause) = pause
+                            && !stopping
+                        {
+                            let running = pause == PauseState::Running;
+                            let response = ui.add_enabled(
+                                !conflict_open,
+                                egui::Button::new(crate::i18n::text(if running {
+                                    "Пауза"
+                                } else {
+                                    "Продолжить"
+                                })),
+                            );
+                            paint_focus(ui, &response, 5);
+                            if response.clicked() {
+                                pause_requested = Some(running);
+                            }
+                        }
                         if self.transfer.is_some() {
-                            let stopping = job.progress.cancel.is_requested();
                             let response = ui
                                 .add_enabled(
                                     !stopping,
@@ -160,8 +182,19 @@ impl PawCommander {
                             paint_focus(ui, &response, 5);
                             stop_requested = response.clicked();
                         }
+                        if !stopping {
+                            match pause {
+                                Some(PauseState::Requested) => {
+                                    ui.label(crate::i18n::text("Приостанавливаем передачу…"));
+                                }
+                                Some(PauseState::Paused) => {
+                                    ui.label(crate::i18n::text("Передача приостановлена"));
+                                }
+                                _ => {}
+                            }
+                        }
                     });
-                    operation_details(ui, job.progress.snapshot());
+                    operation_details(ui, job.progress.snapshot(), paused);
                     if let Some((message, _)) = &self.notice {
                         egui::ScrollArea::vertical()
                             .id_salt("active_operation_notice")
@@ -241,6 +274,9 @@ impl PawCommander {
             });
         if stop_requested {
             self.request_transfer_stop(ctx);
+        } else if let (Some(paused), Some(job)) = (pause_requested, &self.job) {
+            job.progress.set_paused(paused);
+            ctx.request_repaint();
         }
         if archive_add_requested {
             self.action(super::actions::Action::AddToArchive, ctx);

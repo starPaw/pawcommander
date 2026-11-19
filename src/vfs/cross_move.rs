@@ -156,7 +156,7 @@ fn verify_file_pair(
         return Err(changed(target).into());
     }
     progress
-        .verify_copy(displayed_source.path(), size, digest, &mut output)
+        .verify_copy_before_source_removal(displayed_source.path(), size, digest, &mut output)
         .map_err(|error| TransferError::io(error, err))?;
     if !copied.matches_moved_target(&output.metadata()?) {
         return Err(changed(target).into());
@@ -199,8 +199,9 @@ pub(super) fn run(
     observe: &mut impl FnMut(&Location, Phase) -> Result<(), TransferError>,
 ) -> Result<(), TransferError> {
     let cancel = progress.cancellation();
+    let scan = cancel.clone().pausable_scan();
     let manifest =
-        TransferSourceManifest::capture_move_observed(&item.source, &cancel, &mut |_, _| {})?;
+        TransferSourceManifest::capture_move_observed(&item.source, &scan, &mut |_, _| {})?;
     let mut links = BTreeMap::<Location, PathBuf>::new();
     for (path, entry) in &manifest.entries {
         if entry.children.is_none() && !entry.metadata.is_file() {
@@ -236,6 +237,7 @@ pub(super) fn run(
     let mut fully_removed = false;
     let result = result.and_then(|()| {
         observe(&item.source, Phase::Copied)?;
+        progress.checkpoint()?;
         manifest.verify(&cancel, |_, _| {})?;
         let target_manifest =
             TransferSourceManifest::capture_move_observed(&item.target, &cancel, &mut |_, _| {})?;
