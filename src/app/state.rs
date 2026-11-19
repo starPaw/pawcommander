@@ -25,6 +25,8 @@ pub(super) struct Settings {
     pub(super) verify_copies: bool,
     pub(super) transfer_limits: crate::operations::TransferLimits,
     pub(super) diff_tool: String,
+    #[cfg(target_os = "macos")]
+    pub(super) custom_actions: Vec<crate::tools::custom_action::Template>,
     pub(super) hidden: bool,
     pub(super) grid: bool,
     pub(super) pane_grid: Option<[bool; 2]>,
@@ -190,6 +192,8 @@ impl Default for Settings {
             verify_copies: false,
             transfer_limits: Default::default(),
             diff_tool: String::new(),
+            #[cfg(target_os = "macos")]
+            custom_actions: Vec::new(),
             hidden: false,
             grid: false,
             pane_grid: None,

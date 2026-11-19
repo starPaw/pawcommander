@@ -7,6 +7,8 @@ mod bookmarks;
 mod clipboard;
 mod column_view;
 mod comparison;
+#[cfg(target_os = "macos")]
+mod custom_actions;
 mod dialogs;
 mod directory;
 mod directory_compare;

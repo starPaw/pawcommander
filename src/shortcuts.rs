@@ -32,6 +32,8 @@ pub enum Command {
     EditInZed,
     OpenTerminal,
     OpenEmbeddedTerminal,
+    #[cfg(target_os = "macos")]
+    CustomActions,
     Refresh,
     Properties,
     ChangePermissions,
@@ -56,7 +58,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Self; 43 + 2 * cfg!(target_os = "macos") as usize] = [
+    pub const ALL: [Self; 43 + 3 * cfg!(target_os = "macos") as usize] = [
         Self::EditPath,
         Self::Filter,
         Self::Search,
@@ -84,6 +86,8 @@ impl Command {
         Self::OpenTerminal,
         #[cfg(target_os = "macos")]
         Self::OpenEmbeddedTerminal,
+        #[cfg(target_os = "macos")]
+        Self::CustomActions,
         Self::Refresh,
         Self::Properties,
         Self::ChangePermissions,
@@ -133,6 +137,8 @@ impl Command {
             Self::EditInZed => "Открыть в Zed",
             Self::OpenTerminal => "Открыть терминал здесь",
             Self::OpenEmbeddedTerminal => "Открыть встроенный терминал",
+            #[cfg(target_os = "macos")]
+            Self::CustomActions => "Пользовательские действия",
             Self::Refresh => "Обновить",
             Self::Properties => "Свойства",
             Self::ChangePermissions => "Изменить права доступа",
@@ -223,6 +229,8 @@ impl Profile {
             FocusToolbar => (Modifiers::NONE, Key::F10),
             Palette => (CMD_SHIFT, Key::P),
             FolderJump => (CMD_SHIFT, Key::J),
+            #[cfg(target_os = "macos")]
+            CustomActions => return None,
             Preview
             | EditInZed
             | OpenTerminal

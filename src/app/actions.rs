@@ -12,6 +12,8 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
+type ApplicationReporter = Box<dyn FnOnce(Result<String, String>) + Send>;
+
 #[derive(Clone)]
 pub(super) enum ColumnNavigation {
     Left,
@@ -52,6 +54,10 @@ pub(super) enum Action {
     OpenInZed(usize, Location),
     OpenTerminal(Location),
     OpenEmbeddedTerminal(Location),
+    #[cfg(target_os = "macos")]
+    ManageCustomActions,
+    #[cfg(target_os = "macos")]
+    CustomActions,
     Back,
     Forward,
     History(usize, isize),
@@ -162,7 +168,7 @@ impl PawCommander {
         self.launch_application(
             ctx,
             crate::i18n::text("Открытие файла в Zed…"),
-            move || crate::zed::open(&path, text_only),
+            move |report| report(crate::zed::open(&path, text_only)),
         );
     }
 
@@ -170,7 +176,7 @@ impl PawCommander {
         &mut self,
         ctx: &egui::Context,
         status: &str,
-        launch: impl FnOnce() -> Result<String, String> + Send + 'static,
+        launch: impl FnOnce(ApplicationReporter) + Send + 'static,
     ) {
         if self.application_job.is_some() {
             return;
@@ -178,8 +184,10 @@ impl PawCommander {
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
         match std::thread::Builder::new().spawn(move || {
-            let _ = tx.send(launch());
-            ctx.request_repaint();
+            launch(Box::new(move |result| {
+                let _ = tx.send(result);
+                ctx.request_repaint();
+            }));
         }) {
             Ok(_) => {
                 self.application_job = Some(rx);
@@ -195,6 +203,19 @@ impl PawCommander {
                 ));
             }
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn launch_custom_action(
+        &mut self,
+        invocation: crate::tools::custom_action::Invocation,
+        ctx: &egui::Context,
+    ) {
+        self.launch_application(
+            ctx,
+            crate::i18n::text("Запуск пользовательского действия…"),
+            move |report| invocation.launch(report),
+        );
     }
 
     pub(super) fn action(&mut self, action: Action, ctx: &egui::Context) {
@@ -350,8 +371,48 @@ impl PawCommander {
                 self.launch_application(
                     ctx,
                     crate::i18n::text("Открытие терминала…"),
-                    move || crate::terminal::open(&folder),
+                    move |report| report(crate::terminal::open(&folder)),
                 );
+            }
+            #[cfg(target_os = "macos")]
+            Action::ManageCustomActions => {
+                self.remember_dialog_file_focus(ctx);
+                self.dialog = Some(Dialog::EditCustomActions(Box::new(
+                    super::custom_actions::Editor::new(self.settings.custom_actions.clone()),
+                )));
+                self.dialog_focus = true;
+            }
+            #[cfg(target_os = "macos")]
+            Action::CustomActions => {
+                let Some(folder) = self.tab().path.local().map(Path::to_owned) else {
+                    return;
+                };
+                let Some(files) = self
+                    .selected()
+                    .into_iter()
+                    .map(|location| match location {
+                        Location::Local(path) => Some(path),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<_>>>()
+                    .filter(|files| !files.is_empty())
+                else {
+                    return;
+                };
+                self.remember_dialog_file_focus(ctx);
+                self.dialog = Some(
+                    match super::custom_actions::Preview::new(
+                        folder,
+                        files,
+                        self.settings.custom_actions.clone(),
+                    ) {
+                        Some(preview) => Dialog::RunCustomAction(Box::new(preview)),
+                        None => Dialog::EditCustomActions(Box::new(
+                            super::custom_actions::Editor::new(Vec::new()),
+                        )),
+                    },
+                );
+                self.dialog_focus = true;
             }
             Action::OpenEmbeddedTerminal(folder) => {
                 if !crate::terminal::available(&folder) {

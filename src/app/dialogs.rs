@@ -73,6 +73,10 @@ pub(super) enum Dialog {
     },
     BatchRename(Box<BatchRenameDialog>),
     ChangePermissions(Box<PermissionsDialog>),
+    #[cfg(target_os = "macos")]
+    EditCustomActions(Box<super::custom_actions::Editor>),
+    #[cfg(target_os = "macos")]
+    RunCustomAction(Box<super::custom_actions::Preview>),
     CreateArchive {
         sources: Vec<Location>,
         directory: Location,
@@ -430,6 +434,10 @@ impl PawCommander {
             Dialog::Rename { .. } => crate::i18n::text("Переименовать"),
             Dialog::BatchRename(_) => crate::i18n::text("Массовое переименование"),
             Dialog::ChangePermissions(_) => Command::ChangePermissions.label(),
+            #[cfg(target_os = "macos")]
+            Dialog::EditCustomActions(_) => Command::CustomActions.label(),
+            #[cfg(target_os = "macos")]
+            Dialog::RunCustomAction(_) => crate::i18n::text("Предпросмотр запуска"),
             Dialog::CreateArchive { .. } => Command::CreateArchive.label(),
             Dialog::ExtractArchive { .. } => Command::ExtractArchive.label(),
             Dialog::VerifyArchive { .. } => Command::VerifyArchive.label(),
@@ -452,7 +460,13 @@ impl PawCommander {
         };
         // The modal blocks file interactions while a concrete destination is being confirmed.
         egui::Modal::new(egui::Id::unique("file_dialog")).show(ctx, |ui| {
-            ui.set_width(if matches!(dialog, Dialog::BatchRename(_) | Dialog::ChangePermissions(_)) { 605.0 } else { 430.0 });
+            let width: f32 = match &dialog {
+                Dialog::BatchRename(_) | Dialog::ChangePermissions(_) => 605.0,
+                #[cfg(target_os = "macos")]
+                Dialog::EditCustomActions(_) | Dialog::RunCustomAction(_) => 605.0,
+                _ => 430.0,
+            };
+            ui.set_width(width);
             ui.heading(title);
             ui.add_space(12.0);
             match &mut dialog {
@@ -515,6 +529,10 @@ impl PawCommander {
                 }
                 Dialog::BatchRename(editor) => editor.show(ui, self.dialog_focus),
                 Dialog::ChangePermissions(editor) => editor.show(ui, self.dialog_focus),
+                #[cfg(target_os = "macos")]
+                Dialog::EditCustomActions(editor) => editor.show(ui, self.dialog_focus),
+                #[cfg(target_os = "macos")]
+                Dialog::RunCustomAction(preview) => preview.show(ui),
                 Dialog::CreateChecksumManifest { sources, directory, name } => {
                     ui.label(crate::tr_format!("Выбрано файлов: {}", "Selected files: {}", sources.len()));
                     let label = ui.label(crate::i18n::text("Имя манифеста"));
@@ -672,6 +690,10 @@ impl PawCommander {
                 }
                 Dialog::BatchRename(editor) => editor.can_apply(),
                 Dialog::ChangePermissions(editor) => editor.can_apply(),
+                #[cfg(target_os = "macos")]
+                Dialog::EditCustomActions(editor) => editor.can_save(),
+                #[cfg(target_os = "macos")]
+                Dialog::RunCustomAction(preview) => preview.can_run() && self.application_job.is_none(),
                 Dialog::CreateChecksumManifest { name, .. } => fs_ops::checksum_manifest_name(name).is_ok(),
                 Dialog::CreateArchive { name, format, .. } => fs_ops::archive_file_name(name, *format).is_ok(),
                 Dialog::ExtractArchive { address, archive_directory, other, .. } => extraction_destination(address, archive_directory, other.as_ref()).is_ok(),
@@ -686,6 +708,10 @@ impl PawCommander {
             ui.horizontal(|ui| {
                 let cancel_button = ui.button(crate::i18n::text("Отмена"));
                 if self.dialog_focus && matches!(dialog, Dialog::Trash { .. }) {
+                    cancel_button.request_focus();
+                }
+                #[cfg(target_os = "macos")]
+                if self.dialog_focus && matches!(dialog, Dialog::RunCustomAction(_)) {
                     cancel_button.request_focus();
                 }
                 cancel = cancel_button.clicked();
@@ -710,7 +736,11 @@ impl PawCommander {
                         ArchiveEdit::Remove(_) => "Удалить",
                     })
                 } else {
-                    crate::i18n::text("Сохранить")
+                    crate::i18n::text(match &dialog {
+                        #[cfg(target_os = "macos")]
+                        Dialog::RunCustomAction(_) => "Запустить",
+                        _ => "Сохранить",
+                    })
                 };
                 let button = if self.settings.high_contrast {
                     egui::Button::new(label)
@@ -722,6 +752,8 @@ impl PawCommander {
             });
             let submit_on_enter = match dialog {
                 Dialog::TransferLimits { .. } | Dialog::Trash { .. } | Dialog::BatchRename(_) | Dialog::ChangePermissions(_) | Dialog::CreateArchive { .. } | Dialog::ExtractArchive { .. } | Dialog::VerifyArchive { .. } | Dialog::ArchiveEdit { .. } => false,
+                #[cfg(target_os = "macos")]
+                Dialog::EditCustomActions(_) | Dialog::RunCustomAction(_) => false,
                 // The Enter that opens the dialog belongs to its sidebar control.
                 Dialog::WorkspaceName { .. } | Dialog::SelectionRule { .. } | Dialog::CreateChecksumManifest { .. } => !self.dialog_focus,
                 _ => true,
@@ -734,7 +766,13 @@ impl PawCommander {
                 cancel = true;
             }
         });
-        if matches!(dialog, Dialog::SelectionRule { .. }) && (confirm || cancel) {
+        let guard_close_key = match dialog {
+            Dialog::SelectionRule { .. } => true,
+            #[cfg(target_os = "macos")]
+            Dialog::EditCustomActions(_) | Dialog::RunCustomAction(_) => true,
+            _ => false,
+        };
+        if guard_close_key && (confirm || cancel) {
             let key = if cancel {
                 egui::Key::Escape
             } else {
@@ -798,6 +836,16 @@ impl PawCommander {
             match dialog {
                 Dialog::TransferLimits { draft, .. } => self.apply_transfer_limits(draft, ctx),
                 Dialog::SelectionRule { .. } => unreachable!("rule handled above"),
+                #[cfg(target_os = "macos")]
+                Dialog::EditCustomActions(editor) => {
+                    self.settings.custom_actions = editor.into_templates();
+                }
+                #[cfg(target_os = "macos")]
+                Dialog::RunCustomAction(preview) => {
+                    if let Some(invocation) = preview.into_invocation() {
+                        self.launch_custom_action(invocation, ctx);
+                    }
+                }
                 Dialog::NewFolder { parent, name } => self.start_described_job(
                     ctx,
                     crate::i18n::text("Создание папки"),

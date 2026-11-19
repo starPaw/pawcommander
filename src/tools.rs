@@ -1,5 +1,8 @@
-//! Locate optional executables without invoking a shell or running them.
+//! Locate optional tools and hand off explicit application launches.
+#[cfg(target_os = "macos")]
+pub(crate) mod custom_action;
 mod diff;
+mod launch;
 
 use std::path::{Path, PathBuf};
 
