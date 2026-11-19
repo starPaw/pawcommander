@@ -2,6 +2,7 @@ mod reader;
 mod view;
 mod worker;
 
+use super::encoding::Codec;
 pub(super) use view::Document;
 #[cfg(test)]
 pub(crate) use worker::check_sftp_large_text;
@@ -15,19 +16,19 @@ struct Position {
 impl Position {
     const START: Self = Self { byte: 0, line: 1 };
 
-    fn after(self, bytes: &[u8]) -> Self {
+    fn after(self, bytes: &[u8], encoding: Codec) -> Self {
         Self {
             byte: self.byte + bytes.len() as u64,
-            line: self.line + memchr::memchr_iter(b'\n', bytes).count() as u64,
+            line: self.line + encoding.line_breaks(bytes).count() as u64,
         }
     }
 
-    fn before(self, bytes: &[u8]) -> Self {
+    fn before(self, bytes: &[u8], encoding: Codec) -> Self {
         Self {
             byte: self.byte - bytes.len() as u64,
             line: self
                 .line
-                .saturating_sub(memchr::memchr_iter(b'\n', bytes).count() as u64)
+                .saturating_sub(encoding.line_breaks(bytes).count() as u64)
                 .max(1),
         }
     }

@@ -1,6 +1,6 @@
 use super::{
     worker::{Page, Pending, ResultPage, Work, Worker},
-    Direction, Position, QUERY_CHARS,
+    Codec, Direction, Position, QUERY_CHARS,
 };
 use crate::{
     i18n::text,
@@ -13,18 +13,28 @@ use eframe::egui;
 pub(in crate::preview) struct Document {
     location: Location,
     markup: Option<markup::Document>,
+    encoding: Codec,
     source: bool,
     viewer: Option<Result<Viewer, String>>,
 }
 
 impl Document {
-    pub(in crate::preview) fn new(location: Location, markup: Option<markup::Document>) -> Self {
+    pub(in crate::preview) fn new(
+        location: Location,
+        markup: Option<markup::Document>,
+        encoding: Codec,
+    ) -> Self {
         Self {
             location,
             source: markup.is_none(),
             markup,
+            encoding,
             viewer: None,
         }
+    }
+
+    pub(in crate::preview) fn encoding(&self) -> Codec {
+        self.encoding
     }
 
     pub(in crate::preview) fn show(&mut self, ui: &mut egui::Ui) {
@@ -47,7 +57,7 @@ impl Document {
         }
         let viewer = self
             .viewer
-            .get_or_insert_with(|| Viewer::new(self.location.clone(), ui.ctx()));
+            .get_or_insert_with(|| Viewer::new(self.location.clone(), self.encoding, ui.ctx()));
         match viewer {
             Ok(viewer) => viewer.show(ui),
             Err(error) => {
@@ -69,7 +79,7 @@ struct Viewer {
     version: Option<Version>,
     pending: Option<Pending>,
     searching: bool,
-    page: Option<Page>,
+    page: Option<Box<Page>>,
     reset_page: bool,
     query: String,
     line: String,
@@ -79,8 +89,8 @@ struct Viewer {
 }
 
 impl Viewer {
-    fn new(location: Location, ctx: &egui::Context) -> Result<Self, String> {
-        let worker = Worker::start(location, ctx)?;
+    fn new(location: Location, encoding: Codec, ctx: &egui::Context) -> Result<Self, String> {
+        let worker = Worker::start(location, encoding, ctx)?;
         let pending = worker.load(
             Work::Page {
                 index: 0,
@@ -121,17 +131,10 @@ impl Viewer {
         }
         let mut editor = egui::Id::NULL;
         if let Some(page) = &mut self.page {
-            let match_range = page
-                .hit
-                .and_then(|hit| page.text.local_range(hit.start.byte..hit.end.byte));
-            let jump_to = page.jump.take().and_then(|byte| {
-                let byte = byte.max(page.text.origin);
-                page.text.local_range(byte..byte).map(|range| range.start)
-            });
             let highlights = Highlights {
-                ranges: match_range.as_slice(),
+                ranges: page.hit_range.as_slice(),
                 current: 0,
-                jump_to,
+                jump_to: page.jump.take(),
             };
             ui.separator();
             let reset = std::mem::take(&mut self.reset_page);
@@ -238,6 +241,7 @@ impl Viewer {
                     self.notice = None;
                     if let Some(page) = self.page.as_mut() {
                         page.hit = None;
+                        page.hit_range = None;
                     }
                     if self.searching {
                         self.pending = None;
@@ -362,7 +366,8 @@ mod tests {
             }
         }
         let ctx = egui::Context::default();
-        let mut document = Document::new(Location::Local(file.path().to_owned()), None);
+        let mut document =
+            Document::new(Location::Local(file.path().to_owned()), None, Codec::Utf8);
         let draw = |document: &mut Document, events| {
             ctx.run_test_ui(
                 egui::RawInput {

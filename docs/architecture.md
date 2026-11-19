@@ -22,7 +22,8 @@ PawCommander is a single Rust binary using eframe/egui. Start at the module that
 | PDF preview on macOS | [`preview/pdf.rs`](../src/preview/pdf.rs), [`preview/pdf/view.rs`](../src/preview/pdf/view.rs) | `preview/pdf/protocol.rs`, `preview/pdf/worker.rs`, `preview/pdf/macos.m` |
 | Audio and video preview on macOS | [`preview/media.rs`](../src/preview/media.rs), [`preview/media/view.rs`](../src/preview/media/view.rs) | `preview/media/session.rs`, `preview/media/worker.rs`, `preview/media/macos.m`, `vfs/preview.rs` |
 | CSV and TSV preview | [`preview/table.rs`](../src/preview/table.rs), [`preview/table/view.rs`](../src/preview/table/view.rs) | `preview/table/records.rs`, `preview/table/worker.rs`, `vfs/preview.rs` |
-| Large UTF-8 text preview | [`preview/large_text.rs`](../src/preview/large_text.rs), [`preview/large_text/view.rs`](../src/preview/large_text/view.rs) | `preview/large_text/reader.rs`, `preview/large_text/worker.rs`, `preview/source.rs` |
+| Large text preview | [`preview/large_text.rs`](../src/preview/large_text.rs), [`preview/large_text/view.rs`](../src/preview/large_text/view.rs) | `preview/large_text/reader.rs`, `preview/large_text/worker.rs`, `preview/source.rs` |
+| Preview encoding | [`preview/encoding.rs`](../src/preview/encoding.rs) | Text and table workers share encoding selection and decoding |
 | Search and result actions | [`search.rs`](../src/search.rs), [`search/panel.rs`](../src/search/panel.rs), [`app/search.rs`](../src/app/search.rs) | `search/{content,directory,filters,index,saved}.rs`, `name_match.rs` |
 | ZIP/TAR browsing | [`archive.rs`](../src/archive.rs) | `vfs/location.rs`, `app/tabs.rs` |
 | ZIP/TAR creation | [`archive/writer.rs`](../src/archive/writer.rs), [`vfs/archive_create.rs`](../src/vfs/archive_create.rs) | `app/dialogs.rs`, `operations.rs` |
@@ -62,7 +63,9 @@ Quick Look starts an AVFoundation player in a helper process and polls its clock
 
 Quick Look parses CSV and TSV from a bounded input buffer on a worker thread and publishes batches into one page. Page navigation seeks by logical record offsets in the opened local or SFTP file. It verifies the source metadata before reusing an offset. A new filter or separator cancels the current request and scans from the beginning. Closing the preview drops the worker request and releases the input.
 
-Large text Quick Look reads one page near a 32 KiB boundary at a time. The worker aligns boundaries to nearby line endings or UTF-8 characters and tracks original line numbers while seeking. Literal search uses 64 KiB buffers with enough overlap for matches that cross read boundaries. Only the displayed page and current match are retained. The text and table previews share the seekable local/SFTP source and check its metadata before using saved offsets.
+Large text Quick Look reads one page near a 32 KiB boundary at a time. The worker aligns boundaries to nearby line endings or complete characters and tracks original line numbers while seeking. Literal search uses 64 KiB buffers with enough overlap for matches that cross read boundaries. Only the displayed page and current match are retained. The text and table previews share the seekable local/SFTP source and check its metadata before using saved offsets.
+
+The selected encoding is fixed for each preview generation. Large text workers search in the source encoding and map match locations to the decoded page. Table workers decode in bounded chunks and count source bytes when recording the next page offset. Changing the encoding discards the previous generation and starts the read again.
 
 ## Trace a transfer
 
