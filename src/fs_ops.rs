@@ -219,7 +219,7 @@ pub(crate) fn plan_transfer(
     destination: &Path,
     progress: &mut Progress,
 ) -> Result<Vec<LocalTransfer>, TransferError> {
-    progress.check_cancelled()?;
+    progress.checkpoint()?;
     progress.item(destination);
     let destination = directory_path(destination)?;
     let sources = normalize_selection(sources, progress)?;
@@ -232,7 +232,7 @@ pub(crate) fn plan_transfer(
         metadata,
     } in sources
     {
-        progress.check_cancelled()?;
+        progress.checkpoint()?;
         progress.item(&original);
         let current = fs::symlink_metadata(&source).map_err(|e| {
             at(
@@ -395,7 +395,7 @@ fn normalize_selection(
 ) -> Result<Vec<LocalSelection>, TransferError> {
     let mut entries = Vec::with_capacity(paths.len());
     for original in paths {
-        progress.check_cancelled()?;
+        progress.checkpoint()?;
         progress.item(original);
         let path = entry_path(original)?;
         let metadata = fs::symlink_metadata(&path)
@@ -404,13 +404,13 @@ fn normalize_selection(
     }
     let mut first = HashMap::with_capacity(entries.len());
     for (index, (path, _)) in entries.iter().enumerate() {
-        progress.check_cancelled()?;
+        progress.checkpoint()?;
         first.entry(path.as_path()).or_insert(index);
     }
     let mut retained = vec![false; entries.len()];
     let mut covered = vec![Vec::new(); entries.len()];
     for (index, (path, _)) in entries.iter().enumerate() {
-        progress.check_cancelled()?;
+        progress.checkpoint()?;
         // The outermost selected directory covers all selected entries in
         // its tree, including paths spelled through other parent aliases.
         let representative = path
@@ -611,12 +611,13 @@ pub(crate) fn copy_atomically_cancellable(
     publish: impl FnOnce(&Path, &Path) -> Result<(), String>,
     after_entry: &mut impl FnMut(&Path) -> io::Result<()>,
 ) -> Result<(), TransferError> {
-    progress.check_cancelled()?;
+    progress.checkpoint()?;
     progress.item(source);
     let cancel = progress.cancellation();
     let source_location = crate::vfs::Location::Local(source.to_path_buf());
     let target_location = crate::vfs::Location::Local(destination.to_path_buf());
-    let manifest = SourceManifest::capture_observed(source, &cancel, &mut |path, error| {
+    let scan = cancel.clone().pausable_scan();
+    let manifest = SourceManifest::capture_observed(source, &scan, &mut |path, error| {
         let location = crate::vfs::Location::Local(path.to_path_buf());
         if let Some(error) = error {
             progress.results.staged(
@@ -648,7 +649,7 @@ pub(crate) fn copy_atomically_cancellable(
         available_copy_space(parent)?,
         parent.display(),
     )?;
-    progress.check_cancelled()?;
+    progress.checkpoint()?;
     let staging = create_staging_directory(parent)?;
     if let Err(error) =
         crate::recovery::register_staging(&crate::vfs::Location::Local(staging.path.clone()))
@@ -675,6 +676,7 @@ pub(crate) fn copy_atomically_cancellable(
     check_staging()?;
     let payload = staging.path.join("payload");
     let result = copy_tree(source, &payload, progress, &manifest, after_entry)
+        .and_then(|()| progress.checkpoint())
         // Revisit every entry, including early files after later files copied.
         .and_then(|()| {
             manifest.verify(&cancel, |source, error| {
@@ -1012,7 +1014,7 @@ fn copy_tree_entry(
     manifest: &SourceManifest,
     after_entry: &mut impl FnMut(&Path) -> io::Result<()>,
 ) -> io::Result<()> {
-    progress.check_cancelled()?;
+    progress.checkpoint()?;
     progress.item(source);
     let cancel = progress.cancellation();
     let entry = manifest

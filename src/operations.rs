@@ -6,20 +6,41 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 const UPDATE_INTERVAL: Duration = Duration::from_millis(100);
 
 #[cfg(test)]
-type CancellationCheckpoint = Arc<Mutex<Option<Box<dyn FnMut() -> bool + Send>>>>;
+type CancellationCheckpoint = Mutex<Option<Box<dyn FnMut() -> bool + Send>>>;
 
 /// A request is independent of progress publication and remains valid without a view.
 #[derive(Clone, Default)]
 pub(crate) struct Cancellation {
-    requested: Arc<AtomicBool>,
+    control: Arc<TransferControl>,
+    pause_at_checks: bool,
+}
+
+#[derive(Default)]
+struct TransferControl {
+    requested: AtomicBool,
+    pause: Option<PauseControl>,
     #[cfg(test)]
     checkpoint: CancellationCheckpoint,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum PauseState {
+    #[default]
+    Running,
+    Requested,
+    Paused,
+}
+
+#[derive(Default)]
+struct PauseControl {
+    state: Mutex<PauseState>,
+    changed: Condvar,
 }
 
 #[derive(Debug)]
@@ -33,25 +54,51 @@ impl std::fmt::Display for Cancelled {
 impl std::error::Error for Cancelled {}
 
 impl Cancellation {
+    fn with_pause() -> Self {
+        Self {
+            control: Arc::new(TransferControl {
+                pause: Some(PauseControl::default()),
+                ..TransferControl::default()
+            }),
+            pause_at_checks: false,
+        }
+    }
+
     pub fn request(&self) {
-        self.requested.store(true, Ordering::Relaxed);
+        self.control.requested.store(true, Ordering::Relaxed);
+        if let Some(pause) = &self.control.pause {
+            // Synchronize with the worker's decision to sleep before signaling.
+            let _state = pause.state.lock().unwrap();
+            pause.changed.notify_one();
+        }
     }
 
     pub fn is_requested(&self) -> bool {
-        self.requested.load(Ordering::Relaxed)
+        self.control.requested.load(Ordering::Relaxed)
+    }
+
+    /// Let a read-only preparation scan pause at its existing checkpoints.
+    pub fn pausable_scan(mut self) -> Self {
+        self.pause_at_checks = self.control.pause.is_some();
+        self
     }
 
     #[cfg(test)]
     pub fn at_checkpoint(checkpoint: impl FnMut() -> bool + Send + 'static) -> Self {
-        Self {
-            checkpoint: Arc::new(Mutex::new(Some(Box::new(checkpoint)))),
-            ..Self::default()
-        }
+        let cancel = Self::default();
+        cancel.set_checkpoint(checkpoint);
+        cancel
+    }
+
+    #[cfg(test)]
+    pub fn set_checkpoint(&self, checkpoint: impl FnMut() -> bool + Send + 'static) {
+        *self.control.checkpoint.lock().unwrap() = Some(Box::new(checkpoint));
     }
 
     pub fn check(&self) -> io::Result<()> {
         #[cfg(test)]
         if self
+            .control
             .checkpoint
             .lock()
             .unwrap()
@@ -60,11 +107,46 @@ impl Cancellation {
         {
             self.request();
         }
+        self.check_requested()?;
+        if self.pause_at_checks {
+            self.wait_for_resume(|_| {})?;
+        }
+        Ok(())
+    }
+
+    fn check_requested(&self) -> io::Result<()> {
         if self.is_requested() {
             Err(io::Error::other(Cancelled))
         } else {
             Ok(())
         }
+    }
+
+    fn pause_state(&self) -> Option<PauseState> {
+        let pause = self.control.pause.as_ref()?;
+        Some(*pause.state.lock().unwrap())
+    }
+
+    fn wait_for_resume(&self, publish: impl FnOnce(Instant)) -> io::Result<Duration> {
+        let Some(pause) = &self.control.pause else {
+            return Ok(Duration::ZERO);
+        };
+        let mut state = pause.state.lock().unwrap();
+        self.check_requested()?;
+        if *state != PauseState::Requested {
+            return Ok(Duration::ZERO);
+        }
+        let started = Instant::now();
+        publish(started);
+        *state = PauseState::Paused;
+        let _state = pause
+            .changed
+            .wait_while(state, |state| {
+                *state == PauseState::Paused && !self.is_requested()
+            })
+            .unwrap();
+        self.check_requested()?;
+        Ok(started.elapsed())
     }
 }
 
@@ -201,6 +283,28 @@ pub(crate) struct ProgressView {
 }
 
 impl ProgressView {
+    pub fn pause_state(&self) -> Option<PauseState> {
+        self.cancel.pause_state()
+    }
+
+    pub fn set_paused(&self, paused: bool) {
+        let Some(pause) = &self.cancel.control.pause else {
+            return;
+        };
+        let mut state = pause.state.lock().unwrap();
+        if self.cancel.is_requested() {
+            return;
+        }
+        match (*state, paused) {
+            (PauseState::Running, true) => *state = PauseState::Requested,
+            (PauseState::Requested | PauseState::Paused, false) => {
+                *state = PauseState::Running;
+                pause.changed.notify_one();
+            }
+            _ => {}
+        }
+    }
+
     pub fn snapshot(&mut self) -> &Snapshot {
         if let Ok(snapshot) = self.shared.try_lock() {
             self.latest.clone_from(&snapshot);
@@ -223,8 +327,15 @@ pub(crate) struct Progress {
 
 impl Progress {
     pub fn tracked() -> (Self, ProgressView) {
+        Self::track(Cancellation::default())
+    }
+
+    pub fn tracked_transfer() -> (Self, ProgressView) {
+        Self::track(Cancellation::with_pause())
+    }
+
+    fn track(cancel: Cancellation) -> (Self, ProgressView) {
         let view = Arc::new(Mutex::new(Snapshot::default()));
-        let cancel = Cancellation::default();
         (
             Self {
                 view: Some(view.clone()),
@@ -263,6 +374,20 @@ impl Progress {
 
     pub fn check_cancelled(&self) -> io::Result<()> {
         self.cancel.check()
+    }
+
+    /// Pause only between I/O calls while the worker still owns private state.
+    pub fn checkpoint(&mut self) -> io::Result<()> {
+        self.check_cancelled()?;
+        if self.cancel.pause_state() == Some(PauseState::Requested) {
+            let cancel = self.cancel.clone();
+            let elapsed = cancel.wait_for_resume(|now| self.publish(now, true))?;
+            if let Some(transfer) = &mut self.current.transfer {
+                transfer.started += elapsed;
+                transfer.updated += elapsed;
+            }
+        }
+        Ok(())
     }
 
     pub fn item(&mut self, path: &Path) {
@@ -310,17 +435,19 @@ impl Progress {
             let mut buffer = [0; 64 * 1024];
             let mut written = 0;
             loop {
-                progress.check_cancelled()?;
+                progress.checkpoint()?;
                 let read = match input.read(&mut buffer) {
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                     result => result?,
                 };
-                progress.check_cancelled()?;
+                progress.checkpoint()?;
                 if read == 0 {
                     return Ok(written);
                 }
                 let mut pending = &buffer[..read];
                 while !pending.is_empty() {
+                    // SFTP writes can submit multiple packets yet acknowledge
+                    // only part of the buffer. Pause after the whole block.
                     progress.check_cancelled()?;
                     let count = match output.write(pending) {
                         Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
@@ -370,14 +497,14 @@ impl Progress {
         const CHUNK: u64 = 1024 * 1024;
         self.copy_tracked(path, Some(expected), |progress| {
             let mut written = 0;
-            progress.check_cancelled()?;
+            progress.checkpoint()?;
             while written < expected {
-                progress.check_cancelled()?;
+                progress.checkpoint()?;
                 let limit = CHUNK.min(expected - written);
                 let chunk = io::copy(&mut (&mut *input).take(limit), output)?;
                 written += chunk;
                 progress.wrote(chunk);
-                progress.check_cancelled()?;
+                progress.checkpoint()?;
                 if chunk < limit {
                     return Ok(written);
                 }
@@ -398,10 +525,20 @@ impl Progress {
         source_hash: [u8; 32],
         input: &mut impl Read,
     ) -> io::Result<()> {
-        if self.hash_file(path, expected, input)? != Some(source_hash) {
-            return Err(copy_hash_mismatch(path));
-        }
-        Ok(())
+        let actual = self.hash_file_with(path, expected, input, Self::checkpoint)?;
+        verify_hash(path, source_hash, actual)
+    }
+
+    /// The published target is being checked while the source is quarantined.
+    pub(crate) fn verify_copy_before_source_removal(
+        &mut self,
+        path: &Path,
+        expected: u64,
+        source_hash: [u8; 32],
+        input: &mut impl Read,
+    ) -> io::Result<()> {
+        let actual = self.hash_file(path, expected, input)?;
+        verify_hash(path, source_hash, actual)
     }
 
     /// Hash a regular file at its captured length, with a one-byte growth probe.
@@ -410,6 +547,16 @@ impl Progress {
         path: &Path,
         expected: u64,
         input: &mut impl Read,
+    ) -> io::Result<Option<[u8; 32]>> {
+        self.hash_file_with(path, expected, input, |progress| progress.check_cancelled())
+    }
+
+    fn hash_file_with(
+        &mut self,
+        path: &Path,
+        expected: u64,
+        input: &mut impl Read,
+        check: fn(&mut Self) -> io::Result<()>,
     ) -> io::Result<Option<[u8; 32]>> {
         self.current.item = Some(path.to_owned());
         self.current.waiting_for_conflict = false;
@@ -420,14 +567,14 @@ impl Progress {
         let mut read = 0_u64;
         let mut buffer = [0; 64 * 1024];
         loop {
-            self.check_cancelled()?;
+            check(self)?;
             let limit = (expected - read).min(buffer.len() as u64) as usize;
             let size = if limit == 0 { 1 } else { limit };
             let count = match input.read(&mut buffer[..size]) {
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 result => result?,
             };
-            self.check_cancelled()?;
+            check(self)?;
             if count == 0 {
                 break;
             }
@@ -439,7 +586,7 @@ impl Progress {
             self.current.verification.as_mut().unwrap().read = read;
             self.publish(Instant::now(), read == count as u64);
         }
-        self.check_cancelled()?;
+        check(self)?;
         if read != expected {
             return Ok(None);
         }
@@ -512,6 +659,14 @@ fn copy_hash_mismatch(path: &Path) -> io::Error {
         "SHA-256 verification failed for {}. Copy was not published; source was preserved",
         path.display()
     ))
+}
+
+fn verify_hash(path: &Path, expected: [u8; 32], actual: Option<[u8; 32]>) -> io::Result<()> {
+    if actual == Some(expected) {
+        Ok(())
+    } else {
+        Err(copy_hash_mismatch(path))
+    }
 }
 
 #[cfg(test)]

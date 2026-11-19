@@ -36,6 +36,7 @@ mod conflicts;
 mod history;
 mod local;
 mod location;
+mod pause;
 mod retry;
 mod sftp;
 mod source;

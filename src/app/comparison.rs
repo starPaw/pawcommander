@@ -133,6 +133,6 @@ pub(super) fn show_progress<T>(ui: &mut egui::Ui, worker: &mut Worker<T>, messag
             message
         }));
     });
-    super::footer::operation_details(ui, worker.progress.snapshot());
+    super::footer::operation_details(ui, worker.progress.snapshot(), false);
     ui.ctx().request_repaint_after(Duration::from_millis(100));
 }
