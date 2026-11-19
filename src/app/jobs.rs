@@ -937,6 +937,10 @@ impl PawCommander {
             let displayed = self.settings.split || pane_index == 0;
             for (tab_index, tab) in pane.tabs.iter_mut().enumerate() {
                 let current = displayed && tab_index == pane.current;
+                #[cfg(target_os = "macos")]
+                if !current {
+                    tab.git_snapshot = None;
+                }
                 let automatic_allowed = automatic_allowed && scanning_tab != Some(tab.id);
                 if can_reorder && (!tab.automatic_loading() || automatic_allowed) && tab.poll() {
                     ctx.request_repaint();
@@ -968,6 +972,9 @@ impl PawCommander {
                     }
                 }
             }
+            #[cfg(target_os = "macos")]
+            pane.git_status
+                .update(ctx, displayed.then_some(&mut pane.tabs[pane.current]), now);
             let tab = &pane.tabs[pane.current];
             let columns = displayed
                 && tab

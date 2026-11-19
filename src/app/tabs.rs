@@ -51,6 +51,8 @@ pub(super) struct Tab {
     pub(super) has_complete_listing: bool,
     pub(super) folder_visit: FolderVisit,
     pub(super) archive_index: Option<Arc<crate::archive::Index>>,
+    #[cfg(target_os = "macos")]
+    pub(super) git_snapshot: Option<super::git_status::Snapshot>,
     pub(super) next_auto_refresh: Instant,
     pub(super) error: Option<String>,
     pub(super) sort: Sort,
@@ -91,6 +93,8 @@ impl Tab {
             has_complete_listing: false,
             folder_visit: FolderVisit::Unseen,
             archive_index: None,
+            #[cfg(target_os = "macos")]
+            git_snapshot: None,
             next_auto_refresh: Instant::now() + AUTO_REFRESH_INTERVAL,
             error: None,
             sort: Sort::default(),
@@ -145,6 +149,14 @@ impl Tab {
         self.address_error = None;
         self.address_completion.reset();
     }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn git_snapshot(&self) -> Option<&super::git_status::Snapshot> {
+        self.git_snapshot
+            .as_ref()
+            .filter(|git| git.matches(&self.path))
+    }
+
     pub(super) fn reload(&mut self, ctx: &egui::Context) {
         self.archive_index = None;
         self.start_load(ctx, false);
@@ -712,6 +724,8 @@ pub(super) struct Pane {
     pub(super) closed_tabs: VecDeque<(usize, Location)>,
     pub(super) tab_context_menu: Option<egui::Id>,
     pub(super) columns: column_view::Columns,
+    #[cfg(target_os = "macos")]
+    pub(super) git_status: super::git_status::Background,
 }
 
 impl Pane {
@@ -724,6 +738,8 @@ impl Pane {
             closed_tabs: VecDeque::new(),
             tab_context_menu: None,
             columns: column_view::Columns::default(),
+            #[cfg(target_os = "macos")]
+            git_status: super::git_status::Background::default(),
         }
     }
 

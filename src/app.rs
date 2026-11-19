@@ -15,6 +15,8 @@ mod drives;
 mod entry_widget;
 mod file_compare;
 mod footer;
+#[cfg(target_os = "macos")]
+mod git_status;
 mod jobs;
 mod keyboard;
 mod pane_view;
@@ -155,6 +157,8 @@ impl PawCommander {
         self.directory_tree.refresh();
         for pane in &mut self.panes {
             pane.columns.refresh();
+            #[cfg(target_os = "macos")]
+            pane.git_status.refresh();
             for tab in &mut pane.tabs {
                 tab.reload(ctx);
             }

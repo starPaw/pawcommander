@@ -70,10 +70,23 @@ pub(super) fn address_bar(
                     if editing {
                         edit_address(ui, tab, index, trailing, actions);
                     } else {
-                        let width = (ui.available_width() - trailing).max(40.0);
+                        let width = ui.available_width() - trailing;
+                        #[cfg(target_os = "macos")]
+                        let branch = tab.git_snapshot().map(|git| git.branch_label());
+                        #[cfg(target_os = "macos")]
+                        let branch_width = branch.as_ref().map_or(0.0, |label| {
+                            let size = ui.painter().layout_no_wrap(
+                                label.clone(),
+                                FontId::proportional(12.0),
+                                colors.mauve,
+                            ).size();
+                            (size.x + 6.0).min((width - 58.0).clamp(0.0, 144.0))
+                        });
+                        #[cfg(target_os = "macos")]
+                        let width = width - branch_width;
                         let scroll = egui::ScrollArea::horizontal()
                             .id_salt("breadcrumbs")
-                            .max_width(width)
+                            .max_width(width.max(40.0))
                             .auto_shrink([false, true])
                             .scroll_bar_visibility(
                                 egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
@@ -178,6 +191,15 @@ pub(super) fn address_bar(
                         {
                             tab.begin_address();
                             actions.push(Action::Focus(index));
+                        }
+                        #[cfg(target_os = "macos")]
+                        if let Some(label) = branch && branch_width >= 20.0 {
+                            ui.add_sized(
+                                [branch_width - ui.spacing().item_spacing.x, icons::COMPACT_SIZE],
+                                egui::Label::new(
+                                    egui::RichText::new(&label).size(12.0).color(colors.mauve),
+                                ).truncate(),
+                            ).on_hover_text(label);
                         }
                     }
                 });
