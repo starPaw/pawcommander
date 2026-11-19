@@ -8,6 +8,7 @@ mod clipboard;
 mod column_view;
 mod dialogs;
 mod directory;
+mod directory_compare;
 #[cfg(any(target_os = "windows", test))]
 mod drives;
 mod entry_widget;
@@ -45,6 +46,7 @@ use bookmarks::{validate_bookmark_shortcuts, Bookmark, BookmarkEditor, SavedBook
 use clipboard::Clipboard;
 use dialogs::{ConnectionJob, Dialog, SftpForm};
 use directory::DirectoryEntries;
+use directory_compare::DirectoryComparison;
 use eframe::egui;
 use entry_widget::{entry_widget, EntryOptions, COMPACT_FILE_ROW_HEIGHT};
 use jobs::{CutRequest, Job, PendingJob, RetryJob, TransferInteraction, UndoJob};
@@ -78,6 +80,7 @@ pub struct PawCommander {
     quick_look: Option<QuickLook>,
     quick_look_preview: Option<Preview>,
     properties: Option<crate::properties::Properties>,
+    comparison: Option<DirectoryComparison>,
     clipboard: Option<Clipboard>,
     system_clipboard: SystemClipboard,
     dialog: Option<Dialog>,
@@ -159,6 +162,9 @@ impl eframe::App for PawCommander {
         // queue without requiring a visible frame or painting any widgets.
         self.history.poll();
         self.recovery.poll(ctx);
+        if let Some(comparison) = &mut self.comparison {
+            comparison.poll();
+        }
         #[cfg(target_os = "windows")]
         self.windows_drives.poll(ctx);
         self.poll(ctx);
@@ -426,6 +432,7 @@ impl eframe::App for PawCommander {
             });
         self.thumbnails.finish_frame(ctx);
         if self.dialog.is_none()
+            && self.comparison.is_none()
             && !self.conflict_open()
             && self.sftp_form.is_none()
             && !self.show_help
@@ -514,6 +521,7 @@ impl eframe::App for PawCommander {
             ctx.request_repaint();
         }
         self.dialogs(ctx);
+        self.show_directory_comparison(ctx);
         if self
             .properties
             .as_ref()

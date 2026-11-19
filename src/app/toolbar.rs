@@ -113,6 +113,17 @@ impl PawCommander {
                                 self.open_command_palette(ctx, Some(button.id));
                                 ui.close();
                             }
+                            let compare = ui.add_enabled(
+                                self.can_compare_folders(),
+                                egui::Button::new(self.settings.shortcuts.hint(
+                                    ctx, Command::CompareFolders, Command::CompareFolders.label(),
+                                )),
+                            );
+                            paint_focus(ui, &compare, 5);
+                            if compare.clicked() {
+                                actions.push(Action::CompareFolders);
+                                ui.close();
+                            }
                             let about = ui.button(crate::i18n::text("О PawCommander"));
                             paint_focus(ui, &about, 5);
                             if about.clicked() { self.show_help = true; ui.close(); }
