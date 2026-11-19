@@ -31,7 +31,7 @@ pub(super) enum EntryKind {
 
 pub(super) struct EntryMetadata {
     pub kind: EntryKind,
-    pub size: u64,
+    pub size: Option<u64>,
     pub modified: Option<DateTime<Utc>>,
 }
 
@@ -39,7 +39,7 @@ impl EntryMetadata {
     pub fn for_open_file(metadata: &Metadata) -> Self {
         Self {
             kind: EntryKind::File,
-            size: metadata.len(),
+            size: Some(metadata.len()),
             modified: modified_time(metadata),
         }
     }
@@ -120,7 +120,7 @@ impl Directory {
         let modified = DateTime::from_timestamp(stat.st_mtime as i64, 0);
         Ok(EntryMetadata {
             kind: entry_kind(FileType::from_raw_mode(stat.st_mode)),
-            size: u64::try_from(stat.st_size).map_err(|_| io::ErrorKind::InvalidData)?,
+            size: Some(u64::try_from(stat.st_size).map_err(|_| io::ErrorKind::InvalidData)?),
             modified,
         })
     }
@@ -183,7 +183,7 @@ impl Directory {
         let metadata = fs::symlink_metadata(self.path.join(name))?;
         Ok(EntryMetadata {
             kind: entry_kind(&metadata),
-            size: metadata.len(),
+            size: Some(metadata.len()),
             modified: modified_time(&metadata),
         })
     }

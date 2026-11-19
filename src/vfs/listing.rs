@@ -2,8 +2,8 @@ use super::err;
 use super::location::{validate_name, Location};
 use super::sftp::{cached_channel, remote, sessions};
 use crate::{archive, fs_ops};
-use ssh2::{ErrorCode, Sftp};
-use std::path::Path;
+use ssh2::{ErrorCode, File, FileStat, Sftp};
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, TryLockError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -190,13 +190,9 @@ pub(super) fn visit_sftp_directory(
         return Ok(());
     }
     let mut dir = sftp.opendir(location.path()).map_err(err)?;
-    // ssh2::File::readdir reports directory EOF as LIBSSH2_ERROR_FILE (-16).
-    const END_OF_DIRECTORY: ErrorCode = ErrorCode::Session(-16);
     while !cancelled() {
-        let (filename, stat) = match dir.readdir() {
-            Ok(entry) => entry,
-            Err(e) if e.code() == END_OF_DIRECTORY => break,
-            Err(e) => return Err(err(e)),
+        let Some((filename, stat)) = next_sftp_entry(&mut dir).map_err(err)? else {
+            break;
         };
         if cancelled() {
             break;
@@ -233,4 +229,15 @@ pub(super) fn visit_sftp_directory(
         });
     }
     Ok(())
+}
+
+pub(super) fn next_sftp_entry(file: &mut File) -> Result<Option<(PathBuf, FileStat)>, ssh2::Error> {
+    match file.readdir() {
+        Ok(entry) => Ok(Some(entry)),
+        // ssh2 reports directory EOF as LIBSSH2_ERROR_FILE.
+        Err(error) if error.code() == ErrorCode::Session(libssh2_sys::LIBSSH2_ERROR_FILE) => {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
 }

@@ -27,7 +27,8 @@ PawCommander is a single Rust binary using eframe/egui. Start at the module that
 | Large text preview | [`preview/large_text.rs`](../src/preview/large_text.rs), [`preview/large_text/view.rs`](../src/preview/large_text/view.rs) | `preview/large_text/reader.rs`, `preview/large_text/worker.rs`, `preview/source.rs` |
 | Hex preview | [`preview/hex.rs`](../src/preview/hex.rs), [`preview/hex/view.rs`](../src/preview/hex/view.rs) | `preview/hex/worker.rs`, `preview/source.rs`, `preview/read_worker.rs` |
 | Preview encoding | [`preview/encoding.rs`](../src/preview/encoding.rs) | Text and table workers share encoding selection and decoding |
-| Search and result actions | [`search.rs`](../src/search.rs), [`search/panel.rs`](../src/search/panel.rs), [`app/search.rs`](../src/app/search.rs) | `search/{content,directory,filters,index,saved}.rs`, `name_match.rs` |
+| Search and result actions | [`search.rs`](../src/search.rs), [`search/panel.rs`](../src/search/panel.rs), [`app/search.rs`](../src/app/search.rs) | `search/{content,directory,filters,index,remote,saved}.rs`, `name_match.rs` |
+| Bounded SFTP search walk | [`vfs/search.rs`](../src/vfs/search.rs) | One directory handle on an existing session. Limits depth, entries and pending path bytes, and checks the deadline and cancellation between requests. |
 | ZIP/TAR browsing | [`archive.rs`](../src/archive.rs) | `vfs/location.rs`, `app/tabs.rs` |
 | ZIP/TAR creation | [`archive/writer.rs`](../src/archive/writer.rs), [`vfs/archive_create.rs`](../src/vfs/archive_create.rs) | `app/dialogs.rs`, `operations.rs` |
 | ZIP/TAR extraction | [`archive/extraction.rs`](../src/archive/extraction.rs), [`vfs/archive_extract.rs`](../src/vfs/archive_extract.rs) | `app/jobs.rs`, `vfs/staged_file.rs`, `conflict.rs` |

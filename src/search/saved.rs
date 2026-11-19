@@ -1,7 +1,11 @@
 use super::{validate_folder_query, validate_index_query, FilterInput, FolderTarget, Mode, Search};
 #[cfg(test)]
 use crate::test_ui::ContextExt as _;
-use crate::{app::SavedPath, i18n::text};
+use crate::{
+    app::{SavedLocation, SavedPath},
+    i18n::text,
+    vfs::Location,
+};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -18,6 +22,7 @@ pub(super) struct SavedSearch {
 #[derive(Clone, Serialize, Deserialize)]
 enum Scope {
     Folder(Box<FolderScope>),
+    Sftp(Box<SftpScope>),
     Locate,
 }
 
@@ -31,24 +36,33 @@ struct FolderScope {
     filters: FilterInput,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+struct SftpScope {
+    location: SavedLocation,
+    seconds: u64,
+    exclusions: String,
+    filters: FilterInput,
+}
+
 impl Scope {
     fn mode(&self) -> Mode {
         match self {
-            Self::Folder(_) => Mode::Folder,
+            Self::Folder(_) | Self::Sftp(_) => Mode::Folder,
             Self::Locate => Mode::Index,
         }
     }
 
     fn label(&self) -> String {
-        match self {
-            Self::Folder(folder) => match folder.path.clone().into_path() {
-                Some(folder) => {
-                    let path = folder.display();
-                    crate::tr_format!("Папка поиска: {path}", "Search folder: {path}")
-                }
-                None => text("Путь сохранённого поиска несовместим с системой.").into(),
-            },
-            Self::Locate => text("Индекс locate").into(),
+        let folder = match self {
+            Self::Folder(folder) => folder.path.clone().into_path().map(Location::Local),
+            Self::Sftp(folder) => folder.location.clone().into_location(),
+            Self::Locate => return text("Индекс locate").into(),
+        };
+        if let Some(folder) = folder {
+            let path = folder.display();
+            crate::tr_format!("Папка поиска: {path}", "Search folder: {path}")
+        } else {
+            text("Путь сохранённого поиска несовместим с системой.").into()
         }
     }
 }
@@ -87,18 +101,27 @@ impl Search {
     fn saved_candidate(&self) -> Result<SavedSearch, String> {
         let scope = match self.mode {
             Mode::Folder => {
-                let path = self.folder.as_deref().ok_or_else(|| {
-                    text("Для поиска в папке откройте локальную папку в панели.").to_owned()
+                let folder = self.folder.as_ref().ok_or_else(|| {
+                    text("Откройте локальную папку или папку SFTP для поиска.").to_owned()
                 })?;
-                let target = self.folder_target;
+                let target = self.target();
                 let filters = self.filters.parse(target)?;
                 validate_folder_query(target, &self.query, &self.exclusions, &filters)?;
-                Scope::Folder(Box::new(FolderScope {
-                    path: path.into(),
-                    target,
-                    exclusions: self.exclusions.clone(),
-                    filters: self.filters.clone(),
-                }))
+                if folder.remote() {
+                    Scope::Sftp(Box::new(SftpScope {
+                        location: folder.into(),
+                        seconds: self.remote_time_limit(),
+                        exclusions: self.exclusions.clone(),
+                        filters: self.filters.clone(),
+                    }))
+                } else {
+                    Scope::Folder(Box::new(FolderScope {
+                        path: folder.path().into(),
+                        target,
+                        exclusions: self.exclusions.clone(),
+                        filters: self.filters.clone(),
+                    }))
+                }
             }
             Mode::Index => {
                 validate_index_query(&self.query)?;
@@ -126,8 +149,19 @@ impl Search {
         self.query = saved.query;
         match saved.scope {
             Scope::Folder(folder) => {
-                self.folder = folder.path.into_path();
+                self.folder = folder.path.into_path().map(Location::Local);
                 self.folder_target = folder.target;
+                self.exclusions = folder.exclusions;
+                self.filters = folder.filters;
+                if self.folder.is_none() {
+                    self.error =
+                        Some(text("Путь сохранённого поиска несовместим с системой.").into());
+                    return;
+                }
+            }
+            Scope::Sftp(folder) => {
+                self.folder = folder.location.into_location().filter(Location::remote);
+                self.remote_seconds = Some(folder.seconds);
                 self.exclusions = folder.exclusions;
                 self.filters = folder.filters;
                 if self.folder.is_none() {
@@ -396,8 +430,45 @@ mod tests {
             .unwrap_or_else(|| panic!("search failed: {:?}", search.error))
             .matches
             .iter()
-            .map(|hit| hit.path.clone())
+            .map(|hit| hit.path.path().to_path_buf())
             .collect()
+    }
+
+    #[test]
+    fn saved_sftp_search_restores_its_server_folder_and_time_limit() {
+        let ctx = egui::Context::default();
+        let folder = Location::Sftp {
+            endpoint: crate::vfs::Endpoint {
+                host: "127.0.0.1".into(),
+                port: 0,
+                user: "fixture".into(),
+                key: Some("/keys/explicit-key".into()),
+            },
+            path: "/reports".into(),
+        };
+        let mut search = Search {
+            folder_target: FolderTarget::Regex,
+            ..Default::default()
+        };
+        search.open(Some(&folder));
+        search.query = "*.txt".into();
+        search.exclusions = ".git".into();
+        search.remote_seconds = Some(7);
+        save_candidate(&mut search, "Reports");
+        let mut storage = MemoryStorage::default();
+        search.save(&mut storage);
+
+        let mut reopened = Search::load(Some(&storage));
+        reopened.run_saved(0, None, &ctx);
+        assert_eq!(reopened.folder.as_ref(), Some(&folder));
+        assert_eq!(reopened.remote_time_limit(), 7);
+        assert!(reopened.target() == FolderTarget::Name);
+        assert_eq!(reopened.exclusions, ".git");
+        assert!(reopened.job().is_some());
+
+        let local = Location::Local("/local".into());
+        search.open(Some(&local));
+        assert!(search.target() == FolderTarget::Regex);
     }
 
     #[test]
@@ -425,7 +496,7 @@ mod tests {
         let ctx = egui::Context::default();
         let query = r"TODO: [0-9]+";
         let mut search = Search::default();
-        search.open(Some(&saved_folder));
+        search.open(Some(&Location::Local(saved_folder.clone())));
         search.folder_target = FolderTarget::Regex;
         search.query = query.into();
         search.exclusions = "*.skip.txt".into();
@@ -448,11 +519,14 @@ mod tests {
         fs::remove_file(&old_file).unwrap();
         fs::write(&new_file, "TODO: 15").unwrap();
         let mut reopened = Search::load(Some(&storage));
-        reopened.open(Some(&other_folder));
+        reopened.open(Some(&Location::Local(other_folder)));
         assert_eq!(reopened.saved[0].name, "Daily TODOs");
         assert!(reopened.results.is_none());
         reopened.run_saved(0, None, &ctx);
-        assert_eq!(reopened.folder.as_deref(), Some(saved_folder.as_path()));
+        assert_eq!(
+            reopened.folder.as_ref().and_then(Location::local),
+            Some(saved_folder.as_path())
+        );
         assert!(reopened.folder_target == FolderTarget::Regex);
         assert_eq!(reopened.query, query);
         assert_eq!(reopened.exclusions, "*.skip.txt");
@@ -479,7 +553,7 @@ mod tests {
         assert!(Search::load(Some(&storage)).saved.is_empty());
 
         let mut search = Search::default();
-        search.open(Some(&folder));
+        search.open(Some(&Location::Local(folder.clone())));
         search.query = "report".into();
         save_candidate(&mut search, "Exact path");
         search.save(&mut storage);
@@ -513,7 +587,7 @@ mod tests {
     #[test]
     fn folder_search_rejects_invalid_filters_before_saving() {
         let mut search = Search::default();
-        search.open(Some(Path::new("/")));
+        search.open(Some(&Location::Local(Path::new("/").into())));
         search.query = "report".into();
         search.filters = serde_json::from_value(serde_json::json!({
             "minimum_size": "9",

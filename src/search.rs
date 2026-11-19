@@ -6,15 +6,21 @@ mod directory;
 mod filters;
 mod index;
 pub(crate) mod panel;
+mod remote;
 mod saved;
 
+#[cfg(all(test, unix))]
+pub(crate) use remote::check_sftp_search;
+
 use crate::name_match::{normalize, Mask};
+use crate::vfs::Location;
 use content::{LineMatch, Scan, Scanner};
 use directory::{Directory, Entry, EntryKind, EntryMetadata};
 use eframe::egui;
 use filters::{FilterInput, Filters};
 use index::IndexInfo;
 use std::{
+    ffi::OsStr,
     io::{self, Read},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -41,12 +47,18 @@ struct Results {
 }
 
 struct SearchMatch {
-    path: PathBuf,
+    path: Location,
     context: Option<LineMatch>,
 }
 
 impl From<PathBuf> for SearchMatch {
     fn from(path: PathBuf) -> Self {
+        Location::Local(path).into()
+    }
+}
+
+impl From<Location> for SearchMatch {
+    fn from(path: Location) -> Self {
         Self {
             path,
             context: None,
@@ -104,7 +116,9 @@ pub struct Search {
     focus: bool,
     mode: Mode,
     folder_target: FolderTarget,
-    folder: Option<PathBuf>,
+    folder: Option<Location>,
+    remote_seconds: Option<u64>,
+    remote_deadline: Option<Instant>,
     query: String,
     exclusions: String,
     filters: FilterInput,
@@ -122,13 +136,17 @@ pub struct Search {
 }
 
 impl Search {
-    pub fn open(&mut self, folder: Option<&Path>) {
+    pub fn open(&mut self, folder: Option<&Location>) {
+        let folder = folder.filter(|location| !location.is_archive());
         self.panel.cancel_pending();
-        if self.folder.as_deref() != folder {
+        if self.folder.as_ref() != folder {
+            if folder.is_some_and(Location::remote) {
+                self.mode = Mode::Folder;
+            }
             if self.mode == Mode::Folder {
                 self.clear();
             }
-            self.folder = folder.map(Path::to_path_buf);
+            self.folder = folder.cloned();
         }
         self.visible = true;
         self.focus = true;
@@ -157,8 +175,27 @@ impl Search {
         self.jobs[self.mode as usize].as_ref()
     }
 
+    fn sftp_scope(&self) -> bool {
+        self.mode == Mode::Folder && self.folder.as_ref().is_some_and(Location::remote)
+    }
+
+    fn target(&self) -> FolderTarget {
+        if self.sftp_scope() {
+            FolderTarget::Name
+        } else {
+            self.folder_target
+        }
+    }
+
+    fn remote_time_limit(&self) -> u64 {
+        self.remote_seconds
+            .unwrap_or(remote::DEFAULT_SECONDS)
+            .clamp(1, remote::MAX_SECONDS)
+    }
+
     fn can_start(&self, cli: Option<&Path>) -> bool {
-        let has_query = if self.mode == Mode::Folder && self.folder_target != FolderTarget::Name {
+        let target = self.target();
+        let has_query = if self.mode == Mode::Folder && target != FolderTarget::Name {
             !self.query.is_empty()
         } else {
             !self.query.trim().is_empty()
@@ -168,8 +205,7 @@ impl Search {
                 Mode::Folder => {
                     self.folder.is_some()
                         && (has_query
-                            || (self.folder_target == FolderTarget::Name
-                                && self.filters.active(self.folder_target)))
+                            || (target == FolderTarget::Name && self.filters.active(target)))
                 }
                 Mode::Index => cli.is_some() && has_query,
             }
@@ -180,8 +216,9 @@ impl Search {
             return;
         }
         self.clear();
+        let folder_target = self.target();
         let filters = if self.mode == Mode::Folder {
-            match self.filters.parse(self.folder_target) {
+            match self.filters.parse(folder_target) {
                 Ok(filters) => Some(filters),
                 Err(error) => {
                     self.error = Some(error);
@@ -195,8 +232,10 @@ impl Search {
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = cancel.clone();
         let mode = self.mode;
-        let folder_target = self.folder_target;
         let folder = self.folder.clone();
+        let remote_deadline = self
+            .sftp_scope()
+            .then(|| Instant::now() + Duration::from_secs(self.remote_time_limit()));
         let worker_cli = cli.map(Path::to_path_buf);
         let query = self.query.clone();
         let exclusions = self.exclusions.clone();
@@ -205,11 +244,12 @@ impl Search {
             let result = match filters {
                 Some(filters) => FolderSearch::new(folder_target, &query, &exclusions, filters)
                     .and_then(|search| {
-                        run_folder(
-                            folder.as_deref().expect("validated folder"),
-                            search,
-                            &|| worker_cancel.load(Ordering::Relaxed),
-                        )
+                        let folder = folder.as_ref().expect("validated folder");
+                        let cancelled = || worker_cancel.load(Ordering::Relaxed);
+                        match remote_deadline {
+                            Some(deadline) => remote::run(folder, &search, deadline, &cancelled),
+                            None => run_folder(folder.path(), search, &cancelled),
+                        }
                     }),
                 None => run(
                     worker_cli.as_deref().expect("validated locate tool"),
@@ -224,6 +264,9 @@ impl Search {
         match worker {
             Ok(_) => {
                 self.jobs[mode as usize] = Some(Job { cancel, result: rx });
+                if mode == Mode::Folder {
+                    self.remote_deadline = remote_deadline;
+                }
                 if mode == Mode::Index {
                     self.index_info = Some(IndexInfo::unknown());
                     self.pending_index_inspection = cli.map(Path::to_path_buf);
@@ -371,7 +414,9 @@ impl Search {
                 ) =>
             {
                 if let Some(results) = &mut self.results {
-                    results.matches.retain(|hit| hit.path != path);
+                    results
+                        .matches
+                        .retain(|hit| hit.path.local() != Some(&path));
                 }
                 self.selected = None;
                 let path = path.display();
@@ -401,7 +446,7 @@ impl Search {
             .is_some_and(|check| check.path.is_some())
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, cli: Option<&Path>) -> Option<PathBuf> {
+    pub fn show(&mut self, ctx: &egui::Context, cli: Option<&Path>) -> Option<Location> {
         self.poll();
         self.poll_index_inspection(ctx);
         if !self.visible {
@@ -450,26 +495,41 @@ impl Search {
                             }
                             submit = exclusions.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                         } else {
-                            ui.label(crate::i18n::text("Для поиска в папке откройте локальную папку в панели."));
+                            ui.label(crate::i18n::text("Откройте локальную папку или папку SFTP для поиска."));
                         }
-                        let previous_target = self.folder_target;
-                        ui.horizontal(|ui| {
-                            ui.selectable_value(&mut self.folder_target, FolderTarget::Name, crate::i18n::text("Имя файла"));
-                            ui.selectable_value(&mut self.folder_target, FolderTarget::Text, crate::i18n::text("Текст файла"));
-                            ui.selectable_value(&mut self.folder_target, FolderTarget::Regex, crate::i18n::text("Регулярное выражение"));
-                        });
-                        if self.folder_target != previous_target {
-                            self.clear();
-                            self.focus = true;
+                        if self.sftp_scope() {
+                            let mut seconds = self.remote_time_limit();
+                            ui.horizontal(|ui| {
+                                let label = ui.label(crate::i18n::text("Время поиска по SFTP, с"));
+                                ui.add(egui::DragValue::new(&mut seconds).range(1..=remote::MAX_SECONDS)).labelled_by(label.id);
+                                let depth = remote::DEFAULT_DEPTH;
+                                ui.small(crate::tr_format!("Глубина по умолчанию — {depth}. Меняется в фильтрах.", "Default depth is {depth}. Change it in Filters."));
+                            });
+                            if seconds != self.remote_time_limit() {
+                                self.remote_seconds = Some(seconds);
+                                self.clear();
+                            }
+                        } else {
+                            let previous_target = self.folder_target;
+                            ui.horizontal(|ui| {
+                                ui.selectable_value(&mut self.folder_target, FolderTarget::Name, crate::i18n::text("Имя файла"));
+                                ui.selectable_value(&mut self.folder_target, FolderTarget::Text, crate::i18n::text("Текст файла"));
+                                ui.selectable_value(&mut self.folder_target, FolderTarget::Regex, crate::i18n::text("Регулярное выражение"));
+                            });
+                            if self.folder_target != previous_target {
+                                self.clear();
+                                self.focus = true;
+                            }
                         }
-                        if self.folder_target != FolderTarget::Name {
+                        let target = self.target();
+                        if target != FolderTarget::Name {
                             ui.small(crate::i18n::text("Поиск по строкам в файлах UTF-8 до 1 МиБ, с учётом регистра по умолчанию."));
                         }
-                        if self.folder_target == FolderTarget::Regex {
+                        if target == FolderTarget::Regex {
                             ui.small(crate::i18n::text("При поиске по выражению строки больше 64 КиБ пропускаются."));
                         }
-                        crate::i18n::text(match self.folder_target {
-                            FolderTarget::Name if self.filters.active(self.folder_target) => {
+                        crate::i18n::text(match target {
+                            FolderTarget::Name if self.filters.active(target) => {
                                 "Имя необязательно при заданных фильтрах"
                             }
                             FolderTarget::Name => "Часть имени или маска: отчёт, *.rs, фото?.jpg",
@@ -520,8 +580,14 @@ impl Search {
                         }
                     }
                 });
+                if self.mode == Mode::Folder && self.job().is_some_and(|job| !job.cancelled())
+                    && self.remote_deadline.is_some_and(|deadline| Instant::now() >= deadline)
+                {
+                    ui.small(crate::i18n::text("Лимит времени достигнут. Завершается текущий запрос SFTP…"));
+                }
                 if self.mode == Mode::Folder && self.folder.is_some() {
-                    let (changed, filter_submit) = self.filters.show(ui, self.folder_target);
+                    let target = self.target();
+                    let (changed, filter_submit) = self.filters.show(ui, target);
                     if changed {
                         self.clear();
                     }
@@ -543,7 +609,7 @@ impl Search {
                 }
                 if let Some(results) = &self.results {
                     ui.separator();
-                    let has_context = self.mode == Mode::Folder && self.folder_target != FolderTarget::Name;
+                    let has_context = self.mode == Mode::Folder && self.target() != FolderTarget::Name;
                     let count = results.matches.len();
                     let limit = if results.limited { crate::i18n::text("+ · Уточните запрос, показаны первые 1000") } else { "" };
                     ui.label(if has_context {
@@ -637,8 +703,7 @@ impl Search {
             && dock_results
             && let Some(results) = self.results.take()
         {
-            let matching_lines =
-                self.mode == Mode::Folder && self.folder_target != FolderTarget::Name;
+            let matching_lines = self.mode == Mode::Folder && self.target() != FolderTarget::Name;
             self.panel
                 .replace(results, matching_lines, self.query.clone());
             self.selected = None;
@@ -651,10 +716,10 @@ impl Search {
         }
         let checked = self.poll_index_reveal(ctx);
         if self.mode == Mode::Index {
-            if let Some(path) = reveal.take() {
+            if let Some(Location::Local(path)) = reveal.take() {
                 self.check_index_reveal(path, ctx);
             }
-            reveal = checked;
+            reveal = checked.map(Location::Local);
         }
         self.visible = visible && reveal.is_none();
         if !self.visible || window.and_then(|response| response.inner).is_none() {
@@ -735,24 +800,38 @@ impl<'a> FolderSearch<'a> {
         })
     }
 
-    fn matches_candidate(&self, directory: &Directory, entry: &Entry) -> io::Result<bool> {
-        if !self.filters.matches_kind(entry.kind.as_ref().ok().copied())
-            || !self.filters.matches_extension(&entry.name)
-        {
-            return Ok(false);
+    fn excluded(&self, name: &OsStr) -> bool {
+        if self.exclusions.is_empty() {
+            return false;
+        }
+        let name = name.to_string_lossy();
+        let normalized = normalize(&name);
+        self.exclusions.iter().any(|mask| mask.matches(&normalized))
+    }
+
+    fn matches_name(&self, name: &OsStr, kind: Option<EntryKind>) -> bool {
+        if !self.filters.matches_kind(kind) || !self.filters.matches_extension(name) {
+            return false;
         }
         if let FolderMatcher::Name { query, mask } = &self.matcher
             && !query.is_empty()
         {
-            let name = entry.name.to_string_lossy();
+            let name = name.to_string_lossy();
             let normalized = normalize(&name);
             let found = match mask {
                 Some(mask) => mask.matches(&normalized),
                 None => normalized.contains(query.as_str()),
             };
             if !found {
-                return Ok(false);
+                return false;
             }
+        }
+        true
+    }
+
+    fn matches_candidate(&self, directory: &Directory, entry: &Entry) -> io::Result<bool> {
+        if !self.matches_name(&entry.name, entry.kind.as_ref().ok().copied()) {
+            return Ok(false);
         }
         if self.filters.needs_metadata() {
             return self
@@ -810,16 +889,8 @@ fn run_folder(
                 continue;
             }
         };
-        if !search.exclusions.is_empty() {
-            let name = entry.name.to_string_lossy();
-            let normalized = normalize(&name);
-            if search
-                .exclusions
-                .iter()
-                .any(|mask| mask.matches(&normalized))
-            {
-                continue;
-            }
+        if search.excluded(&entry.name) {
+            continue;
         }
         let candidate = match search.matches_candidate(directory, &entry) {
             Ok(candidate) => candidate,
@@ -857,7 +928,7 @@ fn run_folder(
                             } => {
                                 long_lines += skipped;
                                 if !lines.is_empty() {
-                                    let path = directory.path.join(&entry.name);
+                                    let path = Location::Local(directory.path.join(&entry.name));
                                     matches.extend(lines.into_iter().map(|line| SearchMatch {
                                         path: path.clone(),
                                         context: Some(line),
@@ -1074,7 +1145,11 @@ mod tests {
     }
 
     fn paths(results: &Results) -> Vec<PathBuf> {
-        results.matches.iter().map(|hit| hit.path.clone()).collect()
+        results
+            .matches
+            .iter()
+            .map(|hit| hit.path.path().to_path_buf())
+            .collect()
     }
 
     #[test]
@@ -1086,7 +1161,7 @@ mod tests {
         ctx.global_style_mut(|style| style.animation_time = 0.0);
         let root = tempfile::tempdir().unwrap();
         let mut search = Search::default();
-        search.open(Some(root.path()));
+        search.open(Some(&Location::Local(root.path().to_path_buf())));
 
         let mut draw = |events| {
             let input = egui::RawInput {
@@ -1208,7 +1283,7 @@ mod tests {
         });
         search.open(None);
         assert!(!search.can_start(None));
-        search.open(Some(root.path()));
+        search.open(Some(&Location::Local(root.path().to_path_buf())));
         search.start(None, &ctx);
         let results = search
             .job()
@@ -1444,7 +1519,7 @@ mod tests {
                 .matches
                 .iter()
                 .map(|hit| {
-                    assert_eq!(hit.path, path);
+                    assert_eq!(hit.path.path(), path);
                     hit.context.as_ref().unwrap().line
                 })
                 .collect();

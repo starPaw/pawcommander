@@ -56,11 +56,11 @@ use entry_widget::{entry_widget, EntryOptions, COMPACT_FILE_ROW_HEIGHT};
 use jobs::{CutRequest, Job, PendingJob, RetryJob, TransferInteraction, UndoJob};
 use pane_view::{list_notice, render_pane, workspace_card, PaneOptions};
 use quick_look::QuickLook;
-pub(crate) use state::SavedPath;
 use state::{
     FolderMode, FolderView, FolderViewChange, FolderViews, NamedWorkspace, SavedFolderView,
     Settings, WorkspaceSession,
 };
+pub(crate) use state::{SavedLocation, SavedPath};
 use std::collections::VecDeque;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;

@@ -406,7 +406,7 @@ fn opening_gate(endpoint: &Endpoint) -> Result<Arc<OpeningGate>, String> {
     Ok(gate)
 }
 
-fn cached(endpoint: &Endpoint) -> Result<Option<Sftp>, String> {
+pub(super) fn cached(endpoint: &Endpoint) -> Result<Option<Sftp>, String> {
     let session = sessions().lock().map_err(err)?.get(endpoint).cloned();
     match session {
         Some(session) => cached_channel(endpoint, &session),

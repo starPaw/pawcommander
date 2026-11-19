@@ -846,6 +846,8 @@ fn openssh_round_trip_and_host_verification() {
     }
     #[cfg(unix)]
     super::permissions::check(&remote_root, false);
+    #[cfg(unix)]
+    crate::search::check_sftp_search(&remote_root);
     super::undo::sftp_undo(&remote_root);
     check_sftp_archive_round_trip(&remote_root);
     let refresh_file = remote_root.join("external.txt");

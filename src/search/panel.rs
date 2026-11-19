@@ -2,12 +2,16 @@
 use super::{Job, Results};
 #[cfg(test)]
 use crate::test_ui::ContextExt as _;
-use crate::{i18n::text, theme::paint_focus, vfs::Location};
+use crate::{
+    i18n::text,
+    theme::paint_focus,
+    vfs::{search::SftpSearchConnection, Location},
+};
 use eframe::egui;
 use std::{
     collections::BTreeSet,
     io,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver},
@@ -27,46 +31,83 @@ pub(crate) struct TabTarget {
 
 pub(crate) enum ReadyAction {
     Open {
-        path: PathBuf,
+        path: Location,
         directory: bool,
         target: TabTarget,
     },
     Reveal {
-        path: PathBuf,
+        path: Location,
         target: TabTarget,
     },
     Copy {
-        paths: Vec<PathBuf>,
+        paths: Vec<Location>,
         destination: Location,
     },
 }
 
 enum Action {
-    Open(PathBuf, TabTarget),
-    Reveal(PathBuf, TabTarget),
-    Copy(Vec<PathBuf>, Location),
+    Open(Location, TabTarget),
+    Reveal(Location, TabTarget),
+    Copy(Vec<Location>, Location),
 }
 
 impl Action {
-    fn paths(&self) -> &[PathBuf] {
+    fn paths(&self) -> &[Location] {
         match self {
             Self::Open(path, _) | Self::Reveal(path, _) => std::slice::from_ref(path),
             Self::Copy(paths, _) => paths,
         }
     }
 
-    fn validate(self, cancel: &AtomicBool) -> Option<Validation> {
+    fn validate(self, cancel: &AtomicBool, mut checked: impl FnMut()) -> Option<Validation> {
         let mut missing = Vec::new();
         let mut error = None;
         let mut directory = false;
+        let mut remote = None;
+        let opening = matches!(self, Self::Open(..));
         for path in self.paths() {
             if cancel.load(Ordering::Relaxed) {
                 return None;
             }
-            match path.symlink_metadata() {
-                Ok(metadata) if matches!(self, Self::Open(..)) => {
+            if path.remote() {
+                if remote.is_none() {
+                    match SftpSearchConnection::open(path) {
+                        Ok(connection) => {
+                            remote = Some(connection);
+                            checked();
+                        }
+                        Err(cause) => {
+                            error.get_or_insert_with(|| path_error(path, &cause));
+                            break;
+                        }
+                    }
+                }
+                if cancel.load(Ordering::Relaxed) {
+                    return None;
+                }
+                match remote
+                    .as_ref()
+                    .expect("connected")
+                    .directory_at(path, opening)
+                {
+                    Ok(Some(is_directory)) => directory = is_directory,
+                    Ok(None) => missing.push(path.clone()),
+                    Err(cause) => {
+                        error.get_or_insert_with(|| path_error(path, &cause));
+                        break;
+                    }
+                }
+                checked();
+                continue;
+            }
+            let Some(local) = path.local() else {
+                error.get_or_insert_with(|| crate::archive::readonly().into());
+                break;
+            };
+            match local.symlink_metadata() {
+                Ok(metadata) if opening => {
                     if metadata.is_symlink() {
-                        match path.metadata() {
+                        match local.metadata() {
                             Ok(target) => directory = target.is_dir(),
                             Err(cause) => error = Some(path_error(path, &cause)),
                         }
@@ -104,7 +145,7 @@ impl Action {
     }
 }
 
-fn path_error(path: &Path, error: &io::Error) -> String {
+fn path_error(path: &Location, error: &impl std::fmt::Display) -> String {
     let path = path.display();
     crate::tr_format!(
         "Не удалось проверить результат поиска {path}: {error}",
@@ -115,16 +156,21 @@ fn path_error(path: &Path, error: &io::Error) -> String {
 enum Validation {
     Ready(ReadyAction),
     Unavailable {
-        missing: Vec<PathBuf>,
+        missing: Vec<Location>,
         error: Option<String>,
     },
+}
+
+enum CheckEvent {
+    Progress(Instant),
+    Finished(Instant, Box<Validation>),
 }
 
 struct Check {
     // Keep the worker slot occupied while a cancelled or timed-out call drains.
     cancel: Arc<AtomicBool>,
-    started: Instant,
-    receiver: Receiver<(Instant, Validation)>,
+    last_activity: Instant,
+    receiver: Receiver<CheckEvent>,
 }
 
 impl Drop for Check {
@@ -138,7 +184,7 @@ struct Snapshot {
     matching_lines: bool,
     query: String,
     scroll_to_top: bool,
-    selected: BTreeSet<PathBuf>,
+    selected: BTreeSet<Location>,
 }
 
 #[derive(Default)]
@@ -248,8 +294,10 @@ impl Panel {
         let started = Instant::now();
         let worker_ctx = ctx.clone();
         match std::thread::Builder::new().spawn(move || {
-            if let Some(validation) = action.validate(&worker_cancel) {
-                let _ = sender.send((Instant::now(), validation));
+            if let Some(validation) = action.validate(&worker_cancel, || {
+                let _ = sender.send(CheckEvent::Progress(Instant::now()));
+            }) {
+                let _ = sender.send(CheckEvent::Finished(Instant::now(), Box::new(validation)));
             }
             drop(sender);
             worker_ctx.request_repaint();
@@ -257,7 +305,7 @@ impl Panel {
             Ok(_) => {
                 self.check = Some(Check {
                     cancel,
-                    started,
+                    last_activity: started,
                     receiver,
                 });
                 self.error = None;
@@ -275,24 +323,44 @@ impl Panel {
     pub(crate) fn poll(&mut self, ctx: &egui::Context) -> Option<ReadyAction> {
         self.poll_launch(ctx);
         let check = self.check.as_mut()?;
-        let validation = match check.receiver.try_recv() {
-            Ok((finished, _)) if finished.duration_since(check.started) >= CHECK_TIMEOUT => None,
-            Ok((_, validation)) => Some(validation),
-            Err(mpsc::TryRecvError::Empty) => {
-                if check.started.elapsed() >= CHECK_TIMEOUT
-                    && !check.cancel.swap(true, Ordering::Relaxed)
-                {
-                    self.error = Some(
-                        text("Файловая система не ответила на проверку результатов поиска.").into(),
-                    );
-                    ctx.request_repaint();
+        let timeout = text("Файловая система не ответила на проверку результатов поиска.");
+        let validation = loop {
+            match check.receiver.try_recv() {
+                Ok(CheckEvent::Progress(at)) => {
+                    if at.duration_since(check.last_activity) >= CHECK_TIMEOUT
+                        && !check.cancel.swap(true, Ordering::Relaxed)
+                    {
+                        self.error = Some(timeout.into());
+                        ctx.request_repaint();
+                    }
+                    check.last_activity = at;
                 }
-                return None;
+                Ok(CheckEvent::Finished(at, validation)) => {
+                    break (at.duration_since(check.last_activity) < CHECK_TIMEOUT)
+                        .then_some(*validation);
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    if !check.cancel.load(Ordering::Relaxed) {
+                        let remaining = CHECK_TIMEOUT.saturating_sub(check.last_activity.elapsed());
+                        if remaining.is_zero() {
+                            check.cancel.store(true, Ordering::Relaxed);
+                            self.error = Some(timeout.into());
+                            ctx.request_repaint();
+                        } else {
+                            ctx.request_repaint_after(remaining);
+                        }
+                    }
+                    return None;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    break Some(Validation::Unavailable {
+                        missing: Vec::new(),
+                        error: Some(
+                            text("Проверка результатов поиска завершилась неожиданно.").into(),
+                        ),
+                    })
+                }
             }
-            Err(mpsc::TryRecvError::Disconnected) => Some(Validation::Unavailable {
-                missing: Vec::new(),
-                error: Some(text("Проверка результатов поиска завершилась неожиданно.").into()),
-            }),
         };
         let check = self.check.take()?;
         ctx.request_repaint();
@@ -305,15 +373,13 @@ impl Panel {
                 self.remove_missing(missing, error);
             }
             None => {
-                self.error = Some(
-                    text("Файловая система не ответила на проверку результатов поиска.").into(),
-                );
+                self.error = Some(timeout.into());
             }
         }
         None
     }
 
-    fn remove_missing(&mut self, missing: Vec<PathBuf>, error: Option<String>) {
+    fn remove_missing(&mut self, missing: Vec<Location>, error: Option<String>) {
         let missing: BTreeSet<_> = missing.into_iter().collect();
         if let Some(snapshot) = &mut self.snapshot {
             snapshot
@@ -569,6 +635,7 @@ mod tests {
     use super::*;
     use crate::search::{content::LineMatch, SearchMatch};
     use std::fs;
+    use std::path::Path;
 
     fn results(paths: &[&Path]) -> Results {
         Results {
@@ -576,7 +643,7 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(line, path)| SearchMatch {
-                    path: path.to_path_buf(),
+                    path: path.to_path_buf().into(),
                     context: Some(LineMatch {
                         line: line + 1,
                         excerpt: "match".into(),
@@ -588,11 +655,11 @@ mod tests {
         }
     }
 
-    fn check(panel: &mut Panel, started: Instant) -> mpsc::Sender<(Instant, Validation)> {
+    fn check(panel: &mut Panel, started: Instant) -> mpsc::Sender<CheckEvent> {
         let (sender, receiver) = mpsc::channel();
         panel.check = Some(Check {
             cancel: Arc::new(AtomicBool::new(false)),
-            started,
+            last_activity: started,
             receiver,
         });
         sender
@@ -613,12 +680,15 @@ mod tests {
             "match".into(),
         );
         let selected = &mut panel.snapshot.as_mut().unwrap().selected;
-        selected.extend([stale.clone(), present.clone()]);
+        selected.extend([
+            Location::Local(stale.clone()),
+            Location::Local(present.clone()),
+        ]);
 
         let action = Action::Copy(selected.iter().cloned().collect(), destination.clone());
-        let validation = action.validate(&AtomicBool::default()).unwrap();
+        let validation = action.validate(&AtomicBool::default(), || {}).unwrap();
         check(&mut panel, Instant::now())
-            .send((Instant::now(), validation))
+            .send(CheckEvent::Finished(Instant::now(), Box::new(validation)))
             .unwrap();
         assert!(panel.poll(&ctx).is_none());
         assert!(panel.error.as_ref().unwrap().contains("missing.txt"));
@@ -628,8 +698,11 @@ mod tests {
             .results
             .matches
             .iter()
-            .all(|hit| hit.path == present));
-        assert_eq!(snapshot.selected, BTreeSet::from([present.clone()]));
+            .all(|hit| hit.path.path() == present));
+        assert_eq!(
+            snapshot.selected,
+            BTreeSet::from([Location::Local(present.clone())])
+        );
 
         let retry = Action::Copy(
             snapshot.selected.iter().cloned().collect(),
@@ -638,11 +711,11 @@ mod tests {
         let Some(Validation::Ready(ReadyAction::Copy {
             paths,
             destination: captured,
-        })) = retry.validate(&AtomicBool::default())
+        })) = retry.validate(&AtomicBool::default(), || {})
         else {
             panic!("remaining results should pass validation");
         };
-        assert_eq!(paths, [present]);
+        assert_eq!(paths, [Location::Local(present)]);
         assert_eq!(captured, destination);
     }
 
@@ -657,17 +730,19 @@ mod tests {
         let sender = check(&mut panel, Instant::now());
         panel.replace(results(&[&new]), true, "new".into());
         sender
-            .send((
+            .send(CheckEvent::Finished(
                 Instant::now(),
-                Validation::Unavailable {
-                    missing: vec![new.clone()],
+                Box::new(Validation::Unavailable {
+                    missing: vec![new.clone().into()],
                     error: None,
-                },
+                }),
             ))
             .unwrap();
         assert!(panel.poll(&ctx).is_none());
         assert_eq!(
-            panel.snapshot.as_ref().unwrap().results.matches[0].path,
+            panel.snapshot.as_ref().unwrap().results.matches[0]
+                .path
+                .path(),
             new
         );
         assert!(panel.error.is_none());
@@ -675,11 +750,14 @@ mod tests {
         let sender = check(&mut panel, Instant::now());
         panel.close();
         let action = ReadyAction::Copy {
-            paths: vec![new],
+            paths: vec![new.into()],
             destination: root.path().to_path_buf().into(),
         };
         sender
-            .send((Instant::now(), Validation::Ready(action)))
+            .send(CheckEvent::Finished(
+                Instant::now(),
+                Box::new(Validation::Ready(action)),
+            ))
             .unwrap();
         assert!(panel.poll(&ctx).is_none());
         assert!(panel.snapshot.is_none());
@@ -696,14 +774,58 @@ mod tests {
         assert!(panel.check.is_some());
 
         let action = ReadyAction::Copy {
-            paths: vec![root.path().join("file")],
+            paths: vec![root.path().join("file").into()],
             destination: root.path().to_path_buf().into(),
         };
         sender
-            .send((Instant::now(), Validation::Ready(action)))
+            .send(CheckEvent::Finished(
+                Instant::now(),
+                Box::new(Validation::Ready(action)),
+            ))
             .unwrap();
         assert!(panel.poll(&ctx).is_none());
         assert!(panel.check.is_none());
+    }
+
+    #[test]
+    fn remote_checks_can_finish_after_the_initial_wait_while_making_progress() {
+        let ctx = egui::Context::default();
+        let mut panel = Panel::default();
+        let started = Instant::now() - CHECK_TIMEOUT * 2;
+        let sender = check(&mut panel, started);
+        for step in 1..=3 {
+            sender
+                .send(CheckEvent::Progress(started + CHECK_TIMEOUT / 2 * step))
+                .unwrap();
+        }
+        let remote = Location::Sftp {
+            endpoint: crate::vfs::Endpoint {
+                host: "127.0.0.1".into(),
+                port: 0,
+                user: "fixture".into(),
+                key: None,
+            },
+            path: "/folder/file.txt".into(),
+        };
+        let destination = Location::Local("/destination".into());
+        sender
+            .send(CheckEvent::Finished(
+                started + CHECK_TIMEOUT * 2,
+                Box::new(Validation::Ready(ReadyAction::Copy {
+                    paths: vec![remote.clone()],
+                    destination: destination.clone(),
+                })),
+            ))
+            .unwrap();
+        let Some(ReadyAction::Copy {
+            paths,
+            destination: captured,
+        }) = panel.poll(&ctx)
+        else {
+            panic!("the check kept making progress");
+        };
+        assert_eq!(paths, [remote]);
+        assert_eq!(captured, destination);
     }
 
     #[test]

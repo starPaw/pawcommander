@@ -66,7 +66,7 @@ fn search_results_copy_to_captured_location_and_do_not_reveal_in_a_changed_tab()
         .navigate(other.clone().into(), &ctx);
     app.dispatch_search_result(
         ReadyAction::Reveal {
-            path: path.clone(),
+            path: path.clone().into(),
             target,
         },
         &ctx,
@@ -76,7 +76,7 @@ fn search_results_copy_to_captured_location_and_do_not_reveal_in_a_changed_tab()
 
     app.dispatch_search_result(
         ReadyAction::Copy {
-            paths: vec![path.clone()],
+            paths: vec![path.clone().into()],
             destination: destination.clone().into(),
         },
         &ctx,
