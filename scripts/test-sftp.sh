@@ -39,7 +39,7 @@ if [[ "$reconnect" == "1" ]]; then
   done
   export SSH_AUTH_SOCK="$test_root/agent.sock"
   ssh-add "$test_root/client"
-elif [[ "$terminal_test" == "1" ]]; then
+elif [[ "$terminal_test" == "1" || "$terminal_test" == "embedded" ]]; then
   export PAWCOMMANDER_TEST_TERMINAL_KEY="$test_root/client key '%h \${USER}'"
   ssh-keygen -q -t ed25519 -N '' -f "$PAWCOMMANDER_TEST_TERMINAL_KEY"
   cp "$PAWCOMMANDER_TEST_TERMINAL_KEY.pub" "$test_root/client.pub"
@@ -74,10 +74,10 @@ AllowUsers $(id -un)
 Subsystem sftp $subsystem
 LogLevel ERROR
 CONFIG
-if [[ "$terminal_test" == "1" ]]; then
+if [[ "$terminal_test" == "1" || "$terminal_test" == "embedded" ]]; then
   cat >> "$test_root/sshd_config" <<CONFIG
 PermitUserRC no
-SetEnv SHELL=/bin/sh ENV=/dev/null ZDOTDIR=$test_root
+SetEnv SHELL=/bin/sh ENV=/dev/null ZDOTDIR=$test_root LC_CTYPE=UTF-8
 CONFIG
 fi
 "$sshd_bin" -D -e -f "$test_root/sshd_config" > "$test_root/sshd.log" 2>&1 &
@@ -95,6 +95,8 @@ if [[ "$reconnect" == "1" ]]; then
   cargo test --locked sftp_reconnect_checks_lost_publication_replies -- --ignored --nocapture
 elif [[ "$terminal_test" == "1" ]]; then
   cargo test --locked openssh_terminal_starts_interactively_in_the_exact_folder -- --ignored --nocapture
+elif [[ "$terminal_test" == "embedded" ]]; then
+  cargo test --locked openssh_terminal_embedded_propagates_pty_size_and_folder -- --ignored --nocapture
 else
   cargo test --locked openssh_round_trip_and_host_verification -- --ignored --nocapture
 fi

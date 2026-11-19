@@ -121,6 +121,8 @@ pub struct PawCommander {
     connection: Option<ConnectionJob>,
     native_drag: crate::native_drag::NativeDrag,
     application_job: Option<Receiver<Result<String, String>>>,
+    #[cfg(target_os = "macos")]
+    embedded_terminal: Option<crate::terminal::embedded::Panel>,
     tools: crate::tools::Tools,
     search: crate::search::Search,
 }
@@ -172,6 +174,15 @@ impl eframe::App for PawCommander {
         #[cfg(target_os = "windows")]
         self.windows_drives.poll(ctx);
         self.poll(ctx);
+        #[cfg(target_os = "macos")]
+        if self
+            .embedded_terminal
+            .as_mut()
+            .is_some_and(crate::terminal::embedded::Panel::poll)
+        {
+            self.embedded_terminal = None;
+            ctx.request_repaint();
+        }
         // Hidden windows receive close requests through logic-only ticks too.
         if (self.job.is_some() || !self.pending_jobs.is_empty())
             && ctx.input(|i| i.viewport().close_requested())
@@ -215,6 +226,21 @@ impl eframe::App for PawCommander {
             }
             _ => true,
         });
+        #[cfg(target_os = "macos")]
+        if input.viewport_id == egui::ViewportId::ROOT
+            && !self.keyboard_blocked(ctx)
+            && self.embedded_terminal.as_mut().is_some_and(|terminal| {
+                terminal.capture(ctx, &mut input.events, |key, modifiers| {
+                    let chord = shortcuts::chord(key, modifiers);
+                    modifiers.mac_cmd
+                        && Command::Palette.works_in_text_field(chord)
+                        && self.settings.shortcuts.command(chord) == Some(Command::Palette)
+                })
+            })
+        {
+            self.tab_held = false;
+            return;
+        }
         let pane_keys = (!ctx.egui_wants_keyboard_input() || self.file_row_focus(ctx).is_some())
             && !self.keyboard_blocked(ctx);
         let mut pane = self
@@ -350,6 +376,13 @@ impl eframe::App for PawCommander {
         let mut tab_targets = TabDropTargets::default();
         self.toolbar(ui, &mut actions);
         self.footer(ui);
+        #[cfg(target_os = "macos")]
+        {
+            let interactive = !self.keyboard_blocked(ctx);
+            if let Some(terminal) = &mut self.embedded_terminal {
+                terminal.show(ui, interactive);
+            }
+        }
         self.history.show(ctx, &mut self.show_history);
         if let Some(id) = self.history.retry_requested.take() {
             self.retry_transfer(ctx, &id);
@@ -571,6 +604,13 @@ impl eframe::App for PawCommander {
         self.keyboard_had_focus =
             ctx.egui_wants_keyboard_input() && self.file_row_focus(ctx).is_none();
     }
+    #[cfg(target_os = "macos")]
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Some(terminal) = &mut self.embedded_terminal {
+            terminal.shutdown();
+        }
+    }
+
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         // Leave readable paths for older builds and if the session cannot be decoded.
         let mut pinned_tab_counts = [0; 2];

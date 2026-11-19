@@ -276,6 +276,12 @@ On macOS, right-click the current folder in the pane's address bar and choose **
 
 From an SFTP folder, the command opens a separate interactive OpenSSH session in Terminal. The server must allow an SSH shell and a PTY. OpenSSH uses the host, port, account and optional key-file path from the SFTP location. It handles host trust and authentication using its own configuration, agent and prompts. You can enter the password or unlock the key in Terminal if prompted. Key-file names containing OpenSSH expansion syntax use its `IdentityFile` environment expansion, available in OpenSSH 8.4 and later.
 
+### Embedded terminal
+
+On macOS, choose **Open Embedded Terminal** from the same folder menu or from the command palette. The bottom panel starts an interactive local shell or SSH session in the selected pane's current folder. The header shows that starting folder. Opening the action again focuses the running session. Run `cd` inside the shell to change its working folder while browsing in the file panes.
+
+Drag the panel's top edge to resize the terminal and its PTY. Use the trackpad or wheel to scroll through output, drag to select text, and use `Cmd+C` or `Cmd+V` to copy or paste. `Ctrl+C` goes to the terminal session. **Close Terminal** ends the managed session and closes the panel. When the shell exits, its output stays available until you close the panel or open a new session.
+
 ## Accessibility
 
 Open **Settings → Accessibility** to choose an interface scale from 90% to 150% or enable high contrast. Both choices are saved. `Cmd/Ctrl+=` and `Cmd/Ctrl+-` change the scale, and `Cmd/Ctrl+0` resets it to 100%.

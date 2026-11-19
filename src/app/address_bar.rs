@@ -110,6 +110,10 @@ pub(super) fn address_bar(
                                         }
                                         if current && crate::terminal::available(path) {
                                             response.context_menu(|ui| {
+                                                if ui.button(crate::shortcuts::Command::OpenEmbeddedTerminal.label()).clicked() {
+                                                    actions.push(Action::OpenEmbeddedTerminal((*path).clone()));
+                                                    ui.close();
+                                                }
                                                 if ui
                                                     .button(
                                                         crate::shortcuts::Command::OpenTerminal

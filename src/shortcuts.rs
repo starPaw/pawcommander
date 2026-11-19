@@ -31,6 +31,7 @@ pub enum Command {
     QuickLook,
     EditInZed,
     OpenTerminal,
+    OpenEmbeddedTerminal,
     Refresh,
     Properties,
     ChangePermissions,
@@ -55,7 +56,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Self; 43 + cfg!(target_os = "macos") as usize] = [
+    pub const ALL: [Self; 43 + 2 * cfg!(target_os = "macos") as usize] = [
         Self::EditPath,
         Self::Filter,
         Self::Search,
@@ -81,6 +82,8 @@ impl Command {
         Self::EditInZed,
         #[cfg(target_os = "macos")]
         Self::OpenTerminal,
+        #[cfg(target_os = "macos")]
+        Self::OpenEmbeddedTerminal,
         Self::Refresh,
         Self::Properties,
         Self::ChangePermissions,
@@ -129,6 +132,7 @@ impl Command {
             Self::QuickLook => "Быстрый просмотр",
             Self::EditInZed => "Открыть в Zed",
             Self::OpenTerminal => "Открыть терминал здесь",
+            Self::OpenEmbeddedTerminal => "Открыть встроенный терминал",
             Self::Refresh => "Обновить",
             Self::Properties => "Свойства",
             Self::ChangePermissions => "Изменить права доступа",
@@ -222,6 +226,7 @@ impl Profile {
             Preview
             | EditInZed
             | OpenTerminal
+            | OpenEmbeddedTerminal
             | CopyToPane
             | MoveToPane
             | TogglePinTab

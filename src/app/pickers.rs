@@ -112,6 +112,7 @@ impl PawCommander {
                 Command::OpenTerminal => {
                     crate::terminal::available(&tab.path) && self.application_job.is_none()
                 }
+                Command::OpenEmbeddedTerminal => crate::terminal::available(&tab.path),
                 Command::CopyToPane | Command::MoveToPane => {
                     idle && writable
                         && self.settings.split
