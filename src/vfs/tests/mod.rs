@@ -42,6 +42,8 @@ mod location;
 mod metadata;
 mod pause;
 #[cfg(unix)]
+mod permissions;
+#[cfg(unix)]
 mod reconnect;
 mod retry;
 mod sftp;

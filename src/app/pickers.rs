@@ -106,6 +106,7 @@ impl PawCommander {
                 Command::Properties => {
                     has_selection && selected.iter().all(|path| path.local().is_some())
                 }
+                Command::ChangePermissions => idle && tab.path.remote() && has_selection,
                 Command::CopyToPane | Command::MoveToPane => {
                     idle && writable
                         && self.settings.split

@@ -192,6 +192,12 @@ If a connection fails during replacement or restoration, the server may have com
 
 Remote deletion recursively removes directories without a trash. Symlinks are removed without following them. An interrupted or failed deletion may already have removed part of the selection. Visible remote folders refresh automatically through an existing connection; use `F5` for an immediate refresh.
 
+### Change permissions
+
+Select files or folders in an SFTP pane and choose **Change permissions** from the context menu or command palette. Enter an octal mode such as `0644` or a symbolic rule such as `u+rw,go-w`. A symbolic clause without a class applies to all classes (`a`). Choose **Preview** to see each item's current and proposed modes before choosing **Apply**.
+
+The change applies to the selected regular files and folders. An unavailable item or a symbolic link is marked in the preview. If an item changes after the preview or the server denies access, the result history shows the reason for that item. Check any unconfirmed change before trying again after a disconnect.
+
 ## Previews and properties
 
 Grid shows thumbnails for visible PNG, JPEG, and GIF files in local folders. Animated files show a still image. Thumbnails load in the background and update when a folder refresh detects a file change. Use `F5` to rebuild thumbnails in both panes, including after edits that preserve filesystem metadata. Images above 20 MiB, 8,192 pixels on either edge, or 16 megapixels keep their file icons. Icons also remain for links, unsupported or unreadable images, SFTP files, and archive contents.

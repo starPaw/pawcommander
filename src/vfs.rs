@@ -13,6 +13,7 @@ mod file_compare;
 mod listing;
 mod location;
 mod mutations;
+mod permissions;
 mod preview;
 mod read_scope;
 mod retry;
@@ -43,6 +44,7 @@ pub use location::{resolve, Endpoint, Location};
 pub use mutations::{create_directory, trash_entries_with_progress};
 #[cfg(test)]
 pub use mutations::{rename_entry, trash_entries};
+pub(crate) use permissions::{ModeRule, PermissionsPreview};
 #[cfg(target_os = "macos")]
 pub(crate) use preview::cache_media_preview;
 pub(crate) use preview::open_preview_stream;

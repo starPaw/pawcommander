@@ -145,6 +145,7 @@ impl PawCommander {
             }
             Command::Refresh => Action::Refresh,
             Command::Properties => Action::Properties,
+            Command::ChangePermissions => Action::ChangePermissions,
             Command::Rename => Action::Rename,
             Command::CreateArchive => Action::CreateArchive,
             Command::ExtractArchive => Action::ExtractArchive,

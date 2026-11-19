@@ -43,7 +43,7 @@ The script creates a temporary loopback-only SSH server, generates disposable ke
 
 The reconnect mode starts a temporary SSH agent and uses an OpenSSH SFTP subsystem wrapper to withhold rename replies. It checks reconnect and inspection after disconnects before or after publication. It uses `/usr/libexec/sftp-server` by default. Set `SFTP_SERVER_BIN` if your OpenSSH server uses another path.
 
-The metadata-denied mode disables `setstat` and `fsetstat` on the temporary server. It checks that the copy still completes with field-specific warnings. The standard mode checks supported dates and permissions and cancellation after metadata writes.
+The metadata-denied mode disables `setstat` and `fsetstat` on the temporary server. It checks that copies complete with field-specific warnings and that **Change permissions** reports the server's refusal. The standard mode also checks that numeric and symbolic permission changes match their preview, skips changed entries and symbolic links, and honors cancellation before sending a permission update.
 
 Run `bash scripts/test-ssh-interactive.sh` with a C compiler, `pkg-config`, OpenSSH key generation tools and a libssh build with server support. The loopback fixture exercises first-use trust, cancellation, hashed OpenSSH host records, key rotation, keyboard-interactive rounds and a second factor after key authentication. It compares the fingerprints with `ssh-keygen` and writes trust records only in its temporary directory.
 

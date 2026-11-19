@@ -2,6 +2,68 @@ use super::*;
 use std::fs;
 
 #[test]
+fn permissions_command_requires_an_sftp_selection_and_preview() {
+    let fixture = tempfile::tempdir().unwrap();
+    let local = Location::Local(fixture.path().join("local.txt"));
+    fs::write(local.path(), b"local fixture").unwrap();
+    let ctx = egui::Context::default();
+    let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+    let mut app = PawCommander::new(&cc, Some(fixture.path().into()));
+    wait_for_directory(app.tab_mut());
+    app.tab_mut().selected.insert(local);
+    app.run_shortcut(Command::ChangePermissions, &ctx);
+    assert!(app.dialog.is_none());
+
+    let tab = app.tab_mut();
+    tab.path = Location::Sftp {
+        endpoint: Endpoint {
+            host: "127.0.0.1".into(),
+            port: 0,
+            user: "fixture".into(),
+            key: None,
+        },
+        path: "/data".into(),
+    };
+    let selected = tab.path.join("sample.txt");
+    tab.entries.replace(vec![FileEntry {
+        name: selected.name(),
+        path: selected.clone(),
+        is_dir: false,
+        is_symlink: false,
+        size: 1,
+        modified: None,
+        metadata: Default::default(),
+    }]);
+    tab.selected = BTreeSet::from([selected]);
+    app.run_shortcut(Command::ChangePermissions, &ctx);
+    assert!(matches!(&app.dialog, Some(Dialog::ChangePermissions(editor)) if !editor.can_apply()));
+
+    let mut draw = || {
+        ctx.run_test_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(960.0, 680.0),
+                )),
+                ..Default::default()
+            },
+            |ui| app.dialogs(ui.ctx()),
+        )
+    };
+    draw();
+    let rendered = operation_footer_text(&draw());
+    assert!(
+        rendered.contains(Command::ChangePermissions.label()),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains(crate::i18n::text("Предпросмотр")),
+        "{rendered}"
+    );
+    assert!(app.job.is_none());
+}
+
+#[test]
 fn ssh_config_form_reviews_the_effective_endpoint_and_selects_an_identity() {
     let fixture = tempfile::tempdir().unwrap();
     let home = fixture.path().to_owned();

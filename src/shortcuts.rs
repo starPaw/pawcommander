@@ -32,6 +32,7 @@ pub enum Command {
     EditInZed,
     Refresh,
     Properties,
+    ChangePermissions,
     Rename,
     CreateArchive,
     ExtractArchive,
@@ -53,7 +54,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Self; 42] = [
+    pub const ALL: [Self; 43] = [
         Self::EditPath,
         Self::Filter,
         Self::Search,
@@ -79,6 +80,7 @@ impl Command {
         Self::EditInZed,
         Self::Refresh,
         Self::Properties,
+        Self::ChangePermissions,
         Self::Rename,
         Self::CreateArchive,
         Self::ExtractArchive,
@@ -125,6 +127,7 @@ impl Command {
             Self::EditInZed => "Открыть в Zed",
             Self::Refresh => "Обновить",
             Self::Properties => "Свойства",
+            Self::ChangePermissions => "Изменить права доступа",
             Self::Rename => "Переименовать",
             Self::CreateArchive => "Создать архив",
             Self::ExtractArchive => "Распаковать выбранное",
@@ -222,6 +225,7 @@ impl Profile {
             | SelectByExtension
             | InvertSelection
             | RestoreSelection
+            | ChangePermissions
             | CreateArchive
             | ExtractArchive
             | VerifyArchive

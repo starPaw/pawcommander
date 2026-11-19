@@ -1,5 +1,6 @@
 use super::actions::SelectionChange;
 use super::batch_rename::BatchRenameDialog;
+use super::permissions::PermissionsDialog;
 use super::selection::{Rule, RuleKind};
 use super::state::Settings;
 use super::{file_name, PawCommander};
@@ -71,6 +72,7 @@ pub(super) enum Dialog {
         name: String,
     },
     BatchRename(Box<BatchRenameDialog>),
+    ChangePermissions(Box<PermissionsDialog>),
     CreateArchive {
         sources: Vec<Location>,
         directory: Location,
@@ -427,6 +429,7 @@ impl PawCommander {
             Dialog::NewFolder { .. } => crate::i18n::text("Новая папка"),
             Dialog::Rename { .. } => crate::i18n::text("Переименовать"),
             Dialog::BatchRename(_) => crate::i18n::text("Массовое переименование"),
+            Dialog::ChangePermissions(_) => Command::ChangePermissions.label(),
             Dialog::CreateArchive { .. } => Command::CreateArchive.label(),
             Dialog::ExtractArchive { .. } => Command::ExtractArchive.label(),
             Dialog::VerifyArchive { .. } => Command::VerifyArchive.label(),
@@ -449,7 +452,7 @@ impl PawCommander {
         };
         // The modal blocks file interactions while a concrete destination is being confirmed.
         egui::Modal::new(egui::Id::unique("file_dialog")).show(ctx, |ui| {
-            ui.set_width(if matches!(dialog, Dialog::BatchRename(_)) { 605.0 } else { 430.0 });
+            ui.set_width(if matches!(dialog, Dialog::BatchRename(_) | Dialog::ChangePermissions(_)) { 605.0 } else { 430.0 });
             ui.heading(title);
             ui.add_space(12.0);
             match &mut dialog {
@@ -511,6 +514,7 @@ impl PawCommander {
                     }
                 }
                 Dialog::BatchRename(editor) => editor.show(ui, self.dialog_focus),
+                Dialog::ChangePermissions(editor) => editor.show(ui, self.dialog_focus),
                 Dialog::CreateChecksumManifest { sources, directory, name } => {
                     ui.label(crate::tr_format!("Выбрано файлов: {}", "Selected files: {}", sources.len()));
                     let label = ui.label(crate::i18n::text("Имя манифеста"));
@@ -667,6 +671,7 @@ impl PawCommander {
                     !name.trim().is_empty()
                 }
                 Dialog::BatchRename(editor) => editor.can_apply(),
+                Dialog::ChangePermissions(editor) => editor.can_apply(),
                 Dialog::CreateChecksumManifest { name, .. } => fs_ops::checksum_manifest_name(name).is_ok(),
                 Dialog::CreateArchive { name, format, .. } => fs_ops::archive_file_name(name, *format).is_ok(),
                 Dialog::ExtractArchive { address, archive_directory, other, .. } => extraction_destination(address, archive_directory, other.as_ref()).is_ok(),
@@ -690,6 +695,8 @@ impl PawCommander {
                     crate::i18n::text("Выделить")
                 } else if matches!(dialog, Dialog::BatchRename(_)) {
                     crate::i18n::text("Переименовать")
+                } else if matches!(dialog, Dialog::ChangePermissions(_)) {
+                    crate::i18n::text("Применить")
                 } else if matches!(dialog, Dialog::CreateArchive { .. } | Dialog::CreateChecksumManifest { .. }) {
                     crate::i18n::text("Создать")
                 } else if matches!(dialog, Dialog::ExtractArchive { .. }) {
@@ -714,7 +721,7 @@ impl PawCommander {
                 confirm = ui.add_enabled(valid, button).clicked();
             });
             let submit_on_enter = match dialog {
-                Dialog::TransferLimits { .. } | Dialog::Trash { .. } | Dialog::BatchRename(_) | Dialog::CreateArchive { .. } | Dialog::ExtractArchive { .. } | Dialog::VerifyArchive { .. } | Dialog::ArchiveEdit { .. } => false,
+                Dialog::TransferLimits { .. } | Dialog::Trash { .. } | Dialog::BatchRename(_) | Dialog::ChangePermissions(_) | Dialog::CreateArchive { .. } | Dialog::ExtractArchive { .. } | Dialog::VerifyArchive { .. } | Dialog::ArchiveEdit { .. } => false,
                 // The Enter that opens the dialog belongs to its sidebar control.
                 Dialog::WorkspaceName { .. } | Dialog::SelectionRule { .. } | Dialog::CreateChecksumManifest { .. } => !self.dialog_focus,
                 _ => true,
@@ -834,6 +841,16 @@ impl PawCommander {
                 Dialog::BatchRename(editor) => {
                     if let Some(plan) = (*editor).into_plan() {
                         self.start_batch_rename(ctx, plan);
+                    }
+                }
+                Dialog::ChangePermissions(editor) => {
+                    if let Some(plan) = (*editor).into_plan() {
+                        let label = Command::ChangePermissions.label();
+                        let description =
+                            format!("{label} ({}) · {}", plan.changes, plan.directory());
+                        self.start_stoppable_job(ctx, label, description, move |progress| {
+                            plan.apply(progress)
+                        });
                     }
                 }
                 Dialog::CreateArchive {

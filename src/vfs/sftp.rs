@@ -350,7 +350,7 @@ fn connect_reviewed(
     })
 }
 
-fn should_reopen(error: &ssh2::Error) -> bool {
+pub(super) fn should_reopen(error: &ssh2::Error) -> bool {
     // libssh2's SFTP initializer can report CHANNEL_FAILURE for an
     // underlying transport error while it is opening the SSH channel.
     matches!(
