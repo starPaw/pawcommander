@@ -207,6 +207,11 @@ impl PawCommander {
                             }
                             ui.separator();
                             let tools_menu = ui.menu_button(crate::i18n::text("Инструменты"), |ui| {
+                                #[cfg(target_os = "macos")]
+                                if ui.button(crate::i18n::text("Пользовательские действия…")).clicked() {
+                                    actions.push(Action::ManageCustomActions);
+                                    ui.close();
+                                }
                                 for (name, path) in [("locate", &self.tools.locate), ("Zed", &self.tools.zed), ("FileMerge", &self.tools.diff)] {
                                     if let Some(path) = path {
                                         ui.label(crate::tr_format!("{name}: найден", "{name}: found")).on_hover_text(path.display().to_string());

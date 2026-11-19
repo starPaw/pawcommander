@@ -113,6 +113,8 @@ impl PawCommander {
                     crate::terminal::available(&tab.path) && self.application_job.is_none()
                 }
                 Command::OpenEmbeddedTerminal => crate::terminal::available(&tab.path),
+                #[cfg(target_os = "macos")]
+                Command::CustomActions => tab.path.local().is_some() && has_selection,
                 Command::CopyToPane | Command::MoveToPane => {
                     idle && writable
                         && self.settings.split

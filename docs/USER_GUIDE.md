@@ -198,6 +198,14 @@ Select files or folders in an SFTP pane and choose **Change permissions** from t
 
 The change applies to the selected regular files and folders. An unavailable item or a symbolic link is marked in the preview. If an item changes after the preview or the server denies access, the result history shows the reason for that item. Check any unconfirmed change before trying again after a disconnect.
 
+## Custom actions on macOS
+
+Choose **Settings → Tools → Custom actions…** to add a named action with an absolute path to its executable. Enter one argument per row. Use `{file}` in an argument for exactly one selected item, `{files}` on its own for one argument per selected item, or `{folder}` for the current folder. Use `{{` and `}}` to enter literal braces.
+
+Select local files or folders and choose **Custom actions…** from the context menu or **Custom actions** from the command palette. Pick the action and review the executable, working folder and numbered arguments before choosing **Run**. PawCommander passes each value directly to the program, preserving spaces, quotes and other characters in paths.
+
+To open selected files in an installed VLC player, use `/usr/bin/open` as the executable and enter `-b`, `org.videolan.vlc` and `{files}` in three separate rows.
+
 ## Previews and properties
 
 Grid shows thumbnails for visible PNG, JPEG, and GIF files in local folders. Animated files show a still image. Thumbnails load in the background and update when a folder refresh detects a file change. Use `F5` to rebuild thumbnails in both panes, including after edits that preserve filesystem metadata. Images above 20 MiB, 8,192 pixels on either edge, or 16 megapixels keep their file icons. Icons also remain for links, unsupported or unreadable images, SFTP files, and archive contents.

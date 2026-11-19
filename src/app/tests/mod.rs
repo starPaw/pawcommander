@@ -53,6 +53,8 @@ mod accessibility;
 mod address;
 mod bookmarks;
 mod clipboard;
+#[cfg(target_os = "macos")]
+mod custom_actions;
 mod directory;
 mod drag_drop;
 mod jobs;

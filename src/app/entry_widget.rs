@@ -397,6 +397,14 @@ pub(super) fn entry_widget(
                 actions.push(Action::OpenInZed(pane, path.clone()));
                 ui.close();
             }
+            #[cfg(target_os = "macos")]
+            if path.local().is_some()
+                && ui.button(crate::i18n::text("Пользовательские действия…")).clicked()
+            {
+                actions.push(Action::Focus(pane));
+                actions.push(Action::CustomActions);
+                ui.close();
+            }
             if let Some(count) = tab.selected_file_count(visible) {
                 if ui.add_enabled(idle, egui::Button::new(crate::i18n::text("Создать манифест SHA-256…"))).clicked() {
                     actions.push(Action::Focus(pane));

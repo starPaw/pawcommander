@@ -146,6 +146,8 @@ impl PawCommander {
             Command::Refresh => Action::Refresh,
             Command::OpenTerminal => Action::OpenTerminal(self.tab().path.clone()),
             Command::OpenEmbeddedTerminal => Action::OpenEmbeddedTerminal(self.tab().path.clone()),
+            #[cfg(target_os = "macos")]
+            Command::CustomActions => Action::CustomActions,
             Command::Properties => Action::Properties,
             Command::ChangePermissions => Action::ChangePermissions,
             Command::Rename => Action::Rename,

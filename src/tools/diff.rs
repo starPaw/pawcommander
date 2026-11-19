@@ -1,8 +1,7 @@
+use super::launch::{report_startup, start_error};
 use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    thread,
-    time::{Duration, Instant},
 };
 
 pub(super) fn detect() -> Option<PathBuf> {
@@ -34,41 +33,9 @@ pub(crate) fn launch_diff(
     files: &[PathBuf; 2],
     report: impl FnOnce(Result<(), String>),
 ) {
-    let mut child = match spawn(tool, files) {
-        Ok(child) => child,
-        Err(error) => {
-            report(Err(error));
-            return;
-        }
-    };
-    let deadline = Instant::now() + Duration::from_millis(700);
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                report(if status.success() {
-                    Ok(())
-                } else {
-                    Err(crate::tr_format!(
-                        "Внешний инструмент завершился с ошибкой ({status})",
-                        "The external tool exited with an error ({status})"
-                    ))
-                });
-                return;
-            }
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(15)),
-            Ok(None) => {
-                // Some tools keep the process attached while their window is
-                // open. Report startup, then reap it outside the UI thread.
-                report(Ok(()));
-                let _ = child.wait();
-                return;
-            }
-            Err(error) => {
-                report(Err(start_error(error)));
-                let _ = child.wait();
-                return;
-            }
-        }
+    match spawn(tool, files) {
+        Ok(child) => report_startup(child, report),
+        Err(error) => report(Err(error)),
     }
 }
 
@@ -95,11 +62,4 @@ fn spawn(tool: &Path, files: &[PathBuf; 2]) -> Result<Child, String> {
         .stderr(Stdio::null())
         .spawn()
         .map_err(start_error)
-}
-
-fn start_error(error: std::io::Error) -> String {
-    crate::tr_format!(
-        "Не удалось запустить внешний инструмент: {error}",
-        "Could not launch the external tool: {error}"
-    )
 }
