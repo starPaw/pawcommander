@@ -3,11 +3,13 @@ use crate::test_ui::ContextExt as _;
 mod code;
 #[cfg(target_os = "macos")]
 mod helper;
+mod large_text;
 mod markup;
 #[cfg(target_os = "macos")]
 mod media;
 #[cfg(target_os = "macos")]
 mod pdf;
+mod source;
 mod table;
 
 use crate::operations::Cancellation;
@@ -26,6 +28,8 @@ use crate::{
 };
 use chrono::{DateTime, Local};
 use eframe::egui::{self, RichText};
+#[cfg(test)]
+pub(crate) use large_text::check_sftp_large_text;
 #[cfg(target_os = "macos")]
 pub(crate) use media::{run_media_worker, MEDIA_WORKER_ARG};
 #[cfg(target_os = "macos")]
@@ -74,6 +78,7 @@ enum Content {
     #[cfg(target_os = "macos")]
     Media(Box<media::Player>),
     Table(Box<table::Document>),
+    LargeText(Box<large_text::Document>),
     Message(String),
 }
 
@@ -100,14 +105,14 @@ struct TextView {
 
 impl Preview {
     pub fn new() -> Self {
-        Self::with_tables(false)
+        Self::with_quick_look(false)
     }
 
     pub(crate) fn new_quick_look() -> Self {
-        Self::with_tables(true)
+        Self::with_quick_look(true)
     }
 
-    fn with_tables(tables: bool) -> Self {
+    fn with_quick_look(quick_look: bool) -> Self {
         let (requests, receiver) = mpsc::channel::<Request>();
         let (sender, responses) = mpsc::channel();
         thread::spawn(move || {
@@ -119,7 +124,7 @@ impl Preview {
                 if request.cancel.is_requested() {
                     continue;
                 }
-                let result = load_location(&request.path, &request.cancel, tables);
+                let result = load_location(&request.path, &request.cancel, quick_look);
                 if request.cancel.is_requested() {
                     continue;
                 }
@@ -225,6 +230,10 @@ impl Preview {
                     ui.push_id(("table-preview", self.generation), |ui| table.show(ui));
                     return;
                 }
+                Content::LargeText(document) => {
+                    ui.push_id(("large-text", self.generation), |ui| document.show(ui));
+                    return;
+                }
                 #[cfg(target_os = "macos")]
                 Content::Pdf(document) => {
                     ui.push_id(("pdf-preview", self.generation), |ui| document.show(ui));
@@ -286,7 +295,7 @@ impl Preview {
                     Content::Directory => {
                         ui.label(&loaded.kind);
                     }
-                    Content::Table(_) => {}
+                    Content::Table(_) | Content::LargeText(_) => {}
                     #[cfg(target_os = "macos")]
                     Content::Pdf(_) | Content::Media(_) => {}
                 },
@@ -297,6 +306,7 @@ impl Preview {
         if let Some(Ok(loaded)) = &self.result {
             match &loaded.content {
                 Content::Table(table) => return table.text_input(ctx),
+                Content::LargeText(document) => return document.text_input(ctx),
                 #[cfg(target_os = "macos")]
                 Content::Pdf(document) => return document.text_input(ctx),
                 _ => {}
@@ -534,21 +544,11 @@ fn draw_text(
     font_size: f32,
 ) {
     if truncated {
-        ui.colored_label(
-            Palette::from_ctx(ui.ctx()).muted,
-            crate::i18n::text("Показано начало файла: до 32 КиБ, 1000 строк и 8 КиБ на строку."),
-        );
+        draw_text_limit(ui);
     }
     if let Some(document) = markup {
         let old_source = view.source;
-        ui.horizontal_wrapped(|ui| {
-            ui.selectable_value(
-                &mut view.source,
-                false,
-                crate::i18n::text("Форматированный"),
-            );
-            ui.selectable_value(&mut view.source, true, crate::i18n::text("Исходный текст"));
-        });
+        source_controls(ui, &mut view.source);
         if old_source != view.source {
             view.find.clear(ui.ctx());
             view.revision = view.revision.wrapping_add(1);
@@ -561,6 +561,20 @@ fn draw_text(
     ui.push_id(view.revision, |ui| {
         view.find.show(ui, body, code, font_size)
     });
+}
+
+fn source_controls(ui: &mut egui::Ui, source: &mut bool) {
+    ui.horizontal_wrapped(|ui| {
+        ui.selectable_value(source, false, crate::i18n::text("Форматированный"));
+        ui.selectable_value(source, true, crate::i18n::text("Исходный текст"));
+    });
+}
+
+fn draw_text_limit(ui: &mut egui::Ui) {
+    ui.colored_label(
+        Palette::from_ctx(ui.ctx()).muted,
+        crate::i18n::text("Показано начало файла: до 32 КиБ, 1000 строк и 8 КиБ на строку."),
+    );
 }
 
 fn detail(ui: &mut egui::Ui, label: &str, value: &str) {
@@ -603,14 +617,14 @@ fn draw_icon(ui: &mut egui::Ui, is_dir: bool, name: &str) {
 fn load_location(
     location: &Location,
     cancel: &Cancellation,
-    tables: bool,
+    quick_look: bool,
 ) -> Result<Loaded, String> {
-    let separator = tables
+    if let Some(path) = location.local() {
+        return load(path, cancel, quick_look);
+    }
+    let separator = quick_look
         .then(|| table::Separator::from_path(location.path()))
         .flatten();
-    if let Some(path) = location.local() {
-        return load(path, cancel, separator);
-    }
     let limit = if separator.is_some() {
         0
     } else if image_path_format(location.path()).is_some() {
@@ -633,7 +647,8 @@ fn load_location(
         Content::Table(Box::new(table::Document::new(location.clone(), separator)))
     } else {
         let length = stat.size.unwrap_or(bytes.len() as u64);
-        remote_file_preview(location, bytes, length, cancel).unwrap_or_else(Content::Message)
+        remote_file_preview(location, bytes, length, cancel, quick_look)
+            .unwrap_or_else(Content::Message)
     };
     Ok(Loaded {
         kind: if stat.is_dir() {
@@ -662,6 +677,7 @@ fn remote_file_preview(
     bytes: Vec<u8>,
     length: u64,
     cancel: &Cancellation,
+    quick_look: bool,
 ) -> Result<Content, String> {
     #[cfg(target_os = "macos")]
     if media::supported(location.path()) {
@@ -673,17 +689,16 @@ fn remote_file_preview(
     if pdf::is_pdf(location.path()) {
         return pdf_content(bytes, length, cancel);
     }
+    if image_path_format(location.path()).is_none() {
+        return text_content(location, bytes, quick_look);
+    }
     let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
     let path = directory.path().join(location.name());
     fs::write(&path, bytes).map_err(|e| e.to_string())?;
-    load_content(&path, length, cancel)
+    load_content(&path, length, cancel, false)
 }
 
-fn load(
-    path: &Path,
-    cancel: &Cancellation,
-    separator: Option<table::Separator>,
-) -> Result<Loaded, String> {
+fn load(path: &Path, cancel: &Cancellation, quick_look: bool) -> Result<Loaded, String> {
     let link_metadata = fs::symlink_metadata(path).map_err(|e| {
         crate::tr_format!(
             "Не удалось прочитать сведения: {e}",
@@ -721,13 +736,13 @@ fn load(
     } else if !metadata.is_file() {
         // Do not open sockets, devices or named pipes: a read may never finish.
         Content::Message(crate::i18n::text("Предпросмотр специальных файлов недоступен.").into())
-    } else if let Some(separator) = separator {
+    } else if quick_look && let Some(separator) = table::Separator::from_path(path) {
         Content::Table(Box::new(table::Document::new(
             path.to_path_buf().into(),
             separator,
         )))
     } else {
-        load_content(path, metadata.len(), cancel).unwrap_or_else(Content::Message)
+        load_content(path, metadata.len(), cancel, quick_look).unwrap_or_else(Content::Message)
     };
     Ok(Loaded {
         kind: kind.into(),
@@ -752,7 +767,12 @@ pub(crate) fn image_path_format(path: &Path) -> Option<image::ImageFormat> {
     .find_map(|(name, format)| extension.eq_ignore_ascii_case(name).then_some(format))
 }
 
-fn load_content(path: &Path, length: u64, cancel: &Cancellation) -> Result<Content, String> {
+fn load_content(
+    path: &Path,
+    length: u64,
+    cancel: &Cancellation,
+    quick_look: bool,
+) -> Result<Content, String> {
     cancel.check().map_err(|error| error.to_string())?;
     #[cfg(target_os = "macos")]
     if media::supported(path) {
@@ -810,13 +830,30 @@ fn load_content(path: &Path, length: u64, cancel: &Cancellation) -> Result<Conte
             rgba: thumbnail.into_raw(),
         });
     }
-    let mut bytes = read_bounded(path, TEXT_LIMIT)?;
+    text_content(
+        &Location::Local(path.into()),
+        read_bounded(path, TEXT_LIMIT)?,
+        quick_look,
+    )
+}
+
+fn text_content(
+    location: &Location,
+    mut bytes: Vec<u8>,
+    quick_look: bool,
+) -> Result<Content, String> {
     let truncated = bytes.len() > TEXT_LIMIT;
     bytes.truncate(TEXT_LIMIT);
     let mut body = utf8_prefix(&bytes, truncated)?;
     let truncated = code::bound(&mut body) || truncated;
-    let code = code::Code::new(path, &body);
-    let markup = markup::parse(path, &body);
+    let markup = markup::parse(location.path(), &body);
+    if quick_look && truncated {
+        return Ok(Content::LargeText(Box::new(large_text::Document::new(
+            location.clone(),
+            markup,
+        ))));
+    }
+    let code = code::Code::new(location.path(), &body);
     Ok(Content::Text {
         body,
         truncated,
@@ -860,7 +897,7 @@ fn open_regular(path: &Path) -> Result<File, String> {
 }
 
 fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
-    let file = File::open(path).map_err(|e| {
+    let file = open_regular(path).map_err(|e| {
         crate::tr_format!("Не удалось прочитать файл: {e}", "Could not read file: {e}")
     })?;
     let mut bytes = Vec::new();
@@ -886,13 +923,15 @@ fn utf8_prefix(bytes: &[u8], truncated: bool) -> Result<String, String> {
             .into())
         }
     };
-    if text
-        .chars()
-        .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t'))
-    {
+    if !preview_text_chars(text) {
         return Err(crate::i18n::text("Для этого формата предпросмотр недоступен.").into());
     }
     Ok(text.trim_start_matches('\u{feff}').to_owned())
+}
+
+fn preview_text_chars(text: &str) -> bool {
+    text.chars()
+        .all(|ch| !ch.is_control() || matches!(ch, '\n' | '\r' | '\t'))
 }
 
 fn format_size(bytes: u64) -> String {
@@ -930,7 +969,7 @@ mod tests {
         let path = dir.path().join("document.MARKDOWN");
         let original = format!("# Заголовок\n\n{}", "я".repeat(TEXT_LIMIT));
         fs::write(&path, &original).unwrap();
-        let loaded = load(&path, &Cancellation::default(), None).unwrap();
+        let loaded = load(&path, &Cancellation::default(), false).unwrap();
         assert!(matches!(
             loaded.content,
             Content::Text {
@@ -984,7 +1023,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("large.txt");
         fs::write(&path, "я".repeat(TEXT_LIMIT)).unwrap();
-        let loaded = load(&path, &Cancellation::default(), None).unwrap();
+        let loaded = load(&path, &Cancellation::default(), false).unwrap();
         match loaded.content {
             Content::Text {
                 body, truncated, ..
@@ -1004,14 +1043,14 @@ mod tests {
         image::RgbaImage::new(IMAGE_EDGE_LIMIT + 1, 1)
             .save(&path)
             .unwrap();
-        let loaded = load(&path, &Cancellation::default(), None).unwrap();
+        let loaded = load(&path, &Cancellation::default(), false).unwrap();
         assert!(matches!(loaded.content, Content::Message(_)));
     }
 
     #[test]
     fn directory_does_not_get_a_recursive_size_or_text_preview() {
         let directory = tempfile::tempdir().unwrap();
-        let loaded = load(directory.path(), &Cancellation::default(), None).unwrap();
+        let loaded = load(directory.path(), &Cancellation::default(), false).unwrap();
         assert!(loaded.is_dir);
         assert!(loaded.size.is_none());
         assert!(matches!(loaded.content, Content::Directory));
