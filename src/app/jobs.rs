@@ -639,7 +639,7 @@ impl PawCommander {
                 worker_ctx.request_repaint();
             }
             let summary = result?;
-            Ok(crate::i18n::transfer_finished(
+            let mut message = crate::i18n::transfer_finished(
                 summary.completed,
                 summary.skipped,
                 &summary
@@ -650,7 +650,12 @@ impl PawCommander {
                 summary.preparing,
                 summary.cancelled,
                 &destination.display(),
-            ))
+            );
+            if summary.metadata_warnings != 0 {
+                message.push('\n');
+                message.push_str(crate::i18n::text("Даты или права доступа сохранены частично. Подробности указаны в строках журнала."));
+            }
+            Ok(message)
         };
         self.submit_job(
             ctx,

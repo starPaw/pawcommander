@@ -7,6 +7,7 @@ mod archive_extract;
 mod batch_rename;
 mod checksum;
 mod compare;
+mod copy_metadata;
 mod cross_move;
 mod file_compare;
 mod listing;
@@ -64,6 +65,7 @@ pub(crate) use undo::{rename_with_undo, UndoBatch};
 pub struct TransferSummary {
     pub completed: usize,
     pub skipped: usize,
+    pub metadata_warnings: usize,
     pub cancelled: bool,
     pub remaining: Vec<Location>,
     pub preparing: bool,

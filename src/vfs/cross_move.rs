@@ -1,6 +1,7 @@
 //! Verified copy followed by guarded, nonrecursive source removal.
 //! A published copy and a completed move are separate facts. Partial moves
 //! are never automatic retry or inverse-rename candidates.
+use super::copy_metadata::{self, Mode as MetadataMode};
 use super::sftp::remote;
 use super::transfer::{
     copy_item_cancellable, entry_metadata, rename_for_publication, source_children,
@@ -163,6 +164,17 @@ fn verify_file_pair(
     }
     verify_entry(target, copied, &cancel)?;
     copied.verify(target, &cancel, true)?;
+    if displayed_source.remote() || target.remote() {
+        let warning = copy_metadata::finish_file(target, &before.metadata, &mut output)?;
+        let open_version = TransferSourceEntry {
+            metadata: output.metadata()?,
+            children: None,
+        };
+        open_version.verify(target, &cancel, true)?;
+        progress
+            .results
+            .note_metadata(displayed_source, warning.as_deref());
+    }
     current_source.verify_metadata(source, &input.metadata()?)?;
     current_source.verify(source, &cancel, true)?;
     verify_entry(source, before, &cancel)
@@ -225,10 +237,16 @@ pub(super) fn run(
     let configured = progress.copy_verification();
     progress.set_copy_verification(true);
     let mut copied = false;
-    let result = copy_item_cancellable(item, expected, progress, || {
-        copied = true;
-        published();
-    });
+    let result = copy_item_cancellable(
+        item,
+        expected,
+        progress,
+        MetadataMode::KeepReadableForMove,
+        || {
+            copied = true;
+            published();
+        },
+    );
     progress.set_copy_verification(configured);
     if !copied {
         return result;
@@ -302,6 +320,15 @@ pub(super) fn run(
                             return Err(changed(&source).into());
                         }
                         copied.verify(&target, &cancel, true)?;
+                        if original.remote() || target.remote() {
+                            let warning =
+                                copy_metadata::finish_directory(&target, &entry.metadata, copied)?;
+                            progress.results.note_metadata(original, warning.as_deref());
+                            cancel.check()?;
+                            if !directory_matches(&entry.metadata, &metadata(&source)?) {
+                                return Err(changed(&source).into());
+                            }
+                        }
                         if let Some(local) = source.local() {
                             fs::remove_dir(local).map_err(err)?;
                         } else {

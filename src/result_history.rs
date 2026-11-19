@@ -55,6 +55,8 @@ pub(crate) struct ItemResult {
     pub target: Option<String>,
     pub outcome: Outcome,
     pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_warning: Option<String>,
     #[serde(default)]
     pub parent: Option<usize>,
     #[serde(default)]
@@ -68,6 +70,7 @@ impl ItemResult {
             target,
             outcome: Outcome::NotStarted,
             reason: None,
+            metadata_warning: None,
             parent: None,
             descendants_enumerated: false,
         }
@@ -86,6 +89,7 @@ pub(crate) struct Results {
     group: Option<(usize, std::ops::Range<usize>)>,
     observed_group: bool,
     confirming_move: bool,
+    unrecorded_metadata_warning: bool,
     weight: usize,
     omitted: usize,
     details_truncated: bool,
@@ -115,8 +119,7 @@ impl Results {
                 self.index.insert(source, index);
             }
         }
-        self.active = None;
-        self.active_source = None;
+        self.clear_active();
     }
 
     pub fn begin(&mut self, source: &Location) {
@@ -127,6 +130,40 @@ impl Results {
     pub fn clear_active(&mut self) {
         self.active = None;
         self.active_source = None;
+        self.unrecorded_metadata_warning = false;
+    }
+
+    pub(crate) fn note_metadata(&mut self, source: &Location, warning: Option<&str>) {
+        let index = if self.active_source.as_ref() == Some(source) {
+            self.active
+        } else {
+            self.nested_index.get(source).copied()
+        };
+        let Some(index) = index else {
+            self.unrecorded_metadata_warning |= warning.is_some();
+            return;
+        };
+        let old = self.items[index].metadata_warning.take();
+        self.items[index].metadata_warning = if let Some(warning) = warning {
+            Some(self.field(warning, old))
+        } else {
+            self.weight = self
+                .weight
+                .saturating_sub(old.as_deref().map_or(0, json_weight));
+            None
+        };
+    }
+
+    pub(crate) fn active_metadata_warning(&self) -> bool {
+        self.unrecorded_metadata_warning
+            || self
+                .active
+                .is_some_and(|index| self.items[index].metadata_warning.is_some())
+            || self.group.as_ref().is_some_and(|(_, range)| {
+                self.items[range.clone()]
+                    .iter()
+                    .any(|item| item.metadata_warning.is_some())
+            })
     }
 
     fn add_row(
@@ -399,6 +436,11 @@ impl Results {
                     self.items[index].outcome = Outcome::Completed;
                     self.reason(index, None);
                 }
+                if self.items[index].outcome == Outcome::Completed
+                    && self.items[index].metadata_warning.is_some()
+                {
+                    self.items[index].outcome = Outcome::CompletedWithWarning;
+                }
             }
         }
         self.observed_group = false;
@@ -568,6 +610,7 @@ impl ItemResult {
             + json_weight(&self.source)
             + self.target.as_deref().map_or(0, json_weight)
             + self.reason.as_deref().map_or(0, json_weight)
+            + self.metadata_warning.as_deref().map_or(0, json_weight)
     }
 }
 
@@ -917,7 +960,7 @@ impl History {
                                                         "{}\n{paths}\n{}",
                                                         if row.parent.is_none() && !row.descendants_enumerated { format!("{} · {}", row.outcome.label(), crate::tr_format!("Потомки не перечислены полностью", "Descendants were not fully listed")) } else { row.outcome.label().to_owned() },
                                                         single_line(
-                                                            row.reason.as_deref().unwrap_or("—")
+                                                            row.reason.as_deref().or(row.metadata_warning.as_deref()).unwrap_or("—")
                                                         )
                                                     ))
                                                     .selectable(true)
@@ -984,6 +1027,9 @@ fn show_item_details(ui: &mut egui::Ui, row: &ItemResult) {
         .selectable(true)
         .wrap(),
     );
+    if let Some(warning) = &row.metadata_warning {
+        ui.add(egui::Label::new(warning).selectable(true).wrap());
+    }
 }
 
 fn single_line(text: &str) -> String {
@@ -1104,6 +1150,7 @@ mod tests {
                     target: Some("target\nwith newline".into()),
                     outcome: Outcome::Failed,
                     reason: Some("first line\nsecond line\r\nthird line".into()),
+                    metadata_warning: None,
                     parent: None,
                     descendants_enumerated: false,
                 })
@@ -1257,6 +1304,7 @@ mod tests {
                 reason: Some(
                     "Check original target and staging /private/recovery\nsecond line".into(),
                 ),
+                metadata_warning: None,
                 parent: None,
                 descendants_enumerated: false,
             });
