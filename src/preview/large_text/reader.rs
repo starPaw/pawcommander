@@ -1,14 +1,13 @@
 use super::{Codec, Direction, Hit, Position, QUERY_CHARS};
-use crate::{operations::Cancellation, preview::source::Source};
-use memchr::memmem;
-use std::{
-    io::{self, Read},
-    ops::Range,
+use crate::{
+    operations::Cancellation,
+    preview::source::{Source, Window, READ_BLOCK as BLOCK},
 };
+use memchr::memmem;
+use std::{io, ops::Range};
 
 const PAGE_BYTES: u64 = 32 * 1024;
 const LINE_LOOKAHEAD: usize = 512;
-const BLOCK: usize = 64 * 1024;
 
 pub(super) struct PageText {
     pub index: u64,
@@ -20,11 +19,9 @@ pub(super) struct PageText {
 }
 
 pub(super) struct Reader<'a> {
-    source: &'a mut Source,
+    source: Window<'a>,
     size: Option<u64>,
-    offset: u64,
     encoding: Codec,
-    cancel: &'a Cancellation,
 }
 
 impl<'a> Reader<'a> {
@@ -35,11 +32,9 @@ impl<'a> Reader<'a> {
         cancel: &'a Cancellation,
     ) -> Self {
         Self {
-            source,
+            source: Window::new(source, size, cancel),
             size,
-            offset: 0,
             encoding,
-            cancel,
         }
     }
 
@@ -224,31 +219,17 @@ impl<'a> Reader<'a> {
         end: u64,
         finder: &memmem::Finder<'_>,
     ) -> Result<Option<Hit>, String> {
-        let width = self.encoding.width();
-        let overlap = finder.needle().len() - width;
-        let mut buffer = vec![0; BLOCK + overlap];
-        let mut carried = 0;
-        while at.byte + (carried as u64) < end {
-            let offset = at.byte + carried as u64;
-            let wanted = BLOCK.min((end - offset).min(usize::MAX as u64) as usize);
-            let fresh = self.read_at(offset, &mut buffer[carried..carried + wanted])?;
-            let used = carried + fresh;
-            if let Some(index) = aligned_find(&buffer[..used], finder, width) {
-                let start = at.after(&buffer[..index], self.encoding);
-                return Ok(Some(Hit {
-                    start,
-                    end: start.after(finder.needle(), self.encoding),
-                }));
-            }
-            if fresh < wanted {
-                break;
-            }
-            carried = overlap.min(used);
-            let consumed = used - carried;
-            at = at.after(&buffer[..consumed], self.encoding);
-            buffer.copy_within(consumed..used, 0);
-        }
-        Ok(None)
+        let encoding = self.encoding;
+        let found = self
+            .source
+            .find_forward(at.byte..end, finder, encoding.width(), |bytes| {
+                at = at.after(bytes, encoding);
+            })
+            .map_err(read_error)?;
+        Ok(found.map(|_| Hit {
+            start: at,
+            end: at.after(finder.needle(), encoding),
+        }))
     }
 
     fn backward(
@@ -257,25 +238,17 @@ impl<'a> Reader<'a> {
         mut at: Position,
         finder: &memmem::FinderRev<'_>,
     ) -> Result<Option<Hit>, String> {
-        let end = at.byte;
-        let width = self.encoding.width();
-        let overlap = (finder.needle().len() - width) as u64;
-        let mut buffer = vec![0; BLOCK + overlap as usize];
-        while at.byte > lower {
-            let byte = at.byte.saturating_sub(BLOCK as u64).max(lower);
-            let block = (at.byte - byte) as usize;
-            let tail = overlap.min(end - at.byte) as usize;
-            let bytes = self.read_exact_at(byte, &mut buffer[..block + tail])?;
-            at = at.before(&bytes[..block], self.encoding);
-            if let Some(index) = aligned_rfind(bytes, finder, width) {
-                let start = at.after(&bytes[..index], self.encoding);
-                return Ok(Some(Hit {
-                    start,
-                    end: start.after(finder.needle(), self.encoding),
-                }));
-            }
-        }
-        Ok(None)
+        let encoding = self.encoding;
+        let found = self
+            .source
+            .find_backward(lower..at.byte, finder, encoding.width(), |bytes| {
+                at = at.before(bytes, encoding);
+            })
+            .map_err(exact_read_error)?;
+        Ok(found.map(|_| Hit {
+            start: at,
+            end: at.after(finder.needle(), encoding),
+        }))
     }
 
     fn boundary(&mut self, index: u64) -> Result<u64, String> {
@@ -331,63 +304,22 @@ impl<'a> Reader<'a> {
     }
 
     fn read_exact_at<'b>(&mut self, byte: u64, buffer: &'b mut [u8]) -> Result<&'b [u8], String> {
-        let count = self.read_at(byte, buffer)?;
-        if count != buffer.len() {
-            return Err(changed());
-        }
-        Ok(buffer)
+        self.source
+            .read_exact_at(byte, buffer)
+            .map_err(exact_read_error)
     }
 
     fn read_at(&mut self, byte: u64, buffer: &mut [u8]) -> Result<usize, String> {
-        self.cancel.check().map_err(read_error)?;
-        let limit = self.size.map_or(buffer.len(), |size| {
-            size.saturating_sub(byte).min(buffer.len() as u64) as usize
-        });
-        if limit == 0 {
-            return Ok(0);
-        }
-        if self.offset != byte {
-            self.source.seek_to(byte).map_err(read_error)?;
-            self.offset = byte;
-        }
-        let mut used = 0;
-        while used < limit {
-            self.cancel.check().map_err(read_error)?;
-            match self.source.read(&mut buffer[used..limit]) {
-                Ok(0) => break,
-                Ok(count) => {
-                    used += count;
-                    self.offset += count as u64;
-                }
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                Err(error) => return Err(read_error(error)),
-            }
-        }
-        Ok(used)
+        self.source.read_at(byte, buffer).map_err(read_error)
     }
 }
 
-fn aligned_find(bytes: &[u8], finder: &memmem::Finder<'_>, width: usize) -> Option<usize> {
-    let mut offset = 0;
-    while let Some(relative) = finder.find(&bytes[offset..]) {
-        let index = offset + relative;
-        if index.is_multiple_of(width) {
-            return Some(index);
-        }
-        offset = index + 1;
+fn exact_read_error(error: io::Error) -> String {
+    if error.kind() == io::ErrorKind::UnexpectedEof {
+        changed()
+    } else {
+        read_error(error)
     }
-    None
-}
-
-fn aligned_rfind(bytes: &[u8], finder: &memmem::FinderRev<'_>, width: usize) -> Option<usize> {
-    let mut end = bytes.len();
-    while let Some(index) = finder.rfind(&bytes[..end]) {
-        if index.is_multiple_of(width) {
-            return Some(index);
-        }
-        end = index + finder.needle().len() - 1;
-    }
-    None
 }
 
 fn split_at(bytes: &[u8], nominal: usize, encoding: Codec) -> usize {
@@ -602,7 +534,7 @@ mod tests {
             .find(Position::START, "absent", Direction::Forward)
             .is_err());
         assert!(cancel.is_requested());
-        assert!(reader.offset < data.len() as u64);
+        assert!(reader.source.offset() < data.len() as u64);
     }
 
     #[test]

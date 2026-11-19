@@ -6,12 +6,13 @@ use crate::{
     operations::Cancellation,
     preview::{
         code::Code,
+        read_worker,
         source::{Source, Version},
     },
     vfs::Location,
 };
 use eframe::egui;
-use std::{ops::Range, sync::mpsc, thread};
+use std::ops::Range;
 
 pub(super) enum Work {
     Page {
@@ -43,89 +44,27 @@ pub(super) enum ResultPage {
     NoLine,
 }
 
-type Reply = Result<(Version, ResultPage), String>;
+type Output = (Version, ResultPage);
+pub(super) type Worker = read_worker::Worker<(Work, Option<Version>), Output>;
+pub(super) type Pending = read_worker::Pending<Output>;
 
-struct Job {
-    work: Work,
-    version: Option<Version>,
-    reply: mpsc::Sender<Reply>,
-    cancel: Cancellation,
+pub(super) fn start(
+    location: Location,
+    encoding: Codec,
+    ctx: &egui::Context,
+) -> Result<Worker, String> {
+    Worker::start("pawcommander-text", ctx, move |(work, version), cancel| {
+        run(&location, work, *version, encoding, cancel)
+    })
+    .map_err(read_error)
 }
-
-pub(super) struct Pending {
-    replies: mpsc::Receiver<Reply>,
-    cancel: Cancellation,
-}
-
-impl Pending {
-    pub(super) fn poll(&self) -> Option<Reply> {
-        match self.replies.try_recv() {
-            Ok(reply) => Some(reply),
-            Err(mpsc::TryRecvError::Empty) => None,
-            Err(mpsc::TryRecvError::Disconnected) => Some(Err(unavailable())),
-        }
-    }
-}
-
-impl Drop for Pending {
-    fn drop(&mut self) {
-        self.cancel.request();
-    }
-}
-
-pub(super) struct Worker(mpsc::Sender<Job>);
-
-impl Worker {
-    pub(super) fn start(
-        location: Location,
-        encoding: Codec,
-        ctx: &egui::Context,
-    ) -> Result<Self, String> {
-        let (requests, jobs) = mpsc::channel::<Job>();
-        let ctx = ctx.clone();
-        let viewport = ctx.viewport_id();
-        thread::Builder::new()
-            .name("pawcommander-text".into())
-            .spawn(move || {
-                while let Ok(mut job) = jobs.recv() {
-                    while let Ok(newer) = jobs.try_recv() {
-                        job = newer;
-                    }
-                    if job.cancel.is_requested() {
-                        continue;
-                    }
-                    let reply = run(&location, &job.work, job.version, encoding, &job.cancel);
-                    if !job.cancel.is_requested() && job.reply.send(reply).is_ok() {
-                        ctx.request_repaint_of(viewport);
-                    }
-                }
-            })
-            .map_err(read_error)?;
-        Ok(Self(requests))
-    }
-
-    pub(super) fn load(&self, work: Work, version: Option<Version>) -> Result<Pending, String> {
-        let (reply, replies) = mpsc::channel();
-        let cancel = Cancellation::default();
-        self.0
-            .send(Job {
-                work,
-                version,
-                reply,
-                cancel: cancel.clone(),
-            })
-            .map_err(|_| unavailable())?;
-        Ok(Pending { replies, cancel })
-    }
-}
-
 fn run(
     location: &Location,
     work: &Work,
     expected: Option<Version>,
     encoding: Codec,
     cancel: &Cancellation,
-) -> Reply {
+) -> Result<Output, String> {
     cancel.check().map_err(read_error)?;
     let mut source = Source::open(location)?;
     let version = source.version().map_err(read_error)?;
@@ -181,10 +120,6 @@ fn run(
         ResultPage::NoLine
     };
     Ok((version, result))
-}
-
-fn unavailable() -> String {
-    crate::i18n::text("Служба предпросмотра недоступна").into()
 }
 
 #[cfg(test)]
