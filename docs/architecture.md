@@ -98,6 +98,8 @@ A foreground operation can replace a disconnected cached SSH session before open
 
 The in-session transfer retry plan tracks the actual destination, its prior metadata, and any staging or held-source paths. For an unconfirmed SFTP publication, a read-only job checks those locations and records the observed state in result history. It offers a retry only for objects that pass the source and destination checks. The retry worker validates the evidence again before writing.
 
+SFTP transfers set attributes on the private copy after content verification and apply directory metadata after their children. The worker checks the resulting fields and records any partial preservation as result warnings. A copy-and-delete move reapplies access times after its final readback and retains owner read and traversal rights until that verification is complete.
+
 Password-protected ZIP creation streams AES-256 to the same private staging file used for plain archives. Encrypted extraction matches the decoder's entry offsets and sizes against the bounded index and reads through EOF before publishing. The dialog passes the password directly to its queued work. The operation description, result history and recovery record use file locations and outcomes.
 
 Archive edits run through the file-operation queue. They check the resulting member paths, reuse the archive creation path for additions, and preserve retained ZIP payloads or intact TAR record ranges. The worker closes and validates the staged archive before handing it to the checked replacement and rollback flow.

@@ -837,6 +837,12 @@ fn openssh_round_trip_and_host_verification() {
     let local_root = Location::Local(root.join("local"));
     fs::create_dir(local_root.path()).unwrap();
     fs::create_dir(remote_root.path()).unwrap();
+    #[cfg(unix)]
+    if std::env::var("PAWCOMMANDER_TEST_SFTP_METADATA_DENIED").as_deref() == Ok("1") {
+        super::metadata::server_rejected(&local_root, &remote_root);
+        sessions().lock().unwrap().remove(&endpoint);
+        return;
+    }
     super::undo::sftp_undo(&remote_root);
     check_sftp_archive_round_trip(&remote_root);
     let refresh_file = remote_root.join("external.txt");
@@ -1358,6 +1364,12 @@ fn openssh_round_trip_and_host_verification() {
     check_sftp_copy_hash_verification(&local_root, &remote_root);
     check_sftp_source_changes(&local_root, &remote_root);
     check_sftp_source_change_cleanup_at_depth_limit(&local_root, &remote_root);
+    #[cfg(unix)]
+    {
+        super::metadata::round_trip(&local_root, &remote_root);
+        super::metadata::partially_preserved(&local_root, &remote_root);
+        super::metadata::cancelled_after_attributes(&local_root, &remote_root);
+    }
     #[cfg(unix)]
     check_sftp_unsupported_names(&local_root, &remote_root);
     sessions().lock().unwrap().remove(&endpoint);

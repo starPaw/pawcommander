@@ -47,6 +47,9 @@ sftp_options=""
 if [[ "${PAWCOMMANDER_TEST_DISABLE_STATVFS:-0}" == "1" ]]; then
   sftp_options="-P fstatvfs"
 fi
+if [[ "${PAWCOMMANDER_TEST_SFTP_METADATA_DENIED:-0}" == "1" ]]; then
+  sftp_options="-P setstat,fsetstat"
+fi
 subsystem="internal-sftp $sftp_options"
 if [[ "$reconnect" == "1" ]]; then
   subsystem="$(command -v python3) $test_root/subsystem.py $test_root $sftp_server_bin"

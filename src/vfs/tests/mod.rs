@@ -38,6 +38,8 @@ mod history;
 mod interactive_ssh;
 mod local;
 mod location;
+#[cfg(unix)]
+mod metadata;
 mod pause;
 #[cfg(unix)]
 mod reconnect;

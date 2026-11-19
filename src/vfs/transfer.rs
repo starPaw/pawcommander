@@ -1,3 +1,4 @@
+use super::copy_metadata::{self, Mode as MetadataMode};
 use super::location::{validate_name, Location};
 use super::mutations::remove_remote_tree;
 use super::sftp::remote;
@@ -39,7 +40,7 @@ impl LocalEntryMetadata {
         }
     }
 
-    fn from_file(file: &fs::File, metadata: fs::Metadata) -> Self {
+    pub(super) fn from_file(file: &fs::File, metadata: fs::Metadata) -> Self {
         #[cfg(not(windows))]
         let _ = file;
         Self {
@@ -574,7 +575,9 @@ pub(super) fn transfer_run(
             retry.begin_attempt(&item, kind == TransferKind::Copy || copy_move);
         }
         let mut result = match kind {
-            TransferKind::Copy => copy_item_cancellable(&item, expected, progress, published),
+            TransferKind::Copy => {
+                copy_item_cancellable(&item, expected, progress, MetadataMode::Final, published)
+            }
             TransferKind::Move if copy_move => super::cross_move::run(
                 &item,
                 expected,
@@ -652,13 +655,15 @@ pub(super) fn transfer_run(
             }
             _ => crate::result_history::Outcome::Failed,
         };
-        let outcome =
-            if history_warning.is_some() && outcome == crate::result_history::Outcome::Completed {
-                crate::result_history::Outcome::CompletedWithWarning
-            } else {
-                outcome
-            };
-        let reason = result.as_ref().err().map(ToString::to_string).or_else(|| {
+        let metadata_warning = committed && progress.results.active_metadata_warning();
+        let outcome = if (history_warning.is_some() || metadata_warning)
+            && outcome == crate::result_history::Outcome::Completed
+        {
+            crate::result_history::Outcome::CompletedWithWarning
+        } else {
+            outcome
+        };
+        let mut reason = result.as_ref().err().map(ToString::to_string).or_else(|| {
             history_warning.map(|error| {
                 crate::tr_format!(
                     "Перенос завершён, но пофайловый журнал неполон: {error}",
@@ -666,6 +671,15 @@ pub(super) fn transfer_run(
                 )
             })
         });
+        if metadata_warning {
+            let warning = crate::i18n::text(
+                "Даты или права доступа сохранены частично. Подробности указаны в строках журнала.",
+            );
+            reason = Some(
+                reason.map_or_else(|| warning.into(), |reason| format!("{reason}\n{warning}")),
+            );
+            summary.metadata_warnings += 1;
+        }
         if outcome == crate::result_history::Outcome::Completed
             && let Some(entry) = undo_entry
         {
@@ -740,13 +754,15 @@ pub(super) fn copy_item(
     expected: Option<&EntryMetadata>,
     progress: &mut Progress,
 ) -> Result<(), String> {
-    copy_item_cancellable(item, expected, progress, || {}).map_err(|e| e.to_string())
+    copy_item_cancellable(item, expected, progress, MetadataMode::Final, || {})
+        .map_err(|e| e.to_string())
 }
 
 pub(super) fn copy_item_cancellable(
     item: &TransferItem,
     expected: Option<&EntryMetadata>,
     progress: &mut Progress,
+    metadata: MetadataMode,
     published: impl FnOnce(),
 ) -> Result<(), TransferError> {
     progress.set_copy_endpoints(&item.source, &item.target);
@@ -766,7 +782,14 @@ pub(super) fn copy_item_cancellable(
             &mut |_| Ok(()),
         );
     }
-    copy_transfer_cancellable(item, expected, progress, &mut |_, _| Ok(()), published)
+    copy_transfer(
+        item,
+        expected,
+        progress,
+        &mut |_, _| Ok(()),
+        metadata,
+        published,
+    )
 }
 
 pub(super) fn move_item(
@@ -821,11 +844,30 @@ pub(super) fn copy_transfer_checked(
     copy_transfer_cancellable(item, expected, progress, observe, || {}).map_err(|e| e.to_string())
 }
 
+#[cfg(test)]
 pub(super) fn copy_transfer_cancellable(
     item: &TransferItem,
     expected: Option<&EntryMetadata>,
     progress: &mut Progress,
     observe: &mut impl FnMut(&Location, CopyPhase) -> Result<(), String>,
+    published: impl FnOnce(),
+) -> Result<(), TransferError> {
+    copy_transfer(
+        item,
+        expected,
+        progress,
+        observe,
+        MetadataMode::Final,
+        published,
+    )
+}
+
+fn copy_transfer(
+    item: &TransferItem,
+    expected: Option<&EntryMetadata>,
+    progress: &mut Progress,
+    observe: &mut impl FnMut(&Location, CopyPhase) -> Result<(), String>,
+    metadata: MetadataMode,
     published: impl FnOnce(),
 ) -> Result<(), TransferError> {
     progress.checkpoint()?;
@@ -872,33 +914,39 @@ pub(super) fn copy_transfer_cancellable(
             &manifest,
             observe,
         )?;
-        progress.checkpoint()?;
-        manifest.verify(&cancel, |source, error| {
-            progress.results.staged(
-                source,
-                Some(error.to_string()),
-                matches!(error, TransferError::Cancelled),
-            )
-        })?;
-        if let Some(retry) = &progress.retry {
-            retry.verify(item, &cancel)?;
-        }
-        cancel.check()?;
-        let publication = if let Some(expected) = expected {
-            let mut attempted = false;
-            publish_replacement_with_backup_rename(
-                &payload,
-                &item.target,
-                staging,
-                expected,
-                preserve,
-                &mut attempted,
-                rename_without_replacing,
-            )
-            .map_err(|error| publication_error(&item.target, attempted, error))
-        } else {
-            rename_for_publication(&payload, &item.target)
-        };
+        let preserve_metadata = item.source.remote() || item.target.remote();
+        let publication = (|| {
+            progress.checkpoint()?;
+            if preserve_metadata {
+                copy_metadata::stage(&item.source, &payload, &manifest, metadata, progress)?;
+            }
+            manifest.verify(&cancel, |source, error| {
+                progress.results.staged(
+                    source,
+                    Some(error.to_string()),
+                    matches!(error, TransferError::Cancelled),
+                )
+            })?;
+            if let Some(retry) = &progress.retry {
+                retry.verify(item, &cancel)?;
+            }
+            cancel.check()?;
+            if let Some(expected) = expected {
+                let mut attempted = false;
+                publish_replacement_with_backup_rename(
+                    &payload,
+                    &item.target,
+                    staging,
+                    expected,
+                    preserve,
+                    &mut attempted,
+                    rename_without_replacing,
+                )
+                .map_err(|error| publication_error(&item.target, attempted, error))
+            } else {
+                rename_for_publication(&payload, &item.target)
+            }
+        })();
         match publication {
             Err(TransferError::PublicationUnconfirmed(error)) => {
                 *preserve = true;
@@ -907,7 +955,15 @@ pub(super) fn copy_transfer_cancellable(
                     "{error}. Temporary folder retained for inspection at {staging}."
                 )));
             }
-            result => result?,
+            Err(error) => {
+                if preserve_metadata && !*preserve {
+                    // The staging owner will try its normal cleanup and
+                    // report any remaining directory.
+                    let _ = copy_metadata::reopen_for_cleanup(&item.source, &payload, &manifest);
+                }
+                return Err(error);
+            }
+            Ok(()) => {}
         }
         published();
         Ok(())
@@ -1735,9 +1791,15 @@ pub(super) fn copy_tree_entry(
     };
     if let Some(children) = &entry.children {
         if let Some(path) = target.local() {
-            fs::create_dir(path).map_err(local_write_error)?;
+            let mut directory = fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                directory.mode(0o700);
+            }
+            directory.create(path).map_err(local_write_error)?;
         } else {
-            remote(target)?.mkdir(target.path(), 0o755).map_err(err)?;
+            remote(target)?.mkdir(target.path(), 0o700).map_err(err)?;
         }
         for name in children {
             copy_tree(
@@ -1775,11 +1837,14 @@ pub(super) fn copy_tree_entry(
     );
     cancel.check()?;
     let written = if let Some(path) = target.local() {
-        let mut output = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)
-            .map_err(local_write_error)?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut output = options.open(path).map_err(local_write_error)?;
         let written = progress
             .copy(
                 source.path(),
@@ -1796,7 +1861,7 @@ pub(super) fn copy_tree_entry(
             .open_mode(
                 target.path(),
                 OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCLUSIVE,
-                0o644,
+                0o600,
                 OpenType::File,
             )
             .map_err(err)?;

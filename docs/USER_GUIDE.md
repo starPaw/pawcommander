@@ -180,7 +180,9 @@ On Linux, a Secret Service provider must be running on the desktop session bus. 
 
 ### Transfers and recovery
 
-Regular files and folders can be copied recursively in either direction and between connections. Rename is supported within one connection. Moves to or from local storage and between different connections use mandatory verification before guarded source removal, as described above. A same-connection move still uses server rename. SFTP copying rejects symbolic links and special files and does not preserve source ownership, ACLs, permissions, or dates.
+Regular files and folders can be copied recursively in either direction and between connections. Moves to or from local storage and between different connections use mandatory verification before guarded source removal. A same-connection move uses server rename. SFTP copying rejects symbolic links and special files.
+
+SFTP copies preserve ordinary permissions, the directory sticky bit, and the access and modification times supported by the destination. SFTP dates use whole seconds. Destination ownership follows the destination filesystem or account. If the destination cannot preserve some attributes, the transfer result reports partial preservation and the affected rows list the fields in **Details**.
 
 The server must support `fstatvfs@openssh.com` free-space reporting and provide the metadata required for source checks. Unsupported reporting stops the current item before data transfer. Destination space checks may create and remove an empty probe in a private temporary directory.
 
