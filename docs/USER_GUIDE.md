@@ -283,6 +283,12 @@ Choose **Apply plan** to queue the displayed changes. When the job starts, PawCo
 
 Use **Stop** to stop before the next change publishes. Completed paths and the outcome of the active change appear in **Result history**. If publication or restoration cannot be confirmed, the result gives the temporary folder to inspect.
 
+## Two-way folder sync preview on macOS
+
+In **Folder sync preview**, choose **Both directions** and **Build plan**. The first comparison shows copies for items present on only one side and flags different versions of the same path. Once both folders have matching contents, choose **Save common state**. PawCommander checks both folders and saves fingerprints for that pair. The same record is used when the panes are swapped or the app is reopened.
+
+Later previews use the saved state to distinguish new items from deletions and show which pane would receive each change. They flag paths that changed on both sides and paths edited on one side and deleted on the other. If an entire folder is involved in a conflict, its descendants stay together under that conflict. The two-way mode previews these changes. Use **Check plan** to check that both folders and the saved state still match the preview.
+
 ## Compare files
 
 Select one regular file in each pane and choose **Compare files** from the command palette or Settings. Local and SFTP files can be compared. The result shows both sizes and the first differing byte. For text, the dialog shows additions, removals and neighboring lines with their original line numbers. **Show matches** expands the rest of the text. Byte differences remain visible when decoded lines match across encodings or line endings.

@@ -1,5 +1,10 @@
-//! One-way synchronization from a reviewed, revalidated folder plan.
+//! Folder synchronization from reviewed, revalidated snapshots.
 mod apply;
+mod two_way;
+
+#[cfg(test)]
+pub(super) use two_way::two_way_round_trip;
+pub(crate) use two_way::{Reconcile, ReconcileConflict, TwoWayPlan};
 
 use super::{
     compare::{scan, MAX_ENTRIES, MAX_PATH_BYTES},
@@ -107,27 +112,7 @@ impl SyncPlan {
     }
 
     fn revalidate(&self, progress: &mut Progress) -> Result<[ReadScope; 2], TransferError> {
-        let (scopes, current) = observe_folders(&self.folders, progress)?;
-        let cancel = progress.cancellation();
-        for (before, after) in self.observed.iter().zip(current) {
-            if before.root != after.root || before.entries.len() != after.entries.len() {
-                return Err(stale(&before.root));
-            }
-            for (path, entry) in &before.entries {
-                cancel.check()?;
-                let location = before.root.join(path);
-                let actual = after.entries.get(path).ok_or_else(|| stale(&location))?;
-                if entry.kind != actual.kind
-                    || entry
-                        .version
-                        .verify_metadata(&location, &actual.version.metadata)
-                        .is_err()
-                {
-                    return Err(stale(&location));
-                }
-            }
-        }
-        Ok(scopes)
+        revalidate_folders(&self.folders, &self.observed, progress)
     }
 }
 
@@ -187,7 +172,7 @@ fn stale(location: &Location) -> TransferError {
     .into()
 }
 
-#[derive(Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 enum Kind {
     Directory,
     File([u8; 32]),
@@ -202,6 +187,34 @@ struct Observed {
 struct Snapshot {
     root: Location,
     entries: BTreeMap<PathBuf, Observed>,
+}
+
+fn revalidate_folders(
+    folders: &[Location; 2],
+    observed: &[Snapshot; 2],
+    progress: &mut Progress,
+) -> Result<[ReadScope; 2], TransferError> {
+    let (scopes, current) = observe_folders(folders, progress)?;
+    let cancel = progress.cancellation();
+    for (before, after) in observed.iter().zip(current) {
+        if before.root != after.root || before.entries.len() != after.entries.len() {
+            return Err(stale(&before.root));
+        }
+        for (path, entry) in &before.entries {
+            cancel.check()?;
+            let location = before.root.join(path);
+            let actual = after.entries.get(path).ok_or_else(|| stale(&location))?;
+            if entry.kind != actual.kind
+                || entry
+                    .version
+                    .verify_metadata(&location, &actual.version.metadata)
+                    .is_err()
+            {
+                return Err(stale(&location));
+            }
+        }
+    }
+    Ok(scopes)
 }
 
 fn observe_folders(
