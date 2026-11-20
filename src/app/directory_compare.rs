@@ -191,7 +191,11 @@ impl PawCommander {
                 .all(|pane| !pane.tab().path.is_archive())
     }
 
-    pub(super) fn open_directory_comparison(&mut self, ctx: &egui::Context) {
+    pub(super) fn open_directory_comparison(
+        &mut self,
+        return_focus: Option<egui::Id>,
+        ctx: &egui::Context,
+    ) {
         if self.comparison.is_none() && self.can_compare_folders() {
             let folders = [
                 self.panes[0].tab().path.clone(),
@@ -199,6 +203,7 @@ impl PawCommander {
             ];
             self.comparison = Some(ComparisonDialog::new(
                 ComparisonBody::Folders(DirectoryComparison::new(folders)),
+                return_focus,
                 ctx,
             ));
         }

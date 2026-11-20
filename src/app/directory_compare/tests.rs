@@ -112,3 +112,70 @@ fn directory_comparison_dialog_runs_both_modes_and_displays_differences() {
     assert_eq!(fs::read(paths[0].join("equal-size.bin")).unwrap(), b"abc");
     assert_eq!(fs::read(paths[1].join("equal-size.bin")).unwrap(), b"xyz");
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn comparison_from_settings_returns_focus_to_the_settings_button() {
+    let folder = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+    let mut app = PawCommander::new(&cc, Some(folder.path().to_owned()));
+    app.panes[1]
+        .tab_mut()
+        .navigate(folder.path().to_owned().into(), &ctx);
+    app.settings.split = true;
+    app.focus_toolbar = true;
+    let draw = |app: &mut PawCommander, events| {
+        ctx.run_test_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1200.0, 780.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                let mut actions = Vec::new();
+                app.toolbar(ui, &mut actions);
+                for action in actions {
+                    app.action(action, &ctx);
+                }
+                app.show_comparison(&ctx);
+            },
+        )
+    };
+    draw(&mut app, vec![]);
+    let settings = ctx.memory(|memory| memory.focused()).unwrap();
+    let click = |app: &mut PawCommander, label: &str| {
+        draw(app, vec![]);
+        let pos = draw(app, vec![])
+            .shapes
+            .into_iter()
+            .find_map(|clipped| match clipped.shape {
+                egui::Shape::Text(shape) if shape.galley.job.text == label => {
+                    Some(shape.pos + shape.galley.size() * 0.5)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("Missing control {label}"));
+        draw(app, vec![egui::Event::PointerMoved(pos)]);
+        for pressed in [true, false] {
+            draw(
+                app,
+                vec![egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+        }
+    };
+    click(&mut app, text("Настройки"));
+    click(&mut app, Command::CompareFolders.label());
+    assert!(app.comparison.is_some());
+    click(&mut app, text("Закрыть"));
+    assert!(app.comparison.is_none());
+    assert_eq!(app.palette_focus_to_restore, Some(settings));
+}
