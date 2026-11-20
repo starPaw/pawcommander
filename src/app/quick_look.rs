@@ -1,7 +1,13 @@
 use super::{Location, PawCommander, TabTarget};
 #[cfg(test)]
 use crate::test_ui::ContextExt as _;
-use crate::{i18n::text, preview::Preview, shortcuts, theme::paint_focus, vfs::FileEntry};
+use crate::{
+    i18n::text,
+    preview::{Fingerprint, Preview},
+    shortcuts,
+    theme::paint_focus,
+    vfs::FileEntry,
+};
 use eframe::egui::{self, Key, Modifiers};
 
 pub(super) struct QuickLook {
@@ -235,7 +241,7 @@ impl QuickLook {
             })
             .inner;
         ui.separator();
-        preview.show_quick_look(ui, &entry.path, (entry.size, entry.modified));
+        preview.show_quick_look(ui, &entry.path, Fingerprint::from(entry));
         action
     }
 }

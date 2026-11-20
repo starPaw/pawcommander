@@ -26,6 +26,7 @@ use std::{
     path::Path,
     sync::mpsc::{self, Receiver, Sender},
     thread,
+    time::SystemTime,
 };
 
 use crate::{
@@ -108,6 +109,27 @@ impl Content {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct Fingerprint {
+    size: u64,
+    modified: Option<SystemTime>,
+    // APFS edits and replacements can preserve the byte count and mtime.
+    #[cfg(target_os = "macos")]
+    local_file: Option<crate::fs_ops::LocalFileIdentity>,
+}
+
+impl From<&vfs::FileEntry> for Fingerprint {
+    fn from(entry: &vfs::FileEntry) -> Self {
+        Self {
+            size: entry.size,
+            modified: entry.modified,
+            #[cfg(target_os = "macos")]
+            local_file: entry.metadata.local_file,
+        }
+    }
+}
+
 /// A read-only preview with one background reader and a bounded image decoder.
 pub struct Preview {
     requests: Sender<Request>,
@@ -121,7 +143,7 @@ pub struct Preview {
     dirty: bool,
     hex_mode: bool,
     hex: Option<Result<Box<hex::Document>, String>>,
-    fingerprint: Option<(u64, Option<std::time::SystemTime>)>,
+    fingerprint: Option<Fingerprint>,
     cancel: Cancellation,
 }
 
@@ -196,7 +218,7 @@ impl Preview {
         &mut self,
         ui: &mut egui::Ui,
         path: Option<&Location>,
-        fingerprint: Option<(u64, Option<std::time::SystemTime>)>,
+        fingerprint: Option<Fingerprint>,
     ) {
         self.update(ui.ctx(), path, fingerprint);
         let muted = Palette::from_ctx(ui.ctx()).muted;
@@ -250,7 +272,7 @@ impl Preview {
         &mut self,
         ui: &mut egui::Ui,
         path: &Location,
-        fingerprint: (u64, Option<std::time::SystemTime>),
+        fingerprint: Fingerprint,
     ) {
         let changed_path = self.path.as_ref() != Some(path);
         ui.add(egui::Label::new(RichText::new(path.name()).heading()).truncate());
@@ -415,7 +437,7 @@ impl Preview {
         &mut self,
         ctx: &egui::Context,
         path: Option<&Location>,
-        fingerprint: Option<(u64, Option<std::time::SystemTime>)>,
+        fingerprint: Option<Fingerprint>,
     ) {
         let changed_path = self.path.as_ref() != path;
         if changed_path {
@@ -1147,7 +1169,14 @@ mod tests {
         let render = |preview: &mut Preview, size| {
             let _ = ctx.run_test_ui(egui::RawInput::default(), |root_ui| {
                 egui::CentralPanel::default().show(root_ui, |ui| {
-                    preview.show(ui, Some(&location), Some((size, None)));
+                    preview.show(
+                        ui,
+                        Some(&location),
+                        Some(Fingerprint {
+                            size,
+                            ..Fingerprint::default()
+                        }),
+                    );
                 });
             });
         };
@@ -1163,6 +1192,60 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         panic!("preview did not reload changed file");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn local_edit_with_same_size_and_mtime_refreshes_both_previews() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder: Location = dir.path().to_owned().into();
+        let location = folder.join("file.txt");
+        for quick_look in [false, true] {
+            fs::write(location.path(), "old").unwrap();
+            let ctx = egui::Context::default();
+            let mut preview = if quick_look {
+                Preview::new_quick_look()
+            } else {
+                Preview::new()
+            };
+            let mut show = |fingerprint, expected: &str| {
+                for _ in 0..200 {
+                    let _ = ctx.run_test_ui(egui::RawInput::default(), |root_ui| {
+                        egui::CentralPanel::default().show(root_ui, |ui| {
+                            if quick_look {
+                                preview.show_quick_look(ui, &location, fingerprint);
+                            } else {
+                                preview.show(ui, Some(&location), Some(fingerprint));
+                            }
+                        });
+                    });
+                    if matches!(&preview.result, Some(Ok(Loaded { content: Content::Text { body, .. }, .. })) if body == expected)
+                    {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                panic!("missing preview text {expected:?} (Quick Look: {quick_look})");
+            };
+            let entry = || {
+                vfs::read_directory(&folder, &|| false)
+                    .unwrap()
+                    .pop()
+                    .unwrap()
+            };
+            let original = entry();
+            show(Fingerprint::from(&original), "old");
+
+            let mut file = File::create(location.path()).unwrap();
+            std::io::Write::write_all(&mut file, b"new").unwrap();
+            file.set_times(fs::FileTimes::new().set_modified(original.modified.unwrap()))
+                .unwrap();
+            drop(file);
+            let changed = entry();
+            assert_eq!(changed.size, original.size);
+            assert_eq!(changed.modified, original.modified);
+            show(Fingerprint::from(&changed), "new");
+        }
     }
 
     #[test]
@@ -1195,7 +1278,7 @@ mod tests {
                     events,
                     ..Default::default()
                 },
-                |ui| preview.show_quick_look(ui, location, (0, None)),
+                |ui| preview.show_quick_look(ui, location, Fingerprint::default()),
             )
         };
         let settle = |preview: &mut Preview, location: &Location| {
@@ -1295,7 +1378,7 @@ mod tests {
                     events,
                     ..Default::default()
                 },
-                |ui| preview.show_quick_look(ui, path, (0, None)),
+                |ui| preview.show_quick_look(ui, path, Fingerprint::default()),
             )
             .shapes
             .into_iter()
@@ -1490,7 +1573,7 @@ mod tests {
                 },
                 |ui| {
                     ui.style_mut().animation_time = 0.0;
-                    preview.show_quick_look(ui, path, (0, None));
+                    preview.show_quick_look(ui, path, Fingerprint::default());
                 },
             )
             .shapes
