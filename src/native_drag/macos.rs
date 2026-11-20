@@ -1,3 +1,4 @@
+use super::file_promises::{FilePromises, PromiseKind, PromiseRequest};
 #[cfg(test)]
 use crate::test_ui::ContextExt as _;
 use crate::{drag_drop::DragFiles, vfs::Location};
@@ -10,7 +11,8 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSApplication, NSDragOperation, NSDraggingContext, NSDraggingItem, NSDraggingSession,
-    NSDraggingSource, NSEvent, NSEventMask, NSEventType, NSView, NSWorkspace,
+    NSDraggingSource, NSEvent, NSEventMask, NSEventType, NSImage, NSImageNameFolder,
+    NSImageNameMultipleDocuments, NSPasteboardWriting, NSView, NSWorkspace,
 };
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSURL,
@@ -64,6 +66,8 @@ struct SourceState {
     position: Arc<Mutex<Option<egui::Pos2>>>,
 }
 
+pub(super) const DRAG_CANCELLED: u8 = 1;
+
 impl SourceState {
     fn moved(&self, screen_point: NSPoint) {
         if let Some(window) = self.view.window() {
@@ -115,9 +119,14 @@ define_class!(
         fn ended(&self, _: &NSDraggingSession, point: NSPoint, operation: NSDragOperation) {
             self.ivars().escape.stop();
             self.ivars().moved(point);
-            self.ivars()
-                .result
-                .store(if operation.is_empty() { 1 } else { 2 }, Ordering::Release);
+            self.ivars().result.store(
+                if operation.is_empty() {
+                    DRAG_CANCELLED
+                } else {
+                    2
+                },
+                Ordering::Release,
+            );
             self.ivars().ctx.request_repaint();
         }
     }
@@ -129,6 +138,7 @@ struct ActiveDrag {
     result: Arc<AtomicU8>,
     position: Arc<Mutex<Option<egui::Pos2>>>,
     bounds: egui::Rect,
+    promised: bool,
 }
 
 // A frame can be drawn after both mouseDown and mouseDragged. Capture the
@@ -175,6 +185,7 @@ pub struct NativeDrag {
     active: Option<ActiveDrag>,
     mouse_monitor: Option<MousePressMonitor>,
     deferred_input: Vec<egui::Event>,
+    promises: FilePromises,
 }
 
 impl NativeDrag {
@@ -215,10 +226,15 @@ impl NativeDrag {
             return None;
         }
         let bounds = active.bounds;
+        let promised = active.promised;
         let modifiers = active._source.ivars().ctx.input(|input| input.modifiers);
         self.active = None;
         release_pointer(input, position, bounds, modifiers);
-        Some(result == 2)
+        Some(result == 2 && !promised)
+    }
+
+    pub(crate) fn next_promise(&self) -> Option<PromiseRequest> {
+        self.promises.receive()
     }
 
     pub fn handoff(
@@ -243,18 +259,18 @@ impl NativeDrag {
             return None;
         }
         let payload = egui::DragAndDrop::take_payload::<DragFiles>(ctx)?;
-        let paths = match local_paths(&payload.paths) {
-            Ok(paths) => paths,
+        let items = match drag_items(&payload) {
+            Ok(items) => items,
             Err(error) => return Some(Err(error)),
         };
-        Some(self.start(ctx, frame, &paths))
+        Some(self.start(ctx, frame, &items))
     }
 
     fn start(
         &mut self,
         ctx: &egui::Context,
         frame: &eframe::Frame,
-        paths: &[PathBuf],
+        entries: &[DragItem],
     ) -> Result<(), String> {
         let mtm = MainThreadMarker::new().ok_or(crate::i18n::text(
             "Системное перетаскивание требует главного потока",
@@ -309,23 +325,40 @@ impl NativeDrag {
             let location = window.convertPointFromScreen(NSEvent::mouseLocation());
             let point = view.convertPoint_fromView(location, None);
             let workspace = NSWorkspace::sharedWorkspace();
-            let mut items = Vec::with_capacity(paths.len());
-            for (index, path) in paths.iter().enumerate() {
-                let url = file_url(path)?;
-                let writer = ProtocolObject::from_ref(&*url);
+            let mut items = Vec::with_capacity(entries.len());
+            let mut promised = false;
+            for (index, entry) in entries.iter().enumerate() {
+                let (writer, icon): (Retained<ProtocolObject<dyn NSPasteboardWriting>>, _) =
+                    match entry {
+                        DragItem::Local(path) => {
+                            let url = file_url(path)?;
+                            let file_path = url
+                                .path()
+                                .ok_or(crate::i18n::text("Не удалось прочитать путь файла"))?;
+                            (
+                                ProtocolObject::from_retained(url),
+                                Some(workspace.iconForFile(&file_path)),
+                            )
+                        }
+                        DragItem::Remote(path, kind) => {
+                            promised = true;
+                            let provider = self.promises.provider(path, *kind, ctx, &result)?;
+                            let icon = NSImage::imageNamed(match kind {
+                                PromiseKind::Directory => NSImageNameFolder,
+                                PromiseKind::File => NSImageNameMultipleDocuments,
+                            });
+                            (ProtocolObject::from_retained(provider), icon)
+                        }
+                    };
                 let item =
-                    NSDraggingItem::initWithPasteboardWriter(NSDraggingItem::alloc(), writer);
-                let file_path = url
-                    .path()
-                    .ok_or(crate::i18n::text("Не удалось прочитать путь файла"))?;
-                let icon = workspace.iconForFile(&file_path);
+                    NSDraggingItem::initWithPasteboardWriter(NSDraggingItem::alloc(), &writer);
                 let offset = (index.min(4) * 4) as f64;
                 item.setDraggingFrame_contents(
                     NSRect::new(
                         NSPoint::new(point.x + offset, point.y + offset),
                         NSSize::new(40.0, 40.0),
                     ),
-                    Some(&icon),
+                    icon.as_deref().map(|icon| icon.as_ref()),
                 );
                 items.push(item);
             }
@@ -340,10 +373,39 @@ impl NativeDrag {
                 result,
                 position,
                 bounds: ctx.viewport_rect(),
+                promised,
             });
         }
         Ok(())
     }
+}
+
+enum DragItem {
+    Local(PathBuf),
+    Remote(Location, PromiseKind),
+}
+
+fn drag_items(payload: &DragFiles) -> Result<Vec<DragItem>, String> {
+    if payload.paths.iter().all(|path| !path.remote()) {
+        return local_paths(&payload.paths)
+            .map(|paths| paths.into_iter().map(DragItem::Local).collect());
+    }
+    if payload.promise_kinds.len() != payload.paths.len() {
+        return Err(
+            crate::i18n::text("Не удалось подготовить SFTP-объекты для перетаскивания.").into(),
+        );
+    }
+    payload
+        .paths
+        .iter()
+        .zip(&payload.promise_kinds)
+        .map(|(path, kind)| match kind {
+            Some(kind) if path.remote() => Ok(DragItem::Remote(path.clone(), *kind)),
+            _ => {
+                Err(crate::i18n::text("Из SFTP можно перетаскивать обычные файлы и папки.").into())
+            }
+        })
+        .collect()
 }
 
 fn fast_drag_split(events: &[egui::Event]) -> Option<usize> {

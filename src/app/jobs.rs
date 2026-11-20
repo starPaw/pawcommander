@@ -72,6 +72,8 @@ pub(super) struct PendingJob {
     pub(super) cut: Option<CutRequest>,
     retry_origin: Option<RetryJob>,
     undo_origin: Option<UndoJob>,
+    #[cfg(target_os = "macos")]
+    native_completion: Option<mpsc::Sender<Result<(), String>>>,
 }
 
 pub(super) const MAX_PENDING_JOBS: usize = 100;
@@ -147,6 +149,8 @@ impl PawCommander {
                 cut: None,
                 retry_origin: None,
                 undo_origin: None,
+                #[cfg(target_os = "macos")]
+                native_completion: None,
             },
         );
     }
@@ -172,6 +176,58 @@ impl PawCommander {
         work: impl FnOnce(&mut Progress) -> Result<String, String> + Send + 'static,
     ) {
         self.start_conflict_job(ctx, label, description, move |progress, _| work(progress));
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn accept_file_promises(&mut self, ctx: &egui::Context) {
+        use crate::native_drag::{PromiseKind, PromiseRequest};
+
+        while let Some(PromiseRequest {
+            source,
+            kind,
+            target,
+            completion,
+        }) = self.native_drag.next_promise()
+        {
+            let label = crate::i18n::text("Скачивание для принимающего приложения");
+            if self.queue_start_failed || self.pending_jobs.len() >= MAX_PENDING_JOBS {
+                let error = crate::i18n::text("Очередь файловых операций недоступна.").to_owned();
+                let _ = completion.send(Err(error.clone()));
+                self.notice = Some((error, true));
+                continue;
+            }
+            let description = format!("{label} · {source} → {}", target.display());
+            let recovery = self.recovery.directory();
+            let verify = self.settings.verify_copies;
+            let (_, events) = mpsc::channel();
+            self.submit_job(
+                ctx,
+                PendingJob {
+                    label: label.into(),
+                    description,
+                    work: Box::new(move |progress| {
+                        progress.resume_directory = recovery;
+                        progress.set_copy_verification(verify);
+                        fs_ops::copy_sftp_for_drop(
+                            &source,
+                            &target,
+                            matches!(kind, PromiseKind::Directory),
+                            progress,
+                        )
+                    }),
+                    transfer: Some(TransferInteraction {
+                        events,
+                        cut_generation: None,
+                        conflict: None,
+                        can_pause: true,
+                    }),
+                    cut: None,
+                    retry_origin: None,
+                    undo_origin: None,
+                    native_completion: Some(completion),
+                },
+            );
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -207,6 +263,8 @@ impl PawCommander {
                 cut: None,
                 retry_origin: None,
                 undo_origin: None,
+                #[cfg(target_os = "macos")]
+                native_completion: None,
             },
         );
     }
@@ -245,6 +303,8 @@ impl PawCommander {
                 cut: None,
                 retry_origin: None,
                 undo_origin: None,
+                #[cfg(target_os = "macos")]
+                native_completion: None,
             },
         );
     }
@@ -281,6 +341,8 @@ impl PawCommander {
                 cut,
                 retry_origin,
                 undo_origin,
+                #[cfg(target_os = "macos")]
+                native_completion,
                 ..
             }) = self.pending_jobs.pop_front()
             else {
@@ -306,16 +368,30 @@ impl PawCommander {
             // so failure cannot discard this job or the jobs behind it.
             let work = Arc::new(Mutex::new(Some(work)));
             let worker_work = work.clone();
+            #[cfg(target_os = "macos")]
+            let worker_completion = native_completion.clone();
             let worker = move || {
+                #[cfg(target_os = "macos")]
+                let report_to_receiver = |result: &Result<String, String>| {
+                    if let Some(completion) = &worker_completion {
+                        let _ = completion.send(result.as_ref().map(|_| ()).map_err(Clone::clone));
+                    }
+                };
+                let fail_to_start = |error: String| {
+                    let result = Err(error);
+                    #[cfg(target_os = "macos")]
+                    report_to_receiver(&result);
+                    let _ = tx.send(result);
+                    worker_ctx.request_repaint();
+                };
                 let work = worker_work.lock().unwrap().take().unwrap();
                 reporter.results.id = crate::result_history::operation_id();
                 let history_started = crate::result_history::now();
                 if recovery_directory.is_none() && !cfg!(test) {
-                    let _ = tx.send(Err(crate::tr_format!(
+                    fail_to_start(crate::tr_format!(
                         "Операция не начата: папка данных приложения для восстановления недоступна.",
                         "Operation not started: application data directory for recovery is unavailable."
-                    )));
-                    worker_ctx.request_repaint();
+                    ));
                     return;
                 }
                 let pending = match recovery_directory
@@ -332,11 +408,10 @@ impl PawCommander {
                 {
                     Ok(pending) => pending,
                     Err(error) => {
-                        let _ = tx.send(Err(crate::tr_format!(
+                        fail_to_start(crate::tr_format!(
                             "Операция не начата: не удалось сохранить запись восстановления: {error}",
                             "Operation not started: could not save recovery record: {error}"
-                        )));
-                        worker_ctx.request_repaint();
+                        ));
                         return;
                     }
                 };
@@ -357,6 +432,8 @@ impl PawCommander {
                     )
                     .into())
                 });
+                #[cfg(target_os = "macos")]
+                report_to_receiver(&result);
                 let undo_id = undo_id.unwrap_or_else(|| reporter.results.id.clone());
                 let persisted = if let Some(record) = std::mem::take(&mut reporter.results).finish(
                     history_label,
@@ -401,6 +478,16 @@ impl PawCommander {
             #[cfg(not(test))]
             let spawn_result = builder.spawn(worker);
             if let Err(error) = spawn_result {
+                let error = crate::tr_format!(
+                    "Не удалось запустить операцию: {error}",
+                    "Could not start operation: {error}"
+                );
+                #[cfg(target_os = "macos")]
+                if let Some(completion) = native_completion {
+                    let _ = completion.send(Err(error.clone()));
+                    self.notice = Some((error, true));
+                    continue;
+                }
                 self.pending_jobs.push_front(PendingJob {
                     label,
                     description,
@@ -409,15 +496,11 @@ impl PawCommander {
                     cut,
                     retry_origin,
                     undo_origin,
+                    #[cfg(target_os = "macos")]
+                    native_completion: None,
                 });
                 self.queue_start_failed = true;
-                self.notice = Some((
-                    crate::tr_format!(
-                        "Не удалось запустить операцию: {error}",
-                        "Could not start operation: {error}"
-                    ),
-                    true,
-                ));
+                self.notice = Some((error, true));
                 break;
             }
             self.job = Some(Job {
@@ -575,6 +658,8 @@ impl PawCommander {
                 cut: None,
                 retry_origin,
                 undo_origin: None,
+                #[cfg(target_os = "macos")]
+                native_completion: None,
             },
         );
     }
@@ -719,6 +804,8 @@ impl PawCommander {
                 cut,
                 retry_origin,
                 undo_origin: None,
+                #[cfg(target_os = "macos")]
+                native_completion: None,
             },
         );
     }
@@ -822,6 +909,8 @@ impl PawCommander {
                 cut: None,
                 retry_origin: None,
                 undo_origin: Some(job),
+                #[cfg(target_os = "macos")]
+                native_completion: None,
             },
         );
     }

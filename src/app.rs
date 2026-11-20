@@ -192,6 +192,8 @@ impl eframe::App for PawCommander {
         self.windows_drives.poll(ctx);
         self.poll(ctx);
         #[cfg(target_os = "macos")]
+        self.accept_file_promises(ctx);
+        #[cfg(target_os = "macos")]
         self.poll_smb(ctx);
         #[cfg(target_os = "macos")]
         self.poll_external_editors(ctx);

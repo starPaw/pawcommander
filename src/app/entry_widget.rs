@@ -281,7 +281,33 @@ pub(super) fn entry_widget(
     if idle && !archive_member && response.drag_started_by(egui::PointerButton::Primary) {
         let icon = icons::file_icon(&entry.name, entry.is_dir);
         let paths = tab.drag_paths(index, visible);
-        egui::DragAndDrop::set_payload(ui.ctx(), DragFiles { paths, icon });
+        #[cfg(target_os = "macos")]
+        let promise_kinds = if tab.path.remote() {
+            use crate::native_drag::PromiseKind;
+            visible
+                .iter()
+                .map(|&i| &tab.entries[i])
+                .filter(|entry| tab.selected.contains(&entry.path))
+                .map(|entry| {
+                    (!entry.is_symlink).then_some(if entry.is_dir {
+                        PromiseKind::Directory
+                    } else {
+                        PromiseKind::File
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        egui::DragAndDrop::set_payload(
+            ui.ctx(),
+            DragFiles {
+                paths,
+                icon,
+                #[cfg(target_os = "macos")]
+                promise_kinds,
+            },
+        );
         actions.push(Action::Focus(pane));
     }
     let on_checkbox = !grid
