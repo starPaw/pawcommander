@@ -9,7 +9,10 @@ pub(crate) use two_way::{Reconcile, ReconcileConflict, TwoWayPlan};
 use super::{
     compare::{scan, MAX_ENTRIES, MAX_PATH_BYTES},
     read_scope::{changed_during_read, ReadScope},
-    transfer::{entry_metadata, validate_source_child_name, EntryMetadata, TransferSourceEntry},
+    transfer::{
+        entry_metadata, validate_source_child_name, EntryMetadata, TransferSourceEntry,
+        SYNC_STAGING_PREFIX,
+    },
     Location, MAX_TREE_DEPTH,
 };
 use crate::{
@@ -18,7 +21,7 @@ use crate::{
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     path::{Path, PathBuf},
 };
 
@@ -37,6 +40,7 @@ pub(crate) enum SyncChange {
 pub(crate) struct SyncRow {
     pub(crate) path: PathBuf,
     pub(crate) change: SyncChange,
+    destination: usize,
 }
 
 pub(crate) struct SyncPlan {
@@ -102,6 +106,7 @@ impl SyncPlan {
             plan.rows.push(SyncRow {
                 path: path.clone(),
                 change,
+                destination: 1,
             });
         }
         Ok(plan)
@@ -170,6 +175,28 @@ fn stale(location: &Location) -> TransferError {
         "An item changed after planning: {location}. Build the plan again."
     )
     .into()
+}
+
+fn is_sync_staging(name: &OsStr) -> bool {
+    let Some(suffix) = name
+        .to_str()
+        .and_then(|name| name.strip_prefix(SYNC_STAGING_PREFIX))
+    else {
+        return false;
+    };
+    let mut parts = suffix.split('-');
+    (0..3).all(|_| {
+        parts
+            .next()
+            .is_some_and(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+    }) && parts.next().is_none()
+}
+
+fn retained_stage(location: &Location) -> TransferError {
+    crate::tr_format!(
+        "Найдена временная папка синхронизации: {location}. Дождитесь завершения активной операции. Если она прервалась, проверьте сохранённые версии перед новым планом.",
+        "Found a sync staging folder: {location}. Wait for any running synchronization to finish. If it was interrupted, inspect the retained versions before building a new plan."
+    ).into()
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -340,7 +367,10 @@ impl Snapshot {
                 progress.item(location.path());
                 let mut children = BTreeMap::new();
                 scan::visit(scope, &relative, cancel, &mut |name, child| {
-                    let path = relative.join(name);
+                    let path = relative.join(&name);
+                    if is_sync_staging(&name) {
+                        return Err(retained_stage(&self.root.join(&path)));
+                    }
                     budget.visit(path.as_os_str().len() + child.extra_path_bytes())?;
                     if children.insert(path, child).is_some() {
                         return Err(text("Папка содержит повторяющиеся имена").into());

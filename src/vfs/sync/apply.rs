@@ -10,7 +10,8 @@ use crate::{
         staged_file::StagedFile,
         transfer::{
             canonical, entry_metadata, rename_for_publication, with_preserved_staging,
-            EntryMetadata, LocalEntryMetadata, SourceReader, TransferSourceEntry,
+            with_tracked_staging, EntryMetadata, LocalEntryMetadata, SourceReader, StagingNotice,
+            TransferSourceEntry,
         },
         Location,
     },
@@ -29,64 +30,97 @@ impl SyncPlan {
     }
 
     pub(crate) fn apply(&self, progress: &mut Progress) -> Result<String, String> {
+        let execution = Execution {
+            folders: &self.folders,
+            observed: &self.observed,
+            rows: &self.rows,
+        };
+        execution.plan_history(progress);
+        let mut completed = 0;
+        let result = self
+            .revalidate(progress)
+            .and_then(|scopes| execution.apply_groups(&scopes, progress, &mut completed, None));
+        finish(result, completed, progress)
+    }
+}
+
+pub(super) fn finish(
+    result: Result<(), TransferError>,
+    completed: usize,
+    progress: &mut Progress,
+) -> Result<String, String> {
+    match result {
+        Ok(()) => Ok(crate::tr_format!(
+            "Синхронизация завершена. Выполнено: {completed}.",
+            "Synchronization complete. Completed: {completed}."
+        )),
+        Err(TransferError::Cancelled) => {
+            progress.results.cancelled = true;
+            Ok(crate::tr_format!(
+                "Синхронизация остановлена. Выполнено: {completed}.",
+                "Synchronization stopped. Completed: {completed}."
+            ))
+        }
+        Err(error) => Err(crate::tr_format!(
+            "{error}. Выполнено: {completed}.",
+            "{error}. Completed: {completed}."
+        )),
+    }
+}
+
+pub(super) struct Execution<'a> {
+    pub(super) folders: &'a [Location; 2],
+    pub(super) observed: &'a [Snapshot; 2],
+    pub(super) rows: &'a [SyncRow],
+}
+
+impl Execution<'_> {
+    pub(super) fn plan_history(&self, progress: &mut Progress) {
         progress
             .results
             .plan(self.rows.iter().map(|row| self.history_row(row)));
-        let mut completed = 0;
-        let result = self.apply_groups(progress, &mut completed);
-        match result {
-            Ok(()) => Ok(crate::tr_format!(
-                "Синхронизация завершена. Выполнено: {completed}.",
-                "Synchronization complete. Completed: {completed}."
-            )),
-            Err(TransferError::Cancelled) => {
-                progress.results.cancelled = true;
-                Ok(crate::tr_format!(
-                    "Синхронизация остановлена. Выполнено: {completed}.",
-                    "Synchronization stopped. Completed: {completed}."
-                ))
-            }
-            Err(error) => Err(crate::tr_format!(
-                "{error}. Выполнено: {completed}.",
-                "{error}. Completed: {completed}."
-            )),
-        }
     }
 
     fn history_row(&self, row: &SyncRow) -> (Location, Option<String>) {
-        let destination = self.observed[1].root.join(&row.path);
+        let destination = self.observed[row.destination].root.join(&row.path);
         if row.change == SyncChange::Delete {
             (destination, None)
         } else {
             (
-                self.observed[0].root.join(&row.path),
+                self.observed[1 - row.destination].root.join(&row.path),
                 Some(destination.display()),
             )
         }
     }
 
-    fn apply_groups(
+    pub(super) fn apply_groups(
         &self,
+        scopes: &[ReadScope; 2],
         progress: &mut Progress,
         completed: &mut usize,
+        mut staging: Option<&mut StagingNotice<'_>>,
     ) -> Result<(), TransferError> {
-        let scopes = self.revalidate(progress)?;
         let cancel = progress.cancellation();
-        progress.set_copy_endpoints(&self.observed[0].root, &self.observed[1].root);
-        let mut groups = groups(&self.rows);
+        let mut groups = groups(self.rows);
         groups.sort_by_key(|group| group[0].change == SyncChange::Delete);
         for group in groups {
             cancel.check()?;
             let row = &group[0];
             let (key, _) = self.history_row(row);
             progress.results.begin(&key);
-            for (input, scope) in self.folders.iter().zip(&scopes) {
+            for (input, scope) in self.folders.iter().zip(scopes) {
                 scope.parent.verify()?;
                 if canonical(input)? != scope.parent.location.path() {
                     return Err(stale(input));
                 }
             }
-            match self.apply_group(row, &scopes, progress) {
+            let source = 1 - row.destination;
+            let destination = row.destination;
+            progress.set_copy_endpoints(
+                &self.observed[source].root,
+                &self.observed[destination].root,
+            );
+            match self.apply_group(row, scopes, progress, staging.as_deref_mut()) {
                 Ok(warning) => {
                     for (index, row) in group.iter().enumerate() {
                         let (key, target) = self.history_row(row);
@@ -120,8 +154,12 @@ impl SyncPlan {
         row: &SyncRow,
         scopes: &[ReadScope; 2],
         progress: &mut Progress,
+        notice: Option<&mut StagingNotice<'_>>,
     ) -> Result<Option<String>, TransferError> {
-        let [source, destination] = &self.observed;
+        let source_scope = &scopes[1 - row.destination];
+        let destination_scope = &scopes[row.destination];
+        let source = &self.observed[1 - row.destination];
+        let destination = &self.observed[row.destination];
         let relative = row.path.as_path();
         let parent_path = relative.parent().ok_or_else(changed_during_read)?;
         let name = relative.file_name().ok_or_else(changed_during_read)?;
@@ -132,7 +170,7 @@ impl SyncPlan {
             .get(parent_path)
             .ok_or_else(changed_during_read)?;
         let parent = Directory::at(
-            &scopes[1],
+            destination_scope,
             parent_path,
             &parent_entry.version.metadata,
             &cancel,
@@ -143,7 +181,7 @@ impl SyncPlan {
                 .get(parent_path)
                 .ok_or_else(changed_during_read)?;
             Some(Directory::at(
-                &scopes[0],
+                source_scope,
                 parent_path,
                 &entry.version.metadata,
                 &cancel,
@@ -153,7 +191,7 @@ impl SyncPlan {
         };
         let mut committed = false;
         let mut metadata_warning = None;
-        let result = with_preserved_staging(&target, &cancel, |staging, preserve| {
+        let work = |staging: &Location, preserve: &mut bool| {
             *preserve = false;
             parent.verify()?;
             let stage_scope = open_staging(staging)?;
@@ -161,7 +199,7 @@ impl SyncPlan {
             let incoming = Path::new("incoming");
             let payload = staging.join(incoming);
             if row.change != SyncChange::Delete {
-                stage_source(source, relative, &scopes[0], &payload, progress)?;
+                stage_source(source, relative, source_scope, &payload, progress)?;
                 let staged = required_tree(&stage_scope, incoming, progress)?;
                 check_tree(
                     source,
@@ -171,7 +209,7 @@ impl SyncPlan {
                     Check::Contents,
                     &cancel,
                 )?;
-                let current = required_tree(&scopes[0], relative, progress)?;
+                let current = required_tree(source_scope, relative, progress)?;
                 check_tree(
                     source,
                     relative,
@@ -197,7 +235,7 @@ impl SyncPlan {
                     Err(error) => return Err(error),
                 }
             } else {
-                let current = required_tree(&scopes[1], relative, progress)?;
+                let current = required_tree(destination_scope, relative, progress)?;
                 check_tree(
                     destination,
                     relative,
@@ -275,7 +313,11 @@ impl SyncPlan {
             committed = true;
             *preserve = false;
             Ok(())
-        });
+        };
+        let result = match notice {
+            Some(notice) => with_tracked_staging(&target, &cancel, notice, work),
+            None => with_preserved_staging(&target, &cancel, work),
+        };
         match result {
             Ok(()) => Ok(metadata_warning),
             Err(error) if committed => Ok(Some(match metadata_warning {

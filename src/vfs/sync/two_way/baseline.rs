@@ -4,6 +4,7 @@ use super::{Kind, Snapshot, Tree};
 use crate::{
     i18n::text,
     operations::{Cancellation, TransferError},
+    recovery::{same_owned_marker, sync_directory},
     vfs::{err, sftp, transfer::EntryMetadata, Location},
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -11,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     ffi::OsString,
-    fs::{self, OpenOptions},
+    fs::{self, File, OpenOptions, TryLockError},
     io::{self, BufWriter, Read, Write},
     os::unix::{
         ffi::{OsStrExt, OsStringExt},
@@ -85,19 +86,29 @@ impl RootId {
     }
 }
 
-fn capture_pair(observed: &[Snapshot; 2]) -> Result<[RootId; 2], TransferError> {
+fn capture_pair(observed: &[Snapshot; 2]) -> Result<([RootId; 2], [usize; 2]), TransferError> {
     let mut pair = [
         RootId::capture(&observed[0])?,
         RootId::capture(&observed[1])?,
     ];
-    pair.sort();
-    Ok(pair)
+    let mut panes = [0, 1];
+    if pair[0] > pair[1] {
+        pair.swap(0, 1);
+        panes.swap(0, 1);
+    }
+    Ok((pair, panes))
 }
 
 pub(super) struct BaselineStore {
-    directory: PathBuf,
-    path: PathBuf,
+    pub(super) directory: PathBuf,
+    pub(super) path: PathBuf,
     pair: [RootId; 2],
+    pub(super) panes: [usize; 2],
+}
+
+pub(super) struct PairLock<'a> {
+    pub(super) store: &'a BaselineStore,
+    _lock: File,
 }
 
 #[derive(Serialize)]
@@ -123,7 +134,7 @@ enum DiskKind {
 
 impl BaselineStore {
     pub(super) fn new(directory: PathBuf, observed: &[Snapshot; 2]) -> Result<Self, TransferError> {
-        let pair = capture_pair(observed)?;
+        let (pair, panes) = capture_pair(observed)?;
         check_storage_location(&directory, &pair)?;
         let seed = serde_json::to_vec(&pair).map_err(err)?;
         let filename = URL_SAFE_NO_PAD.encode(Sha256::digest(seed));
@@ -132,11 +143,13 @@ impl BaselineStore {
             directory,
             path,
             pair,
+            panes,
         })
     }
 
     pub(super) fn check_roots(&self, observed: &[Snapshot; 2]) -> Result<(), TransferError> {
-        if capture_pair(observed)? != self.pair {
+        let (pair, panes) = capture_pair(observed)?;
+        if pair != self.pair || panes != self.panes {
             return Err(text("Пара папок изменилась. Постройте план заново.").into());
         }
         Ok(())
@@ -147,22 +160,9 @@ impl BaselineStore {
         if !self.directory_exists()? {
             return Ok(None);
         }
-        let open = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(&self.path);
-        let file = match open {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.into()),
+        let Some(record): Option<ReadRecord> = read_record(&self.path, MAX_FILE_BYTES)? else {
+            return Ok(None);
         };
-        let metadata = file.metadata()?;
-        if !metadata.is_file() || metadata.len() > MAX_FILE_BYTES {
-            return Err(invalid());
-        }
-        let record: ReadRecord =
-            serde_json::from_reader(io::BufReader::new(file.take(MAX_FILE_BYTES)))
-                .map_err(|_| invalid())?;
         if record.version != VERSION
             || record.pair != self.pair
             || record.entries.len() > MAX_ENTRIES
@@ -204,14 +204,52 @@ impl BaselineStore {
         Ok(Some(tree))
     }
 
-    pub(super) fn seed(&self, tree: &Tree, cancel: &Cancellation) -> Result<(), TransferError> {
-        cancel.check()?;
+    pub(super) fn lock(&self) -> Result<PairLock<'_>, TransferError> {
         if !self.directory_exists()? {
-            fs::create_dir_all(&self.directory)?;
+            use std::os::unix::fs::DirBuilderExt;
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&self.directory)?;
             if !self.directory_exists()? {
                 return Err(invalid());
             }
         }
+        let path = self.path.with_extension("lock");
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&path)?;
+        match lock.try_lock() {
+            Ok(()) if same_owned_marker(&lock, &path)? => Ok(PairLock {
+                store: self,
+                _lock: lock,
+            }),
+            Ok(()) => Err(invalid()),
+            Err(TryLockError::WouldBlock) => {
+                Err(text("Синхронизация этой пары уже выполняется.").into())
+            }
+            Err(error) => Err(err(error).into()),
+        }
+    }
+
+    pub(super) fn directory_exists(&self) -> Result<bool, TransferError> {
+        match fs::symlink_metadata(&self.directory) {
+            Ok(metadata) if metadata.is_dir() => Ok(true),
+            Ok(_) => Err(invalid()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+impl PairLock<'_> {
+    pub(super) fn save(&self, tree: &Tree, cancel: &Cancellation) -> Result<(), TransferError> {
+        cancel.check()?;
         let mut entries = Vec::with_capacity(tree.len());
         for (path, kind) in tree {
             cancel.check()?;
@@ -223,43 +261,61 @@ impl BaselineStore {
             };
             entries.push((path, kind));
         }
-        let mut temporary = tempfile::NamedTempFile::new_in(&self.directory)?;
-        let mut writer = BufWriter::new(temporary.as_file_mut());
-        serde_json::to_writer(
-            &mut writer,
+        self.write(
+            &self.store.path,
             &WriteRecord {
                 version: VERSION,
-                pair: &self.pair,
+                pair: &self.store.pair,
                 entries,
             },
+            MAX_FILE_BYTES,
+            cancel,
         )
-        .map_err(err)?;
+    }
+
+    pub(super) fn write(
+        &self,
+        path: &Path,
+        record: &impl Serialize,
+        limit: u64,
+        cancel: &Cancellation,
+    ) -> Result<(), TransferError> {
+        let mut temporary = tempfile::NamedTempFile::new_in(&self.store.directory)?;
+        let mut writer = BufWriter::new(temporary.as_file_mut());
+        serde_json::to_writer(&mut writer, record).map_err(err)?;
         writer.flush()?;
         drop(writer);
-        if temporary.as_file().metadata()?.len() > MAX_FILE_BYTES {
+        if temporary.as_file().metadata()?.len() > limit {
             return Err(invalid());
         }
         temporary.as_file().sync_all()?;
         cancel.check()?;
-        temporary.persist_noclobber(&self.path).map_err(|error| {
-            if error.error.kind() == io::ErrorKind::AlreadyExists {
-                text("Общее состояние изменилось. Постройте план заново.").into()
-            } else {
-                TransferError::from(error.error)
-            }
-        })?;
-        crate::recovery::sync_directory(&self.directory)?;
+        temporary.persist(path).map_err(|error| error.error)?;
+        sync_directory(&self.store.directory)?;
         Ok(())
     }
+}
 
-    fn directory_exists(&self) -> Result<bool, TransferError> {
-        match fs::symlink_metadata(&self.directory) {
-            Ok(metadata) if metadata.is_dir() => Ok(true),
-            Ok(_) => Err(invalid()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(error.into()),
-        }
+pub(super) fn read_record<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    limit: u64,
+) -> Result<Option<T>, TransferError> {
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > limit {
+        return Err(invalid());
     }
+    serde_json::from_reader(io::BufReader::new(file.take(limit)))
+        .map(Some)
+        .map_err(|_| invalid())
 }
 
 fn check_storage_location(directory: &Path, pair: &[RootId; 2]) -> Result<(), TransferError> {
@@ -291,7 +347,7 @@ fn decode(value: &str) -> Result<Vec<u8>, TransferError> {
     URL_SAFE_NO_PAD.decode(value).map_err(|_| invalid())
 }
 
-fn decode_path(value: &str) -> Result<PathBuf, TransferError> {
+pub(super) fn decode_path(value: &str) -> Result<PathBuf, TransferError> {
     let bytes = decode(value)?;
     if bytes.is_empty() || bytes.contains(&0) {
         return Err(invalid());
@@ -309,6 +365,6 @@ fn decode_path(value: &str) -> Result<PathBuf, TransferError> {
     Ok(path)
 }
 
-fn invalid() -> TransferError {
+pub(super) fn invalid() -> TransferError {
     text("Сохранённое общее состояние повреждено или имеет неподдерживаемый формат.").into()
 }

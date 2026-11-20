@@ -194,15 +194,9 @@ fn common_state_round_trips_raw_names_and_fails_closed_on_damaged_records() {
         Kind::Link(OsString::from_vec(vec![b'/', 0xfd])),
     )]);
     let cancel = Progress::default().cancellation();
-    plan.store.seed(&tree, &cancel).unwrap();
+    plan.store.lock().unwrap().save(&tree, &cancel).unwrap();
     assert!(plan.store.read(&cancel).unwrap().as_ref() == Some(&tree));
-    let record = fs::read_dir(&pair.records)
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
-    fs::write(record, b"{").unwrap();
+    fs::write(&plan.store.path, b"{").unwrap();
     assert!(plan.store.read(&cancel).is_err());
 }
 
@@ -212,6 +206,139 @@ fn refuses_a_pair_that_contains_the_state_directory() {
     let inside = pair.folders[0].path().join("PawCommander/states");
     assert!(TwoWayPlan::build_in(pair.folders, inside.clone(), &mut Progress::default()).is_err());
     assert!(!inside.exists());
+}
+
+#[test]
+fn choices_stay_in_the_preview_until_a_revalidated_apply_updates_both_folders() {
+    let pair = Pair::new();
+    for side in 0..2 {
+        pair.file(side, "conflict", b"base");
+    }
+    let mut progress = Progress::default();
+    pair.build().remember(&mut progress).unwrap();
+    pair.file(0, "conflict", b"left");
+    pair.file(1, "conflict", b"peer");
+    pair.file(0, "sub/left-only", b"left");
+    pair.file(1, "right-only", b"peer");
+    let mut plan = pair.build();
+    assert!(plan.apply(&mut progress).is_err());
+    plan.choose("conflict".into(), 1, &progress).unwrap();
+    assert_plan(
+        &plan,
+        &[
+            ("conflict", change(0, SyncChange::Replace)),
+            ("right-only", change(0, SyncChange::Copy)),
+            ("sub", change(1, SyncChange::Copy)),
+            ("sub/left-only", change(1, SyncChange::Copy)),
+        ],
+    );
+    let old = pair.folders[0].path().join("conflict");
+    assert_eq!(fs::read(&old).unwrap(), b"left");
+    let timestamp = old.metadata().unwrap().modified().unwrap();
+    fs::write(&old, b"late").unwrap();
+    File::open(&old)
+        .unwrap()
+        .set_times(FileTimes::new().set_modified(timestamp))
+        .unwrap();
+    assert!(plan.apply(&mut progress).is_err());
+    assert!(!pair.folders[0].path().join("right-only").exists());
+    assert_eq!(fs::read(old).unwrap(), b"late");
+    assert!(plan.store.read_run().unwrap().is_none());
+
+    let mut plan = pair.build();
+    plan.choose("conflict".into(), 1, &progress).unwrap();
+    plan.apply(&mut progress).unwrap();
+    assert!(plan.store.read_run().unwrap().is_none());
+    let next = pair.build();
+    assert!(next.has_baseline());
+    assert!(next.rows.is_empty());
+    assert!(!next.can_remember());
+    for folder in &pair.folders {
+        assert_eq!(fs::read(folder.path().join("conflict")).unwrap(), b"peer");
+        assert_eq!(fs::read(folder.path().join("right-only")).unwrap(), b"peer");
+        assert_eq!(
+            fs::read(folder.path().join("sub/left-only")).unwrap(),
+            b"left"
+        );
+    }
+    pair.file(0, "conflict", b"next");
+    assert_plan(
+        &pair.build(),
+        &[("conflict", change(1, SyncChange::Replace))],
+    );
+}
+
+#[test]
+fn interrupted_pair_blocks_held_entries_then_requires_review_of_the_actual_folders() {
+    let mut pair = Pair::new();
+    for side in 0..2 {
+        pair.file(side, "entry", b"base");
+    }
+    let mut progress = Progress::default();
+    let mut plan = pair.build();
+    plan.remember(&mut progress).unwrap();
+    let previous = fs::read(&plan.store.path).unwrap();
+    let cancel = progress.cancellation();
+    let mut run = Run::new();
+    let stage_name = ".pawcommander-two-way-19-45678-2";
+    let stage = plan.observed[1].root.join(stage_name);
+    {
+        let lock = plan.store.lock().unwrap();
+        assert!(plan.store.lock().is_err());
+        lock.save_run(&run, &cancel).unwrap();
+        lock.track_stage(&mut run, &stage, &plan.observed, &cancel)
+            .unwrap();
+    }
+    fs::create_dir_all(stage.path().join("previous")).unwrap();
+    let original = pair.folders[1].path().join("entry");
+    let held = stage.path().join("previous/entry");
+    fs::rename(&original, &held).unwrap();
+    pair.file(0, "entry", b"left");
+    pair.folders.swap(0, 1);
+    let blocked = TwoWayPlan::build_in(pair.folders.clone(), pair.records.clone(), &mut progress);
+    assert!(blocked.err().unwrap().to_string().contains(stage_name));
+    assert_eq!(fs::read(&held).unwrap(), b"base");
+    assert_eq!(fs::read(&plan.store.path).unwrap(), previous);
+
+    fs::rename(&held, &original).unwrap();
+    fs::remove_dir_all(stage.path()).unwrap();
+    let mut recovered = pair.build();
+    assert!(recovered.interrupted());
+    assert_plan(
+        &recovered,
+        &[("entry", Reconcile::Conflict(ReconcileConflict::Interrupted))],
+    );
+    assert!(recovered.apply(&mut progress).is_err());
+    recovered.choose("entry".into(), 1, &progress).unwrap();
+    recovered.apply(&mut progress).unwrap();
+    assert_eq!(fs::read(original).unwrap(), b"left");
+    assert!(!pair.build().interrupted());
+}
+
+#[test]
+fn matching_folders_can_finish_an_interrupted_run_by_saving_the_verified_state() {
+    let pair = Pair::new();
+    let mut progress = Progress::default();
+    for side in 0..2 {
+        pair.file(side, "file", b"base");
+    }
+    let mut initial = pair.build();
+    initial.remember(&mut progress).unwrap();
+    {
+        let lock = initial.store.lock().unwrap();
+        lock.save_run(&Run::new(), &progress.cancellation())
+            .unwrap();
+    }
+    for side in 0..2 {
+        pair.file(side, "file", b"done");
+    }
+    let mut recovered = pair.build();
+    assert!(recovered.interrupted());
+    assert!(recovered.can_remember());
+    recovered.remember(&mut progress).unwrap();
+    assert!(!recovered.interrupted());
+    pair.file(0, "file", b"next");
+    assert_plan(&pair.build(), &[("file", change(1, SyncChange::Replace))]);
 }
 
 pub(in crate::vfs) fn two_way_round_trip(remote: &Location) {
@@ -245,7 +372,7 @@ pub(in crate::vfs) fn two_way_round_trip(remote: &Location) {
     pair.file(0, "upload", b"left");
     pair.file(1, "download", b"peer");
     pair.folders.swap(0, 1);
-    let plan = pair.build();
+    let mut plan = pair.build();
     assert!(plan.has_baseline());
     assert_plan(
         &plan,
@@ -261,4 +388,19 @@ pub(in crate::vfs) fn two_way_round_trip(remote: &Location) {
     plan.verify(&mut Progress::default()).unwrap();
     assert_eq!(fs::read(peer.path()).unwrap(), b"peer");
     assert!(!fixture.path().join("upload").exists());
+
+    let mut progress = Progress::default();
+    plan.choose("disputed".into(), 1, &progress).unwrap();
+    assert!(plan.deletes_remote());
+    plan.apply(&mut progress).unwrap();
+    assert!(!peer.path().exists());
+    assert_eq!(fs::read(fixture.path().join("upload")).unwrap(), b"left");
+    assert_eq!(
+        fs::read(pair.folders[1].path().join("download")).unwrap(),
+        b"peer"
+    );
+    let reopened = pair.build();
+    assert!(reopened.rows.is_empty());
+    assert!(!reopened.can_remember());
+    assert!(!reopened.interrupted());
 }

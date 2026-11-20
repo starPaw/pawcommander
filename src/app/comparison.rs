@@ -25,7 +25,7 @@ pub(super) enum ComparisonResponse {
     Open,
     Close,
     #[cfg(target_os = "macos")]
-    ApplySync(std::sync::Arc<crate::vfs::SyncPlan>),
+    ApplySync(super::folder_sync::Plan),
 }
 
 impl ComparisonDialog {

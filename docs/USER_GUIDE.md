@@ -283,11 +283,13 @@ Choose **Apply plan** to queue the displayed changes. When the job starts, PawCo
 
 Use **Stop** to stop before the next change publishes. Completed paths and the outcome of the active change appear in **Result history**. If publication or restoration cannot be confirmed, the result gives the temporary folder to inspect.
 
-## Two-way folder sync preview on macOS
+## Two-way folder synchronization on macOS
 
-In **Folder sync preview**, choose **Both directions** and **Build plan**. The first comparison shows copies for items present on only one side and flags different versions of the same path. Once both folders have matching contents, choose **Save common state**. PawCommander checks both folders and saves fingerprints for that pair. The same record is used when the panes are swapped or the app is reopened.
+In **Folder sync preview**, choose **Both directions** and **Build plan**. The first comparison shows copies for items present on only one side and flags different versions of the same path. If the folders already match, choose **Save common state**. PawCommander checks both folders and saves fingerprints for that pair. The same record is used when the panes are swapped or the app is reopened.
 
-Later previews use the saved state to distinguish new items from deletions and show which pane would receive each change. They flag paths that changed on both sides and paths edited on one side and deleted on the other. If an entire folder is involved in a conflict, its descendants stay together under that conflict. The two-way mode previews these changes. Use **Check plan** to check that both folders and the saved state still match the preview.
+Later plans use the saved state to distinguish new items from deletions. If both versions changed, choose which version to keep. When an item was edited on one side and deleted on the other, choose the edited version to restore the item or accept the deletion. A choice for a disputed folder applies to its contents. Review the resulting actions before choosing **Apply plan**. The queue rechecks both folders and saves the new common state once both match the planned result. Local deletions go to the Trash. SFTP deletions are permanent.
+
+After a stop or interruption, build a fresh plan for the same two folders. Differences from an interrupted run require a choice before you can apply the new plan. If PawCommander reports a retained staging folder, use the displayed path to inspect the copies. An original held during replacement or deletion is under `previous` inside that folder. Restore it if its original name is free. Save any other needed versions outside both synchronized folders and move the retained staging folder out of the pair before building a new plan. If the folders match after recovery, **Save common state** completes the review.
 
 ## Compare files
 
