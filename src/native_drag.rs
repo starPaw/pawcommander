@@ -1,7 +1,11 @@
 //! Hand an internal drag to the OS as it leaves the window. Keeping the handoff
 //! at the boundary preserves egui's internal targets and Shift-move semantics.
 #[cfg(target_os = "macos")]
+mod file_promises;
+#[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+pub(crate) use file_promises::{PromiseKind, PromiseRequest};
 #[cfg(target_os = "macos")]
 pub use macos::{listen_for_escape, NativeDrag};
 

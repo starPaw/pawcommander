@@ -65,6 +65,8 @@ pub(crate) use sftp::{
     connect_location, AuthRequest, ConnectRequest, ConnectedLocation, ConnectionControl,
     ConnectionPrompt, HostKeyRequest, InteractiveAuth,
 };
+#[cfg(target_os = "macos")]
+pub(crate) use transfer::copy_sftp_for_drop;
 #[cfg(test)]
 pub use transfer::transfer;
 pub use transfer::transfer_with_conflicts;

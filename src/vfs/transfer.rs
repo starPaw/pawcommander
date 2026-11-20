@@ -780,6 +780,82 @@ pub(super) fn copy_item(
         .map_err(|e| e.to_string())
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn copy_sftp_for_drop(
+    source: &Location,
+    destination: &Path,
+    directory: bool,
+    progress: &mut Progress,
+) -> Result<String, String> {
+    use crate::{i18n::text, result_history::Outcome};
+
+    let target = Location::Local(destination.to_owned());
+    progress
+        .results
+        .plan([(source.clone(), Some(target.display()))]);
+    progress.results.begin(source);
+    let mut committed = false;
+    let result = (|| {
+        progress.checkpoint()?;
+        if !source.remote() || !destination.is_absolute() || destination.file_name().is_none() {
+            return Err(text("Недопустимый путь файла").into());
+        }
+        if !entry_metadata(source)?.is_some_and(|metadata| {
+            if directory {
+                metadata.is_directory()
+            } else {
+                metadata.is_file()
+            }
+        }) {
+            return Err(changed_source(source).into());
+        }
+        if entry_metadata(&target)?.is_some() {
+            return Err(crate::tr_format!(
+                "Путь назначения уже занят: {target}",
+                "The destination path is already occupied: {target}"
+            )
+            .into());
+        }
+        let item = TransferItem::new(source.clone(), source.clone(), target);
+        copy_item_cancellable(&item, None, progress, MetadataMode::Final, || {
+            committed = true
+        })
+    })();
+    let warning = committed && (result.is_err() || progress.results.active_metadata_warning());
+    let outcome = match (&result, committed) {
+        (_, true) if warning => Outcome::CompletedWithWarning,
+        (_, true) => Outcome::Completed,
+        (Err(TransferError::Cancelled), false) => {
+            progress.results.cancelled = true;
+            Outcome::Cancelled
+        }
+        (Err(TransferError::PublicationUnconfirmed(_)), false) => Outcome::PublicationUnconfirmed,
+        (_, false) if progress.partial_copy_retained => Outcome::PartialCopyRetained,
+        _ => Outcome::Failed,
+    };
+    let reason = result.as_ref().err().map(ToString::to_string).or_else(|| {
+        warning.then(|| {
+            text(
+                "Даты или права доступа сохранены частично. Подробности указаны в строках журнала.",
+            )
+            .into()
+        })
+    });
+    progress.results.record(source, None, outcome, reason);
+    if committed {
+        Ok(text(if warning {
+            "Файл передан. Подробности о предупреждениях в журнале результатов."
+        } else {
+            "Файлы переданы принимающему приложению"
+        })
+        .into())
+    } else {
+        result
+            .map(|()| text("Файлы переданы принимающему приложению").into())
+            .map_err(|error| error.to_string())
+    }
+}
+
 pub(super) fn copy_item_cancellable(
     item: &TransferItem,
     expected: Option<&EntryMetadata>,

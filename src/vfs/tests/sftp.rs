@@ -3,6 +3,82 @@ use super::*;
 use crate::vfs::cache_media_preview;
 
 #[cfg(target_os = "macos")]
+fn check_promised_sftp_download(local_root: &Location, remote_root: &Location) {
+    use crate::{
+        result_history::Outcome,
+        vfs::{copy_sftp_for_drop, resume_copy},
+    };
+
+    let output = local_root.join("receiving app");
+    let recovery = local_root.path().join("promised-downloads");
+    fs::create_dir(output.path()).unwrap();
+    let source = remote_root.join("drag source.txt");
+    let target = output.join("drag source 2.txt");
+    let bytes = b"file delivered at the receiver's requested name";
+    fs::write(source.path(), bytes).unwrap();
+    fs::write(output.join("drag source.txt").path(), b"existing file").unwrap();
+    let mut progress = Progress::default();
+    progress.resume_directory = Some(recovery.clone());
+    copy_sftp_for_drop(&source, target.path(), false, &mut progress).unwrap();
+    assert_eq!(fs::read(target.path()).unwrap(), bytes);
+    assert_eq!(fs::read(source.path()).unwrap(), bytes);
+    assert_eq!(
+        fs::read(output.join("drag source.txt").path()).unwrap(),
+        b"existing file"
+    );
+    assert!(copy_sftp_for_drop(&source, target.path(), false, &mut Progress::default()).is_err());
+    assert_eq!(fs::read(target.path()).unwrap(), bytes);
+
+    let source_folder = remote_root.join("drag folder");
+    let target_folder = output.join("drag folder");
+    fs::create_dir_all(source_folder.join("nested/empty").path()).unwrap();
+    fs::write(source_folder.join("nested/child.txt").path(), bytes).unwrap();
+    let mut progress = Progress::default();
+    progress.resume_directory = Some(recovery.clone());
+    copy_sftp_for_drop(&source_folder, target_folder.path(), true, &mut progress).unwrap();
+    assert!(target_folder.join("nested/empty").path().is_dir());
+    assert_eq!(
+        fs::read(target_folder.join("nested/child.txt").path()).unwrap(),
+        bytes
+    );
+    assert_eq!(
+        fs::read(source_folder.join("nested/child.txt").path()).unwrap(),
+        bytes
+    );
+
+    let source = remote_root.join("stopped download.bin");
+    let target = output.join("stopped download.bin");
+    let data = vec![53; 1024 * 1024];
+    fs::write(source.path(), &data).unwrap();
+    let destination = output.path().to_owned();
+    let mut progress = Progress::default();
+    progress.resume_directory = Some(recovery.clone());
+    progress.cancellation().set_checkpoint(move || {
+        fs::read_dir(&destination)
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".pawcommander-transfer-")
+                    && fs::metadata(entry.path().join("payload")).is_ok_and(|meta| meta.len() != 0)
+            })
+    });
+    assert!(copy_sftp_for_drop(&source, target.path(), false, &mut progress).is_err());
+    assert_eq!(
+        progress.results.root_outcomes(),
+        [(source.clone(), Outcome::Cancelled)]
+    );
+    assert_eq!(fs::read(source.path()).unwrap(), data);
+    assert!(!target.path().exists());
+    let (offers, errors) = resume_copy::scan(&recovery);
+    assert!(offers.is_empty() && errors.is_empty());
+    assert_eq!(fs::read_dir(output.path()).unwrap().count(), 3);
+    println!("SFTP file and folder delivery honored the requested names, preserved originals, and cleaned staging on Stop");
+}
+
+#[cfg(target_os = "macos")]
 fn check_sftp_editor(local_root: &Location, remote_root: &Location, setstat_denied: bool) {
     use crate::result_history::Outcome;
     use std::os::unix::fs::PermissionsExt;
@@ -1458,5 +1534,7 @@ fn openssh_round_trip_and_host_verification() {
     }
     #[cfg(unix)]
     check_sftp_unsupported_names(&local_root, &remote_root);
+    #[cfg(target_os = "macos")]
+    check_promised_sftp_download(&local_root, &remote_root);
     sessions().lock().unwrap().remove(&endpoint);
 }

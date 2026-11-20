@@ -35,7 +35,7 @@ PawCommander brings a familiar two-pane workflow to a calm, colorful desktop app
 | **Move naturally.** Multiple selection, file clipboard, drag and drop, and keyboard shortcuts. | **Keep track of transfers.** Background operations, copy progress, conflict choices, and free-space checks. |
 | **Choose your mood.** All four Catppuccin palettes, system appearance, and English / Russian UI. | **Open in Zed.** Send local files or remote text files to your editor over SSH. |
 
-Visible local and connected SFTP folders refresh automatically. On macOS, you can also drag local files out to Finder and other apps.
+Visible local and connected SFTP folders refresh automatically. On macOS, drag local and SFTP files and folders to Finder or another app that accepts them.
 
 On macOS, **Settings → Crash recovery** lists interrupted copies and copy-based moves of local and SFTP files and folders. PawCommander checks the source, destination and partial copy before continuing. For folders it keeps verified children and writes the remainder of incomplete files. **Check and resume move** verifies the full copy before removing the original. If an interruption leaves the intact original in a temporary folder, PawCommander checks it and finishes the move using the published copy. If verification fails, the files remain available for inspection.
 

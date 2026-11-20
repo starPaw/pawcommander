@@ -8,6 +8,8 @@ use eframe::egui::{self, Color32, LayerId, Rect};
 pub struct DragFiles {
     pub paths: Vec<Location>,
     pub icon: crate::icons::Icon,
+    #[cfg(target_os = "macos")]
+    pub(crate) promise_kinds: Vec<Option<crate::native_drag::PromiseKind>>,
 }
 
 #[cfg(test)]
@@ -16,6 +18,8 @@ impl DragFiles {
         Self {
             paths,
             icon: crate::icons::Icon::Document,
+            #[cfg(target_os = "macos")]
+            promise_kinds: Vec::new(),
         }
     }
 }
