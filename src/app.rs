@@ -426,7 +426,7 @@ impl eframe::App for PawCommander {
             let fingerprint = selected
                 .first()
                 .and_then(|path| self.tab().entries.iter().find(|entry| &entry.path == path))
-                .map(|entry| (entry.size, entry.modified));
+                .map(crate::preview::Fingerprint::from);
             let narrow = ctx.content_rect().width() < 900.0;
             egui::Panel::right("preview")
                 .default_size(if narrow { 155.0 } else { 260.0 })
