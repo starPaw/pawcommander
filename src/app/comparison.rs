@@ -11,7 +11,7 @@ use std::{sync::mpsc, thread, time::Duration};
 
 pub(super) struct ComparisonDialog {
     pub(super) body: ComparisonBody,
-    previous_focus: Option<egui::Id>,
+    return_focus: Option<egui::Id>,
 }
 
 pub(super) enum ComparisonBody {
@@ -20,10 +20,14 @@ pub(super) enum ComparisonBody {
 }
 
 impl ComparisonDialog {
-    pub(super) fn new(body: ComparisonBody, ctx: &egui::Context) -> Self {
+    pub(super) fn new(
+        body: ComparisonBody,
+        return_focus: Option<egui::Id>,
+        ctx: &egui::Context,
+    ) -> Self {
         Self {
             body,
-            previous_focus: ctx.memory(|memory| memory.focused()),
+            return_focus: return_focus.or_else(|| ctx.memory(|memory| memory.focused())),
         }
     }
 
@@ -47,7 +51,7 @@ impl PawCommander {
         if let Some(comparison) = &mut self.comparison
             && !comparison.show(ctx)
         {
-            self.palette_focus_to_restore = comparison.previous_focus;
+            self.palette_focus_to_restore = comparison.return_focus;
             self.comparison = None;
             ctx.request_repaint();
         }

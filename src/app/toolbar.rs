@@ -114,7 +114,11 @@ impl PawCommander {
                                 ui.close();
                             }
                             for (command, action, enabled) in [
-                                (Command::CompareFolders, Action::CompareFolders, self.can_compare_folders()),
+                                (
+                                    Command::CompareFolders,
+                                    Action::CompareFolders(cfg!(target_os = "macos").then_some(button.id)),
+                                    self.can_compare_folders(),
+                                ),
                                 (Command::CompareFiles, Action::CompareFiles, self.files_to_compare().is_some()),
                             ] {
                                 let compare = ui.add_enabled(enabled, egui::Button::new(

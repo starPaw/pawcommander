@@ -156,7 +156,7 @@ impl PawCommander {
             Command::VerifyArchive => Action::VerifyArchive,
             Command::CreateChecksumManifest => Action::CreateChecksumManifest,
             Command::VerifyChecksumManifest => Action::VerifyChecksumManifest,
-            Command::CompareFolders => Action::CompareFolders,
+            Command::CompareFolders => Action::CompareFolders(None),
             Command::CompareFiles => Action::CompareFiles,
             Command::AddToArchive => Action::AddToArchive,
             Command::RemoveFromArchive => Action::RemoveFromArchive,

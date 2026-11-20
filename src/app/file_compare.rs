@@ -306,6 +306,7 @@ impl PawCommander {
             let tool = self.tools.diff_tool(&self.settings.diff_tool);
             self.comparison = Some(ComparisonDialog::new(
                 ComparisonBody::Files(FileComparisonDialog::new(files, tool, ctx)),
+                None,
                 ctx,
             ));
         }

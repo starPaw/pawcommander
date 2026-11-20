@@ -81,7 +81,7 @@ pub(super) enum Action {
     VerifyArchive,
     CreateChecksumManifest,
     VerifyChecksumManifest,
-    CompareFolders,
+    CompareFolders(Option<egui::Id>),
     CompareFiles,
     AddToArchive,
     RemoveFromArchive,
@@ -700,7 +700,9 @@ impl PawCommander {
                     });
                 }
             }
-            Action::CompareFolders => self.open_directory_comparison(ctx),
+            Action::CompareFolders(return_focus) => {
+                self.open_directory_comparison(return_focus, ctx)
+            }
             Action::CompareFiles => self.open_file_comparison(ctx),
             Action::Trash if !self.conflict_open() => {
                 let paths = self.selected();
