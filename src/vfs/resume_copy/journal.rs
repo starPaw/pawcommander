@@ -1,15 +1,19 @@
 //! Durable receipts for one worker and one staged copy.
-use super::Receipt;
+use super::{Intent, Publication, Receipt};
+use crate::app::SavedLocation;
 use crate::recovery::{same_owned_marker, sync_directory};
+use serde::{Deserialize, Serialize};
+use std::cell::Cell;
 use std::ffi::OsStr;
 use std::fs::{self, DirBuilder, File, OpenOptions, TryLockError};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 const PREFIX: &str = "copy-";
 const SUFFIX: &str = ".json";
 const VERSION: u32 = 1;
+const MOVE_VERSION: u32 = 2;
 const MAX_BYTES: u64 = 128 * 1024;
 const MAX_ENTRIES: usize = 1024;
 
@@ -17,6 +21,23 @@ pub(super) struct Ticket {
     file: File,
     path: PathBuf,
     pub(super) receipt: Receipt,
+    publication: Cell<Option<Publication>>,
+    pub(super) holding: Option<SavedLocation>,
+    pub(super) removed: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+pub(super) enum Event {
+    Publication(Publication),
+    Removing(SavedLocation),
+    Removed,
+}
+
+fn version(intent: Intent) -> u32 {
+    match intent {
+        Intent::Copy => VERSION,
+        Intent::Move => MOVE_VERSION,
+    }
 }
 
 impl Ticket {
@@ -30,7 +51,8 @@ impl Ticket {
             .suffix(".pending")
             .tempfile_in(directory)?;
         file.as_file().try_lock().map_err(io::Error::other)?;
-        let bytes = serde_json::to_vec(&(VERSION, &receipt)).map_err(io::Error::other)?;
+        let bytes =
+            serde_json::to_vec(&(version(receipt.intent), &receipt)).map_err(io::Error::other)?;
         if bytes.len() as u64 > MAX_BYTES {
             return Err(io::Error::other("Copy recovery record exceeds 128 KiB"));
         }
@@ -43,6 +65,9 @@ impl Ticket {
             file,
             path,
             receipt,
+            publication: Cell::new(None),
+            holding: None,
+            removed: false,
         })
     }
 
@@ -67,15 +92,35 @@ impl Ticket {
                 "Invalid copy recovery record size or identity",
             ));
         }
-        let (version, receipt): (u32, Receipt) =
-            serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-        if version != VERSION {
+        let mut lines = bytes.split(|&byte| byte == b'\n');
+        let (stored_version, receipt): (u32, Receipt) =
+            serde_json::from_slice(lines.next().unwrap_or_default()).map_err(io::Error::other)?;
+        if stored_version != version(receipt.intent) {
             return Err(io::Error::other("Unsupported copy recovery record version"));
+        }
+        let mut publication = None;
+        let mut holding = None;
+        let mut removed = false;
+        for line in lines {
+            let event = serde_json::from_slice(line).map_err(io::Error::other)?;
+            match event {
+                Event::Publication(seal) if receipt.intent == Intent::Move && holding.is_none() => {
+                    publication = Some(seal);
+                }
+                Event::Removing(location) if publication.is_some() && !removed => {
+                    holding = Some(location);
+                }
+                Event::Removed if holding.is_some() && !removed => removed = true,
+                _ => return Err(io::Error::other("Invalid move recovery record sequence")),
+            }
         }
         Ok(Some(Self {
             file,
             path,
             receipt,
+            publication: Cell::new(publication),
+            holding,
+            removed,
         }))
     }
 
@@ -84,7 +129,33 @@ impl Ticket {
         self.path.file_name().and_then(OsStr::to_str).unwrap()
     }
 
-    pub(super) fn finish(self) -> io::Result<()> {
+    pub(super) fn publication(&self) -> Option<Publication> {
+        self.publication.get()
+    }
+
+    pub(super) fn seal(&self, proof: Publication) -> io::Result<()> {
+        if self.publication() != Some(proof) {
+            self.record(&Event::Publication(proof))?;
+            self.publication.set(Some(proof));
+        }
+        Ok(())
+    }
+
+    pub(super) fn record(&self, event: &Event) -> io::Result<()> {
+        if self.receipt.intent != Intent::Move || !same_owned_marker(&self.file, &self.path)? {
+            return Err(io::Error::other("Move recovery record identity changed"));
+        }
+        let mut bytes = vec![b'\n'];
+        serde_json::to_writer(&mut bytes, event).map_err(io::Error::other)?;
+        let mut file = &self.file;
+        if file.seek(SeekFrom::End(0))? + bytes.len() as u64 > MAX_BYTES {
+            return Err(io::Error::other("Move recovery record exceeds 128 KiB"));
+        }
+        file.write_all(&bytes)?;
+        file.sync_all()
+    }
+
+    pub(super) fn finish(&self) -> io::Result<()> {
         if !same_owned_marker(&self.file, &self.path)? {
             return Err(io::Error::other("Copy recovery record identity changed"));
         }

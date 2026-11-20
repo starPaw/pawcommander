@@ -184,7 +184,11 @@ impl PawCommander {
             return;
         };
         let (_, events) = mpsc::channel();
-        let label = crate::i18n::text("Продолжение копирования");
+        let label = crate::i18n::text(if offer.moving {
+            "Продолжение переноса"
+        } else {
+            "Продолжение копирования"
+        });
         let description = format!("{label} · {} → {}", offer.source, offer.target);
         self.submit_job(
             ctx,
@@ -635,9 +639,11 @@ impl PawCommander {
         let worker_ctx = ctx.clone();
         let retry_origin = retry.clone();
         #[cfg(target_os = "macos")]
-        let resume_directory = (kind == TransferKind::Copy && !cfg!(test))
-            .then(|| self.recovery.directory())
-            .flatten();
+        let resume_directory = if cfg!(test) {
+            None
+        } else {
+            self.recovery.directory()
+        };
         let work = move |progress: &mut Progress| {
             let id = crate::result_history::operation_id();
             progress.results.id = id.clone();

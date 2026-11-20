@@ -311,12 +311,16 @@ impl Recovery {
                 egui::ScrollArea::both().show(ui, |ui| {
                     #[cfg(target_os = "macos")]
                     if !self.report.copies.is_empty() {
-                        ui.heading(crate::i18n::text("Прерванные копирования"));
+                        ui.heading(crate::i18n::text("Прерванные копирования и переносы"));
                         ui.small(crate::i18n::text("Перед продолжением PawCommander сверяет источник, назначение и временную копию."));
                         for (index, offer) in self.report.copies.iter().enumerate() {
                             ui.push_id(&offer.id, |ui| {
                                 ui.label(format!("{} → {}", offer.source, offer.target));
-                                if ui.add_enabled(self.receive.is_none(), egui::Button::new(crate::i18n::text("Проверить и продолжить"))).clicked() {
+                                let action = if offer.moving { "Проверить и продолжить перенос" } else { "Проверить и продолжить" };
+                                if offer.moving {
+                                    ui.small(crate::i18n::text("Источник удаляется после проверки полной копии."));
+                                }
+                                if ui.add_enabled(self.receive.is_none(), egui::Button::new(crate::i18n::text(action))).clicked() {
                                     resume = Some(index);
                                 }
                             });

@@ -42,6 +42,8 @@ pub(super) fn required(item: &TransferItem) -> Result<bool, TransferError> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Phase {
     Copied,
+    #[cfg(target_os = "macos")]
+    QuarantinePlanned,
     Quarantined,
     BeforeRemove,
     Removed,
@@ -124,6 +126,7 @@ fn verify_file_pair(
     displayed_source: &Location,
     before: &TransferSourceEntry,
     copied: &TransferSourceEntry,
+    finish_attributes: bool,
     progress: &mut Progress,
 ) -> Result<(), TransferError> {
     let cancel = progress.cancellation();
@@ -170,7 +173,7 @@ fn verify_file_pair(
     }
     verify_entry(target, copied, &cancel)?;
     copied.verify(target, &cancel, true)?;
-    if displayed_source.remote() || target.remote() {
+    if finish_attributes {
         let warning = copy_metadata::finish_file(target, &before.metadata, &mut output)?;
         let open_version = TransferSourceEntry {
             metadata: output.metadata()?,
@@ -216,30 +219,15 @@ pub(super) fn run(
     removed: impl FnOnce(),
     observe: &mut impl FnMut(&Location, Phase) -> Result<(), TransferError>,
 ) -> Result<(), TransferError> {
-    let cancel = progress.cancellation();
-    let scan = cancel.clone().pausable_scan();
-    let manifest =
-        TransferSourceManifest::capture_move_observed(&item.source, &scan, &mut |_, _| {})?;
-    let mut links = BTreeMap::<Location, PathBuf>::new();
-    for (path, entry) in &manifest.entries {
-        if entry.children.is_none() && !entry.metadata.is_file() {
-            // Local symbolic links can be compared without following them.
-            // Remote links/special objects retain the existing copy restriction.
-            if let (Some(local), Some(_), EntryMetadata::Local(meta)) =
-                (path.local(), item.target.local(), &entry.metadata)
-                && meta.is_symlink()
-                && entry.metadata.same_object(&entry.metadata)
-            {
-                links.insert(path.clone(), fs::read_link(local).map_err(err)?);
-            } else {
-                return Err(crate::tr_format!(
-                    "Безопасный перенос этого типа объекта между дисками недоступен: {path}",
-                    "Safe cross-volume move is unavailable for this object type: {path}"
-                )
-                .into());
-            }
-        }
+    #[cfg(target_os = "macos")]
+    if let Some(directory) = progress.resume_directory.clone()
+        && entry_metadata(&item.source)?.is_some_and(|meta| meta.is_file() || meta.is_directory())
+    {
+        return super::resume_copy::move_item(
+            item, expected, &directory, progress, published, removed, observe,
+        );
     }
+    let source = MoveSource::capture(item, progress)?;
     let configured = progress.copy_verification();
     progress.set_copy_verification(true);
     let mut copied = false;
@@ -257,19 +245,86 @@ pub(super) fn run(
     if !copied {
         return result;
     }
+    if let Err(error) = result {
+        progress.results.copied_source_remaining();
+        return Err(incomplete(&item.target, error, progress));
+    }
+    remove_verified(item, source, None, progress, removed, observe)
+}
+
+pub(super) struct MoveSource {
+    manifest: TransferSourceManifest,
+    links: BTreeMap<Location, PathBuf>,
+}
+
+impl MoveSource {
+    pub(super) fn capture(item: &TransferItem, progress: &Progress) -> Result<Self, TransferError> {
+        let scan = progress.cancellation().pausable_scan();
+        let manifest =
+            TransferSourceManifest::capture_move_observed(&item.source, &scan, &mut |_, _| {})?;
+        let mut links = BTreeMap::new();
+        for (path, entry) in &manifest.entries {
+            if entry.children.is_none() && !entry.metadata.is_file() {
+                // A local symbolic link has a literal target to compare.
+                if let (Some(local), Some(_), EntryMetadata::Local(meta)) =
+                    (path.local(), item.target.local(), &entry.metadata)
+                    && meta.is_symlink()
+                    && entry.metadata.same_object(&entry.metadata)
+                {
+                    links.insert(path.clone(), fs::read_link(local).map_err(err)?);
+                } else {
+                    return Err(crate::tr_format!(
+                        "Безопасный перенос этого типа объекта между дисками недоступен: {path}",
+                        "Safe cross-volume move is unavailable for this object type: {path}"
+                    )
+                    .into());
+                }
+            }
+        }
+        Ok(Self { manifest, links })
+    }
+}
+
+pub(super) fn remove_verified(
+    item: &TransferItem,
+    original: MoveSource,
+    verified_target: Option<TransferSourceManifest>,
+    progress: &mut Progress,
+    removed: impl FnOnce(),
+    observe: &mut impl FnMut(&Location, Phase) -> Result<(), TransferError>,
+) -> Result<(), TransferError> {
+    let MoveSource { manifest, links } = original;
+    let cancel = progress.cancellation();
     progress.results.copied_source_remaining();
     let mut fully_removed = false;
-    let result = result.and_then(|()| {
+    let result = (|| {
         observe(&item.source, Phase::Copied)?;
         progress.checkpoint()?;
         manifest.verify(&cancel, |_, _| {})?;
-        let target_manifest =
-            TransferSourceManifest::capture_move_observed(&item.target, &cancel, &mut |_, _| {})?;
+        let finish_local_attributes = verified_target.is_some();
+        let target_manifest = match verified_target {
+            Some(manifest) => {
+                manifest.verify(&cancel, |_, _| {})?;
+                manifest
+            }
+            None => TransferSourceManifest::capture_move_observed(
+                &item.target,
+                &cancel,
+                &mut |_, _| {},
+            )?,
+        };
         with_preserved_staging(&item.source, &cancel, |staging, preserve| {
             let staging_meta = metadata(staging)?;
             let held = staging.join("source");
             if let Some(retry) = &mut progress.retry {
                 retry.note_held_source(&item.original, &held);
+            }
+            #[cfg(target_os = "macos")]
+            if let Err(error) = observe(&held, Phase::QuarantinePlanned)
+                .and_then(|()| cancel.check().map_err(Into::into))
+            {
+                *preserve = false;
+                return Err(error);
             }
             // This directory is registered for crash recovery and retained
             // even on panic or an unacknowledged remote rename.
@@ -321,12 +376,14 @@ pub(super) fn run(
                         &item.target,
                         &cancel,
                     )?;
+                    let finish_attributes =
+                        finish_local_attributes || original.remote() || target.remote();
                     if entry.children.is_some() {
                         if !directory_matches(&entry.metadata, &metadata(&source)?) {
                             return Err(changed(&source).into());
                         }
                         copied.verify(&target, &cancel, true)?;
-                        if original.remote() || target.remote() {
+                        if finish_attributes {
                             let warning =
                                 copy_metadata::finish_directory(&target, &entry.metadata, copied)?;
                             progress.results.note_metadata(original, warning.as_deref());
@@ -350,7 +407,15 @@ pub(super) fn run(
                                 return Err(changed(&source).into());
                             }
                         } else {
-                            verify_file_pair(&source, &target, original, entry, copied, progress)?;
+                            verify_file_pair(
+                                &source,
+                                &target,
+                                original,
+                                entry,
+                                copied,
+                                finish_attributes,
+                                progress,
+                            )?;
                         }
                         cancel.check()?;
                         if let Some(local) = source.local() {
@@ -388,17 +453,28 @@ pub(super) fn run(
                 }
             }
         })
-    });
+    })();
     if fully_removed {
         removed();
         return result;
     }
-    if cancel.is_requested() {
+    Err(incomplete(
+        &item.target,
+        result.err().unwrap_or_else(|| changed(&item.source).into()),
+        progress,
+    ))
+}
+
+pub(super) fn incomplete(
+    target: &Location,
+    error: TransferError,
+    progress: &mut Progress,
+) -> TransferError {
+    if progress.cancellation().is_requested() {
         progress.results.cancelled = true;
     }
-    Err(crate::tr_format!(
-        "Копия создана в {}, но перенос не завершён. Остаток источника сохранён; автоматический повтор недоступен. {}",
-        "Copy created at {}, but the move is incomplete. Remaining source was preserved; automatic retry is unavailable. {}",
-        item.target, result.err().map_or_else(|| changed(&item.source), |e| e.to_string())
-    ).into())
+    crate::tr_format!(
+        "Копия создана в {target}. Перенос не завершён. Проверьте исходные данные и журнал. {error}",
+        "A copy was created at {target}. The move is incomplete. Check the source and result history. {error}"
+    ).into()
 }
