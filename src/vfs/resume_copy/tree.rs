@@ -4,7 +4,8 @@ use super::{
     changed_copy, changed_source, copy_metadata, copy_suffix, discard_stage, entry_metadata,
     file_scope, register_copy, rename_for_publication, retained_error, stage_contents,
     stage_identity, verify_stamp, verify_target, Cancellation, Completion, EntryMetadata,
-    FileProof, Location, Original, Paths, Progress, Receipt, Ticket, TransferError,
+    FileProof, Intent, Location, Original, Paths, Progress, Publication, Receipt, Ticket,
+    TransferError,
 };
 use crate::vfs::{
     sftp::remote,
@@ -83,7 +84,7 @@ impl Snapshot {
                 .into());
             };
             feed_field(&mut manifest, relative.as_os_str().as_encoded_bytes());
-            feed_field(&mut manifest, &metadata_bytes(&entry.metadata)?);
+            feed_field(&mut manifest, &metadata_bytes(&entry.metadata, false)?);
             feed_field(&mut contents, relative.as_os_str().as_encoded_bytes());
             match &content {
                 Content::Directory => contents.update([0]),
@@ -283,6 +284,7 @@ impl Snapshot {
         &self,
         paths: &Paths,
         payload: &Location,
+        mode: copy_metadata::Mode,
         progress: &mut Progress,
     ) -> Result<(), TransferError> {
         for (relative, node) in self.entries.iter().rev() {
@@ -296,6 +298,7 @@ impl Snapshot {
                     &copy,
                     metadata,
                     copy_metadata::access_time(metadata),
+                    mode,
                     progress,
                 )?;
             }
@@ -347,12 +350,14 @@ impl Snapshot {
     }
 }
 
-pub(super) fn copy(
+pub(super) fn start(
     source: Location,
     target: Location,
     directory: &Path,
+    intent: Intent,
     progress: &mut Progress,
     published: impl FnOnce(),
+    after: impl FnOnce(&Ticket, &Paths, &mut Progress) -> Result<(), TransferError>,
 ) -> Result<(), TransferError> {
     let local_names = !source.remote() && !target.remote();
     verify_target(None, &target, false, progress)?;
@@ -363,6 +368,7 @@ pub(super) fn copy(
         check_copy_space(snapshot.bytes, &target, stage)?;
         mkdir(&stage.join("payload"))?;
         let record = Receipt {
+            intent,
             source: (&source).into(),
             target: (&target).into(),
             stage_name: stage.name(),
@@ -374,12 +380,13 @@ pub(super) fn copy(
         let ticket = register_copy(directory, stage, record, &cancel)?;
         *preserve = true;
         let paths = ticket.receipt.paths()?;
-        finish(ticket, &paths, Some(snapshot), progress, published).map(|_| ())
+        finish(&ticket, &paths, Some(snapshot), progress, published)?;
+        after(&ticket, &paths, progress)
     })
 }
 
 pub(super) fn resume(
-    ticket: Ticket,
+    ticket: &Ticket,
     paths: &Paths,
     progress: &mut Progress,
     published: impl FnOnce(),
@@ -388,7 +395,7 @@ pub(super) fn resume(
 }
 
 fn finish(
-    ticket: Ticket,
+    ticket: &Ticket,
     paths: &Paths,
     mut snapshot: Option<Snapshot>,
     progress: &mut Progress,
@@ -443,9 +450,13 @@ fn finish(
         let complete = snapshot.inventory(&payload, true, &cancel)?;
         snapshot.verify_bytes(paths, &payload, &complete, true, progress)?;
         snapshot.verify_source(&paths.source, &cancel)?;
-        snapshot.apply_metadata(paths, &payload, progress)?;
+        snapshot.apply_metadata(paths, &payload, receipt.intent.metadata(), progress)?;
         stage_contents(receipt, paths, owner, &["payload"])?;
         snapshot.verify_source(&paths.source, &cancel)?;
+        if receipt.intent == Intent::Move {
+            let complete = snapshot.inventory(&payload, true, &cancel)?;
+            ticket.seal(publication_seal(&complete)?)?;
+        }
         cancel.check()?;
         rename_for_publication(&payload, &paths.target)?;
         committed = true;
@@ -453,6 +464,9 @@ fn finish(
         Ok(Completion::FolderCopied(reused))
     })();
     if committed {
+        if receipt.intent == Intent::Move {
+            return result;
+        }
         if !matches!(&result, Ok(Completion::AlreadyPresent))
             || entry_metadata(&paths.stage)?.is_some()
         {
@@ -473,6 +487,41 @@ fn finish(
     ticket.finish()?;
     progress.partial_copy_retained = false;
     result
+}
+
+pub(super) fn verify_original(
+    paths: &Paths,
+    proof: Proof,
+    progress: &mut Progress,
+) -> Result<(), TransferError> {
+    let local_names = !paths.source.remote() && !paths.target.remote();
+    if Snapshot::capture(&paths.source, local_names, progress)?.proof != proof {
+        return Err(changed_source());
+    }
+    Ok(())
+}
+
+pub(super) fn verify_published(
+    paths: &Paths,
+    proof: Proof,
+    seal: Option<Publication>,
+    progress: &mut Progress,
+) -> Result<(), TransferError> {
+    let local_names = !paths.source.remote() && !paths.target.remote();
+    let snapshot = Snapshot::capture(&paths.target, local_names, progress)?;
+    if snapshot.proof.contents != proof.contents {
+        return Err(changed_copy());
+    }
+    if let Some(expected) = seal {
+        let entries = snapshot
+            .entries
+            .iter()
+            .map(|(path, node)| (path, &node.entry.metadata));
+        if publication_seal(entries)? != expected {
+            return Err(changed_copy());
+        }
+    }
+    Ok(())
 }
 
 fn at(root: &Location, relative: &Path) -> Location {
@@ -538,7 +587,21 @@ fn feed_field(digest: &mut Sha256, bytes: &[u8]) {
     digest.update(bytes);
 }
 
-fn metadata_bytes(metadata: &EntryMetadata) -> Result<Vec<u8>, TransferError> {
+fn publication_seal<'a>(
+    entries: impl IntoIterator<Item = (&'a PathBuf, &'a EntryMetadata)>,
+) -> Result<Publication, TransferError> {
+    let mut digest = Sha256::new();
+    for (path, metadata) in entries {
+        feed_field(&mut digest, path.as_os_str().as_encoded_bytes());
+        feed_field(
+            &mut digest,
+            &metadata_bytes(metadata, path.as_os_str().is_empty())?,
+        );
+    }
+    Ok(Publication::Folder(digest.finalize().into()))
+}
+
+fn metadata_bytes(metadata: &EntryMetadata, renamed_root: bool) -> Result<Vec<u8>, TransferError> {
     match metadata {
         EntryMetadata::Local(meta) => serde_json::to_vec(&(
             meta.dev(),
@@ -547,8 +610,8 @@ fn metadata_bytes(metadata: &EntryMetadata) -> Result<Vec<u8>, TransferError> {
             meta.len(),
             meta.mtime(),
             meta.mtime_nsec(),
-            meta.ctime(),
-            meta.ctime_nsec(),
+            if renamed_root { 0 } else { meta.ctime() },
+            if renamed_root { 0 } else { meta.ctime_nsec() },
         )),
         EntryMetadata::Remote(stat) => {
             serde_json::to_vec(&(stat.perm, stat.size, stat.mtime, stat.uid, stat.gid))

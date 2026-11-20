@@ -1,4 +1,4 @@
-//! A queued copy may retain an unpublished file or folder for explicit resumption.
+//! Explicit recovery of checked file and folder copies, including copy-based moves.
 mod journal;
 #[cfg(test)]
 pub(super) mod tests;
@@ -6,12 +6,14 @@ mod tree;
 
 use super::{
     copy_metadata,
+    cross_move::{self, MoveSource, Phase},
     read_scope::ReadScope,
     sftp::remote,
     staged_file::StagedFile,
     transfer::{
         check_copy_space, entry_metadata, publish_checked_replacement, rename_for_publication,
         rename_without_replacing, with_preserved_staging, EntryMetadata, TransferItem,
+        TransferSourceManifest,
     },
     Location,
 };
@@ -19,7 +21,7 @@ use crate::app::SavedLocation;
 use crate::i18n::text;
 use crate::operations::{Cancellation, Progress, TransferError};
 use crate::result_history::Outcome;
-use journal::Ticket;
+use journal::{Event, Ticket};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
@@ -145,6 +147,8 @@ impl FileProof {
 
 #[derive(Deserialize, Serialize)]
 struct Receipt {
+    #[serde(default, skip_serializing_if = "Intent::is_copy")]
+    intent: Intent,
     source: SavedLocation,
     target: SavedLocation,
     stage_name: String,
@@ -152,6 +156,32 @@ struct Receipt {
     original: Original,
     source_accessed: Option<SavedTime>,
     previous: Option<FileProof>,
+}
+
+#[derive(Clone, Copy, Default, Deserialize, Eq, PartialEq, Serialize)]
+enum Intent {
+    #[default]
+    Copy,
+    Move,
+}
+
+impl Intent {
+    fn is_copy(&self) -> bool {
+        *self == Self::Copy
+    }
+
+    fn metadata(self) -> copy_metadata::Mode {
+        match self {
+            Self::Copy => copy_metadata::Mode::Final,
+            Self::Move => copy_metadata::Mode::KeepReadableForMove,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+enum Publication {
+    File(FileStamp),
+    Folder([u8; 32]),
 }
 
 // Keep the version-one file record readable, including copies interrupted by an
@@ -219,6 +249,7 @@ pub(crate) struct Offer {
     pub id: String,
     pub source: String,
     pub target: String,
+    pub moving: bool,
 }
 
 fn receipts(directory: &Path) -> PathBuf {
@@ -233,6 +264,7 @@ pub(crate) fn scan(directory: &Path) -> (Vec<Offer>, Vec<String>) {
             id: ticket.name().into(),
             source: paths.source.display(),
             target: paths.target.display(),
+            moving: ticket.receipt.intent == Intent::Move,
         });
         Ok(())
     });
@@ -246,6 +278,26 @@ pub(super) fn copy(
     directory: &Path,
     progress: &mut Progress,
     published: impl FnOnce(),
+) -> Result<(), TransferError> {
+    start_file(
+        item,
+        expected,
+        directory,
+        Intent::Copy,
+        progress,
+        published,
+        |_, _, _| Ok(()),
+    )
+}
+
+fn start_file(
+    item: &TransferItem,
+    expected: Option<&EntryMetadata>,
+    directory: &Path,
+    intent: Intent,
+    progress: &mut Progress,
+    published: impl FnOnce(),
+    after: impl FnOnce(&Ticket, &Paths, &mut Progress) -> Result<(), TransferError>,
 ) -> Result<(), TransferError> {
     let cancel = progress.cancellation();
     let source = resolved_file(&item.source)?;
@@ -270,6 +322,7 @@ pub(super) fn copy(
         let payload = stage.join("payload");
         StagedFile::open(&payload, cancel.clone())?.close()?;
         let receipt = Receipt {
+            intent,
             source: (&source).into(),
             target: (&target).into(),
             stage_name: stage.name(),
@@ -281,7 +334,8 @@ pub(super) fn copy(
         let ticket = register_copy(directory, stage, receipt, &cancel)?;
         *preserve = true;
         let paths = ticket.receipt.paths()?;
-        finish_copy(ticket, &paths, progress, false, published).map(|_| ())
+        finish_copy(&ticket, &paths, progress, false, published)?;
+        after(&ticket, &paths, progress)
     })
 }
 
@@ -309,7 +363,196 @@ pub(super) fn copy_folder(
 ) -> Result<(), TransferError> {
     let source = resolved_file(&item.source)?;
     let target = resolved_file(&item.target)?;
-    tree::copy(source, target, directory, progress, published)
+    tree::start(
+        source,
+        target,
+        directory,
+        Intent::Copy,
+        progress,
+        published,
+        |_, _, _| Ok(()),
+    )
+}
+
+pub(super) fn move_item(
+    item: &TransferItem,
+    expected: Option<&EntryMetadata>,
+    directory: &Path,
+    progress: &mut Progress,
+    published: impl FnOnce(),
+    removed: impl FnOnce(),
+    observe: &mut impl FnMut(&Location, Phase) -> Result<(), TransferError>,
+) -> Result<(), TransferError> {
+    let after = |ticket: &Ticket, paths: &Paths, progress: &mut Progress| {
+        let canonical = TransferItem::new(
+            item.original.clone(),
+            paths.source.clone(),
+            paths.target.clone(),
+        );
+        finish_move(ticket, paths, &canonical, progress, || {}, removed, observe)
+    };
+    if entry_metadata(&item.source)?.is_some_and(|entry| entry.is_file()) {
+        start_file(
+            item,
+            expected,
+            directory,
+            Intent::Move,
+            progress,
+            published,
+            after,
+        )
+    } else if expected.is_none() {
+        tree::start(
+            resolved_file(&item.source)?,
+            resolved_file(&item.target)?,
+            directory,
+            Intent::Move,
+            progress,
+            published,
+            after,
+        )
+    } else {
+        Err(changed_source())
+    }
+}
+
+fn verify_move_stage(
+    ticket: &Ticket,
+    paths: &Paths,
+    progress: &mut Progress,
+) -> Result<bool, TransferError> {
+    if ticket.removed && entry_metadata(&paths.stage)?.is_none() {
+        return Ok(false);
+    }
+    let receipt = &ticket.receipt;
+    let backup = paths.stage.join("previous");
+    let expected = receipt.previous.as_ref();
+    let has_backup = entry_metadata(&backup)?.is_some();
+    if has_backup != expected.is_some() && !(ticket.removed && !has_backup) {
+        return Err(changed_copy());
+    }
+    let extra: &[&str] = if has_backup { &["previous"] } else { &[] };
+    stage_contents(receipt, paths, ticket.name(), extra)?;
+    if has_backup {
+        verify_target(expected, &backup, true, progress)?;
+    }
+    Ok(true)
+}
+
+fn verify_published_move(
+    ticket: &Ticket,
+    paths: &Paths,
+    progress: &mut Progress,
+) -> Result<(), TransferError> {
+    let seal = ticket.publication().ok_or_else(changed_target)?;
+    let check_seal = !ticket.removed;
+    match &ticket.receipt.original {
+        Original::File(original) => {
+            let current = FileProof::read(&paths.target, progress)?.0;
+            if current.digest != original.digest
+                || check_seal && Publication::File(current.stamp.ignore_rename_time()) != seal
+            {
+                return Err(changed_target());
+            }
+        }
+        Original::Folder(proof) => {
+            tree::verify_published(paths, *proof, check_seal.then_some(seal), progress)?;
+        }
+    }
+    Ok(())
+}
+
+fn finish_move(
+    ticket: &Ticket,
+    paths: &Paths,
+    item: &TransferItem,
+    progress: &mut Progress,
+    published: impl FnOnce(),
+    removed: impl FnOnce(),
+    observe: &mut impl FnMut(&Location, Phase) -> Result<(), TransferError>,
+) -> Result<(), TransferError> {
+    let has_stage = verify_move_stage(ticket, paths, progress)?;
+    let history = ticket.removed;
+    let scan = progress.cancellation().pausable_scan();
+    // Bind the checked destination to the per-entry identities used by deletion.
+    let target = if history {
+        None
+    } else {
+        Some(TransferSourceManifest::capture_move_observed(
+            &paths.target,
+            &scan,
+            &mut |_, _| {},
+        )?)
+    };
+    verify_published_move(ticket, paths, progress)?;
+    published();
+    if history {
+        // This phase only confirms a prior removal. The source path may have been reused.
+        removed();
+    } else {
+        let verified = (|| {
+            if let Some(holding) = &ticket.holding {
+                let held = holding.clone().into_location().ok_or_else(changed_source)?;
+                if entry_metadata(&held)?.is_some() || entry_metadata(&paths.source)?.is_none() {
+                    return Err(crate::tr_format!(
+                        "Проверьте исходную папку и сохранённый адрес {held}.",
+                        "Check the original folder and retained location {held}."
+                    )
+                    .into());
+                }
+            }
+            let source = MoveSource::capture(item, progress)?;
+            match &ticket.receipt.original {
+                Original::File(original) => {
+                    if FileProof::read(&paths.source, progress)?.0 != *original {
+                        return Err(changed_source());
+                    }
+                }
+                Original::Folder(proof) => tree::verify_original(paths, *proof, progress)?,
+            }
+            Ok(source)
+        })();
+        let source = verified.map_err(|error| {
+            progress.results.copied_source_remaining();
+            cross_move::incomplete(&paths.target, error, progress)
+        })?;
+        let mut held_root = None;
+        cross_move::remove_verified(
+            item,
+            source,
+            target,
+            progress,
+            removed,
+            &mut |location, phase| {
+                // Sync the location before rename and the completion after the last unlink.
+                if phase == Phase::QuarantinePlanned {
+                    ticket.record(&Event::Removing(location.into()))?;
+                    held_root = Some(location.clone());
+                } else if phase == Phase::Removed && held_root.as_ref() == Some(location) {
+                    ticket.record(&Event::Removed)?;
+                }
+                observe(location, phase)
+            },
+        )?;
+    }
+    if has_stage {
+        let backup = paths.stage.join("previous");
+        let extra: &[&str] = if entry_metadata(&backup)?.is_some() {
+            let expected = ticket
+                .receipt
+                .previous
+                .as_ref()
+                .ok_or_else(changed_target)?;
+            verify_target(Some(expected), &backup, true, &mut Progress::default())?;
+            &["previous"]
+        } else {
+            &[]
+        };
+        discard_stage(&ticket.receipt, paths, ticket.name(), extra)?;
+    }
+    ticket.finish()?;
+    progress.partial_copy_retained = false;
+    Ok(())
 }
 
 pub(crate) fn resume(
@@ -329,13 +572,45 @@ pub(crate) fn resume(
         .plan([(paths.source.clone(), Some(paths.target.display()))]);
     progress.results.begin(&paths.source);
     progress.set_copy_endpoints(&paths.source, &paths.target);
+    let moving = ticket.receipt.intent == Intent::Move;
     let mut committed = false;
-    let result = match ticket.receipt.original {
-        Original::File(_) => finish_copy(ticket, &paths, progress, true, || committed = true),
-        Original::Folder(_) => tree::resume(ticket, &paths, progress, || committed = true),
-    };
+    let mut removed = false;
+    let result = (|| {
+        let completion = if moving
+            && (ticket.holding.is_some() || entry_metadata(&paths.stage.join("payload"))?.is_none())
+        {
+            Completion::AlreadyPresent
+        } else {
+            match ticket.receipt.original {
+                Original::File(_) => {
+                    finish_copy(&ticket, &paths, progress, true, || committed = true)?
+                }
+                Original::Folder(_) => {
+                    tree::resume(&ticket, &paths, progress, || committed = true)?
+                }
+            }
+        };
+        if moving {
+            let item = TransferItem::new(
+                paths.source.clone(),
+                paths.source.clone(),
+                paths.target.clone(),
+            );
+            finish_move(
+                &ticket,
+                &paths,
+                &item,
+                progress,
+                || committed = true,
+                || removed = true,
+                &mut |_, _| Ok(()),
+            )?;
+        }
+        Ok(completion)
+    })();
     let mut reason = result.as_ref().err().map(ToString::to_string);
     let outcome = match (&result, committed) {
+        (_, true) if moving && !removed => Outcome::CopiedSourceRemaining,
         (_, true) if result.is_err() || progress.results.active_metadata_warning() => {
             Outcome::CompletedWithWarning
         }
@@ -359,13 +634,26 @@ pub(crate) fn resume(
         .results
         .record(&paths.source, None, outcome, reason);
     result
-        .map(|result| match result {
-            Completion::Copied(offset) => crate::tr_format!(
+        .map(|result| match (moving, result) {
+            (true, Completion::Copied(offset)) => crate::tr_format!(
+                "Перенос продолжен с позиции {offset} байт и завершён.",
+                "Move resumed at byte {offset} and completed."
+            ),
+            (true, Completion::FolderCopied(bytes)) => crate::tr_format!(
+                "Перенос папки завершён. Использовано сохранённых байтов: {bytes}.",
+                "Folder move completed. Reused {bytes} staged bytes."
+            ),
+            (true, Completion::AlreadyPresent) => {
+                text("Перенос завершён после сверки копии.").into()
+            }
+            (false, Completion::Copied(offset)) => crate::tr_format!(
                 "Копирование продолжено с позиции {offset} байт и завершено.",
                 "Copy resumed at byte {offset} and completed."
             ),
-            Completion::AlreadyPresent => text("В назначении подтверждена полная копия.").into(),
-            Completion::FolderCopied(bytes) => crate::tr_format!(
+            (false, Completion::AlreadyPresent) => {
+                text("В назначении подтверждена полная копия.").into()
+            }
+            (false, Completion::FolderCopied(bytes)) => crate::tr_format!(
                 "Копирование папки завершено. Использовано сохранённых байтов: {bytes}.",
                 "Folder copy completed. Reused {bytes} staged bytes."
             ),
@@ -380,7 +668,7 @@ enum Completion {
 }
 
 fn finish_copy(
-    ticket: Ticket,
+    ticket: &Ticket,
     paths: &Paths,
     progress: &mut Progress,
     resuming: bool,
@@ -449,10 +737,16 @@ fn finish_copy(
             &payload,
             &source_metadata,
             receipt.source_accessed.as_ref().and_then(SavedTime::get),
+            receipt.intent.metadata(),
             progress,
         )?;
         verify_stamp(&paths.source, original.stamp)?;
         stage_contents(receipt, paths, owner, entries)?;
+        if receipt.intent == Intent::Move {
+            let metadata = entry_metadata(&payload)?.ok_or_else(changed_copy)?;
+            let stamp = FileStamp::from(&metadata)?;
+            ticket.seal(Publication::File(stamp.ignore_rename_time()))?;
+        }
         cancel.check()?;
         if let Some(expected) = &receipt.previous
             && !parked
@@ -495,6 +789,9 @@ fn finish_copy(
         published();
         Ok(Completion::Copied(offset))
     })();
+    if committed && receipt.intent == Intent::Move {
+        return result;
+    }
     let cleanup = if committed {
         if matches!(&result, Ok(Completion::AlreadyPresent))
             && entry_metadata(&paths.stage)?.is_none()

@@ -391,12 +391,13 @@ pub(super) fn stage_resumed_entry(
     payload: &Location,
     metadata: &EntryMetadata,
     accessed: Option<SystemTime>,
+    mode: Mode,
     progress: &mut Progress,
 ) -> Result<(), TransferError> {
     let mut attributes = Attributes::from_entry(metadata);
     attributes.accessed = accessed;
     let channel = payload.remote().then(|| remote(payload)).transpose()?;
-    let warning = apply_path(payload, &attributes, channel.as_ref(), Mode::Final, None)?;
+    let warning = apply_path(payload, &attributes, channel.as_ref(), mode, None)?;
     progress.results.note_metadata(source, warning.as_deref());
     Ok(())
 }

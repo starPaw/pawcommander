@@ -23,13 +23,29 @@ fn first_copy(
     recovery: &Path,
     checkpoint: impl FnMut() -> bool + Send + 'static,
 ) -> Result<(), String> {
+    first_transfer(
+        source,
+        destination,
+        recovery,
+        TransferKind::Copy,
+        checkpoint,
+    )
+}
+
+fn first_transfer(
+    source: &Location,
+    destination: &Location,
+    recovery: &Path,
+    kind: TransferKind,
+    checkpoint: impl FnMut() -> bool + Send + 'static,
+) -> Result<(), String> {
     let (mut progress, _) = Progress::tracked_transfer();
     progress.resume_directory = Some(recovery.to_owned());
     progress.cancellation().set_checkpoint(checkpoint);
     transfer_with_conflicts(
         std::slice::from_ref(source),
         destination,
-        TransferKind::Copy,
+        kind,
         &mut progress,
         |_| {
             Ok(Answer {
@@ -52,12 +68,17 @@ fn continued(recovery: &Path, partial: &Path, source: &Path, target: &Path, byte
     let result = resume(recovery, &offers[0].id, &mut progress).unwrap();
     assert!(result.contains(&offset.to_string()), "{result}");
     assert_eq!(view.snapshot().total_written, bytes.len() as u64 - offset);
-    assert_eq!(fs::read(source).unwrap(), bytes);
+    if offers[0].moving {
+        assert!(!source.exists());
+    } else {
+        assert_eq!(fs::read(source).unwrap(), bytes);
+    }
     assert_eq!(fs::read(target).unwrap(), bytes);
     assert!(!partial.parent().unwrap().exists());
     assert!(scan(recovery).0.is_empty());
     println!(
-        "Continued at byte {offset}, wrote {} bytes and verified the destination",
+        "Continued {} at byte {offset}, wrote {} bytes and verified the destination",
+        if offers[0].moving { "move" } else { "copy" },
         view.snapshot().total_written
     );
 }
@@ -158,17 +179,131 @@ fn retained_copy_restarts_from_checked_offset_and_never_retries_changed_data() {
 }
 
 pub(crate) fn check_sftp(root: &Path, remote_root: &Location) {
+    for kind in [TransferKind::Copy, TransferKind::Move] {
+        check_sftp_files(root, remote_root, kind);
+        check_sftp_folders(root, remote_root, kind);
+    }
+}
+
+fn interrupt_move(item: &TransferItem, recovery: &Path, interrupt: Phase) -> Offer {
+    let (mut progress, _) = Progress::tracked_transfer();
+    progress.resume_directory = Some(recovery.to_owned());
+    let interrupted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        cross_move::run(item, None, &mut progress, || {}, || {}, &mut |_, phase| {
+            if phase == interrupt {
+                std::panic::panic_any("interrupted move after publication");
+            }
+            Ok(())
+        })
+        .unwrap();
+    }));
+    assert_eq!(
+        interrupted.unwrap_err().downcast_ref::<&str>(),
+        Some(&"interrupted move after publication")
+    );
+    let (mut offers, errors) = scan(recovery);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(offers.len(), 1);
+    let offer = offers.pop().unwrap();
+    assert!(offer.moving);
+    offer
+}
+
+#[test]
+fn published_move_requires_the_original_source_and_the_sealed_destination() {
+    for tree in [false, true] {
+        for replaced in [None, Some("source"), Some("target")] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().canonicalize().unwrap();
+            let recovery = root.join("recovery");
+            let source: Location = root.join("source").into();
+            let target: Location = root.join("target").into();
+            let payload = |location: &Location| {
+                if tree {
+                    location.path().join("child")
+                } else {
+                    location.path().to_owned()
+                }
+            };
+            if tree {
+                fs::create_dir(source.path()).unwrap();
+            }
+            let bytes = b"verified payload";
+            fs::write(payload(&source), bytes).unwrap();
+            let item = TransferItem::new(source.clone(), source.clone(), target.clone());
+            let offer = interrupt_move(&item, &recovery, Phase::Copied);
+
+            if let Some(name) = replaced {
+                let location = if name == "source" { &source } else { &target };
+                fs::rename(location.path(), root.join("original")).unwrap();
+                if tree {
+                    fs::create_dir(location.path()).unwrap();
+                }
+                fs::write(payload(location), bytes).unwrap();
+            }
+            let (mut progress, mut view) = Progress::tracked_transfer();
+            let result = resume(&recovery, &offer.id, &mut progress);
+            assert_eq!(view.snapshot().total_written, 0);
+            assert_eq!(fs::read(payload(&target)).unwrap(), bytes);
+            if replaced.is_none() {
+                assert!(result.is_ok(), "{result:?}");
+                assert!(!source.path().exists());
+                assert!(scan(&recovery).0.is_empty());
+            } else {
+                assert!(result.is_err(), "replacement of {replaced:?} was accepted");
+                assert_eq!(fs::read(payload(&source)).unwrap(), bytes);
+                assert_eq!(scan(&recovery).0.len(), 1);
+            }
+        }
+    }
+}
+
+#[test]
+fn move_recovery_preserves_held_source_and_recognizes_acknowledged_removal() {
+    for phase in [Phase::Quarantined, Phase::Removed] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let recovery = root.join("recovery");
+        let source: Location = root.join("source").into();
+        let target: Location = root.join("target").into();
+        let bytes = b"original data";
+        fs::write(source.path(), bytes).unwrap();
+        let item = TransferItem::new(source.clone(), source.clone(), target.clone());
+        let offer = interrupt_move(&item, &recovery, phase);
+        let ticket = Ticket::open(receipts(&recovery).join(&offer.id))
+            .unwrap()
+            .unwrap();
+        let held = ticket.holding.clone().unwrap().into_location().unwrap();
+        assert!(!source.path().exists());
+        fs::write(source.path(), b"new source at the old path").unwrap();
+        drop(ticket);
+
+        let result = resume(&recovery, &offer.id, &mut Progress::default());
+        assert_eq!(
+            fs::read(source.path()).unwrap(),
+            b"new source at the old path"
+        );
+        assert_eq!(fs::read(target.path()).unwrap(), bytes);
+        if phase == Phase::Quarantined {
+            assert!(result.unwrap_err().contains(&held.display()));
+            assert_eq!(fs::read(held.path()).unwrap(), bytes);
+            assert_eq!(scan(&recovery).0.len(), 1);
+        } else {
+            assert!(result.is_ok(), "{result:?}");
+            assert!(!held.path().exists());
+            assert!(scan(&recovery).0.is_empty());
+        }
+    }
+}
+
+fn check_sftp_files(root: &Path, remote_root: &Location, kind: TransferKind) {
     use std::net::{Shutdown, TcpStream};
     use std::os::fd::{AsRawFd, BorrowedFd};
 
     for upload in [true, false] {
-        let name = if upload {
-            "resume-upload"
-        } else {
-            "resume-download"
-        };
-        let remote = remote_root.join(name);
-        let local: Location = root.join(name).into();
+        let name = reconnect_name("file", upload, kind);
+        let remote = remote_root.join(&name);
+        let local: Location = root.join(&name).into();
         let recovery = root.join(format!("recovery-{name}"));
         fs::create_dir(local.path()).unwrap();
         fs::create_dir(remote.path()).unwrap();
@@ -191,7 +326,7 @@ pub(crate) fn check_sftp(root: &Path, remote_root: &Location) {
         let socket = TcpStream::from(fd.try_clone_to_owned().unwrap());
         let output_path = output.path().to_owned();
         let mut disconnected = false;
-        let result = first_copy(&source, output, &recovery, move || {
+        let result = first_transfer(&source, output, &recovery, kind, move || {
             if !disconnected
                 && staged_payload(&output_path)
                     .and_then(|path| path.metadata().ok())
@@ -211,7 +346,16 @@ pub(crate) fn check_sftp(root: &Path, remote_root: &Location) {
             &super::super::sftp::sessions().lock().unwrap()[endpoint]
         ));
     }
-    check_sftp_folders(root, remote_root);
+}
+
+fn reconnect_name(shape: &str, upload: bool, kind: TransferKind) -> String {
+    let action = if kind == TransferKind::Move {
+        "move"
+    } else {
+        "copy"
+    };
+    let direction = if upload { "upload" } else { "download" };
+    format!("resume-{action}-{shape}-{direction}")
 }
 
 const HEAD: &[u8] = b"already completed child";
@@ -246,7 +390,13 @@ fn checked_folder(recovery: &Path, stage: &Path, source: &Path, target: &Path, b
         view.snapshot().total_written,
         bytes.len() as u64 - suffix_offset
     );
-    for root in [source, target] {
+    if offers[0].moving {
+        assert!(!source.exists());
+    }
+    for root in [source, target]
+        .into_iter()
+        .filter(|&root| root != source || !offers[0].moving)
+    {
         assert_eq!(fs::read(root.join("a-finished")).unwrap(), HEAD);
         assert_eq!(fs::read(root.join("z-child/large")).unwrap(), bytes);
         assert!(root.join("z-child/empty").is_dir());
@@ -395,18 +545,14 @@ fn stopping_a_folder_copy_cleans_only_a_verified_draft() {
     }
 }
 
-fn check_sftp_folders(root: &Path, remote_root: &Location) {
+fn check_sftp_folders(root: &Path, remote_root: &Location, kind: TransferKind) {
     use std::net::{Shutdown, TcpStream};
     use std::os::fd::{AsRawFd, BorrowedFd};
     let bytes: Vec<_> = (0..768 * 1024).map(|i| (i % 239) as u8).collect();
     for upload in [true, false] {
-        let name = if upload {
-            "resume-folder-upload"
-        } else {
-            "resume-folder-download"
-        };
-        let remote = remote_root.join(name);
-        let local: Location = root.join(name).into();
+        let name = reconnect_name("folder", upload, kind);
+        let remote = remote_root.join(&name);
+        let local: Location = root.join(&name).into();
         let recovery = root.join(format!("recovery-{name}"));
         fs::create_dir(local.path()).unwrap();
         fs::create_dir(remote.path()).unwrap();
@@ -426,7 +572,7 @@ fn check_sftp_folders(root: &Path, remote_root: &Location) {
         let socket = TcpStream::from(fd.try_clone_to_owned().unwrap());
         let output_path = output.path().to_owned();
         let mut disconnected = false;
-        let error = first_copy(&source, output, &recovery, move || {
+        let error = first_transfer(&source, output, &recovery, kind, move || {
             if !disconnected && tail_progress(&output_path).is_some_and(|len| len >= 128 * 1024) {
                 socket.shutdown(Shutdown::Both).unwrap();
                 disconnected = true;
