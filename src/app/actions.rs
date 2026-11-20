@@ -58,6 +58,10 @@ pub(super) enum Action {
     ManageCustomActions,
     #[cfg(target_os = "macos")]
     CustomActions,
+    #[cfg(target_os = "macos")]
+    OpenExternalEditor(Location),
+    #[cfg(target_os = "macos")]
+    ConfigureExternalEditors,
     Back,
     Forward,
     History(usize, isize),
@@ -178,7 +182,7 @@ impl PawCommander {
         );
     }
 
-    fn launch_application(
+    pub(super) fn launch_application(
         &mut self,
         ctx: &egui::Context,
         status: &str,
@@ -386,6 +390,10 @@ impl PawCommander {
                 self.active = i;
                 self.open_in_zed(path, false, ctx);
             }
+            #[cfg(target_os = "macos")]
+            Action::OpenExternalEditor(path) => self.open_external_editor(path, ctx),
+            #[cfg(target_os = "macos")]
+            Action::ConfigureExternalEditors => self.configure_external_editors(ctx),
             Action::OpenTerminal(folder) => {
                 if !crate::terminal::available(&folder) {
                     return;

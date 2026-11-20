@@ -212,6 +212,16 @@ impl PawCommander {
                                     actions.push(Action::ManageCustomActions);
                                     ui.close();
                                 }
+                                #[cfg(target_os = "macos")]
+                                if ui.button(crate::i18n::text("Внешние редакторы…")).clicked() {
+                                    actions.push(Action::ConfigureExternalEditors);
+                                    ui.close();
+                                }
+                                #[cfg(target_os = "macos")]
+                                if self.remote_editor.available() && ui.button(crate::i18n::text("Правка SFTP")).clicked() {
+                                    self.remote_editor.reveal();
+                                    ui.close();
+                                }
                                 for (name, path) in [("locate", &self.tools.locate), ("Zed", &self.tools.zed), ("FileMerge", &self.tools.diff)] {
                                     if let Some(path) = path {
                                         ui.label(crate::tr_format!("{name}: найден", "{name}: found")).on_hover_text(path.display().to_string());

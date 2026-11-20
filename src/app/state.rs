@@ -27,6 +27,8 @@ pub(super) struct Settings {
     pub(super) diff_tool: String,
     #[cfg(target_os = "macos")]
     pub(super) custom_actions: Vec<crate::tools::custom_action::Template>,
+    #[cfg(target_os = "macos")]
+    pub(super) external_editors: super::external_editors::Editors,
     pub(super) hidden: bool,
     pub(super) grid: bool,
     pub(super) pane_grid: Option<[bool; 2]>,
@@ -194,6 +196,8 @@ impl Default for Settings {
             diff_tool: String::new(),
             #[cfg(target_os = "macos")]
             custom_actions: Vec::new(),
+            #[cfg(target_os = "macos")]
+            external_editors: Default::default(),
             hidden: false,
             grid: false,
             pane_grid: None,

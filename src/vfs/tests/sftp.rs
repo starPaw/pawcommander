@@ -2,6 +2,81 @@ use super::*;
 #[cfg(target_os = "macos")]
 use crate::vfs::cache_media_preview;
 
+#[cfg(target_os = "macos")]
+fn check_sftp_editor(local_root: &Location, remote_root: &Location, setstat_denied: bool) {
+    use crate::result_history::Outcome;
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = remote_root.with_path(remote_root.path().with_file_name("editor"));
+    fs::create_dir(directory.path()).unwrap();
+    let source = directory.join("a 'quoted' file.txt");
+    fs::write(source.path(), b"original").unwrap();
+    fs::set_permissions(source.path(), fs::Permissions::from_mode(0o640)).unwrap();
+    let copies = local_root.path().with_file_name("editor-copies");
+    let mut edit =
+        crate::vfs::RemoteEdit::download(source.clone(), &copies, &mut Progress::default())
+            .unwrap();
+    assert_eq!(fs::read(edit.copy()).unwrap(), b"original");
+    assert_eq!(
+        fs::metadata(edit.copy().parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    fs::write(edit.copy(), b"edited!!").unwrap();
+    let mut cancelled = Progress::default();
+    cancelled.cancellation().request();
+    assert!(edit.save(&mut cancelled).is_err());
+    assert_eq!(cancelled.results.items[0].outcome, Outcome::Cancelled);
+    assert_eq!(fs::read(source.path()).unwrap(), b"original");
+
+    let mut progress = Progress::default();
+    let result = edit.save(&mut progress);
+    if setstat_denied {
+        assert!(result.is_err());
+        assert_eq!(fs::read(source.path()).unwrap(), b"original");
+    } else {
+        assert_eq!(
+            result.unwrap(),
+            crate::i18n::text("Правка сохранена на сервере.")
+        );
+        assert_eq!(fs::read(source.path()).unwrap(), b"edited!!");
+        assert_eq!(
+            fs::metadata(source.path()).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        assert_eq!(
+            edit.save(&mut Progress::default()).unwrap(),
+            crate::i18n::text("На сервере уже сохранена эта версия.")
+        );
+        let modified = fs::metadata(source.path()).unwrap().modified().unwrap();
+        fs::write(source.path(), b"external").unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(source.path())
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        fs::write(edit.copy(), b"new edit").unwrap();
+        assert_eq!(
+            edit.save(&mut Progress::default()).unwrap_err(),
+            crate::i18n::text("Файл на сервере изменился или недоступен. Рабочая копия сохранена.")
+        );
+        assert_eq!(fs::read(source.path()).unwrap(), b"external");
+    }
+    assert_eq!(
+        fs::read(edit.copy()).unwrap(),
+        if setstat_denied {
+            b"edited!!"
+        } else {
+            b"new edit"
+        }
+    );
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+}
+
 fn check_sftp_retry(local_root: &Location, remote_root: &Location) {
     for (name, source_root, target_root, kind) in [
         ("upload", local_root, remote_root, TransferKind::Copy),
@@ -837,6 +912,12 @@ fn openssh_round_trip_and_host_verification() {
     let local_root = Location::Local(root.join("local"));
     fs::create_dir(local_root.path()).unwrap();
     fs::create_dir(remote_root.path()).unwrap();
+    #[cfg(target_os = "macos")]
+    check_sftp_editor(
+        &local_root,
+        &remote_root,
+        std::env::var("PAWCOMMANDER_TEST_SFTP_METADATA_DENIED").as_deref() == Ok("1"),
+    );
     #[cfg(unix)]
     if std::env::var("PAWCOMMANDER_TEST_SFTP_METADATA_DENIED").as_deref() == Ok("1") {
         super::metadata::server_rejected(&local_root, &remote_root);

@@ -398,6 +398,12 @@ pub(super) fn entry_widget(
                 ui.close();
             }
             #[cfg(target_os = "macos")]
+            if !is_dir && ui.button(crate::i18n::text("Открыть во внешнем редакторе")).clicked() {
+                actions.push(Action::Focus(pane));
+                actions.push(Action::OpenExternalEditor(path.clone()));
+                ui.close();
+            }
+            #[cfg(target_os = "macos")]
             if path.local().is_some()
                 && ui.button(crate::i18n::text("Пользовательские действия…")).clicked()
             {

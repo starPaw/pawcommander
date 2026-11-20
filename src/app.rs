@@ -15,6 +15,8 @@ mod directory_compare;
 #[cfg(any(target_os = "windows", test))]
 mod drives;
 mod entry_widget;
+#[cfg(target_os = "macos")]
+mod external_editors;
 mod file_compare;
 mod footer;
 #[cfg(target_os = "macos")]
@@ -134,6 +136,8 @@ pub struct PawCommander {
     smb: smb_connections::Connections,
     #[cfg(target_os = "macos")]
     embedded_terminal: Option<crate::terminal::embedded::Panel>,
+    #[cfg(target_os = "macos")]
+    remote_editor: external_editors::Session,
     tools: crate::tools::Tools,
     search: crate::search::Search,
 }
@@ -189,6 +193,8 @@ impl eframe::App for PawCommander {
         self.poll(ctx);
         #[cfg(target_os = "macos")]
         self.poll_smb(ctx);
+        #[cfg(target_os = "macos")]
+        self.poll_external_editors(ctx);
         #[cfg(target_os = "macos")]
         if self
             .embedded_terminal
@@ -573,6 +579,8 @@ impl eframe::App for PawCommander {
             ctx.request_repaint();
         }
         self.dialogs(ctx);
+        #[cfg(target_os = "macos")]
+        self.show_remote_editor(ctx);
         self.show_comparison(ctx);
         if self
             .properties

@@ -1225,15 +1225,36 @@ pub(super) fn publish_replacement_with_backup_rename(
     attempted: &mut bool,
     backup_rename: impl FnOnce(&Location, &Location) -> Result<(), String>,
 ) -> Result<(), String> {
-    let target_changed = || {
-        crate::tr_format!(
-            "Назначение {target} изменилось после показа диалога",
-            "Destination {target} changed after the conflict dialog was shown"
-        )
-    };
-    if !entry_metadata(target)?.is_some_and(|meta| expected.matches_file(&meta)) {
-        return Err(target_changed());
-    }
+    publish_checked_replacement(
+        payload,
+        target,
+        staging,
+        preserve,
+        attempted,
+        backup_rename,
+        |candidate| {
+            if entry_metadata(candidate)?.is_some_and(|meta| expected.matches_file(&meta)) {
+                Ok(())
+            } else {
+                Err(crate::tr_format!(
+                    "Назначение {target} изменилось после показа диалога",
+                    "Destination {target} changed after the conflict dialog was shown"
+                ))
+            }
+        },
+    )
+}
+
+pub(super) fn publish_checked_replacement(
+    payload: &Location,
+    target: &Location,
+    staging: &Location,
+    preserve: &mut bool,
+    attempted: &mut bool,
+    backup_rename: impl FnOnce(&Location, &Location) -> Result<(), String>,
+    mut check: impl FnMut(&Location) -> Result<(), String>,
+) -> Result<(), String> {
+    check(target)?;
     let backup = staging.join("previous");
     // A lost SFTP reply can hide a successful rename. Preserve the staging
     // directory until the old file is either restored or safely replaced.
@@ -1244,9 +1265,7 @@ pub(super) fn publish_replacement_with_backup_rename(
     })?;
     *preserve = true;
     let result = (|| {
-        if !entry_metadata(&backup)?.is_some_and(|meta| expected.matches_file(&meta)) {
-            return Err(target_changed());
-        }
+        check(&backup)?;
         if !entry_metadata(payload)?.is_some_and(|meta| meta.is_file()) {
             return Err(crate::tr_format!(
                 "Исходный объект {payload} больше не является обычным файлом",
