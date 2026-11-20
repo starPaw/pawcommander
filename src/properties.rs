@@ -1,6 +1,7 @@
-//! Read-only local properties. Cancellation is cooperative between filesystem calls.
+//! Read-only file properties. Cancellation is cooperative between requests.
 #[cfg(test)]
 use crate::test_ui::ContextExt as _;
+use crate::vfs::Location;
 use chrono::{DateTime, Local};
 use eframe::egui;
 use std::cell::Cell;
@@ -13,7 +14,12 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
+
+#[cfg(target_os = "macos")]
+mod sftp;
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) use sftp::check_sftp_properties;
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod unix;
@@ -32,7 +38,7 @@ struct Summary {
     bytes: u64,
     errors: u64,
     error_examples: Vec<String>,
-    details: Vec<(PathBuf, String)>,
+    details: Vec<(Location, String)>,
     done: bool,
     cancelled: bool,
 }
@@ -52,10 +58,13 @@ impl Summary {
     }
 
     fn error(&mut self, path: &Path, error: impl std::fmt::Display) {
+        self.read_error(path.display(), error);
+    }
+
+    fn read_error(&mut self, path: impl std::fmt::Display, error: impl std::fmt::Display) {
         self.errors += 1;
         if self.error_examples.len() < 5 {
-            self.error_examples
-                .push(format!("{}: {error}", path.display()));
+            self.error_examples.push(format!("{path}: {error}"));
         }
     }
 }
@@ -64,6 +73,7 @@ pub struct Properties {
     state: Arc<Mutex<Summary>>,
     cancel: Arc<AtomicBool>,
     focus_stop: Cell<bool>,
+    remote: bool,
 }
 impl Drop for Properties {
     fn drop(&mut self) {
@@ -71,7 +81,17 @@ impl Drop for Properties {
     }
 }
 impl Properties {
-    pub fn start(paths: Vec<PathBuf>, ctx: &egui::Context) -> Self {
+    pub fn available<'a>(selection: impl IntoIterator<Item = &'a Location>) -> bool {
+        let mut selection = selection.into_iter();
+        let Some(first) = selection.next() else {
+            return false;
+        };
+        (first.local().is_some() || cfg!(target_os = "macos") && first.remote())
+            && selection.all(|item| first.same_backend(item))
+    }
+
+    pub fn start(selection: Vec<Location>, ctx: &egui::Context) -> Self {
+        let remote = selection.first().is_some_and(Location::remote);
         let state = Arc::new(Mutex::new(Summary::default()));
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_state = state.clone();
@@ -81,13 +101,21 @@ impl Properties {
             .name("pawcommander-properties".into())
             .spawn(move || {
                 let mut last = Instant::now();
-                let summary = scan(&paths, &worker_cancel, |summary| {
+                let publish = |summary: &Summary| {
                     if last.elapsed() >= Duration::from_millis(100) {
                         *worker_state.lock().unwrap() = summary.clone();
                         ctx.request_repaint();
                         last = Instant::now();
                     }
-                });
+                };
+                #[cfg(target_os = "macos")]
+                let summary = if remote {
+                    sftp::scan(&selection, &worker_cancel, publish)
+                } else {
+                    scan_local_selection(selection, &worker_cancel, publish)
+                };
+                #[cfg(not(target_os = "macos"))]
+                let summary = scan_local_selection(selection, &worker_cancel, publish);
                 *worker_state.lock().unwrap() = summary;
                 ctx.request_repaint();
             });
@@ -100,6 +128,7 @@ impl Properties {
             state,
             cancel,
             focus_stop: Cell::new(true),
+            remote,
         }
     }
 
@@ -107,7 +136,11 @@ impl Properties {
     pub fn show(&self, ctx: &egui::Context) -> bool {
         let summary = self.state.lock().unwrap().clone();
         let mut open = true;
-        egui::Window::new(crate::i18n::text("Свойства локальных файлов"))
+        egui::Window::new(crate::i18n::text(if self.remote {
+            "Свойства файлов SFTP"
+        } else {
+            "Свойства локальных файлов"
+        }))
             .id(egui::Id::unique("local-properties"))
             .open(&mut open)
             .default_width(580.0)
@@ -145,7 +178,7 @@ impl Properties {
                 egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
                     for (path, details) in &summary.details {
                         ui.separator();
-                        ui.label(path.display().to_string());
+                        ui.label(path.display());
                         ui.label(details);
                     }
                     if summary.errors > 0 {
@@ -164,9 +197,9 @@ impl Properties {
     }
 }
 
-fn date(value: std::io::Result<std::time::SystemTime>) -> String {
+fn date(value: Option<SystemTime>) -> String {
     value.map_or_else(
-        |_| crate::i18n::text("недоступно").into(),
+        || crate::i18n::text("недоступно").into(),
         |time| {
             DateTime::<Local>::from(time)
                 .format("%Y-%m-%d %H:%M:%S %:z")
@@ -194,10 +227,25 @@ fn details(metadata: &Metadata) -> String {
     crate::tr_format!(
         "Права: {permissions}\nИзменён: {}\nСоздан: {}\nДоступ: {}",
         "Permissions: {permissions}\nModified: {}\nCreated: {}\nAccessed: {}",
-        date(metadata.modified()),
-        date(metadata.created()),
-        date(metadata.accessed())
+        date(metadata.modified().ok()),
+        date(metadata.created().ok()),
+        date(metadata.accessed().ok())
     )
+}
+
+fn scan_local_selection(
+    selection: Vec<Location>,
+    cancel: &AtomicBool,
+    progress: impl FnMut(&Summary),
+) -> Summary {
+    let paths: Vec<_> = selection
+        .into_iter()
+        .filter_map(|location| match location {
+            Location::Local(path) => Some(path),
+            _ => None,
+        })
+        .collect();
+    scan(&paths, cancel, progress)
 }
 
 fn scan(paths: &[PathBuf], cancel: &AtomicBool, mut progress: impl FnMut(&Summary)) -> Summary {
@@ -237,7 +285,9 @@ fn scan(paths: &[PathBuf], cancel: &AtomicBool, mut progress: impl FnMut(&Summar
                 continue;
             }
         };
-        summary.details.push((path.clone(), details(&metadata)));
+        summary
+            .details
+            .push((path.clone().into(), details(&metadata)));
         if metadata.is_dir() {
             accepted.insert(path.clone());
         }
@@ -525,6 +575,7 @@ mod tests {
                 state: Arc::new(Mutex::new(Summary::default())),
                 cancel: Arc::new(AtomicBool::new(false)),
                 focus_stop: Cell::new(true),
+                remote: false,
             };
             let background = egui::Id::unique("background");
             ctx.memory_mut(|memory| memory.request_focus(background));
@@ -570,6 +621,7 @@ mod tests {
             state: Arc::new(Mutex::new(Summary::default())),
             cancel: Arc::new(AtomicBool::new(false)),
             focus_stop: Cell::new(true),
+            remote: false,
         };
         let mut other = None;
         for frame in 0..5 {
@@ -596,7 +648,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         fs::write(temp.path().join("data"), b"1234567").unwrap();
         let ctx = egui::Context::default();
-        let properties = Properties::start(vec![temp.path().into()], &ctx);
+        let properties = Properties::start(vec![temp.path().to_owned().into()], &ctx);
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
             if properties.state.lock().unwrap().done {

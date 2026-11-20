@@ -106,7 +106,7 @@ impl PawCommander {
                 }
                 Command::RemoveFromArchive => idle && !writable && has_selection,
                 Command::Properties => {
-                    has_selection && selected.iter().all(|path| path.local().is_some())
+                    has_selection && crate::properties::Properties::available(&selected)
                 }
                 Command::ChangePermissions => idle && tab.path.remote() && has_selection,
                 Command::OpenTerminal => {

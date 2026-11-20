@@ -525,17 +525,9 @@ impl PawCommander {
             }
             Action::Properties => {
                 let selected = self.selected();
-                if self.properties.is_none()
-                    && !selected.is_empty()
-                    && selected.iter().all(|path| path.local().is_some())
+                if self.properties.is_none() && crate::properties::Properties::available(&selected)
                 {
-                    self.properties = Some(crate::properties::Properties::start(
-                        selected
-                            .into_iter()
-                            .filter_map(|path| path.local().map(Path::to_path_buf))
-                            .collect(),
-                        ctx,
-                    ));
+                    self.properties = Some(crate::properties::Properties::start(selected, ctx));
                 }
             }
             Action::Refresh => {
