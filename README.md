@@ -37,7 +37,7 @@ PawCommander brings a familiar two-pane workflow to a calm, colorful desktop app
 
 Visible local and connected SFTP folders refresh automatically. On macOS, you can also drag local files out to Finder and other apps.
 
-On macOS, **Settings → Crash recovery** lists recoverable copies of individual local and SFTP files. **Check and resume** verifies the source, destination and existing partial file before writing the remaining bytes. A mismatch leaves the files available for inspection. Recovery can also verify a complete destination when the final reply was lost.
+On macOS, **Settings → Crash recovery** lists recoverable copies of local and SFTP files and folders. **Check and resume** verifies the source, destination and existing partial copy. For folders it keeps verified children and writes the remainder of incomplete files. A mismatch leaves the files available for inspection. Recovery can also verify a complete destination when the final reply was lost.
 
 On macOS, a local Git working tree shows its branch beside the folder path. The current folder marks modified (`M`), untracked (`?`) and ignored (`!`) entries. Git status refreshes in the background without writing to the repository.
 

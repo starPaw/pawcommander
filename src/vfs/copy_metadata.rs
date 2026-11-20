@@ -386,7 +386,7 @@ pub(super) fn access_time(metadata: &EntryMetadata) -> Option<SystemTime> {
 }
 
 #[cfg(target_os = "macos")]
-pub(super) fn stage_resumed_file(
+pub(super) fn stage_resumed_entry(
     source: &Location,
     payload: &Location,
     metadata: &EntryMetadata,

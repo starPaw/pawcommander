@@ -84,6 +84,14 @@ impl EntryMetadata {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    pub(super) fn is_directory(&self) -> bool {
+        match self {
+            Self::Local(meta) => meta.is_dir(),
+            Self::Remote(stat) => stat.is_dir(),
+        }
+    }
+
     pub(super) fn same_object(&self, other: &Self) -> bool {
         #[cfg(unix)]
         if let (Self::Local(left), Self::Local(right)) = (self, other) {
@@ -789,9 +797,14 @@ pub(super) fn copy_item_cancellable(
     }
     #[cfg(target_os = "macos")]
     if let Some(directory) = progress.resume_directory.clone()
-        && entry_metadata(&item.source)?.is_some_and(|meta| meta.is_file())
+        && let Some(metadata) = entry_metadata(&item.source)?
     {
-        return super::resume_copy::copy(item, expected, &directory, progress, published);
+        if metadata.is_file() {
+            return super::resume_copy::copy(item, expected, &directory, progress, published);
+        }
+        if metadata.is_directory() && expected.is_none() {
+            return super::resume_copy::copy_folder(item, &directory, progress, published);
+        }
     }
     if let (Some(source), Some(target)) = (item.source.local(), item.target.local()) {
         return fs_ops::copy_atomically_cancellable(
@@ -1707,7 +1720,15 @@ pub(super) fn source_children(
 pub(super) struct TransferSourceManifest {
     pub(super) entries: BTreeMap<Location, TransferSourceEntry>,
     pub(super) bytes: u64,
-    moving: bool,
+    mode: ManifestMode,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ManifestMode {
+    Copy,
+    #[cfg(target_os = "macos")]
+    NativeCopy,
+    Move,
 }
 
 const MAX_MOVE_JOURNAL_ENTRIES: usize = 100_000;
@@ -1731,13 +1752,7 @@ impl TransferSourceManifest {
         cancel: &Cancellation,
         observe: &mut impl FnMut(&Location, Option<&TransferError>),
     ) -> Result<Self, TransferError> {
-        let mut manifest = Self {
-            entries: BTreeMap::new(),
-            bytes: 0,
-            moving: false,
-        };
-        manifest.capture_entry(source, 0, cancel, observe)?;
-        Ok(manifest)
+        Self::capture_for(source, cancel, ManifestMode::Copy, observe)
     }
 
     pub(super) fn capture_move_observed(
@@ -1745,10 +1760,33 @@ impl TransferSourceManifest {
         cancel: &Cancellation,
         observe: &mut impl FnMut(&Location, Option<&TransferError>),
     ) -> Result<Self, TransferError> {
+        Self::capture_for(source, cancel, ManifestMode::Move, observe)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn capture_copy_tree(
+        source: &Location,
+        cancel: &Cancellation,
+        native_names: bool,
+    ) -> Result<Self, TransferError> {
+        let mode = if native_names {
+            ManifestMode::NativeCopy
+        } else {
+            ManifestMode::Copy
+        };
+        Self::capture_for(source, cancel, mode, &mut |_, _| {})
+    }
+
+    fn capture_for(
+        source: &Location,
+        cancel: &Cancellation,
+        mode: ManifestMode,
+        observe: &mut impl FnMut(&Location, Option<&TransferError>),
+    ) -> Result<Self, TransferError> {
         let mut manifest = Self {
             entries: BTreeMap::new(),
             bytes: 0,
-            moving: true,
+            mode,
         };
         manifest.capture_entry(source, 0, cancel, observe)?;
         Ok(manifest)
@@ -1777,7 +1815,7 @@ impl TransferSourceManifest {
         observe: &mut impl FnMut(&Location, Option<&TransferError>),
     ) -> Result<(), TransferError> {
         cancel.check()?;
-        if self.moving && self.entries.len() >= MAX_MOVE_JOURNAL_ENTRIES {
+        if self.mode == ManifestMode::Move && self.entries.len() >= MAX_MOVE_JOURNAL_ENTRIES {
             return Err("Пофайловый журнал переноса превысил лимит 100000 элементов".into());
         }
         if depth > MAX_TREE_DEPTH {
@@ -1798,14 +1836,15 @@ impl TransferSourceManifest {
                 (stat.is_dir(), stat.is_file())
             }
         };
-        if !self.moving && !is_dir && !is_file {
+        let native_names = self.mode != ManifestMode::Copy;
+        if !native_names && !is_dir && !is_file {
             return Err(format!(
                 "SFTP-копирование ссылок и специальных файлов пока недоступно: {source}"
             )
             .into());
         }
         let children = if is_dir {
-            Some(source_children(source, cancel, self.moving)?)
+            Some(source_children(source, cancel, native_names)?)
         } else {
             None
         };
@@ -1821,7 +1860,7 @@ impl TransferSourceManifest {
                 self.capture_entry(&source.join(name), depth + 1, cancel, observe)?;
             }
         }
-        entry.verify(source, cancel, self.moving)?;
+        entry.verify(source, cancel, native_names)?;
         self.entries.insert(source.clone(), entry);
         Ok(())
     }
@@ -1833,7 +1872,7 @@ impl TransferSourceManifest {
     ) -> Result<(), TransferError> {
         // Revisit early files too; parent mtime does not track child contents.
         for (source, entry) in &self.entries {
-            if let Err(error) = entry.verify(source, cancel, self.moving) {
+            if let Err(error) = entry.verify(source, cancel, self.mode != ManifestMode::Copy) {
                 failed(source, &error);
                 return Err(error);
             }

@@ -1,7 +1,8 @@
-//! A queued copy may retain an unpublished regular file for explicit resumption.
+//! A queued copy may retain an unpublished file or folder for explicit resumption.
 mod journal;
 #[cfg(test)]
 pub(super) mod tests;
+mod tree;
 
 use super::{
     copy_metadata,
@@ -16,7 +17,7 @@ use super::{
 };
 use crate::app::SavedLocation;
 use crate::i18n::text;
-use crate::operations::{Progress, TransferError};
+use crate::operations::{Cancellation, Progress, TransferError};
 use crate::result_history::Outcome;
 use journal::Ticket;
 use serde::{Deserialize, Serialize};
@@ -148,9 +149,18 @@ struct Receipt {
     target: SavedLocation,
     stage_name: String,
     stage_identity: Option<(u64, u64)>,
-    original: FileProof,
+    original: Original,
     source_accessed: Option<SavedTime>,
     previous: Option<FileProof>,
+}
+
+// Keep the version-one file record readable, including copies interrupted by an
+// earlier build. Folder receipts add a different proof under the same field.
+#[derive(Deserialize, Serialize)]
+#[serde(untagged)]
+enum Original {
+    File(FileProof),
+    Folder(tree::Proof),
 }
 
 struct Paths {
@@ -264,21 +274,42 @@ pub(super) fn copy(
             target: (&target).into(),
             stage_name: stage.name(),
             stage_identity: stage_identity(stage)?,
-            original,
+            original: Original::File(original),
             source_accessed: copy_metadata::access_time(&source_metadata).map(SavedTime::from),
             previous,
         };
-        let ticket = Ticket::create(&receipts(directory), receipt)?;
-        if let Err(error) =
-            StagedFile::open(&stage.join(ticket.name()), cancel.clone()).and_then(StagedFile::close)
-        {
-            ticket.finish()?;
-            return Err(error);
-        }
+        let ticket = register_copy(directory, stage, receipt, &cancel)?;
         *preserve = true;
         let paths = ticket.receipt.paths()?;
         finish_copy(ticket, &paths, progress, false, published).map(|_| ())
     })
+}
+
+fn register_copy(
+    directory: &Path,
+    stage: &Location,
+    receipt: Receipt,
+    cancel: &Cancellation,
+) -> Result<Ticket, TransferError> {
+    let ticket = Ticket::create(&receipts(directory), receipt)?;
+    if let Err(error) =
+        StagedFile::open(&stage.join(ticket.name()), cancel.clone()).and_then(StagedFile::close)
+    {
+        ticket.finish()?;
+        return Err(error);
+    }
+    Ok(ticket)
+}
+
+pub(super) fn copy_folder(
+    item: &TransferItem,
+    directory: &Path,
+    progress: &mut Progress,
+    published: impl FnOnce(),
+) -> Result<(), TransferError> {
+    let source = resolved_file(&item.source)?;
+    let target = resolved_file(&item.target)?;
+    tree::copy(source, target, directory, progress, published)
 }
 
 pub(crate) fn resume(
@@ -299,7 +330,10 @@ pub(crate) fn resume(
     progress.results.begin(&paths.source);
     progress.set_copy_endpoints(&paths.source, &paths.target);
     let mut committed = false;
-    let result = finish_copy(ticket, &paths, progress, true, || committed = true);
+    let result = match ticket.receipt.original {
+        Original::File(_) => finish_copy(ticket, &paths, progress, true, || committed = true),
+        Original::Folder(_) => tree::resume(ticket, &paths, progress, || committed = true),
+    };
     let mut reason = result.as_ref().err().map(ToString::to_string);
     let outcome = match (&result, committed) {
         (_, true) if result.is_err() || progress.results.active_metadata_warning() => {
@@ -331,12 +365,17 @@ pub(crate) fn resume(
                 "Copy resumed at byte {offset} and completed."
             ),
             Completion::AlreadyPresent => text("В назначении подтверждена полная копия.").into(),
+            Completion::FolderCopied(bytes) => crate::tr_format!(
+                "Копирование папки завершено. Использовано сохранённых байтов: {bytes}.",
+                "Folder copy completed. Reused {bytes} staged bytes."
+            ),
         })
         .map_err(|err| err.to_string())
 }
 
 enum Completion {
     Copied(u64),
+    FolderCopied(u64),
     AlreadyPresent,
 }
 
@@ -348,6 +387,9 @@ fn finish_copy(
     published: impl FnOnce(),
 ) -> Result<Completion, TransferError> {
     let receipt = &ticket.receipt;
+    let Original::File(original) = &receipt.original else {
+        return Err(changed_copy());
+    };
     let owner = ticket.name();
     progress.partial_copy_retained = true;
     let cancel = progress.cancellation();
@@ -357,7 +399,7 @@ fn finish_copy(
     let result = (|| {
         let payload = paths.stage.join("payload");
         if resuming && entry_metadata(&payload)?.is_none() {
-            if FileProof::read(&paths.target, progress)?.0.digest != receipt.original.digest {
+            if FileProof::read(&paths.target, progress)?.0.digest != original.digest {
                 return Err(changed_copy());
             }
             committed = true;
@@ -379,61 +421,37 @@ fn finish_copy(
         }
         let (partial, metadata) = FileProof::read(&payload, progress)?;
         let offset = partial.stamp.size();
-        let size = receipt.original.stamp.size();
+        let size = original.stamp.size();
         if offset > size {
             return Err(changed_copy());
         }
         if resuming {
-            if FileProof::read(&paths.source, progress)?.0 != receipt.original {
+            if FileProof::read(&paths.source, progress)?.0 != *original {
                 return Err(changed_source());
             }
             if offset < size {
                 check_copy_space(size - offset, &paths.target, &paths.stage)?;
             }
         }
-        let (scope, name) = file_scope(&paths.source)?;
-        scope
-            .read_checked(name, &cancel, |source, size, input| {
-                verify_stamp(source, receipt.original.stamp)?;
-                if offset != 0 {
-                    let mut prefix = (&mut *input).take(offset);
-                    progress.set_copy_endpoints(source, source);
-                    let actual = progress.hash_copy_check(source.path(), offset, &mut prefix)?;
-                    if actual != Some(partial.digest) {
-                        return Err(changed_copy());
-                    }
-                }
-                if size > offset {
-                    progress.set_copy_endpoints(source, &paths.target);
-                    let mut output =
-                        StagedFile::open_at(&payload, offset, &metadata, cancel.clone())?;
-                    let remaining = size - offset;
-                    let written = progress.copy(
-                        source.path(),
-                        Some(remaining),
-                        &mut input.take(remaining),
-                        &mut output,
-                    )?;
-                    if written != remaining {
-                        return Err(changed_source());
-                    }
-                    output.close()?;
-                }
-                Ok(())
-            })?
-            .ok_or_else(changed_source)?;
-        if FileProof::read(&payload, progress)?.0.digest != receipt.original.digest {
+        copy_suffix(
+            &paths.source,
+            &payload,
+            original,
+            Some((&partial, &metadata)),
+            progress,
+        )?;
+        if FileProof::read(&payload, progress)?.0.digest != original.digest {
             return Err(changed_copy());
         }
-        let source_metadata = verify_stamp(&paths.source, receipt.original.stamp)?;
-        copy_metadata::stage_resumed_file(
+        let source_metadata = verify_stamp(&paths.source, original.stamp)?;
+        copy_metadata::stage_resumed_entry(
             &paths.source,
             &payload,
             &source_metadata,
             receipt.source_accessed.as_ref().and_then(SavedTime::get),
             progress,
         )?;
-        verify_stamp(&paths.source, receipt.original.stamp)?;
+        verify_stamp(&paths.source, original.stamp)?;
         stage_contents(receipt, paths, owner, entries)?;
         cancel.check()?;
         if let Some(expected) = &receipt.previous
@@ -501,17 +519,61 @@ fn finish_copy(
         }
         discard_stage(receipt, paths, owner, &["payload"])
     } else {
-        return result.map_err(|error| match error {
-            TransferError::PublicationUnconfirmed(message) => {
-                TransferError::PublicationUnconfirmed(retained(&paths.stage, &message))
-            }
-            other => retained(&paths.stage, &other.to_string()).into(),
-        });
+        return result.map_err(|error| retained_error(&paths.stage, error));
     };
     cleanup.map_err(|error| retained(&paths.stage, &error.to_string()))?;
     ticket.finish()?;
     progress.partial_copy_retained = false;
     result
+}
+
+fn copy_suffix(
+    source: &Location,
+    payload: &Location,
+    original: &FileProof,
+    partial: Option<(&FileProof, &EntryMetadata)>,
+    progress: &mut Progress,
+) -> Result<(), TransferError> {
+    let cancel = progress.cancellation();
+    let (scope, name) = file_scope(source)?;
+    scope
+        .read_checked(name, &cancel, |source, size, input| {
+            verify_stamp(source, original.stamp)?;
+            let offset = partial.map_or(0, |(proof, _)| proof.stamp.size());
+            if offset > size {
+                return Err(changed_copy());
+            }
+            if let Some((proof, _)) = partial.filter(|_| offset != 0) {
+                let mut prefix = (&mut *input).take(offset);
+                progress.set_copy_endpoints(source, source);
+                let actual = progress.hash_copy_check(source.path(), offset, &mut prefix)?;
+                if actual != Some(proof.digest) {
+                    return Err(changed_copy());
+                }
+            }
+            if offset == size && partial.is_some() {
+                return Ok(());
+            }
+            progress.set_copy_endpoints(source, payload);
+            let mut output = match partial {
+                Some((_, metadata)) => {
+                    StagedFile::open_at(payload, offset, metadata, cancel.clone())?
+                }
+                None => StagedFile::open(payload, cancel.clone())?,
+            };
+            let remaining = size - offset;
+            let written = progress.copy(
+                source.path(),
+                Some(remaining),
+                &mut input.take(remaining),
+                &mut output,
+            )?;
+            if written != remaining {
+                return Err(changed_source());
+            }
+            output.close()
+        })?
+        .ok_or_else(changed_source)
 }
 
 fn resolved_file(file: &Location) -> Result<Location, TransferError> {
@@ -634,12 +696,6 @@ fn stage_contents(
     if FileStamp::from(&marker)?.size() != 0 {
         return Err(changed_copy());
     }
-    for name in extra {
-        let item = entry_metadata(&stage.join(name))?.ok_or_else(changed_copy)?;
-        if !item.is_file() {
-            return Err(changed_copy());
-        }
-    }
     Ok(())
 }
 
@@ -651,6 +707,12 @@ fn discard_stage(
 ) -> Result<(), TransferError> {
     stage_contents(receipt, paths, owner, extra)?;
     let stage = &paths.stage;
+    for name in extra {
+        let item = entry_metadata(&stage.join(name))?.ok_or_else(changed_copy)?;
+        if !item.is_file() {
+            return Err(changed_copy());
+        }
+    }
     if let Some(path) = stage.local() {
         for name in extra.iter().copied().chain([owner]) {
             fs::remove_file(path.join(name))?;
@@ -683,4 +745,13 @@ fn retained(stage: &Location, message: &str) -> String {
         "{message} Временная копия сохранена: {stage}. См. «Восстановление после сбоя».",
         "{message} Partial copy retained at {stage}. See Crash recovery."
     )
+}
+
+fn retained_error(stage: &Location, error: TransferError) -> TransferError {
+    match error {
+        TransferError::PublicationUnconfirmed(message) => {
+            TransferError::PublicationUnconfirmed(retained(stage, &message))
+        }
+        other => retained(stage, &other.to_string()).into(),
+    }
 }
