@@ -10,7 +10,7 @@ use crate::{
     vfs::{Location, Reconcile, ReconcileConflict, SyncChange, SyncPlan, TwoWayPlan},
 };
 use eframe::egui::{self, Key};
-use std::{path::Path, sync::Arc};
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Direction {
@@ -19,14 +19,29 @@ enum Direction {
     Both,
 }
 
-enum Plan {
-    OneWay(Arc<SyncPlan>),
+pub(super) enum Plan {
+    OneWay(Box<SyncPlan>),
     TwoWay(Box<TwoWayPlan>),
+}
+
+impl Plan {
+    fn can_apply(&self) -> bool {
+        match self {
+            Self::OneWay(plan) => !plan.rows.is_empty(),
+            Self::TwoWay(plan) => plan.can_apply(),
+        }
+    }
 }
 
 struct Preview {
     plan: Plan,
     checked: bool,
+}
+
+enum Review {
+    Check,
+    Remember,
+    Keep(PathBuf, usize),
 }
 
 pub(super) struct FolderSyncDialog {
@@ -64,7 +79,7 @@ impl FolderSyncDialog {
             let plan = if direction == Direction::Both {
                 Plan::TwoWay(Box::new(TwoWayPlan::build(folders, progress)?))
             } else {
-                Plan::OneWay(Arc::new(SyncPlan::build(folders, delete_extra, progress)?))
+                Plan::OneWay(Box::new(SyncPlan::build(folders, delete_extra, progress)?))
             };
             Ok(Preview {
                 plan,
@@ -73,15 +88,18 @@ impl FolderSyncDialog {
         });
     }
 
-    fn check(&mut self, ctx: &egui::Context, remember: bool) {
+    fn review(&mut self, ctx: &egui::Context, action: Review) {
         if let Phase::Finished(mut preview) = std::mem::replace(&mut self.phase, Phase::Ready) {
             self.phase = Phase::start(ctx, move |progress| {
-                match &mut preview.plan {
-                    Plan::OneWay(plan) => plan.verify(progress)?,
-                    Plan::TwoWay(plan) if remember => plan.remember(progress)?,
-                    Plan::TwoWay(plan) => plan.verify(progress)?,
+                preview.checked = !matches!(action, Review::Keep(..));
+                match (&mut preview.plan, action) {
+                    (Plan::OneWay(plan), _) => plan.verify(progress)?,
+                    (Plan::TwoWay(plan), Review::Check) => plan.verify(progress)?,
+                    (Plan::TwoWay(plan), Review::Remember) => plan.remember(progress)?,
+                    (Plan::TwoWay(plan), Review::Keep(path, side)) => {
+                        plan.choose(path, side, progress)?
+                    }
                 }
-                preview.checked = true;
                 Ok(preview)
             });
         }
@@ -90,11 +108,10 @@ impl FolderSyncDialog {
     pub(super) fn show(&mut self, ctx: &egui::Context) -> ComparisonResponse {
         let running = matches!(self.phase, Phase::Running(_));
         let mut build = false;
-        let mut check = false;
+        let mut review = None;
         let mut stop = false;
         let mut close = false;
         let mut apply = false;
-        let mut remember = false;
         let modal = egui::Modal::new(egui::Id::unique("folder_sync")).show(ctx, |ui| {
             ui.set_width((ctx.content_rect().width() - 44.0).clamp(200.0, 740.0));
             ui.heading(Command::SyncFolders.label());
@@ -120,9 +137,10 @@ impl FolderSyncDialog {
             match &mut self.phase {
                 Phase::Ready => {}
                 Phase::Running(worker) => show_progress(ui, worker, "Проверяем папки для плана…"),
-                Phase::Finished(preview) => show_preview(ui, preview, self.run),
+                Phase::Finished(preview) => review = show_preview(ui, preview, self.run),
                 Phase::Failed(error) => {
-                    ui.colored_label(ui.visuals().error_fg_color, error);
+                    let message = egui::RichText::new(error.as_str()).color(ui.visuals().error_fg_color);
+                    ui.add(egui::Label::new(message).selectable(true).wrap());
                 }
                 Phase::Stopped => {
                     ui.label(text("Проверка папок остановлена"));
@@ -139,26 +157,27 @@ impl FolderSyncDialog {
                         .clicked();
                 } else {
                     build = ui.button(text("Построить план")).clicked();
-                    check = ui
+                    if ui
                         .add_enabled(
                             matches!(self.phase, Phase::Finished(_)),
                             egui::Button::new(text("Проверить план")),
                         )
-                        .clicked();
-                    if self.direction == Direction::Both {
-                        if let Phase::Finished(Preview { plan: Plan::TwoWay(plan), .. }) = &self.phase
-                            && plan.can_remember()
-                        {
-                            remember = ui.button(text("Сохранить общее состояние")).clicked();
-                        }
-                    } else {
-                        apply = ui
-                            .add_enabled(
-                                matches!(&self.phase, Phase::Finished(Preview { plan: Plan::OneWay(plan), .. }) if !plan.rows.is_empty()),
-                                egui::Button::new(text("Применить план")),
-                            )
-                            .clicked();
+                        .clicked()
+                    {
+                        review = Some(Review::Check);
                     }
+                    if let Phase::Finished(Preview { plan: Plan::TwoWay(plan), .. }) = &self.phase
+                        && plan.can_remember()
+                        && ui.button(text("Сохранить общее состояние")).clicked()
+                    {
+                        review = Some(Review::Remember);
+                    }
+                    apply = ui
+                        .add_enabled(
+                            matches!(&self.phase, Phase::Finished(preview) if preview.plan.can_apply()),
+                            egui::Button::new(text("Применить план")),
+                        )
+                        .clicked();
                     close = ui.button(text("Закрыть")).clicked();
                 }
             });
@@ -170,27 +189,27 @@ impl FolderSyncDialog {
         } else if close || modal.should_close() {
             return ComparisonResponse::Close;
         } else if apply
-            && let Phase::Finished(Preview {
-                plan: Plan::OneWay(plan),
-                ..
-            }) = &self.phase
+            && let Phase::Finished(preview) = std::mem::replace(&mut self.phase, Phase::Ready)
         {
-            return ComparisonResponse::ApplySync(Arc::clone(plan));
+            return ComparisonResponse::ApplySync(preview.plan);
         } else if build {
             self.build(ctx);
-        } else if check || remember {
-            self.check(ctx, remember);
+        } else if let Some(action) = review {
+            self.review(ctx, action);
         }
         ComparisonResponse::Open
     }
 }
 
-fn show_preview(ui: &mut egui::Ui, preview: &Preview, run: u64) {
+fn show_preview(ui: &mut egui::Ui, preview: &Preview, run: u64) -> Option<Review> {
     if preview.checked {
         ui.label(text("План проверен"));
     }
     match &preview.plan {
-        Plan::OneWay(plan) => show_one_way(ui, plan, run),
+        Plan::OneWay(plan) => {
+            show_one_way(ui, plan, run);
+            None
+        }
         Plan::TwoWay(plan) => show_two_way(ui, plan, run),
     }
 }
@@ -210,25 +229,28 @@ fn show_one_way(ui: &mut egui::Ui, plan: &SyncPlan, run: u64) {
     if plan.deletions > 0 && plan.folders()[1].remote() {
         ui.small(text("Удаление из папки SFTP необратимо."));
     }
-    show_rows(ui, &plan.rows, run, 112.0, |row| {
+    show_rows(ui, &plan.rows, run, |ui, row, height| {
         let action = match row.change {
             SyncChange::Copy => "Копировать",
             SyncChange::Replace => "Заменить",
             SyncChange::Delete => "Удалить",
         };
-        (action, &row.path, false)
+        show_action(ui, action, false, 112.0, height);
+        show_relative_path(ui, &row.path);
     });
 }
 
-fn show_two_way(ui: &mut egui::Ui, plan: &TwoWayPlan, run: u64) {
-    ui.label(text(if plan.has_baseline() {
+fn show_two_way(ui: &mut egui::Ui, plan: &TwoWayPlan, run: u64) -> Option<Review> {
+    ui.label(text(if plan.interrupted() {
+        "Проверка после прерывания синхронизации"
+    } else if plan.has_baseline() {
         "Общее состояние сохранено"
     } else {
         "Первое сравнение"
     }));
     if plan.rows.is_empty() {
         ui.label(text("План пуст"));
-        return;
+        return None;
     }
     ui.label(crate::tr_format!(
         "Изменения: {} · конфликты: {}",
@@ -236,12 +258,16 @@ fn show_two_way(ui: &mut egui::Ui, plan: &TwoWayPlan, run: u64) {
         plan.rows.len() - plan.conflicts,
         plan.conflicts
     ));
-    if !plan.has_baseline() {
+    if plan.conflicts > 0 {
         ui.small(text(
-            "Для первого общего состояния содержимое папок должно совпадать.",
+            "Для каждого конфликта выберите версию, которую нужно оставить.",
         ));
     }
-    show_rows(ui, &plan.rows, run, 245.0, |row| {
+    if plan.deletes_remote() {
+        ui.small(text("Удаление из папки SFTP необратимо."));
+    }
+    let mut choice = None;
+    show_rows(ui, &plan.rows, run, |ui, row, height| {
         let (action, conflict) = match row.outcome {
             Reconcile::Change {
                 destination,
@@ -262,20 +288,35 @@ fn show_two_way(ui: &mut egui::Ui, plan: &TwoWayPlan, run: u64) {
                     ReconcileConflict::FirstComparison => "Разные версии при первом сравнении",
                     ReconcileConflict::BothChanged => "Конфликт: обе стороны изменены",
                     ReconcileConflict::EditAndDelete => "Конфликт: правка и удаление",
+                    ReconcileConflict::Interrupted => "Различие после прерывания",
                 },
                 true,
             ),
         };
-        (action, &row.path, conflict)
+        show_action(ui, action, conflict, 245.0, height);
+        if conflict {
+            for side in 0..2 {
+                let label = match (side == 0, plan.missing(&row.path, side)) {
+                    (true, false) => "Оставить версию слева",
+                    (false, false) => "Оставить версию справа",
+                    (true, true) => "Принять удаление слева",
+                    (false, true) => "Принять удаление справа",
+                };
+                if ui.button(text(label)).clicked() {
+                    choice = Some(Review::Keep(row.path.clone(), side));
+                }
+            }
+        }
+        show_relative_path(ui, &row.path);
     });
+    choice
 }
 
 fn show_rows<T>(
     ui: &mut egui::Ui,
     rows: &[T],
     run: u64,
-    action_width: f32,
-    display: impl Fn(&T) -> (&'static str, &Path, bool),
+    mut display: impl FnMut(&mut egui::Ui, &T, f32),
 ) {
     let height = (ui.ctx().content_rect().height() * 0.48).clamp(65.0, 380.0);
     let row_height = ui
@@ -287,31 +328,39 @@ fn show_rows<T>(
         .auto_shrink([false, true])
         .show_rows(ui, row_height, rows.len(), |ui, visible| {
             for row in &rows[visible] {
-                ui.horizontal(|ui| {
-                    let (action, path, conflict) = display(row);
-                    let mut action = egui::RichText::new(text(action));
-                    if conflict {
-                        action = action.color(ui.visuals().error_fg_color);
-                    }
-                    ui.add_sized(
-                        [action_width, row_height],
-                        egui::Label::new(action).truncate(),
-                    );
-                    let path = path.to_string_lossy().escape_debug().to_string();
-                    ui.add(egui::Label::new(path).extend().selectable(true));
-                });
+                ui.horizontal(|ui| display(ui, row, row_height));
             }
         });
 }
 
+fn show_action(ui: &mut egui::Ui, action: &'static str, conflict: bool, width: f32, height: f32) {
+    let mut action = egui::RichText::new(text(action));
+    if conflict {
+        action = action.color(ui.visuals().error_fg_color);
+    }
+    ui.add_sized([width, height], egui::Label::new(action).truncate());
+}
+
+fn show_relative_path(ui: &mut egui::Ui, path: &Path) {
+    let path = path.to_string_lossy().escape_debug().to_string();
+    ui.add(egui::Label::new(path).extend().selectable(true));
+}
+
 impl PawCommander {
-    pub(super) fn enqueue_folder_sync(&mut self, plan: Arc<SyncPlan>, ctx: &egui::Context) {
-        let [source, destination] = plan.folders();
+    pub(super) fn enqueue_folder_sync(&mut self, plan: Plan, ctx: &egui::Context) {
+        let (folders, label, direction) = match &plan {
+            Plan::OneWay(plan) => (plan.folders(), "Синхронизация папок", '→'),
+            Plan::TwoWay(plan) => (plan.folders(), "Двусторонняя синхронизация папок", '↔'),
+        };
+        let [left, right] = folders;
         self.start_stoppable_job(
             ctx,
-            text("Синхронизация папок"),
-            format!("{} → {}", source.display(), destination.display()),
-            move |progress| plan.apply(progress),
+            text(label),
+            format!("{} {direction} {}", left.display(), right.display()),
+            move |progress| match plan {
+                Plan::OneWay(plan) => plan.apply(progress),
+                Plan::TwoWay(plan) => plan.apply(progress),
+            },
         );
     }
 

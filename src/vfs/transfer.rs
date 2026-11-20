@@ -1418,19 +1418,20 @@ struct LocalStaging {
 }
 
 impl LocalStaging {
-    fn create(parent: &Path) -> Result<Self, TransferError> {
+    fn create(
+        parent: &Path,
+        prefix: &str,
+        mut proposed: impl FnMut(&Location) -> Result<(), TransferError>,
+    ) -> Result<Self, TransferError> {
         for _ in 0..100 {
             let nonce = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos();
             let counter = LOCAL_STAGING_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let path = parent.join(format!(
-                ".pawcommander-transfer-{}-{nonce}-{counter}",
-                std::process::id()
-            ));
+            let path = parent.join(format!("{prefix}{}-{nonce}-{counter}", std::process::id()));
             let location = Location::Local(path.clone());
-            crate::recovery::plan_staging(&location).map_err(err)?;
+            proposed(&location)?;
             let builder = fs::DirBuilder::new();
             #[cfg(unix)]
             let builder = {
@@ -1534,7 +1535,7 @@ pub(super) fn with_staging_typed(
     cancel: Option<&Cancellation>,
     work: impl FnOnce(&Location, &mut bool) -> Result<(), TransferError>,
 ) -> Result<(), TransferError> {
-    staging_typed(target, cancel, false, work)
+    staging_typed(target, cancel, false, None, work)
 }
 
 /// Source data may be moved here: never recursively remove it on unwinding.
@@ -1543,23 +1544,56 @@ pub(super) fn with_preserved_staging(
     cancel: &Cancellation,
     work: impl FnOnce(&Location, &mut bool) -> Result<(), TransferError>,
 ) -> Result<(), TransferError> {
-    staging_typed(target, Some(cancel), true, work)
+    staging_typed(target, Some(cancel), true, None, work)
+}
+
+pub(super) type StagingNotice<'a> = dyn FnMut(&Location) -> Result<(), TransferError> + 'a;
+
+pub(super) const SYNC_STAGING_PREFIX: &str = ".pawcommander-two-way-";
+
+#[cfg(target_os = "macos")]
+pub(super) fn with_tracked_staging(
+    target: &Location,
+    cancel: &Cancellation,
+    notice: &mut StagingNotice<'_>,
+    work: impl FnOnce(&Location, &mut bool) -> Result<(), TransferError>,
+) -> Result<(), TransferError> {
+    staging_typed(target, Some(cancel), true, Some(notice), work)
 }
 
 fn staging_typed(
     target: &Location,
     cancel: Option<&Cancellation>,
     mut preserve: bool,
+    mut notice: Option<&mut StagingNotice<'_>>,
     work: impl FnOnce(&Location, &mut bool) -> Result<(), TransferError>,
 ) -> Result<(), TransferError> {
     if let Some(cancel) = cancel {
         cancel.check()?;
     }
     let parent = target.parent().ok_or("Недопустимое назначение")?;
+    // A tracked job keeps one current location in its own durable record.
+    // The generic append-only recovery record is bounded independently.
+    let use_operation_marker = notice.is_none();
+    let prefix = if !use_operation_marker {
+        SYNC_STAGING_PREFIX
+    } else if parent.remote() {
+        ".pawcommander-sftp-"
+    } else {
+        ".pawcommander-transfer-"
+    };
+    let mut proposed = |location: &Location| -> Result<(), TransferError> {
+        if let Some(notice) = notice.as_deref_mut() {
+            notice(location)?;
+        } else {
+            crate::recovery::plan_staging(location).map_err(err)?;
+        }
+        Ok(())
+    };
     if let Some(parent) = parent.local() {
-        let mut staging = LocalStaging::create(parent)?;
+        let mut staging = LocalStaging::create(parent, prefix, proposed)?;
         let location = Location::Local(staging.path().into());
-        if let Err(error) = crate::recovery::register_staging(&location) {
+        if use_operation_marker && let Err(error) = crate::recovery::register_staging(&location) {
             let cleanup = staging.close().map_err(err);
             return staging_result_typed(Err(err(error).into()), cleanup, &location, target);
         }
@@ -1583,11 +1617,8 @@ fn staging_typed(
         .unwrap_or_default()
         .as_nanos();
     let counter = LOCAL_STAGING_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let staging = parent.join(format!(
-        ".pawcommander-sftp-{}-{nonce}-{counter}",
-        std::process::id()
-    ));
-    crate::recovery::plan_staging(&staging).map_err(err)?;
+    let staging = parent.join(format!("{prefix}{}-{nonce}-{counter}", std::process::id()));
+    proposed(&staging)?;
     match sftp.mkdir(staging.path(), 0o700) {
         Ok(()) => {}
         Err(e) if sftp.lstat(staging.path()).is_err() => return Err(err(e).into()),
@@ -1598,7 +1629,7 @@ fn staging_typed(
             )));
         }
     }
-    if let Err(error) = crate::recovery::register_staging(&staging) {
+    if use_operation_marker && let Err(error) = crate::recovery::register_staging(&staging) {
         let cleanup = remove_remote_tree(
             &sftp,
             &staging,
