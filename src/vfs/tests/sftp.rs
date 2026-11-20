@@ -1535,6 +1535,9 @@ fn openssh_round_trip_and_host_verification() {
     #[cfg(unix)]
     check_sftp_unsupported_names(&local_root, &remote_root);
     #[cfg(target_os = "macos")]
-    check_promised_sftp_download(&local_root, &remote_root);
+    {
+        check_promised_sftp_download(&local_root, &remote_root);
+        crate::properties::check_sftp_properties(&remote_root);
+    }
     sessions().lock().unwrap().remove(&endpoint);
 }

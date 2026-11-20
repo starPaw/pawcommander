@@ -488,16 +488,26 @@ pub(super) fn entry_widget(
                     Action::Trash,
                     idle,
                 ),
-                if path.remote() {
-                    (crate::i18n::text("Изменить права доступа…"), Action::ChangePermissions,
-                        idle && !tab.selected.is_empty())
-                } else {
-                    (crate::i18n::text("Свойства…"), Action::Properties,
-                        !tab.selected.is_empty() && tab.selected.iter().all(|path| !path.remote()))
-                },
+            ]
+            .into_iter()
+            .chain((!path.remote() || cfg!(target_os = "macos")).then(|| {
+                (
+                    crate::i18n::text("Свойства…"),
+                    Action::Properties,
+                    crate::properties::Properties::available(&tab.selected),
+                )
+            }))
+            .chain(path.remote().then(|| {
+                (
+                    crate::i18n::text("Изменить права доступа…"),
+                    Action::ChangePermissions,
+                    idle && !tab.selected.is_empty(),
+                )
+            }))
+            .chain([
                 (crate::i18n::text("Копировать путь"), Action::CopyPath, true),
                 (crate::i18n::text("Показать в системе"), Action::Reveal, !path.remote()),
-            ] {
+            ]) {
                 if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
                     actions.push(Action::Focus(pane));
                     actions.push(action);

@@ -23,6 +23,8 @@ pub(crate) mod resume_copy;
 mod retry;
 pub(crate) mod search;
 mod sftp;
+#[cfg(target_os = "macos")]
+mod sftp_properties;
 mod staged_file;
 mod transfer;
 mod undo;
@@ -65,6 +67,8 @@ pub(crate) use sftp::{
     connect_location, AuthRequest, ConnectRequest, ConnectedLocation, ConnectionControl,
     ConnectionPrompt, HostKeyRequest, InteractiveAuth,
 };
+#[cfg(target_os = "macos")]
+pub(crate) use sftp_properties::{visit_properties, PropertyEvent};
 #[cfg(target_os = "macos")]
 pub(crate) use transfer::copy_sftp_for_drop;
 #[cfg(test)]

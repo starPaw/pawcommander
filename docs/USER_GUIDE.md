@@ -261,9 +261,11 @@ Markdown (`.md`, `.markdown`, `.mdown`, `.mkd`) and HTML (`.html`, `.htm`) open 
 
 Choose **Source** for the existing line-numbered text view and Find controls; switching views resets search, selection and scroll. Parsing runs in the background on the same bounded text prefix. Formatting also stops at 32 nested elements, 8,192 parser events, 4,096 text runs, 1,024 blocks or 64 KiB of output, with an explicit complexity notice. Malformed or complex documents may have simplified or incomplete formatting; Source still shows the bounded input prefix. This is not a full browser, CSS renderer or implementation of every Markdown extension.
 
-Select local items and use **Properties** or `Alt+Enter` to calculate their combined logical size and counts in the background. Hidden entries are included; overlapping selected trees are counted once. Symlinks are counted separately without following targets. Hard links are counted per path. Counts update as directory entries are read; cancellation keeps the partial result. The result is logical file size, not disk usage.
+Select items and use **Properties** or `Alt+Enter` to calculate their combined logical size and counts in the background. This works for local items and, on macOS, items on the same SFTP connection. The calculation includes hidden entries and counts overlapping selected trees once. Each hard link counts per path, and symbolic links are counted separately without traversing their targets.
 
-Properties show available dates and permissions for selected roots. Unix permissions, UID, and GID do not represent ACLs or effective access; Windows shows read-only state. Properties are read-only and are not available for SFTP. While counting, **Stop calculation** receives initial keyboard focus; press `Space` or `Enter` to stop. You can also close the window or press `Esc` to request cancellation. Results can be partial when files disappear or access fails. Cancellation does not interrupt a blocked OS call.
+Properties show available dates and permissions for selected items. Unix permissions show the mode, UID, and GID. Windows shows read-only state. SFTP shows the server's modification and access times, with creation time marked unavailable. The SFTP calculation can read up to 128 nested directory levels.
+
+While counting, **Stop calculation** receives initial keyboard focus. Press `Space` or `Enter` to stop and keep the partial result. Close the window or press `Esc` to dismiss it and request cancellation. Cancellation takes effect between filesystem or SFTP requests. When an entry disappears or cannot be read, the window identifies the result as partial.
 
 ## Compare folders
 
