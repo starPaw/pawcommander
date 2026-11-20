@@ -9,6 +9,8 @@ mod checksum;
 mod compare;
 mod copy_metadata;
 mod cross_move;
+#[cfg(target_os = "macos")]
+mod external_editor;
 mod file_compare;
 mod listing;
 mod location;
@@ -34,6 +36,8 @@ pub(crate) use checksum::{
     verify_checksum_manifest,
 };
 pub(crate) use compare::{compare_folders, Comparison, ComparisonMode, ComparisonStatus};
+#[cfg(target_os = "macos")]
+pub(crate) use external_editor::RemoteEdit;
 pub(crate) use file_compare::{
     compare_files, DiffKind, DiffRow, FileComparison, FileDifference, TextDifference,
 };

@@ -39,6 +39,8 @@ Visible local and connected SFTP folders refresh automatically. On macOS, you ca
 
 On macOS, a local Git working tree shows its branch beside the folder path. The current folder marks modified (`M`), untracked (`?`) and ignored (`!`) entries. Git status refreshes in the background without writing to the repository.
 
+On macOS, **Settings → Tools → External editors** sets separate commands for local files and SFTP working copies. Choose **Open in external editor** from a file's context menu. For SFTP, save the working copy in your editor, then choose **Save to server** in PawCommander. If the server file changed, PawCommander keeps both versions. **Show in Finder** reveals the copy under `~/Library/Application Support/PawCommander/Editor Copies`, where it stays after the edit session ends.
+
 Use the arrow beside the breadcrumbs to type a path. Folder suggestions work for local paths and connected SFTP servers. Use Up or Down to select a suggestion, Tab to complete the path, Enter to open it, or Esc to return to the breadcrumbs.
 
 Open **Go to Folder** from the sidebar or command palette, or press `Ctrl+Shift+J` (`Cmd+Shift+J` on macOS). Type part of a folder name or path to search your last 128 distinct visited folders. Results rank by match quality, recency, and visit frequency. Select a folder to open it in the active pane.

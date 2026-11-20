@@ -78,6 +78,8 @@ pub(super) enum Dialog {
     #[cfg(target_os = "macos")]
     RunCustomAction(Box<super::custom_actions::Preview>),
     #[cfg(target_os = "macos")]
+    ExternalEditors(Box<super::external_editors::Editors>),
+    #[cfg(target_os = "macos")]
     ConnectSmb(Box<super::smb_connections::Form>),
     CreateArchive {
         sources: Vec<Location>,
@@ -441,6 +443,8 @@ impl PawCommander {
             #[cfg(target_os = "macos")]
             Dialog::RunCustomAction(_) => crate::i18n::text("Предпросмотр запуска"),
             #[cfg(target_os = "macos")]
+            Dialog::ExternalEditors(_) => crate::i18n::text("Внешние редакторы"),
+            #[cfg(target_os = "macos")]
             Dialog::ConnectSmb(_) => crate::i18n::text("Подключение SMB"),
             Dialog::CreateArchive { .. } => Command::CreateArchive.label(),
             Dialog::ExtractArchive { .. } => Command::ExtractArchive.label(),
@@ -467,7 +471,7 @@ impl PawCommander {
             let width: f32 = match &dialog {
                 Dialog::BatchRename(_) | Dialog::ChangePermissions(_) => 605.0,
                 #[cfg(target_os = "macos")]
-                Dialog::EditCustomActions(_) | Dialog::RunCustomAction(_) => 605.0,
+                Dialog::EditCustomActions(_) | Dialog::RunCustomAction(_) | Dialog::ExternalEditors(_) => 605.0,
                 _ => 430.0,
             };
             ui.set_width(width);
@@ -535,6 +539,8 @@ impl PawCommander {
                 Dialog::ChangePermissions(editor) => editor.show(ui, self.dialog_focus),
                 #[cfg(target_os = "macos")]
                 Dialog::EditCustomActions(editor) => editor.show(ui, self.dialog_focus),
+                #[cfg(target_os = "macos")]
+                Dialog::ExternalEditors(editors) => editors.show(ui),
                 #[cfg(target_os = "macos")]
                 Dialog::RunCustomAction(preview) => preview.show(ui),
                 #[cfg(target_os = "macos")]
@@ -699,6 +705,8 @@ impl PawCommander {
                 #[cfg(target_os = "macos")]
                 Dialog::EditCustomActions(editor) => editor.can_save(),
                 #[cfg(target_os = "macos")]
+                Dialog::ExternalEditors(editors) => editors.valid(),
+                #[cfg(target_os = "macos")]
                 Dialog::RunCustomAction(preview) => preview.can_run() && self.application_job.is_none(),
                 #[cfg(target_os = "macos")]
                 Dialog::ConnectSmb(form) => form.endpoint().is_ok() && !self.smb.busy(),
@@ -763,7 +771,7 @@ impl PawCommander {
             let submit_on_enter = match dialog {
                 Dialog::TransferLimits { .. } | Dialog::Trash { .. } | Dialog::BatchRename(_) | Dialog::ChangePermissions(_) | Dialog::CreateArchive { .. } | Dialog::ExtractArchive { .. } | Dialog::VerifyArchive { .. } | Dialog::ArchiveEdit { .. } => false,
                 #[cfg(target_os = "macos")]
-                Dialog::EditCustomActions(_) | Dialog::RunCustomAction(_) | Dialog::ConnectSmb(_) => false,
+                Dialog::EditCustomActions(_) | Dialog::RunCustomAction(_) | Dialog::ConnectSmb(_) | Dialog::ExternalEditors(_) => false,
                 // The Enter that opens the dialog belongs to its sidebar control.
                 Dialog::WorkspaceName { .. } | Dialog::SelectionRule { .. } | Dialog::CreateChecksumManifest { .. } => !self.dialog_focus,
                 _ => true,
@@ -779,9 +787,10 @@ impl PawCommander {
         let guard_close_key = match dialog {
             Dialog::SelectionRule { .. } => true,
             #[cfg(target_os = "macos")]
-            Dialog::EditCustomActions(_) | Dialog::RunCustomAction(_) | Dialog::ConnectSmb(_) => {
-                true
-            }
+            Dialog::EditCustomActions(_)
+            | Dialog::RunCustomAction(_)
+            | Dialog::ConnectSmb(_)
+            | Dialog::ExternalEditors(_) => true,
             _ => false,
         };
         if guard_close_key && (confirm || cancel) {
@@ -852,6 +861,8 @@ impl PawCommander {
                 Dialog::EditCustomActions(editor) => {
                     self.settings.custom_actions = editor.into_templates();
                 }
+                #[cfg(target_os = "macos")]
+                Dialog::ExternalEditors(editors) => self.settings.external_editors = *editors,
                 #[cfg(target_os = "macos")]
                 Dialog::RunCustomAction(preview) => {
                     if let Some(invocation) = preview.into_invocation() {
