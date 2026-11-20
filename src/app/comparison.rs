@@ -17,6 +17,8 @@ pub(super) struct ComparisonDialog {
 pub(super) enum ComparisonBody {
     Folders(DirectoryComparison),
     Files(FileComparisonDialog),
+    #[cfg(target_os = "macos")]
+    Sync(super::folder_sync::FolderSyncDialog),
 }
 
 impl ComparisonDialog {
@@ -35,6 +37,8 @@ impl ComparisonDialog {
         match &mut self.body {
             ComparisonBody::Folders(view) => view.poll(),
             ComparisonBody::Files(view) => view.poll(),
+            #[cfg(target_os = "macos")]
+            ComparisonBody::Sync(view) => view.poll(),
         }
     }
 
@@ -42,6 +46,8 @@ impl ComparisonDialog {
         match &mut self.body {
             ComparisonBody::Folders(view) => view.show(ctx),
             ComparisonBody::Files(view) => view.show(ctx),
+            #[cfg(target_os = "macos")]
+            ComparisonBody::Sync(view) => view.show(ctx),
         }
     }
 }

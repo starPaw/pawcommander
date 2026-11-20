@@ -1,5 +1,5 @@
 //! Read-only comparison of two folder trees by exact relative name.
-mod scan;
+pub(super) mod scan;
 #[cfg(test)]
 mod tests;
 #[cfg(all(test, target_os = "macos"))]
@@ -17,8 +17,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const MAX_ENTRIES: usize = 100_000;
-const MAX_PATH_BYTES: usize = 32 * 1024 * 1024;
+pub(super) const MAX_ENTRIES: usize = 100_000;
+pub(super) const MAX_PATH_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum ComparisonMode {

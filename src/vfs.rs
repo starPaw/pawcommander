@@ -26,6 +26,8 @@ mod sftp;
 #[cfg(target_os = "macos")]
 mod sftp_properties;
 mod staged_file;
+#[cfg(target_os = "macos")]
+mod sync;
 mod transfer;
 mod undo;
 
@@ -69,6 +71,8 @@ pub(crate) use sftp::{
 };
 #[cfg(target_os = "macos")]
 pub(crate) use sftp_properties::{visit_properties, PropertyEvent};
+#[cfg(target_os = "macos")]
+pub(crate) use sync::{SyncChange, SyncPlan};
 #[cfg(target_os = "macos")]
 pub(crate) use transfer::copy_sftp_for_drop;
 #[cfg(test)]

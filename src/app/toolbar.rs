@@ -120,6 +120,8 @@ impl PawCommander {
                                     self.can_compare_folders(),
                                 ),
                                 (Command::CompareFiles, Action::CompareFiles, self.files_to_compare().is_some()),
+                                #[cfg(target_os = "macos")]
+                                (Command::SyncFolders, Action::SyncFolders(Some(button.id)), self.can_compare_folders()),
                             ] {
                                 let compare = ui.add_enabled(enabled, egui::Button::new(
                                     self.settings.shortcuts.hint(ctx, command, command.label()),
