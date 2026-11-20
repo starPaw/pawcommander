@@ -114,6 +114,90 @@ fn verification_rejects_new_items_even_when_they_were_not_in_the_plan() {
     );
 }
 
+#[test]
+fn apply_publishes_verified_copies_and_both_type_replacements() {
+    use crate::result_history::Outcome;
+
+    let (_temporary, pair) = folders();
+    let [source, target] = &pair;
+    fs::create_dir_all(source.join("folder-over-file").path()).unwrap();
+    fs::write(source.join("folder-over-file/.child").path(), b"child").unwrap();
+    symlink(".child", source.join("folder-over-file/link").path()).unwrap();
+    fs::write(target.join("folder-over-file").path(), b"old file").unwrap();
+    fs::write(source.join("file-over-folder").path(), b"source file").unwrap();
+    fs::create_dir_all(target.join("file-over-folder/old").path()).unwrap();
+    fs::write(target.join("file-over-folder/old/data").path(), b"old tree").unwrap();
+    fs::write(source.join("new").path(), b"copy").unwrap();
+    fs::write(source.join("edit").path(), b"new!").unwrap();
+    fs::write(target.join("edit").path(), b"old!").unwrap();
+    fs::write(target.join("extra").path(), b"keep").unwrap();
+
+    let mut progress = Progress::default();
+    let plan = SyncPlan::build(pair.clone(), false, &mut progress).unwrap();
+    let row_count = plan.rows.len();
+    plan.apply(&mut progress).unwrap();
+    for (path, bytes) in [
+        ("folder-over-file/.child", b"child".as_slice()),
+        ("file-over-folder", b"source file"),
+        ("new", b"copy"),
+        ("edit", b"new!"),
+    ] {
+        assert_eq!(fs::read(source.join(path).path()).unwrap(), bytes);
+        assert_eq!(fs::read(target.join(path).path()).unwrap(), bytes);
+    }
+    assert_eq!(
+        fs::read_link(target.join("folder-over-file/link").path()).unwrap(),
+        Path::new(".child")
+    );
+    assert_eq!(fs::read(target.join("extra").path()).unwrap(), b"keep");
+    assert!(fs::read_dir(target.path()).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".pawcommander-")
+    }));
+    let outcomes = progress.results.root_outcomes();
+    assert_eq!(outcomes.len(), row_count);
+    assert!(outcomes
+        .iter()
+        .all(|(_, status)| *status == Outcome::Completed));
+    assert_eq!(
+        outcomes
+            .iter()
+            .find(|(location, _)| location.path().ends_with("file-over-folder/old/data"))
+            .unwrap()
+            .1,
+        Outcome::Completed
+    );
+}
+
+#[test]
+fn apply_revalidates_before_its_first_mutation() {
+    use crate::result_history::Outcome;
+
+    let (_temporary, pair) = folders();
+    let [source, target] = &pair;
+    fs::write(source.join("a-copy").path(), b"copy").unwrap();
+    fs::write(source.join("z-replace").path(), b"want").unwrap();
+    let item = target.join("z-replace");
+    fs::write(item.path(), b"have").unwrap();
+    let time = UNIX_EPOCH + Duration::from_secs(1_650_000_000);
+    set_modified(item.path(), time);
+    let mut progress = Progress::default();
+    let plan = SyncPlan::build(pair.clone(), false, &mut progress).unwrap();
+    fs::write(item.path(), b"edit").unwrap();
+    set_modified(item.path(), time);
+    assert!(plan.apply(&mut progress).unwrap_err().contains("z-replace"));
+    assert!(progress
+        .results
+        .root_outcomes()
+        .iter()
+        .all(|(_, status)| *status == Outcome::NotStarted));
+    assert_eq!(fs::read(item.path()).unwrap(), b"edit");
+    assert!(!target.join("a-copy").path().exists());
+}
+
 pub(in crate::vfs) fn sync_round_trip(remote: &Location) {
     use super::super::{sftp, transfer::remote_source_matches};
 
@@ -140,13 +224,55 @@ pub(in crate::vfs) fn sync_round_trip(remote: &Location) {
     assert!(remote_source_matches(&original, &edited));
     let error = plan.verify(&mut progress).unwrap_err();
     assert!(error.to_string().contains("changed.bin"));
+    assert!(plan.apply(&mut progress).is_err());
     assert_eq!(fs::read(peer.path()).unwrap(), b"edit");
     assert!(destination.join("extra").path().is_file());
     assert!(!destination.join(".new").path().exists());
 
-    let reverse = SyncPlan::build([destination, source], false, &mut progress).unwrap();
+    let reverse =
+        SyncPlan::build([destination.clone(), source.clone()], false, &mut progress).unwrap();
     assert_eq!(
         (reverse.copies, reverse.replacements, reverse.deletions),
         (1, 1, 0)
     );
+    reverse.apply(&mut progress).unwrap();
+    assert_eq!(
+        fs::read(source.join("changed.bin").path()).unwrap(),
+        b"edit"
+    );
+    assert_eq!(fs::read(source.join("extra").path()).unwrap(), b"extra");
+    assert_eq!(fs::read(peer.path()).unwrap(), b"edit");
+    assert_eq!(fs::read(source.join(".new").path()).unwrap(), b"copy");
+
+    fs::write(source.join("changed.bin").path(), b"new!").unwrap();
+    fs::remove_file(source.join("extra").path()).unwrap();
+    fs::create_dir_all(destination.join("extra-tree/old").path()).unwrap();
+    fs::write(destination.join("extra-tree/old/file").path(), b"old").unwrap();
+    symlink(".new", source.join("link").path()).unwrap();
+    let upload =
+        SyncPlan::build([source.clone(), destination.clone()], true, &mut progress).unwrap();
+    assert_eq!(
+        (upload.copies, upload.replacements, upload.deletions),
+        (2, 1, 4)
+    );
+    upload.apply(&mut progress).unwrap();
+    assert_eq!(fs::read(peer.path()).unwrap(), b"new!");
+    assert_eq!(fs::read(destination.join(".new").path()).unwrap(), b"copy");
+    assert_eq!(
+        fs::read_link(destination.join("link").path()).unwrap(),
+        Path::new(".new")
+    );
+    assert!(!destination.join("extra").path().exists());
+    assert!(!destination.join("extra-tree").path().exists());
+    assert_eq!(
+        fs::read(source.join("changed.bin").path()).unwrap(),
+        b"new!"
+    );
+    assert!(fs::read_dir(destination.path()).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".pawcommander-")
+    }));
 }

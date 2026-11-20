@@ -273,11 +273,15 @@ Open the folders in the two panes and choose **Compare folders** from the comman
 
 **Size and modified time** compares file sizes and modification times. Comparisons involving SFTP use whole seconds. **By contents** compares the SHA-256 hashes of equal-length files. The comparison treats each symbolic link as a single entry and compares its target path. Comparing is read-only. Use **Stop** to end the scan. The scanner supports up to 100,000 entries across both folders, 32 MiB of path data and 128 directory levels.
 
-## Folder sync preview on macOS
+## One-way folder synchronization on macOS
 
 Open the two folders and choose **Folder sync preview** from Settings or the command palette. Select the source direction and choose **Build plan**. The preview lists each planned copy, replacement and deletion by relative path. It compares regular files by SHA-256 and symbolic links by their target paths.
 
 Enable **Remove destination-only items** to include extra files and folders from the destination. When a file replaces a folder, the preview lists the affected descendants as deletions. **Check plan** reads both folders again and reports changes since planning. Build the plan again after editing either folder. Overlapping folders, name collisions and unreadable entries prevent a complete plan.
+
+Choose **Apply plan** to queue the displayed changes. When the job starts, PawCommander checks both folders again. If the plan has become stale, the job ends before changing files. Copies and replacements are checked in private staging before publication. The job processes destination-only deletions after the copies and replacements. Local deletions go to the Trash, and deletions from an SFTP folder are permanent.
+
+Use **Stop** to stop before the next change publishes. Completed paths and the outcome of the active change appear in **Result history**. If publication or restoration cannot be confirmed, the result gives the temporary folder to inspect.
 
 ## Compare files
 

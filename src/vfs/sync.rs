@@ -1,4 +1,6 @@
-//! A read-only one-way plan and the evidence needed to revalidate it.
+//! One-way synchronization from a reviewed, revalidated folder plan.
+mod apply;
+
 use super::{
     compare::{scan, MAX_ENTRIES, MAX_PATH_BYTES},
     read_scope::{changed_during_read, ReadScope},
@@ -48,7 +50,7 @@ impl SyncPlan {
         delete_extra: bool,
         progress: &mut Progress,
     ) -> Result<Self, TransferError> {
-        let observed = observe_folders(&folders, progress)?;
+        let (_, observed) = observe_folders(&folders, progress)?;
         let mut plan = Self {
             folders,
             observed,
@@ -101,7 +103,11 @@ impl SyncPlan {
     }
 
     pub(crate) fn verify(&self, progress: &mut Progress) -> Result<(), TransferError> {
-        let current = observe_folders(&self.folders, progress)?;
+        self.revalidate(progress).map(drop)
+    }
+
+    fn revalidate(&self, progress: &mut Progress) -> Result<[ReadScope; 2], TransferError> {
+        let (scopes, current) = observe_folders(&self.folders, progress)?;
         let cancel = progress.cancellation();
         for (before, after) in self.observed.iter().zip(current) {
             if before.root != after.root || before.entries.len() != after.entries.len() {
@@ -121,7 +127,7 @@ impl SyncPlan {
                 }
             }
         }
-        Ok(())
+        Ok(scopes)
     }
 }
 
@@ -201,7 +207,7 @@ struct Snapshot {
 fn observe_folders(
     folders: &[Location; 2],
     progress: &mut Progress,
-) -> Result<[Snapshot; 2], TransferError> {
+) -> Result<([ReadScope; 2], [Snapshot; 2]), TransferError> {
     let cancel = progress.cancellation();
     cancel.check()?;
     let source = ReadScope::open(&folders[0])?;
@@ -213,10 +219,11 @@ fn observe_folders(
         &cancel,
     )?;
     let mut budget = Budget::default();
-    Ok([
+    let observed = [
         Snapshot::read(&source, &mut budget, &cancel, progress)?,
         Snapshot::read(&destination, &mut budget, &cancel, progress)?,
-    ])
+    ];
+    Ok(([source, destination], observed))
 }
 
 fn check_roots(
@@ -268,16 +275,26 @@ impl Budget {
 }
 
 impl Snapshot {
+    fn empty(scope: &ReadScope) -> Self {
+        Self {
+            root: scope.parent.location.clone(),
+            entries: BTreeMap::new(),
+        }
+    }
+
+    fn subtree<'a>(&'a self, path: &'a Path) -> impl Iterator<Item = (&'a PathBuf, &'a Observed)> {
+        self.entries
+            .range(path.to_owned()..)
+            .take_while(move |(candidate, _)| candidate.starts_with(path))
+    }
+
     fn read(
         scope: &ReadScope,
         budget: &mut Budget,
         cancel: &Cancellation,
         progress: &mut Progress,
     ) -> Result<Self, TransferError> {
-        let mut snapshot = Self {
-            root: scope.parent.location.clone(),
-            entries: BTreeMap::new(),
-        };
+        let mut snapshot = Self::empty(scope);
         snapshot.observe(
             scope,
             PathBuf::new(),
