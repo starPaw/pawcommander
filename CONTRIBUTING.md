@@ -45,6 +45,8 @@ The standard fixture covers SFTP name search with filters, depth and time limits
 
 The reconnect mode starts a temporary SSH agent and uses an OpenSSH SFTP subsystem wrapper to withhold rename replies. It checks reconnect and inspection after disconnects before or after publication. It uses `/usr/libexec/sftp-server` by default. Set `SFTP_SERVER_BIN` if your OpenSSH server uses another path.
 
+On macOS the reconnect mode also drops the socket during an upload and a download. It checks that resumption writes exactly the missing suffix and preserves the previous destination until the verified copy is published.
+
 The metadata-denied mode disables `setstat` and `fsetstat` on the temporary server. It checks that copies complete with field-specific warnings and that **Change permissions** reports the server's refusal. The standard mode also checks that numeric and symbolic permission changes match their preview, skips changed entries and symbolic links, and honors cancellation before sending a permission update.
 
 On macOS, run `PAWCOMMANDER_TEST_SFTP_TERMINAL=1 bash scripts/test-sftp.sh` to execute the SSH launch document against a disposable OpenSSH server. The test verifies the interactive shell, PTY, exact folder and identity path, and refusal when the folder is missing or the host is unknown.

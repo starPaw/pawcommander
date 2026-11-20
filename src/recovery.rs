@@ -1,8 +1,7 @@
 //! Conservative crash detection for operations that reached their worker.
 //!
-//! All I/O belongs on background workers. Records are descriptions, never
-//! executable plans: recovery does not retry operations, inspect destinations,
-//! discover arbitrary staging directories, or remove any source, target, or staging data.
+//! All I/O belongs on background workers. Legacy operation records are descriptions.
+//! A separate copy receipt can be selected after its previous worker releases it.
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -151,6 +150,18 @@ struct Saved {
 pub(crate) struct Report {
     pub unfinished: Vec<Record>,
     pub errors: Vec<String>,
+    #[cfg(target_os = "macos")]
+    copies: Vec<crate::vfs::resume_copy::Offer>,
+}
+
+impl Report {
+    fn has_findings(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        if !self.copies.is_empty() {
+            return true;
+        }
+        !self.unfinished.is_empty() || !self.errors.is_empty()
+    }
 }
 
 /// Startup discovery and presentation; disk access stays on its scan worker.
@@ -160,6 +171,8 @@ pub(crate) struct Recovery {
     receive: Option<Receiver<Report>>,
     directory: Option<PathBuf>,
     open: bool,
+    #[cfg(target_os = "macos")]
+    resume_requested: Option<crate::vfs::resume_copy::Offer>,
 }
 
 impl Recovery {
@@ -172,7 +185,7 @@ impl Recovery {
             return Self {
                 report: Report {
                     errors: vec!["No local application-data directory".into()],
-                    ..Report::default()
+                    ..Default::default()
                 },
                 open: true,
                 ..Self::default()
@@ -187,31 +200,12 @@ impl Recovery {
     }
 
     fn open_directory(directory: PathBuf, ctx: &egui::Context) -> Self {
-        let (send, receive) = mpsc::channel();
-        let worker_directory = directory.clone();
-        let worker_ctx = ctx.clone();
-        let worker = std::thread::Builder::new()
-            .name("pawcommander-recovery-scan".into())
-            .spawn(move || {
-                let _ = send.send(scan(&worker_directory));
-                worker_ctx.request_repaint();
-            });
-        match worker {
-            Ok(_) => Self {
-                directory: Some(directory),
-                receive: Some(receive),
-                ..Self::default()
-            },
-            Err(error) => Self {
-                directory: Some(directory),
-                report: Report {
-                    errors: vec![error.to_string()],
-                    ..Report::default()
-                },
-                open: true,
-                ..Self::default()
-            },
-        }
+        let mut recovery = Self {
+            directory: Some(directory),
+            ..Self::default()
+        };
+        recovery.scan_in_background(ctx);
+        recovery
     }
 
     pub fn directory(&self) -> Option<PathBuf> {
@@ -225,7 +219,7 @@ impl Recovery {
         };
         match receive.try_recv() {
             Ok(report) => {
-                self.open |= !report.unfinished.is_empty() || !report.errors.is_empty();
+                self.open |= report.has_findings();
                 self.report = report;
                 self.receive = None;
                 ctx.request_repaint();
@@ -242,8 +236,39 @@ impl Recovery {
         }
     }
 
-    pub fn reopen(&mut self) {
+    pub fn reopen(&mut self, ctx: &egui::Context) {
         self.open = true;
+        if cfg!(target_os = "macos") {
+            self.scan_in_background(ctx);
+        }
+    }
+
+    fn scan_in_background(&mut self, ctx: &egui::Context) {
+        let Some(directory) = self.directory.clone() else {
+            return;
+        };
+        if self.receive.is_some() {
+            return;
+        }
+        let (send, receive) = mpsc::channel();
+        let ctx = ctx.clone();
+        match std::thread::Builder::new()
+            .name("pawcommander-recovery-scan".into())
+            .spawn(move || {
+                let _ = send.send(scan(&directory));
+                ctx.request_repaint();
+            }) {
+            Ok(_) => self.receive = Some(receive),
+            Err(error) => {
+                self.report.errors.push(error.to_string());
+                self.open = true;
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn take_resume_request(&mut self) -> Option<crate::vfs::resume_copy::Offer> {
+        self.resume_requested.take()
     }
 
     pub fn is_open(&self) -> bool {
@@ -254,6 +279,8 @@ impl Recovery {
         if !self.open {
             return;
         }
+        #[cfg(target_os = "macos")]
+        let mut resume = None;
         egui::Window::new(crate::tr_format!("Восстановление после сбоя", "Crash recovery"))
             .id(egui::Id::unique("crash_recovery"))
             .open(&mut self.open)
@@ -278,10 +305,24 @@ impl Recovery {
                 }
                 if self.receive.is_some() {
                     ui.label(crate::tr_format!("Проверка незавершённых заданий…", "Checking unfinished operations…"));
-                } else if self.report.unfinished.is_empty() && self.report.errors.is_empty() {
+                } else if !self.report.has_findings() {
                     ui.label(crate::tr_format!("Незавершённые задания не обнаружены.", "No unfinished operations found."));
                 }
                 egui::ScrollArea::both().show(ui, |ui| {
+                    #[cfg(target_os = "macos")]
+                    if !self.report.copies.is_empty() {
+                        ui.heading(crate::i18n::text("Прерванные копирования"));
+                        ui.small(crate::i18n::text("Перед продолжением PawCommander сверяет источник, назначение и временную копию."));
+                        for (index, offer) in self.report.copies.iter().enumerate() {
+                            ui.push_id(&offer.id, |ui| {
+                                ui.label(format!("{} → {}", offer.source, offer.target));
+                                if ui.add_enabled(self.receive.is_none(), egui::Button::new(crate::i18n::text("Проверить и продолжить"))).clicked() {
+                                    resume = Some(index);
+                                }
+                            });
+                        }
+                        ui.separator();
+                    }
                     for error in &self.report.errors {
                         ui.add(egui::Label::new(error).selectable(true).wrap());
                     }
@@ -309,6 +350,11 @@ impl Recovery {
                     }
                 });
             });
+        #[cfg(target_os = "macos")]
+        if let Some(index) = resume {
+            self.resume_requested = Some(self.report.copies.remove(index));
+            self.open = false;
+        }
     }
 }
 
@@ -421,7 +467,7 @@ impl PendingOperation {
     }
 }
 
-fn same_owned_marker(owned: &File, path: &Path) -> io::Result<bool> {
+pub(crate) fn same_owned_marker(owned: &File, path: &Path) -> io::Result<bool> {
     let candidate = fs::symlink_metadata(path)?;
     if !candidate.file_type().is_file() {
         return Ok(false);
@@ -537,6 +583,12 @@ pub(crate) fn scan(directory: &Path) -> Report {
         }
     }
     report.unfinished.sort_by_key(|record| record.started);
+    #[cfg(target_os = "macos")]
+    {
+        let (copies, errors) = crate::vfs::resume_copy::scan(directory);
+        report.copies = copies;
+        report.errors.extend(errors);
+    }
     report
 }
 
@@ -621,7 +673,7 @@ fn read_record(path: &Path) -> io::Result<Option<(Record, Vec<String>)>> {
     Ok(Some((record, warnings)))
 }
 
-fn sync_directory(directory: &Path) -> io::Result<()> {
+pub(crate) fn sync_directory(directory: &Path) -> io::Result<()> {
     #[cfg(unix)]
     File::open(directory)?.sync_all()?;
     #[cfg(not(unix))]

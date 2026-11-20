@@ -174,6 +174,39 @@ impl PawCommander {
         self.start_conflict_job(ctx, label, description, move |progress, _| work(progress));
     }
 
+    #[cfg(target_os = "macos")]
+    pub(super) fn resume_copy(
+        &mut self,
+        ctx: &egui::Context,
+        offer: crate::vfs::resume_copy::Offer,
+    ) {
+        let Some(directory) = self.recovery.directory() else {
+            return;
+        };
+        let (_, events) = mpsc::channel();
+        let label = crate::i18n::text("Продолжение копирования");
+        let description = format!("{label} · {} → {}", offer.source, offer.target);
+        self.submit_job(
+            ctx,
+            PendingJob {
+                label: label.into(),
+                description,
+                work: Box::new(move |progress| {
+                    crate::vfs::resume_copy::resume(&directory, &offer.id, progress)
+                }),
+                transfer: Some(TransferInteraction {
+                    events,
+                    cut_generation: None,
+                    conflict: None,
+                    can_pause: true,
+                }),
+                cut: None,
+                retry_origin: None,
+                undo_origin: None,
+            },
+        );
+    }
+
     pub(super) fn start_conflict_job(
         &mut self,
         ctx: &egui::Context,
@@ -601,6 +634,10 @@ impl PawCommander {
         let (events, rx) = mpsc::channel();
         let worker_ctx = ctx.clone();
         let retry_origin = retry.clone();
+        #[cfg(target_os = "macos")]
+        let resume_directory = (kind == TransferKind::Copy && !cfg!(test))
+            .then(|| self.recovery.directory())
+            .flatten();
         let work = move |progress: &mut Progress| {
             let id = crate::result_history::operation_id();
             progress.results.id = id.clone();
@@ -610,6 +647,10 @@ impl PawCommander {
                     .unwrap_or_else(|| crate::vfs::RetryTransfer::new(kind, destination.clone())),
             );
             progress.set_copy_verification(verify_copies);
+            #[cfg(target_os = "macos")]
+            {
+                progress.resume_directory = resume_directory;
+            }
             let cancellation = progress.cancellation();
             let result = fs_ops::transfer_with_conflicts(
                 &sources,

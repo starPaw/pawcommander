@@ -170,7 +170,7 @@ impl PawCommander {
                             });
                             ui.separator();
                             if ui.button(crate::tr_format!("Восстановление после сбоя", "Crash recovery")).clicked() {
-                                self.recovery.reopen();
+                                self.recovery.reopen(ctx);
                                 ui.close();
                             }
                             ui.separator();
