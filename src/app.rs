@@ -18,6 +18,8 @@ mod entry_widget;
 #[cfg(target_os = "macos")]
 mod external_editors;
 mod file_compare;
+#[cfg(target_os = "macos")]
+mod folder_sync;
 mod footer;
 #[cfg(target_os = "macos")]
 mod git_status;

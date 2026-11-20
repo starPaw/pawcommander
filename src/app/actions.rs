@@ -83,6 +83,8 @@ pub(super) enum Action {
     VerifyChecksumManifest,
     CompareFolders(Option<egui::Id>),
     CompareFiles,
+    #[cfg(target_os = "macos")]
+    SyncFolders(Option<egui::Id>),
     AddToArchive,
     RemoveFromArchive,
     Trash,
@@ -704,6 +706,8 @@ impl PawCommander {
                 self.open_directory_comparison(return_focus, ctx)
             }
             Action::CompareFiles => self.open_file_comparison(ctx),
+            #[cfg(target_os = "macos")]
+            Action::SyncFolders(return_focus) => self.open_folder_sync(return_focus, ctx),
             Action::Trash if !self.conflict_open() => {
                 let paths = self.selected();
                 if !paths.is_empty() {

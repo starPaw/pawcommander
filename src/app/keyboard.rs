@@ -158,6 +158,8 @@ impl PawCommander {
             Command::VerifyChecksumManifest => Action::VerifyChecksumManifest,
             Command::CompareFolders => Action::CompareFolders(None),
             Command::CompareFiles => Action::CompareFiles,
+            #[cfg(target_os = "macos")]
+            Command::SyncFolders => Action::SyncFolders(None),
             Command::AddToArchive => Action::AddToArchive,
             Command::RemoveFromArchive => Action::RemoveFromArchive,
             Command::NewFolder => Action::NewFolder,

@@ -45,6 +45,8 @@ pub enum Command {
     VerifyChecksumManifest,
     CompareFolders,
     CompareFiles,
+    #[cfg(target_os = "macos")]
+    SyncFolders,
     AddToArchive,
     RemoveFromArchive,
     NewFolder,
@@ -58,7 +60,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Self; 43 + 3 * cfg!(target_os = "macos") as usize] = [
+    pub const ALL: [Self; 43 + 4 * cfg!(target_os = "macos") as usize] = [
         Self::EditPath,
         Self::Filter,
         Self::Search,
@@ -99,6 +101,8 @@ impl Command {
         Self::VerifyChecksumManifest,
         Self::CompareFolders,
         Self::CompareFiles,
+        #[cfg(target_os = "macos")]
+        Self::SyncFolders,
         Self::AddToArchive,
         Self::RemoveFromArchive,
         Self::NewFolder,
@@ -150,6 +154,8 @@ impl Command {
             Self::VerifyChecksumManifest => "Проверить манифест SHA-256",
             Self::CompareFolders => "Сравнить папки",
             Self::CompareFiles => "Сравнить файлы",
+            #[cfg(target_os = "macos")]
+            Self::SyncFolders => "План синхронизации папок",
             Self::AddToArchive => "Добавить в архив",
             Self::RemoveFromArchive => "Удалить из архива",
             Self::NewFolder => "Создать папку",
@@ -230,7 +236,7 @@ impl Profile {
             Palette => (CMD_SHIFT, Key::P),
             FolderJump => (CMD_SHIFT, Key::J),
             #[cfg(target_os = "macos")]
-            CustomActions => return None,
+            CustomActions | SyncFolders => return None,
             Preview
             | EditInZed
             | OpenTerminal

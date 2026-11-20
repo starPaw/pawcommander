@@ -10,14 +10,14 @@ use std::{
     time::UNIX_EPOCH,
 };
 
-pub(super) enum Entry {
+pub(in crate::vfs) enum Entry {
     Directory,
     File(FileInfo),
     Link(PathBuf),
     Unreadable(String),
 }
 
-pub(super) struct FileInfo {
+pub(in crate::vfs) struct FileInfo {
     pub(super) size: Option<u64>,
     pub(super) modified: Option<Modified>,
 }
@@ -54,7 +54,7 @@ impl Modified {
 }
 
 impl Entry {
-    pub(super) fn extra_path_bytes(&self) -> usize {
+    pub(in crate::vfs) fn extra_path_bytes(&self) -> usize {
         match self {
             Self::Link(path) => path.as_os_str().len(),
             Self::Unreadable(message) => message.len(),
@@ -65,7 +65,7 @@ impl Entry {
 
 type Visitor<'a> = &'a mut dyn FnMut(OsString, Entry) -> Result<(), TransferError>;
 
-pub(super) fn visit(
+pub(in crate::vfs) fn visit(
     scope: &ReadScope,
     relative: &Path,
     cancel: &Cancellation,
