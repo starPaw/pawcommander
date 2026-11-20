@@ -7,6 +7,33 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
+fn disconnect_at_rename(
+    fixture: &Path,
+    source: &Location,
+    session: &ssh2::Session,
+    wait: Duration,
+) -> thread::JoinHandle<String> {
+    // SAFETY: the cached session is held until we have duplicated its socket.
+    let fd = unsafe { BorrowedFd::borrow_raw(session.as_raw_fd()) };
+    let socket = TcpStream::from(fd.try_clone_to_owned().unwrap());
+    let name = source.path().file_name().unwrap().to_str().unwrap();
+    let marker = fixture.join(format!("held-{name}"));
+    thread::spawn(move || {
+        let until = Instant::now() + wait;
+        loop {
+            if let Ok(stage) = fs::read_to_string(&marker) {
+                socket.shutdown(Shutdown::Both).unwrap();
+                return stage;
+            }
+            if Instant::now() >= until {
+                let _ = socket.shutdown(Shutdown::Both);
+                panic!("SFTP rename never reached {}", marker.display());
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    })
+}
+
 fn interrupt_rename(
     fixture: &Path,
     source: &Location,
@@ -18,22 +45,7 @@ fn interrupt_rename(
     drop(remote(destination).unwrap());
     let endpoint = destination.sftp_endpoint().unwrap();
     let session = sessions().lock().unwrap()[endpoint].clone();
-    // SAFETY: the cached session is held until we have duplicated its socket.
-    let fd = unsafe { BorrowedFd::borrow_raw(session.as_raw_fd()) };
-    let socket = TcpStream::from(fd.try_clone_to_owned().unwrap());
-    let name = source.path().file_name().unwrap().to_str().unwrap();
-    let marker = fixture.join(format!("held-{name}"));
-    let disconnect = thread::spawn(move || {
-        let until = Instant::now() + Duration::from_secs(12);
-        loop {
-            if let Ok(stage) = fs::read_to_string(&marker) {
-                socket.shutdown(Shutdown::Both).unwrap();
-                return stage;
-            }
-            assert!(Instant::now() < until, "SFTP rename was never held");
-            thread::sleep(Duration::from_millis(10));
-        }
-    });
+    let disconnect = disconnect_at_rename(fixture, source, &session, Duration::from_secs(12));
     let mut progress = Progress::default();
     progress.retry = Some(RetryTransfer::new(kind, destination.clone()));
     let operation = transfer_with_conflicts(
@@ -64,6 +76,73 @@ fn interrupt_rename(
         .unwrap();
     assert!(retry.needs_inspection());
     (retry, session)
+}
+
+#[cfg(target_os = "macos")]
+fn check_lost_source_hold(fixture: &Path, remote_root: &Location) {
+    use crate::vfs::resume_copy::{resume, scan};
+    use std::os::unix::fs::MetadataExt;
+
+    let input = remote_root.join("held-source-input");
+    let destination: Location = fixture.join("held-source-output").into();
+    let recovery = fixture.join("held-source-recovery");
+    let source = input.join("lost-held-after");
+    let target = destination.join("lost-held-after");
+    let bytes = b"published folder contents";
+    fs::create_dir_all(source.join("nested/empty").path()).unwrap();
+    fs::write(source.join("nested/data").path(), bytes).unwrap();
+    fs::create_dir(destination.path()).unwrap();
+    drop(remote(&input).unwrap());
+    let endpoint = input.sftp_endpoint().unwrap();
+    let session = sessions().lock().unwrap()[endpoint].clone();
+    let disconnected = disconnect_at_rename(fixture, &source, &session, Duration::from_secs(45));
+    let (mut progress, _) = Progress::tracked_transfer();
+    progress.resume_directory = Some(recovery.clone());
+    let interrupted = transfer_with_conflicts(
+        std::slice::from_ref(&source),
+        &destination,
+        TransferKind::Move,
+        &mut progress,
+        |_| panic!("unexpected conflict"),
+        |_, _| panic!("source removal was never confirmed"),
+    );
+    assert_eq!(disconnected.join().unwrap(), "after");
+    assert!(interrupted.is_err());
+    assert!(!source.path().exists());
+    let held = fs::read_dir(input.path())
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path()
+        .join("source");
+    assert_eq!(fs::read(held.join("nested/data")).unwrap(), bytes);
+    assert_eq!(fs::read(target.join("nested/data").path()).unwrap(), bytes);
+    let before = fs::metadata(target.path()).unwrap();
+
+    let (offers, errors) = scan(&recovery);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(offers.len(), 1);
+    assert!(offers[0].moving);
+    let (mut progress, mut view) = Progress::tracked_transfer();
+    resume(&recovery, &offers[0].id, &mut progress).unwrap();
+    assert_eq!(view.snapshot().total_written, 0);
+    assert!(!Arc::ptr_eq(
+        &session,
+        &sessions().lock().unwrap()[endpoint]
+    ));
+    assert_eq!(before.ino(), fs::metadata(target.path()).unwrap().ino());
+    assert_eq!(fs::read(target.join("nested/data").path()).unwrap(), bytes);
+    assert!(target.join("nested/empty").path().is_dir());
+    assert!(fs::read_dir(input.path()).unwrap().next().is_none());
+    assert!(scan(&recovery).0.is_empty());
+    assert_eq!(progress.results.items.len(), 4);
+    assert!(progress
+        .results
+        .items
+        .iter()
+        .all(|row| row.outcome == Outcome::Completed));
+    println!("Resumed after the server moved the source into staging and lost its reply; wrote no file data");
 }
 
 #[test]
@@ -210,6 +289,9 @@ fn sftp_reconnect_checks_lost_publication_replies() {
         CONTENTS
     );
     #[cfg(target_os = "macos")]
-    crate::vfs::resume_copy::tests::check_sftp(&fixture, &remote_root);
+    {
+        check_lost_source_hold(&fixture, &remote_root);
+        crate::vfs::resume_copy::tests::check_sftp(&fixture, &remote_root);
+    }
     sessions().lock().unwrap().remove(&endpoint);
 }

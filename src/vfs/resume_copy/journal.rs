@@ -1,6 +1,5 @@
 //! Durable receipts for one worker and one staged copy.
-use super::{Intent, Publication, Receipt};
-use crate::app::SavedLocation;
+use super::{HeldSource, Intent, Receipt, RenamedIdentity};
 use crate::recovery::{same_owned_marker, sync_directory};
 use serde::{Deserialize, Serialize};
 use std::cell::Cell;
@@ -21,15 +20,15 @@ pub(super) struct Ticket {
     file: File,
     path: PathBuf,
     pub(super) receipt: Receipt,
-    publication: Cell<Option<Publication>>,
-    pub(super) holding: Option<SavedLocation>,
+    publication: Cell<Option<RenamedIdentity>>,
+    pub(super) holding: Option<HeldSource>,
     pub(super) removed: bool,
 }
 
 #[derive(Deserialize, Serialize)]
 pub(super) enum Event {
-    Publication(Publication),
-    Removing(SavedLocation),
+    Publication(RenamedIdentity),
+    Removing(HeldSource),
     Removed,
 }
 
@@ -129,11 +128,11 @@ impl Ticket {
         self.path.file_name().and_then(OsStr::to_str).unwrap()
     }
 
-    pub(super) fn publication(&self) -> Option<Publication> {
+    pub(super) fn publication(&self) -> Option<RenamedIdentity> {
         self.publication.get()
     }
 
-    pub(super) fn seal(&self, proof: Publication) -> io::Result<()> {
+    pub(super) fn seal(&self, proof: RenamedIdentity) -> io::Result<()> {
         if self.publication() != Some(proof) {
             self.record(&Event::Publication(proof))?;
             self.publication.set(Some(proof));
