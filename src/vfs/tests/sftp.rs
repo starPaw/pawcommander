@@ -1539,6 +1539,7 @@ fn openssh_round_trip_and_host_verification() {
         check_promised_sftp_download(&local_root, &remote_root);
         crate::properties::check_sftp_properties(&remote_root);
         super::super::sync::sync_round_trip(&remote_root);
+        super::super::sync::two_way_round_trip(&remote_root);
     }
     sessions().lock().unwrap().remove(&endpoint);
 }
