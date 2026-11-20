@@ -1,5 +1,7 @@
 use super::{
-    comparison::{show_pair, show_progress, ComparisonBody, ComparisonDialog, Phase},
+    comparison::{
+        show_pair, show_progress, ComparisonBody, ComparisonDialog, ComparisonResponse, Phase,
+    },
     PawCommander,
 };
 use crate::{
@@ -66,12 +68,13 @@ impl FolderSyncDialog {
         }
     }
 
-    pub(super) fn show(&mut self, ctx: &egui::Context) -> bool {
+    pub(super) fn show(&mut self, ctx: &egui::Context) -> ComparisonResponse {
         let running = matches!(self.phase, Phase::Running(_));
         let mut build = false;
         let mut check = false;
         let mut stop = false;
         let mut close = false;
+        let mut apply = false;
         let modal = egui::Modal::new(egui::Id::unique("folder_sync")).show(ctx, |ui| {
             ui.set_width((ctx.content_rect().width() - 44.0).clamp(200.0, 740.0));
             ui.heading(Command::SyncFolders.label());
@@ -119,6 +122,12 @@ impl FolderSyncDialog {
                             egui::Button::new(text("Проверить план")),
                         )
                         .clicked();
+                    apply = ui
+                        .add_enabled(
+                            matches!(&self.phase, Phase::Finished(preview) if !preview.plan.rows.is_empty()),
+                            egui::Button::new(text("Применить план")),
+                        )
+                        .clicked();
                     close = ui.button(text("Закрыть")).clicked();
                 }
             });
@@ -128,13 +137,15 @@ impl FolderSyncDialog {
                 worker.progress.cancel.request();
             }
         } else if close || modal.should_close() {
-            return false;
+            return ComparisonResponse::Close;
+        } else if apply && let Phase::Finished(preview) = &self.phase {
+            return ComparisonResponse::ApplySync(Arc::clone(&preview.plan));
         } else if build {
             self.build(ctx);
         } else if check {
             self.check(ctx);
         }
-        true
+        ComparisonResponse::Open
     }
 }
 
@@ -154,6 +165,9 @@ fn show_preview(ui: &mut egui::Ui, preview: &Preview, run: u64) {
         plan.replacements,
         plan.deletions
     ));
+    if plan.deletions > 0 && plan.folders()[1].remote() {
+        ui.small(text("Удаление из папки SFTP необратимо."));
+    }
     let height = (ui.ctx().content_rect().height() * 0.48).clamp(65.0, 380.0);
     let row_height = ui
         .text_style_height(&egui::TextStyle::Body)
@@ -182,6 +196,16 @@ fn show_preview(ui: &mut egui::Ui, preview: &Preview, run: u64) {
 }
 
 impl PawCommander {
+    pub(super) fn enqueue_folder_sync(&mut self, plan: Arc<SyncPlan>, ctx: &egui::Context) {
+        let [source, destination] = plan.folders();
+        self.start_stoppable_job(
+            ctx,
+            text("Синхронизация папок"),
+            format!("{} → {}", source.display(), destination.display()),
+            move |progress| plan.apply(progress),
+        );
+    }
+
     pub(super) fn open_folder_sync(&mut self, return_focus: Option<egui::Id>, ctx: &egui::Context) {
         if self.comparison.is_none() && self.can_compare_folders() {
             let folders = [

@@ -21,6 +21,13 @@ pub(super) enum ComparisonBody {
     Sync(super::folder_sync::FolderSyncDialog),
 }
 
+pub(super) enum ComparisonResponse {
+    Open,
+    Close,
+    #[cfg(target_os = "macos")]
+    ApplySync(std::sync::Arc<crate::vfs::SyncPlan>),
+}
+
 impl ComparisonDialog {
     pub(super) fn new(
         body: ComparisonBody,
@@ -42,25 +49,37 @@ impl ComparisonDialog {
         }
     }
 
-    fn show(&mut self, ctx: &egui::Context) -> bool {
-        match &mut self.body {
+    fn show(&mut self, ctx: &egui::Context) -> ComparisonResponse {
+        let open = match &mut self.body {
             ComparisonBody::Folders(view) => view.show(ctx),
             ComparisonBody::Files(view) => view.show(ctx),
             #[cfg(target_os = "macos")]
-            ComparisonBody::Sync(view) => view.show(ctx),
+            ComparisonBody::Sync(view) => return view.show(ctx),
+        };
+        if open {
+            ComparisonResponse::Open
+        } else {
+            ComparisonResponse::Close
         }
     }
 }
 
 impl PawCommander {
     pub(super) fn show_comparison(&mut self, ctx: &egui::Context) {
-        if let Some(comparison) = &mut self.comparison
-            && !comparison.show(ctx)
-        {
-            self.palette_focus_to_restore = comparison.return_focus;
-            self.comparison = None;
-            ctx.request_repaint();
+        let Some(comparison) = &mut self.comparison else {
+            return;
+        };
+        let response = comparison.show(ctx);
+        if matches!(response, ComparisonResponse::Open) {
+            return;
         }
+        self.palette_focus_to_restore = comparison.return_focus;
+        self.comparison = None;
+        #[cfg(target_os = "macos")]
+        if let ComparisonResponse::ApplySync(plan) = response {
+            self.enqueue_folder_sync(plan, ctx);
+        }
+        ctx.request_repaint();
     }
 }
 
