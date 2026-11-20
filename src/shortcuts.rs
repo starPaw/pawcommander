@@ -430,6 +430,9 @@ impl ShortcutEditor {
 
     pub fn capture(&mut self, ctx: &egui::Context) {
         if let Some(command) = self.recording {
+            // egui schedules Tab and arrow navigation before delivering the events.
+            #[cfg(target_os = "macos")]
+            ctx.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
             let mut captured = None;
             ctx.input_mut(|input| {
                 input.events.retain(|event| {
@@ -727,6 +730,32 @@ mod tests {
             editor.draft.command(chord(Key::F9, Modifiers::SHIFT)),
             Some(Command::Rename)
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn recording_tab_does_not_move_widget_focus() {
+        let ctx = egui::Context::default();
+        let mut editor = ShortcutEditor::new(&Shortcuts::default());
+        editor.recording = Some(Command::EditPath);
+        let input = egui::RawInput {
+            events: vec![Event::Key {
+                key: Key::Tab,
+                physical_key: Some(Key::Tab),
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        let _ = ctx.run_test_ui(input, |ui| {
+            editor.capture(ui.ctx());
+            let _ = ui.button("Focusable control");
+        });
+
+        assert!(editor.recording.is_none());
+        assert!(editor.error.unwrap().contains(Command::OtherPane.label()));
+        assert!(ctx.memory(|memory| memory.focused().is_none()));
     }
 
     #[test]
