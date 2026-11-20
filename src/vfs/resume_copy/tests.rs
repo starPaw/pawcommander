@@ -209,6 +209,19 @@ fn interrupt_move(item: &TransferItem, recovery: &Path, interrupt: Phase) -> Off
     offer
 }
 
+fn retained_location(recovery: &Path, offer: &Offer) -> Location {
+    let ticket = Ticket::open(receipts(recovery).join(&offer.id))
+        .unwrap()
+        .unwrap();
+    let paths = ticket.receipt.paths().unwrap();
+    let Some(HeldSource::Verified(record)) = &ticket.holding else {
+        panic!("move has no checked source staging record");
+    };
+    staging_at(&paths.source, &record.stage_name)
+        .unwrap()
+        .join("source")
+}
+
 #[test]
 fn published_move_requires_the_original_source_and_the_sealed_destination() {
     for tree in [false, true] {
@@ -270,13 +283,9 @@ fn move_recovery_preserves_held_source_and_recognizes_acknowledged_removal() {
         fs::write(source.path(), bytes).unwrap();
         let item = TransferItem::new(source.clone(), source.clone(), target.clone());
         let offer = interrupt_move(&item, &recovery, phase);
-        let ticket = Ticket::open(receipts(&recovery).join(&offer.id))
-            .unwrap()
-            .unwrap();
-        let held = ticket.holding.clone().unwrap().into_location().unwrap();
+        let held = retained_location(&recovery, &offer);
         assert!(!source.path().exists());
         fs::write(source.path(), b"new source at the old path").unwrap();
-        drop(ticket);
 
         let result = resume(&recovery, &offer.id, &mut Progress::default());
         assert_eq!(
@@ -291,8 +300,112 @@ fn move_recovery_preserves_held_source_and_recognizes_acknowledged_removal() {
         } else {
             assert!(result.is_ok(), "{result:?}");
             assert!(!held.path().exists());
+            assert!(!held.parent().unwrap().path().exists());
             assert!(scan(&recovery).0.is_empty());
         }
+    }
+}
+
+#[test]
+fn move_recovery_finishes_verified_files_and_trees_around_source_rename() {
+    for (tree, phase, restored) in [
+        (false, Phase::QuarantinePlanned, false),
+        (false, Phase::Quarantined, false),
+        (true, Phase::Quarantined, false),
+        (true, Phase::Quarantined, true),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let recovery = root.join("recovery");
+        let source: Location = root.join("tree").into();
+        let target: Location = root.join("target").into();
+        let bytes = b"complete and verified";
+        if tree {
+            setup_folder(source.path(), bytes);
+            std::os::unix::fs::symlink("a-finished", source.join("link").path()).unwrap();
+        } else {
+            fs::write(source.path(), bytes).unwrap();
+        }
+        let item = TransferItem::new(source.clone(), source.clone(), target.clone());
+        let offer = interrupt_move(&item, &recovery, phase);
+        let held = retained_location(&recovery, &offer);
+        assert_eq!(source.path().exists(), phase == Phase::QuarantinePlanned);
+        if restored {
+            fs::rename(held.path(), source.path()).unwrap();
+        }
+        let before = fs::metadata(target.path()).unwrap();
+        let (mut progress, mut view) = Progress::tracked_transfer();
+        resume(&recovery, &offer.id, &mut progress).unwrap();
+        assert_eq!(view.snapshot().total_written, 0);
+        assert_eq!(before.ino(), fs::metadata(target.path()).unwrap().ino());
+        if tree {
+            assert_eq!(fs::read(target.join("a-finished").path()).unwrap(), HEAD);
+            assert_eq!(
+                fs::read(target.join("z-child/large").path()).unwrap(),
+                bytes
+            );
+            assert_eq!(
+                fs::read_link(target.join("link").path()).unwrap(),
+                Path::new("a-finished")
+            );
+            assert!(target.join("z-child/empty").path().is_dir());
+            assert_eq!(progress.results.items.len(), 6);
+        } else {
+            assert_eq!(fs::read(target.path()).unwrap(), bytes);
+        }
+        assert!(progress
+            .results
+            .items
+            .iter()
+            .all(|row| row.outcome == Outcome::Completed));
+        assert!(!source.path().exists());
+        assert!(!held.parent().unwrap().path().exists());
+        assert!(scan(&recovery).0.is_empty());
+    }
+}
+
+#[test]
+fn move_recovery_keeps_an_incomplete_or_unowned_held_tree() {
+    for problem in ["missing child", "unexpected sibling", "legacy receipt"] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let recovery = root.join("recovery");
+        let source: Location = root.join("tree").into();
+        let target: Location = root.join("target").into();
+        let bytes = b"original file bytes";
+        setup_folder(source.path(), bytes);
+        let item = TransferItem::new(source.clone(), source.clone(), target.clone());
+        let offer = interrupt_move(&item, &recovery, Phase::Quarantined);
+        let held = retained_location(&recovery, &offer);
+        let sibling = held.parent().unwrap().join("another file");
+        if problem == "missing child" {
+            fs::remove_file(held.join("a-finished").path()).unwrap();
+        } else if problem == "unexpected sibling" {
+            fs::write(sibling.path(), b"keep this file").unwrap();
+        } else {
+            let receipt = receipts(&recovery).join(&offer.id);
+            let journal = fs::read_to_string(&receipt).unwrap();
+            let (prefix, _) = journal.rsplit_once('\n').unwrap();
+            let legacy =
+                serde_json::to_string(&Event::Removing(HeldSource::Legacy((&held).into())))
+                    .unwrap();
+            fs::write(&receipt, format!("{prefix}\n{legacy}")).unwrap();
+        }
+        let (mut progress, mut view) = Progress::tracked_transfer();
+        let error = resume(&recovery, &offer.id, &mut progress).unwrap_err();
+        assert!(error.contains(&held.display()), "{problem}: {error}");
+        assert_eq!(view.snapshot().total_written, 0);
+        assert_eq!(fs::read(held.join("z-child/large").path()).unwrap(), bytes);
+        assert_eq!(fs::read(target.join("a-finished").path()).unwrap(), HEAD);
+        assert_eq!(
+            fs::read(target.join("z-child/large").path()).unwrap(),
+            bytes
+        );
+        assert!(!source.path().exists());
+        if problem == "unexpected sibling" {
+            assert_eq!(fs::read(sibling.path()).unwrap(), b"keep this file");
+        }
+        assert_eq!(scan(&recovery).0.len(), 1);
     }
 }
 

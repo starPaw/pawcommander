@@ -4,7 +4,7 @@ use super::{
     changed_copy, changed_source, copy_metadata, copy_suffix, discard_stage, entry_metadata,
     file_scope, register_copy, rename_for_publication, retained_error, stage_contents,
     stage_identity, verify_stamp, verify_target, Cancellation, Completion, EntryMetadata,
-    FileProof, Intent, Location, Original, Paths, Progress, Publication, Receipt, Ticket,
+    FileProof, Intent, Location, Original, Paths, Progress, Receipt, RenamedIdentity, Ticket,
     TransferError,
 };
 use crate::vfs::{
@@ -129,6 +129,14 @@ impl Snapshot {
             }
         }
         Ok(())
+    }
+
+    fn renamed_identity(&self) -> Result<RenamedIdentity, TransferError> {
+        publication_seal(
+            self.entries
+                .iter()
+                .map(|(path, node)| (path, &node.entry.metadata)),
+        )
     }
 
     fn report(&self, paths: &Paths, progress: &mut Progress) {
@@ -428,7 +436,7 @@ fn finish(
             published();
             return Ok(Completion::AlreadyPresent);
         }
-        stage_contents(receipt, paths, owner, &["payload"])?;
+        stage_contents(&paths.stage, receipt.stage_identity, owner, &["payload"])?;
         verify_target(None, &paths.target, false, progress)?;
         let resuming = snapshot.is_none();
         if resuming {
@@ -451,7 +459,7 @@ fn finish(
         snapshot.verify_bytes(paths, &payload, &complete, true, progress)?;
         snapshot.verify_source(&paths.source, &cancel)?;
         snapshot.apply_metadata(paths, &payload, receipt.intent.metadata(), progress)?;
-        stage_contents(receipt, paths, owner, &["payload"])?;
+        stage_contents(&paths.stage, receipt.stage_identity, owner, &["payload"])?;
         snapshot.verify_source(&paths.source, &cancel)?;
         if receipt.intent == Intent::Move {
             let complete = snapshot.inventory(&payload, true, &cancel)?;
@@ -470,17 +478,17 @@ fn finish(
         if !matches!(&result, Ok(Completion::AlreadyPresent))
             || entry_metadata(&paths.stage)?.is_some()
         {
-            discard_stage(receipt, paths, owner, &[])?;
+            discard_stage(&paths.stage, receipt.stage_identity, owner, &[])?;
         }
     } else if matches!(&result, Err(TransferError::Cancelled)) {
         let Some(snapshot) = snapshot.filter(|_| draft_verified) else {
             return result;
         };
-        stage_contents(receipt, paths, owner, &["payload"])?;
+        stage_contents(&paths.stage, receipt.stage_identity, owner, &["payload"])?;
         let present = snapshot.inventory(&payload, false, &Cancellation::default())?;
         snapshot.verify_bytes(paths, &payload, &present, false, &mut Progress::default())?;
         snapshot.discard(&payload, &present)?;
-        discard_stage(receipt, paths, owner, &[])?;
+        discard_stage(&paths.stage, receipt.stage_identity, owner, &[])?;
     } else {
         return result.map_err(|error| retained_error(&paths.stage, error));
     }
@@ -489,22 +497,29 @@ fn finish(
     result
 }
 
-pub(super) fn verify_original(
-    paths: &Paths,
+pub(super) fn verify_move_source(
+    source: &Location,
+    destination: &Location,
     proof: Proof,
+    renamed: Option<RenamedIdentity>,
     progress: &mut Progress,
-) -> Result<(), TransferError> {
-    let local_names = !paths.source.remote() && !paths.target.remote();
-    if Snapshot::capture(&paths.source, local_names, progress)?.proof != proof {
+) -> Result<RenamedIdentity, TransferError> {
+    let snapshot = Snapshot::capture(source, !source.remote() && !destination.remote(), progress)?;
+    let identity = snapshot.renamed_identity()?;
+    let matches = match renamed {
+        Some(expected) => identity == expected && snapshot.proof.contents == proof.contents,
+        None => snapshot.proof == proof,
+    };
+    if !matches {
         return Err(changed_source());
     }
-    Ok(())
+    Ok(identity)
 }
 
 pub(super) fn verify_published(
     paths: &Paths,
     proof: Proof,
-    seal: Option<Publication>,
+    seal: Option<RenamedIdentity>,
     progress: &mut Progress,
 ) -> Result<(), TransferError> {
     let local_names = !paths.source.remote() && !paths.target.remote();
@@ -512,14 +527,10 @@ pub(super) fn verify_published(
     if snapshot.proof.contents != proof.contents {
         return Err(changed_copy());
     }
-    if let Some(expected) = seal {
-        let entries = snapshot
-            .entries
-            .iter()
-            .map(|(path, node)| (path, &node.entry.metadata));
-        if publication_seal(entries)? != expected {
-            return Err(changed_copy());
-        }
+    if let Some(expected) = seal
+        && snapshot.renamed_identity()? != expected
+    {
+        return Err(changed_copy());
     }
     Ok(())
 }
@@ -589,7 +600,7 @@ fn feed_field(digest: &mut Sha256, bytes: &[u8]) {
 
 fn publication_seal<'a>(
     entries: impl IntoIterator<Item = (&'a PathBuf, &'a EntryMetadata)>,
-) -> Result<Publication, TransferError> {
+) -> Result<RenamedIdentity, TransferError> {
     let mut digest = Sha256::new();
     for (path, metadata) in entries {
         feed_field(&mut digest, path.as_os_str().as_encoded_bytes());
@@ -598,7 +609,7 @@ fn publication_seal<'a>(
             &metadata_bytes(metadata, path.as_os_str().is_empty())?,
         );
     }
-    Ok(Publication::Folder(digest.finalize().into()))
+    Ok(RenamedIdentity::Folder(digest.finalize().into()))
 }
 
 fn metadata_bytes(metadata: &EntryMetadata, renamed_root: bool) -> Result<Vec<u8>, TransferError> {

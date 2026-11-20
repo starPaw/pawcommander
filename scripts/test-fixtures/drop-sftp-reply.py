@@ -10,7 +10,7 @@ import sys
 RENAME = 18
 STATUS = 101
 BEFORE = {"lost-before.bin"}
-AFTER = {"lost-after.bin", "lost-move-dir", "lost-replacement.bin", "lost-conflict.bin"}
+AFTER = {"lost-after.bin", "lost-move-dir", "lost-replacement.bin", "lost-conflict.bin", "lost-held-after"}
 
 
 def read_packet(stream):
@@ -39,7 +39,12 @@ def rename_target(packet):
     target_offset = 9 + source_length
     target_length, = struct.unpack_from(">I", packet, target_offset)
     start = target_offset + 4
-    return Path(os.fsdecode(packet[start:start + target_length])).name
+    target = Path(os.fsdecode(packet[start:start + target_length]))
+    if target.name == "source" and target.parent.name.startswith(".pawcommander-sftp-"):
+        source = Path(os.fsdecode(packet[9:target_offset]))
+        if source.name == "lost-held-after":
+            return source.name
+    return target.name
 
 
 def run(fixture, sftp_server):

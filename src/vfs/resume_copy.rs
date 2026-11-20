@@ -179,9 +179,23 @@ impl Intent {
 }
 
 #[derive(Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
-enum Publication {
+enum RenamedIdentity {
     File(FileStamp),
     Folder([u8; 32]),
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(untagged)]
+enum HeldSource {
+    Verified(SourceStage),
+    Legacy(SavedLocation),
+}
+
+#[derive(Deserialize, Serialize)]
+struct SourceStage {
+    stage_name: String,
+    stage_identity: Option<(u64, u64)>,
+    source_identity: RenamedIdentity,
 }
 
 // Keep the version-one file record readable, including copies interrupted by an
@@ -219,30 +233,31 @@ impl Receipt {
         {
             return Err(changed_copy());
         }
-        let prefix = if target.remote() {
-            ".pawcommander-sftp-"
-        } else {
-            ".pawcommander-transfer-"
-        };
-        let valid = self.stage_name.strip_prefix(prefix).is_some_and(|nonce| {
-            !nonce.is_empty()
-                && nonce
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || byte == b'-')
-        });
-        if !valid {
-            return Err(changed_copy());
-        }
-        let stage = target
-            .parent()
-            .ok_or_else(changed_copy)?
-            .join(&self.stage_name);
+        let stage = staging_at(&target, &self.stage_name)?;
         Ok(Paths {
             source,
             target,
             stage,
         })
     }
+}
+
+fn staging_at(item: &Location, stage_name: &str) -> Result<Location, TransferError> {
+    let prefix = if item.remote() {
+        ".pawcommander-sftp-"
+    } else {
+        ".pawcommander-transfer-"
+    };
+    let valid = stage_name.strip_prefix(prefix).is_some_and(|nonce| {
+        !nonce.is_empty()
+            && nonce
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || byte == b'-')
+    });
+    if !valid {
+        return Err(changed_copy());
+    }
+    Ok(item.parent().ok_or_else(changed_copy)?.join(stage_name))
 }
 
 pub(crate) struct Offer {
@@ -346,13 +361,19 @@ fn register_copy(
     cancel: &Cancellation,
 ) -> Result<Ticket, TransferError> {
     let ticket = Ticket::create(&receipts(directory), receipt)?;
-    if let Err(error) =
-        StagedFile::open(&stage.join(ticket.name()), cancel.clone()).and_then(StagedFile::close)
-    {
+    if let Err(error) = create_owner_marker(stage, ticket.name(), cancel) {
         ticket.finish()?;
         return Err(error);
     }
     Ok(ticket)
+}
+
+fn create_owner_marker(
+    stage: &Location,
+    name: &str,
+    cancel: &Cancellation,
+) -> Result<(), TransferError> {
+    StagedFile::open(&stage.join(name), cancel.clone())?.close()
 }
 
 pub(super) fn copy_folder(
@@ -432,7 +453,7 @@ fn verify_move_stage(
         return Err(changed_copy());
     }
     let extra: &[&str] = if has_backup { &["previous"] } else { &[] };
-    stage_contents(receipt, paths, ticket.name(), extra)?;
+    stage_contents(&paths.stage, receipt.stage_identity, ticket.name(), extra)?;
     if has_backup {
         verify_target(expected, &backup, true, progress)?;
     }
@@ -450,7 +471,7 @@ fn verify_published_move(
         Original::File(original) => {
             let current = FileProof::read(&paths.target, progress)?.0;
             if current.digest != original.digest
-                || check_seal && Publication::File(current.stamp.ignore_rename_time()) != seal
+                || check_seal && RenamedIdentity::File(current.stamp.ignore_rename_time()) != seal
             {
                 return Err(changed_target());
             }
@@ -459,6 +480,118 @@ fn verify_published_move(
             tree::verify_published(paths, *proof, check_seal.then_some(seal), progress)?;
         }
     }
+    Ok(())
+}
+
+fn verify_move_source(
+    source: &Location,
+    paths: &Paths,
+    original: &Original,
+    renamed: Option<RenamedIdentity>,
+    progress: &mut Progress,
+) -> Result<RenamedIdentity, TransferError> {
+    match original {
+        Original::File(expected) => {
+            let (actual, _) = FileProof::read(source, progress)?;
+            let identity = RenamedIdentity::File(actual.stamp.ignore_rename_time());
+            let matches = match renamed {
+                Some(value) => value == identity,
+                None => actual.stamp == expected.stamp,
+            };
+            if !matches || actual.digest != expected.digest {
+                return Err(changed_source());
+            }
+            Ok(identity)
+        }
+        Original::Folder(proof) => {
+            tree::verify_move_source(source, &paths.target, *proof, renamed, progress)
+        }
+    }
+}
+
+fn restore_held_source(
+    ticket: &Ticket,
+    paths: &Paths,
+    progress: &mut Progress,
+) -> Result<Option<RenamedIdentity>, TransferError> {
+    let record = match &ticket.holding {
+        Some(HeldSource::Verified(record)) => record,
+        Some(HeldSource::Legacy(location)) => {
+            let held = location
+                .clone()
+                .into_location()
+                .ok_or_else(changed_source)?;
+            if entry_metadata(&held)?.is_some() || entry_metadata(&paths.source)?.is_none() {
+                return Err(retained_source(&held, changed_source()));
+            }
+            return Ok(None);
+        }
+        None => return Ok(None),
+    };
+    let stage = staging_at(&paths.source, &record.stage_name)?;
+    let held = stage.join("source");
+    let result = (|| {
+        let source_present = entry_metadata(&paths.source)?.is_some();
+        if entry_metadata(&held)?.is_none() {
+            return if source_present {
+                Ok(())
+            } else {
+                Err(changed_source())
+            };
+        }
+        if source_present {
+            return Err(changed_source());
+        }
+        stage_contents(&stage, record.stage_identity, ticket.name(), &["source"])?;
+        verify_move_source(
+            &held,
+            paths,
+            &ticket.receipt.original,
+            Some(record.source_identity),
+            progress,
+        )?;
+        progress.checkpoint()?;
+        stage_contents(&stage, record.stage_identity, ticket.name(), &["source"])?;
+        rename_for_publication(&held, &paths.source)
+    })();
+    result.map_err(|error| retained_source(&held, error))?;
+    Ok(Some(record.source_identity))
+}
+
+fn retained_source(held: &Location, error: TransferError) -> TransferError {
+    crate::tr_format!(
+        "{error} Проверьте исходную папку и сохранённый адрес {held}.",
+        "{error} Check the original folder and retained location {held}."
+    )
+    .into()
+}
+
+fn discard_source_stage(ticket: &Ticket, paths: &Paths) -> Result<(), TransferError> {
+    if let Some(HeldSource::Verified(record)) = &ticket.holding {
+        let stage = staging_at(&paths.source, &record.stage_name)?;
+        if entry_metadata(&stage)?.is_some() {
+            discard_stage(&stage, record.stage_identity, ticket.name(), &[])
+                .map_err(|error| retained_source(&stage.join("source"), error))?;
+        }
+    }
+    Ok(())
+}
+
+fn record_source_stage(
+    ticket: &Ticket,
+    held: &Location,
+    source_identity: RenamedIdentity,
+    cancel: &Cancellation,
+) -> Result<(), TransferError> {
+    let stage = held.parent().ok_or_else(changed_source)?;
+    let identity = stage_identity(&stage)?;
+    create_owner_marker(&stage, ticket.name(), cancel)?;
+    stage_contents(&stage, identity, ticket.name(), &[])?;
+    ticket.record(&Event::Removing(HeldSource::Verified(SourceStage {
+        stage_name: stage.name(),
+        stage_identity: identity,
+        source_identity,
+    })))?;
     Ok(())
 }
 
@@ -489,34 +622,28 @@ fn finish_move(
     if history {
         // This phase only confirms a prior removal. The source path may have been reused.
         removed();
+        discard_source_stage(ticket, paths)?;
     } else {
         let verified = (|| {
-            if let Some(holding) = &ticket.holding {
-                let held = holding.clone().into_location().ok_or_else(changed_source)?;
-                if entry_metadata(&held)?.is_some() || entry_metadata(&paths.source)?.is_none() {
-                    return Err(crate::tr_format!(
-                        "Проверьте исходную папку и сохранённый адрес {held}.",
-                        "Check the original folder and retained location {held}."
-                    )
-                    .into());
-                }
-            }
+            let renamed = restore_held_source(ticket, paths, progress)?;
             let source = MoveSource::capture(item, progress)?;
-            match &ticket.receipt.original {
-                Original::File(original) => {
-                    if FileProof::read(&paths.source, progress)?.0 != *original {
-                        return Err(changed_source());
-                    }
-                }
-                Original::Folder(proof) => tree::verify_original(paths, *proof, progress)?,
-            }
-            Ok(source)
+            let source_identity = verify_move_source(
+                &paths.source,
+                paths,
+                &ticket.receipt.original,
+                renamed,
+                progress,
+            )?;
+            discard_source_stage(ticket, paths)?;
+            Ok((source, source_identity))
         })();
-        let source = verified.map_err(|error| {
+        let (source, source_identity) = verified.map_err(|error| {
             progress.results.copied_source_remaining();
             cross_move::incomplete(&paths.target, error, progress)
         })?;
+        source.report(item, progress);
         let mut held_root = None;
+        let cancel = progress.cancellation();
         cross_move::remove_verified(
             item,
             source,
@@ -526,7 +653,7 @@ fn finish_move(
             &mut |location, phase| {
                 // Sync the location before rename and the completion after the last unlink.
                 if phase == Phase::QuarantinePlanned {
-                    ticket.record(&Event::Removing(location.into()))?;
+                    record_source_stage(ticket, location, source_identity, &cancel)?;
                     held_root = Some(location.clone());
                 } else if phase == Phase::Removed && held_root.as_ref() == Some(location) {
                     ticket.record(&Event::Removed)?;
@@ -548,7 +675,12 @@ fn finish_move(
         } else {
             &[]
         };
-        discard_stage(&ticket.receipt, paths, ticket.name(), extra)?;
+        discard_stage(
+            &paths.stage,
+            ticket.receipt.stage_identity,
+            ticket.name(),
+            extra,
+        )?;
     }
     ticket.finish()?;
     progress.partial_copy_retained = false;
@@ -700,7 +832,7 @@ fn finish_copy(
         } else {
             &["payload"]
         };
-        stage_contents(receipt, paths, owner, entries)?;
+        stage_contents(&paths.stage, receipt.stage_identity, owner, entries)?;
         if parked {
             verify_target(receipt.previous.as_ref(), &backup, true, progress)?;
             verify_target(None, &paths.target, false, progress)?;
@@ -741,11 +873,11 @@ fn finish_copy(
             progress,
         )?;
         verify_stamp(&paths.source, original.stamp)?;
-        stage_contents(receipt, paths, owner, entries)?;
+        stage_contents(&paths.stage, receipt.stage_identity, owner, entries)?;
         if receipt.intent == Intent::Move {
             let metadata = entry_metadata(&payload)?.ok_or_else(changed_copy)?;
             let stamp = FileStamp::from(&metadata)?;
-            ticket.seal(Publication::File(stamp.ignore_rename_time()))?;
+            ticket.seal(RenamedIdentity::File(stamp.ignore_rename_time()))?;
         }
         cancel.check()?;
         if let Some(expected) = &receipt.previous
@@ -799,13 +931,18 @@ fn finish_copy(
             Ok(())
         } else if let Some(previous) = &receipt.previous {
             verify_target(Some(previous), &backup, true, &mut Progress::default())?;
-            discard_stage(receipt, paths, owner, &["previous"])
+            discard_stage(&paths.stage, receipt.stage_identity, owner, &["previous"])
         } else {
-            discard_stage(receipt, paths, owner, &[])
+            discard_stage(&paths.stage, receipt.stage_identity, owner, &[])
         }
     } else if matches!(result, Err(TransferError::Cancelled)) {
         if parked {
-            stage_contents(receipt, paths, owner, &["payload", "previous"])?;
+            stage_contents(
+                &paths.stage,
+                receipt.stage_identity,
+                owner,
+                &["payload", "previous"],
+            )?;
             verify_target(
                 receipt.previous.as_ref(),
                 &backup,
@@ -814,7 +951,7 @@ fn finish_copy(
             )?;
             rename_without_replacing(&backup, &paths.target)?;
         }
-        discard_stage(receipt, paths, owner, &["payload"])
+        discard_stage(&paths.stage, receipt.stage_identity, owner, &["payload"])
     } else {
         return result.map_err(|error| retained_error(&paths.stage, error));
     };
@@ -943,15 +1080,12 @@ fn stage_identity(stage: &Location) -> Result<Option<(u64, u64)>, TransferError>
 }
 
 fn stage_contents(
-    receipt: &Receipt,
-    paths: &Paths,
+    stage: &Location,
+    identity: Option<(u64, u64)>,
     owner: &str,
     extra: &[&str],
 ) -> Result<(), TransferError> {
-    let stage = &paths.stage;
-    if stage_identity(stage)? != receipt.stage_identity
-        || super::transfer::canonical(stage)? != stage.path()
-    {
+    if stage_identity(stage)? != identity || super::transfer::canonical(stage)? != stage.path() {
         return Err(changed_copy());
     }
     let expected: BTreeSet<OsString> = std::iter::once(owner)
@@ -997,13 +1131,12 @@ fn stage_contents(
 }
 
 fn discard_stage(
-    receipt: &Receipt,
-    paths: &Paths,
+    stage: &Location,
+    identity: Option<(u64, u64)>,
     owner: &str,
     extra: &[&str],
 ) -> Result<(), TransferError> {
-    stage_contents(receipt, paths, owner, extra)?;
-    let stage = &paths.stage;
+    stage_contents(stage, identity, owner, extra)?;
     for name in extra {
         let item = entry_metadata(&stage.join(name))?.ok_or_else(changed_copy)?;
         if !item.is_file() {

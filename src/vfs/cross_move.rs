@@ -283,6 +283,15 @@ impl MoveSource {
         }
         Ok(Self { manifest, links })
     }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn report(&self, item: &TransferItem, progress: &mut Progress) {
+        progress.results.descendants(
+            &item.source,
+            &item.target,
+            self.manifest.entries.keys().cloned(),
+        );
+    }
 }
 
 pub(super) fn remove_verified(
