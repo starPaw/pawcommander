@@ -28,6 +28,7 @@ pub(crate) enum Outcome {
     Failed,
     Cancelled,
     PublicationUnconfirmed,
+    PartialCopyRetained,
     RetryReady,
     #[default]
     NotStarted,
@@ -43,6 +44,7 @@ impl Outcome {
             Self::Failed => "Ошибка",
             Self::Cancelled => "Отменено",
             Self::PublicationUnconfirmed => "Публикация не подтверждена",
+            Self::PartialCopyRetained => "Доступна проверка прерванного копирования",
             Self::RetryReady => "Готово к повтору",
             Self::NotStarted => "Не начато",
         })

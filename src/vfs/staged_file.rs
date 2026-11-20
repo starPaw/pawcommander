@@ -55,6 +55,49 @@ impl StagedFile {
         })
     }
 
+    #[cfg(target_os = "macos")]
+    pub(super) fn open_at(
+        path: &Location,
+        offset: u64,
+        expected: &super::transfer::EntryMetadata,
+        cancel: Cancellation,
+    ) -> Result<Self, TransferError> {
+        use super::transfer::{EntryMetadata, LocalEntryMetadata};
+        use std::io::{Seek, SeekFrom};
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+        cancel.check()?;
+        let file = if let Some(path) = path.local() {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(path)?;
+            let metadata = file.metadata()?;
+            if metadata.nlink() != 1
+                || !expected.matches_file(&EntryMetadata::Local(LocalEntryMetadata::from_file(
+                    &file, metadata,
+                )))
+            {
+                return Err(super::resume_copy::changed_copy());
+            }
+            file.seek(SeekFrom::Start(offset))?;
+            OutputFile::Local(file)
+        } else {
+            let mut file = remote(path)?
+                .open_mode(path.path(), OpenFlags::WRITE, 0, OpenType::File)
+                .map_err(err)?;
+            if !expected.matches_file(&EntryMetadata::Remote(file.stat().map_err(err)?)) {
+                return Err(super::resume_copy::changed_copy());
+            }
+            file.seek(SeekFrom::Start(offset))?;
+            OutputFile::Remote(file)
+        };
+        Ok(Self {
+            file: BufWriter::with_capacity(64 * 1024, file),
+            cancel,
+        })
+    }
+
     pub(super) fn close(mut self) -> Result<(), TransferError> {
         self.flush()?;
         match self.file.into_inner().map_err(|error| error.into_error())? {

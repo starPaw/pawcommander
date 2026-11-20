@@ -105,7 +105,7 @@ fn recovery_window_blocks_file_shortcuts_and_drops() {
     let ctx = egui::Context::default();
     let cc = eframe::CreationContext::_new_kittest(ctx.clone());
     let mut app = PawCommander::new(&cc, Some(root.path().into()));
-    app.recovery.reopen();
+    app.recovery.reopen(&ctx);
     assert!(app.keyboard_blocked(&ctx));
     assert!(!app.drop_enabled());
 }
@@ -120,7 +120,7 @@ fn recovery_report_suspends_existing_new_folder_dialog_enter() {
         parent: root.path().to_path_buf().into(),
         name: "must-not-be-created".into(),
     });
-    app.recovery.reopen();
+    app.recovery.reopen(&ctx);
     let mut frame = eframe::Frame::_new_kittest();
     let _ = ctx.run_test_ui(
         egui::RawInput {

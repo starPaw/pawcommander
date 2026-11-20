@@ -209,5 +209,7 @@ fn sftp_reconnect_checks_lost_publication_replies() {
         fs::read(remote_root.join("lost-move-dir/nested/data").path()).unwrap(),
         CONTENTS
     );
+    #[cfg(target_os = "macos")]
+    crate::vfs::resume_copy::tests::check_sftp(&fixture, &remote_root);
     sessions().lock().unwrap().remove(&endpoint);
 }

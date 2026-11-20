@@ -18,6 +18,8 @@ mod mutations;
 mod permissions;
 mod preview;
 mod read_scope;
+#[cfg(target_os = "macos")]
+pub(crate) mod resume_copy;
 mod retry;
 pub(crate) mod search;
 mod sftp;

@@ -373,6 +373,10 @@ impl eframe::App for PawCommander {
                 ));
             });
             self.recovery.show(ctx);
+            #[cfg(target_os = "macos")]
+            if let Some(offer) = self.recovery.take_resume_request() {
+                self.resume_copy(ctx, offer);
+            }
             return;
         }
         if !self.conflict_open()

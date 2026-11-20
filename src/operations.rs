@@ -359,6 +359,10 @@ impl ProgressView {
 
 #[derive(Default)]
 pub(crate) struct Progress {
+    #[cfg(target_os = "macos")]
+    pub resume_directory: Option<PathBuf>,
+    #[cfg(target_os = "macos")]
+    pub partial_copy_retained: bool,
     pub results: crate::result_history::Results,
     pub retry: Option<crate::vfs::RetryTransfer>,
     pub undo: crate::vfs::UndoBatch,
@@ -633,6 +637,16 @@ impl Progress {
         input: &mut impl Read,
     ) -> io::Result<Option<[u8; 32]>> {
         self.hash_file_with(path, expected, input, false)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn hash_copy_check(
+        &mut self,
+        path: &Path,
+        expected: u64,
+        input: &mut impl Read,
+    ) -> io::Result<Option<[u8; 32]>> {
+        self.hash_file_with(path, expected, input, true)
     }
 
     fn hash_file_with(

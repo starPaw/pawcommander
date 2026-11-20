@@ -37,6 +37,8 @@ PawCommander brings a familiar two-pane workflow to a calm, colorful desktop app
 
 Visible local and connected SFTP folders refresh automatically. On macOS, you can also drag local files out to Finder and other apps.
 
+On macOS, **Settings → Crash recovery** lists recoverable copies of individual local and SFTP files. **Check and resume** verifies the source, destination and existing partial file before writing the remaining bytes. A mismatch leaves the files available for inspection. Recovery can also verify a complete destination when the final reply was lost.
+
 On macOS, a local Git working tree shows its branch beside the folder path. The current folder marks modified (`M`), untracked (`?`) and ignored (`!`) entries. Git status refreshes in the background without writing to the repository.
 
 On macOS, **Settings → Tools → External editors** sets separate commands for local files and SFTP working copies. Choose **Open in external editor** from a file's context menu. For SFTP, save the working copy in your editor, then choose **Save to server** in PawCommander. If the server file changed, PawCommander keeps both versions. **Show in Finder** reveals the copy under `~/Library/Application Support/PawCommander/Editor Copies`, where it stays after the edit session ends.

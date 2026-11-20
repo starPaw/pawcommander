@@ -380,6 +380,27 @@ pub(super) fn stage(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+pub(super) fn access_time(metadata: &EntryMetadata) -> Option<SystemTime> {
+    Attributes::from_entry(metadata).accessed
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn stage_resumed_file(
+    source: &Location,
+    payload: &Location,
+    metadata: &EntryMetadata,
+    accessed: Option<SystemTime>,
+    progress: &mut Progress,
+) -> Result<(), TransferError> {
+    let mut attributes = Attributes::from_entry(metadata);
+    attributes.accessed = accessed;
+    let channel = payload.remote().then(|| remote(payload)).transpose()?;
+    let warning = apply_path(payload, &attributes, channel.as_ref(), Mode::Final, None)?;
+    progress.results.note_metadata(source, warning.as_deref());
+    Ok(())
+}
+
 pub(super) fn finish_file(
     target: &Location,
     source: &EntryMetadata,

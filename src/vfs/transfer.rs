@@ -495,6 +495,10 @@ pub(super) fn transfer_run(
         progress.results.clear_active();
     }
     for item in ready {
+        #[cfg(target_os = "macos")]
+        {
+            progress.partial_copy_retained = false;
+        }
         progress.checkpoint()?;
         progress.results.begin(&item.original);
         progress.item(item.source.path());
@@ -656,6 +660,10 @@ pub(super) fn transfer_run(
             (Ok(()), true) => crate::result_history::Outcome::Completed,
             (Err(_), true) => crate::result_history::Outcome::CompletedWithWarning,
             (Err(TransferError::Cancelled), false) => crate::result_history::Outcome::Cancelled,
+            #[cfg(target_os = "macos")]
+            (Err(_), false) if progress.partial_copy_retained => {
+                crate::result_history::Outcome::PartialCopyRetained
+            }
             (Err(TransferError::PublicationUnconfirmed(_)), false) => {
                 crate::result_history::Outcome::PublicationUnconfirmed
             }
@@ -778,6 +786,12 @@ pub(super) fn copy_item_cancellable(
             return Err(crate::i18n::text(crate::smb::REPLACE_UNAVAILABLE).into());
         }
         return copy_to_smb(item, progress, published);
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(directory) = progress.resume_directory.clone()
+        && entry_metadata(&item.source)?.is_some_and(|meta| meta.is_file())
+    {
+        return super::resume_copy::copy(item, expected, &directory, progress, published);
     }
     if let (Some(source), Some(target)) = (item.source.local(), item.target.local()) {
         return fs_ops::copy_atomically_cancellable(

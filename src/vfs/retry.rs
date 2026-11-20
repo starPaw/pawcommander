@@ -295,6 +295,7 @@ impl RetryTransfer {
                         | Outcome::CompletedWithWarning
                         | Outcome::CopiedSourceRemaining
                         | Outcome::PublicationUnconfirmed
+                        | Outcome::PartialCopyRetained
                 )
             })
             .map(|(path, _)| path.clone())
