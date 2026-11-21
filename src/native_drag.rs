@@ -5,7 +5,9 @@ mod file_promises;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
-pub(crate) use file_promises::{PromiseKind, PromiseRequest};
+pub(crate) use crate::vfs::PromiseKind;
+#[cfg(target_os = "macos")]
+pub(crate) use file_promises::PromiseRequest;
 #[cfg(target_os = "macos")]
 pub use macos::{listen_for_escape, NativeDrag};
 

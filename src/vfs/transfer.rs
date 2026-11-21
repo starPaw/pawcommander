@@ -215,6 +215,8 @@ pub(super) struct TransferItem {
     pub(super) covered: Vec<PathBuf>,
     pub(super) local_move_source: Option<EntryMetadata>,
     pub(super) replacement: Option<(EntryMetadata, EntryMetadata)>,
+    #[cfg(target_os = "macos")]
+    promised_kind: Option<PromiseKind>,
 }
 
 impl TransferItem {
@@ -226,6 +228,8 @@ impl TransferItem {
             covered: Vec::new(),
             local_move_source: None,
             replacement: None,
+            #[cfg(target_os = "macos")]
+            promised_kind: None,
         }
     }
 
@@ -255,6 +259,22 @@ impl TransferItem {
             self.verify_approved_source(entry_metadata(&self.source)?.as_ref())?;
         }
         Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn verify_promised_kind(&self, metadata: Option<&EntryMetadata>) -> Result<(), TransferError> {
+        if let Some(kind) = self.promised_kind {
+            kind.verify(&self.original, metadata)?;
+        }
+        Ok(())
+    }
+
+    fn copy_manifest_mode(&self) -> ManifestMode {
+        #[cfg(target_os = "macos")]
+        if let Some(kind) = self.promised_kind {
+            return ManifestMode::FilePromise(kind);
+        }
+        ManifestMode::Copy
     }
 }
 
@@ -329,6 +349,8 @@ pub(super) fn transfer_plan(
                     covered: item.covered,
                     local_move_source,
                     replacement: None,
+                    #[cfg(target_os = "macos")]
+                    promised_kind: None,
                 }
             })
             .collect());
@@ -859,6 +881,34 @@ pub(super) fn copy_item(
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PromiseKind {
+    File,
+    Directory,
+}
+
+#[cfg(target_os = "macos")]
+impl PromiseKind {
+    fn verify(
+        self,
+        source: &Location,
+        metadata: Option<&EntryMetadata>,
+    ) -> Result<(), TransferError> {
+        use crate::file_error::FilePromiseError;
+
+        let metadata = metadata.ok_or_else(|| FilePromiseError::SourceMissing(source.clone()))?;
+        let matches = match self {
+            Self::File => metadata.is_file(),
+            Self::Directory => metadata.is_directory(),
+        };
+        if !matches {
+            return Err(FilePromiseError::SourceTypeChanged(source.clone()).into());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum DropDelivery {
     Completed,
@@ -869,7 +919,7 @@ pub(crate) enum DropDelivery {
 pub(crate) fn copy_sftp_for_drop(
     source: &Location,
     destination: &Path,
-    directory: bool,
+    kind: PromiseKind,
     progress: &mut Progress,
 ) -> Result<DropDelivery, TransferError> {
     use crate::{file_error::FilePromiseError, i18n::text, result_history::Outcome};
@@ -888,20 +938,13 @@ pub(crate) fn copy_sftp_for_drop(
         if !destination.is_absolute() || destination.file_name().is_none() {
             return Err(FilePromiseError::InvalidDestination(destination.into()).into());
         }
-        let metadata = entry_metadata(source)?
-            .ok_or_else(|| FilePromiseError::SourceMissing(source.clone()))?;
-        let expected_type = if directory {
-            metadata.is_directory()
-        } else {
-            metadata.is_file()
-        };
-        if !expected_type {
-            return Err(FilePromiseError::SourceTypeChanged(source.clone()).into());
-        }
+        kind.verify(source, entry_metadata(source)?.as_ref())?;
         if entry_metadata(&target)?.is_some() {
             return Err(MutationError::DestinationExists(target).into());
         }
-        let item = TransferItem::new(source.clone(), source.clone(), target);
+        progress.checkpoint()?;
+        let mut item = TransferItem::new(source.clone(), source.clone(), target);
+        item.promised_kind = Some(kind);
         copy_item_cancellable(&item, None, progress, MetadataMode::Final, || {
             committed = true
         })
@@ -957,14 +1000,17 @@ pub(super) fn copy_item_cancellable(
         return copy_to_smb(item, progress, published);
     }
     #[cfg(target_os = "macos")]
-    if let Some(directory) = progress.resume_directory.clone()
-        && let Some(metadata) = entry_metadata(&item.source)?
-    {
-        if metadata.is_file() {
-            return super::resume_copy::copy(item, expected, &directory, progress, published);
-        }
-        if metadata.is_directory() && expected.is_none() {
-            return super::resume_copy::copy_folder(item, &directory, progress, published);
+    if let Some(directory) = progress.resume_directory.clone() {
+        let metadata = entry_metadata(&item.source)?;
+        // Route from the same observation used to check the promised type.
+        item.verify_promised_kind(metadata.as_ref())?;
+        if let Some(metadata) = metadata {
+            if metadata.is_file() {
+                return super::resume_copy::copy(item, expected, &directory, progress, published);
+            }
+            if metadata.is_directory() && expected.is_none() {
+                return super::resume_copy::copy_folder(item, &directory, progress, published);
+            }
         }
     }
     if let (Some(source), Some(target)) = (item.source.local(), item.target.local()) {
@@ -1013,7 +1059,9 @@ fn copy_to_smb(
     let cancel = progress.cancellation();
     progress.checkpoint()?;
     let source_changed = || ScanError::FileChanged(item.source.clone());
-    let metadata = entry_metadata(&item.source)?.ok_or_else(source_changed)?;
+    let metadata = entry_metadata(&item.source)?;
+    item.verify_promised_kind(metadata.as_ref())?;
+    let metadata = metadata.ok_or_else(source_changed)?;
     if !metadata.is_file() {
         return Err(MutationError::SmbSourceNotRegular(item.source.clone()).into());
     }
@@ -1190,8 +1238,11 @@ fn copy_transfer(
     progress.checkpoint()?;
     let cancel = progress.cancellation();
     let scan = cancel.clone().pausable_scan();
-    let manifest =
-        TransferSourceManifest::capture_observed(&item.source, &scan, &mut |source, error| {
+    let manifest = TransferSourceManifest::capture_for(
+        &item.source,
+        &scan,
+        item.copy_manifest_mode(),
+        &mut |source, error| {
             if let Some(error) = error {
                 progress.results.staged(
                     source,
@@ -1203,7 +1254,8 @@ fn copy_transfer(
                     .results
                     .capturing(&item.source, &item.target, source);
             }
-        })?;
+        },
+    )?;
     progress.results.captured();
     let source = manifest
         .entries
@@ -1956,8 +2008,23 @@ pub(super) struct TransferSourceManifest {
 enum ManifestMode {
     Copy,
     #[cfg(target_os = "macos")]
+    FilePromise(PromiseKind),
+    #[cfg(target_os = "macos")]
     NativeCopy,
     Move,
+}
+
+impl ManifestMode {
+    fn uses_native_names(self) -> bool {
+        match self {
+            Self::Copy => false,
+            #[cfg(target_os = "macos")]
+            Self::FilePromise(_) => false,
+            #[cfg(target_os = "macos")]
+            Self::NativeCopy => true,
+            Self::Move => true,
+        }
+    }
 }
 
 pub(super) const MAX_MOVE_JOURNAL_ENTRIES: usize = 100_000;
@@ -1973,15 +2040,7 @@ impl TransferSourceManifest {
         source: &Location,
         cancel: &Cancellation,
     ) -> Result<Self, TransferError> {
-        Self::capture_observed(source, cancel, &mut |_, _| {})
-    }
-
-    fn capture_observed(
-        source: &Location,
-        cancel: &Cancellation,
-        observe: &mut impl FnMut(&Location, Option<&TransferError>),
-    ) -> Result<Self, TransferError> {
-        Self::capture_for(source, cancel, ManifestMode::Copy, observe)
+        Self::capture_for(source, cancel, ManifestMode::Copy, &mut |_, _| {})
     }
 
     pub(super) fn capture_move_observed(
@@ -2053,8 +2112,14 @@ impl TransferSourceManifest {
         if depth > MAX_TREE_DEPTH {
             return Err(crate::i18n::text!("Слишком большая глубина папок (более 128)").into());
         }
-        let metadata =
-            entry_metadata(source)?.ok_or_else(|| MutationError::SourceChanged(source.clone()))?;
+        let metadata = entry_metadata(source)?;
+        #[cfg(target_os = "macos")]
+        if depth == 0
+            && let ManifestMode::FilePromise(kind) = self.mode
+        {
+            kind.verify(source, metadata.as_ref())?;
+        }
+        let metadata = metadata.ok_or_else(|| MutationError::SourceChanged(source.clone()))?;
         let (is_dir, is_file) = match &metadata {
             EntryMetadata::Local(meta) => {
                 meta.modified()
@@ -2070,7 +2135,7 @@ impl TransferSourceManifest {
                 (stat.is_dir(), stat.is_file())
             }
         };
-        let native_names = self.mode != ManifestMode::Copy;
+        let native_names = self.mode.uses_native_names();
         if !native_names && !is_dir && !is_file {
             return Err(crate::tr_format!(
                 "SFTP copying of links and special files is unavailable: {source}",
@@ -2109,7 +2174,7 @@ impl TransferSourceManifest {
     ) -> Result<(), TransferError> {
         // Revisit early files too; parent mtime does not track child contents.
         for (source, entry) in &self.entries {
-            if let Err(error) = entry.verify(source, cancel, self.mode != ManifestMode::Copy) {
+            if let Err(error) = entry.verify(source, cancel, self.mode.uses_native_names()) {
                 failed(source, &error);
                 return Err(error);
             }

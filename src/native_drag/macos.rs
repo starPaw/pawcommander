@@ -1,4 +1,5 @@
-use super::file_promises::{FilePromises, PromiseKind, PromiseRequest};
+use super::file_promises::{FilePromises, PromiseRequest};
+use super::PromiseKind;
 #[cfg(test)]
 use crate::test_ui::ContextExt as _;
 use crate::{drag_drop::DragFiles, vfs::Location};

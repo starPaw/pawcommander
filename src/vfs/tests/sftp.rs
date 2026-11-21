@@ -264,7 +264,7 @@ fn check_promised_sftp_download(local_root: &Location, remote_root: &Location) {
     use crate::{
         file_error::{Failure, FilePromiseError, MutationError},
         result_history::Outcome,
-        vfs::{copy_sftp_for_drop, resume_copy, DropDelivery},
+        vfs::{copy_sftp_for_drop, resume_copy, DropDelivery, PromiseKind},
     };
 
     let output = local_root.join("receiving app");
@@ -278,7 +278,7 @@ fn check_promised_sftp_download(local_root: &Location, remote_root: &Location) {
     let mut progress = Progress::default();
     progress.resume_directory = Some(recovery.clone());
     assert_eq!(
-        copy_sftp_for_drop(&source, target.path(), false, &mut progress).unwrap(),
+        copy_sftp_for_drop(&source, target.path(), PromiseKind::File, &mut progress).unwrap(),
         DropDelivery::Completed
     );
     assert_eq!(fs::read(target.path()).unwrap(), bytes);
@@ -287,8 +287,13 @@ fn check_promised_sftp_download(local_root: &Location, remote_root: &Location) {
         fs::read(output.join("drag source.txt").path()).unwrap(),
         b"existing file"
     );
-    let error =
-        copy_sftp_for_drop(&source, target.path(), false, &mut Progress::default()).unwrap_err();
+    let error = copy_sftp_for_drop(
+        &source,
+        target.path(),
+        PromiseKind::File,
+        &mut Progress::default(),
+    )
+    .unwrap_err();
     assert!(
         matches!(error, TransferError::Failed(Failure::Mutation(reason))
         if matches!(reason.as_ref(), MutationError::DestinationExists(path) if path == &target))
@@ -301,8 +306,13 @@ fn check_promised_sftp_download(local_root: &Location, remote_root: &Location) {
     fs::write(source_folder.join("nested/child.txt").path(), bytes).unwrap();
     let missing = remote_root.join("missing drag source.txt");
     let mut progress = Progress::default();
-    let error =
-        copy_sftp_for_drop(&missing, target_folder.path(), false, &mut progress).unwrap_err();
+    let error = copy_sftp_for_drop(
+        &missing,
+        target_folder.path(),
+        PromiseKind::File,
+        &mut progress,
+    )
+    .unwrap_err();
     assert!(
         matches!(error, TransferError::Failed(Failure::FilePromise(reason))
         if matches!(reason.as_ref(), FilePromiseError::SourceMissing(path) if path == &missing))
@@ -312,8 +322,13 @@ fn check_promised_sftp_download(local_root: &Location, remote_root: &Location) {
         [(missing, Outcome::Failed)]
     );
     let mut progress = Progress::default();
-    let error =
-        copy_sftp_for_drop(&source_folder, target_folder.path(), false, &mut progress).unwrap_err();
+    let error = copy_sftp_for_drop(
+        &source_folder,
+        target_folder.path(),
+        PromiseKind::File,
+        &mut progress,
+    )
+    .unwrap_err();
     assert!(
         matches!(error, TransferError::Failed(Failure::FilePromise(reason))
         if matches!(reason.as_ref(), FilePromiseError::SourceTypeChanged(path) if path == &source_folder))
@@ -326,7 +341,13 @@ fn check_promised_sftp_download(local_root: &Location, remote_root: &Location) {
 
     let mut progress = Progress::default();
     progress.resume_directory = Some(recovery.clone());
-    copy_sftp_for_drop(&source_folder, target_folder.path(), true, &mut progress).unwrap();
+    copy_sftp_for_drop(
+        &source_folder,
+        target_folder.path(),
+        PromiseKind::Directory,
+        &mut progress,
+    )
+    .unwrap();
     assert!(target_folder.join("nested/empty").path().is_dir());
     assert_eq!(
         fs::read(target_folder.join("nested/child.txt").path()).unwrap(),
@@ -357,7 +378,7 @@ fn check_promised_sftp_download(local_root: &Location, remote_root: &Location) {
             })
     });
     assert!(matches!(
-        copy_sftp_for_drop(&source, target.path(), false, &mut progress),
+        copy_sftp_for_drop(&source, target.path(), PromiseKind::File, &mut progress),
         Err(TransferError::Cancelled)
     ));
     assert_eq!(
@@ -370,6 +391,84 @@ fn check_promised_sftp_download(local_root: &Location, remote_root: &Location) {
     assert!(offers.is_empty() && errors.is_empty());
     assert_eq!(fs::read_dir(output.path()).unwrap().count(), 3);
     println!("SFTP file and folder delivery honored exact names and preserved originals. Occupied destinations, vanished or changed items, and Stop returned distinct typed errors");
+}
+
+#[cfg(target_os = "macos")]
+fn check_changed_promised_source_after_preflight(local_root: &Location, remote_root: &Location) {
+    use crate::{
+        file_error::{Failure, FilePromiseError},
+        result_history::Outcome,
+        vfs::{copy_sftp_for_drop, resume_copy, PromiseKind},
+    };
+
+    let receiver = local_root.join("late promise receiver");
+    fs::create_dir(receiver.path()).unwrap();
+    let sentinel = receiver.join("previous file");
+    fs::write(sentinel.path(), b"existing destination bytes").unwrap();
+    let recovery = local_root.path().join("late-promise-receipts");
+    let bytes = b"original source bytes";
+    for (case, promise, resumable) in [
+        ("file-plain", PromiseKind::File, false),
+        ("folder-plain", PromiseKind::Directory, false),
+        ("file-resumable", PromiseKind::File, true),
+        ("folder-resumable", PromiseKind::Directory, true),
+    ] {
+        let source = remote_root.join(case);
+        let saved = remote_root.join(format!("{case}-original"));
+        let target = receiver.join(case);
+        if promise == PromiseKind::File {
+            fs::write(source.path(), bytes).unwrap();
+        } else {
+            fs::create_dir(source.path()).unwrap();
+            fs::write(source.join("child").path(), bytes).unwrap();
+        }
+        let mut progress = Progress::default();
+        progress.resume_directory = resumable.then(|| recovery.clone());
+        let mut checks = 0;
+        let source_path = source.path().to_owned();
+        let saved_path = saved.path().to_owned();
+        progress.cancellation().set_checkpoint(move || {
+            checks += 1;
+            if checks == 2 {
+                // Swap the source between the preflight check and copy dispatch.
+                fs::rename(&source_path, &saved_path).unwrap();
+                if promise == PromiseKind::File {
+                    fs::create_dir(&source_path).unwrap();
+                } else {
+                    fs::write(&source_path, b"replacement regular file").unwrap();
+                }
+            }
+            false
+        });
+        let error = copy_sftp_for_drop(&source, target.path(), promise, &mut progress).unwrap_err();
+        assert!(
+            matches!(error, TransferError::Failed(Failure::FilePromise(reason))
+            if matches!(reason.as_ref(), FilePromiseError::SourceTypeChanged(path) if path == &source))
+        );
+        assert_eq!(
+            progress.results.root_outcomes(),
+            [(source.clone(), Outcome::Failed)]
+        );
+        assert!(!target.path().exists());
+        if promise == PromiseKind::File {
+            assert!(source.path().is_dir());
+            assert_eq!(fs::read(saved.path()).unwrap(), bytes);
+        } else {
+            assert_eq!(
+                fs::read(source.path()).unwrap(),
+                b"replacement regular file"
+            );
+            assert_eq!(fs::read(saved.join("child").path()).unwrap(), bytes);
+        }
+    }
+    assert_eq!(
+        fs::read(sentinel.path()).unwrap(),
+        b"existing destination bytes"
+    );
+    assert_eq!(fs::read_dir(receiver.path()).unwrap().count(), 1);
+    let (offers, errors) = resume_copy::scan(&recovery);
+    assert!(offers.is_empty() && errors.is_empty());
+    println!("SFTP promises rejected both late kind changes in regular and resumable copies without writing to the receiver");
 }
 
 #[cfg(target_os = "macos")]
@@ -1936,6 +2035,7 @@ fn openssh_round_trip_and_host_verification() {
     #[cfg(target_os = "macos")]
     {
         check_promised_sftp_download(&local_root, &remote_root);
+        check_changed_promised_source_after_preflight(&local_root, &remote_root);
         crate::properties::check_sftp_properties(&remote_root);
         crate::vfs::file_templates::check_sftp(&remote_root);
         super::super::sync::sync_round_trip(&remote_root);
