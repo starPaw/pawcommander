@@ -15,7 +15,7 @@ use crate::file_error::{
     ResumeCheckError, ResumeCheckProblem, ResumeRecordEvent, ResumeRole, SyncError,
 };
 use crate::operations::TransferError;
-use crate::result_history::{HistoryError, HistoryOpenProblem};
+use crate::result_history::{HistoryError, HistoryOpenProblem, HistorySaveProblem};
 use crate::vfs::{DeletionFailure, TransferFailure};
 
 pub(crate) fn file_error(error: &TransferError) -> String {
@@ -263,11 +263,7 @@ pub(crate) fn history_error(error: &HistoryError) -> String {
             error = source
         ),
         HistoryError::Open { path, problem } => history_open_problem(path, problem),
-        HistoryError::Save { path, source } => crate::tr_format!(
-            "Could not save result history {path} ({error}).",
-            path = path.display(),
-            error = source
-        ),
+        HistoryError::Save { path, problem } => history_save_problem(path, problem),
     }
 }
 
@@ -325,6 +321,62 @@ fn history_open_problem(path: &std::path::Path, problem: &HistoryOpenProblem) ->
             "Unsupported version {version} of result history {path}.",
             version = version,
             path = path
+        ),
+    }
+}
+
+fn history_save_problem(path: &std::path::Path, problem: &HistorySaveProblem) -> String {
+    use HistorySaveProblem::*;
+
+    let path = path.display();
+    match problem {
+        MissingParent => crate::tr_format!(
+            "Result history {path} has no containing directory.",
+            path = path
+        ),
+        Serialize(source) => crate::tr_format!(
+            "Could not encode result history {path} ({error}).",
+            path = path,
+            error = source
+        ),
+        SizeLimit(limit) => crate::tr_format!(
+            "Result history {path} exceeds the {limit}-byte limit.",
+            path = path,
+            limit = limit
+        ),
+        CreateTemporary(source) => crate::tr_format!(
+            "Could not create a temporary file for result history {path} ({error}).",
+            path = path,
+            error = source
+        ),
+        WriteTemporary(source) => crate::tr_format!(
+            "Could not write the temporary file for result history {path} ({error}).",
+            path = path,
+            error = source
+        ),
+        SyncTemporary(source) => crate::tr_format!(
+            "Could not sync the temporary file for result history {path} ({error}).",
+            path = path,
+            error = source
+        ),
+        CheckLock(source) => crate::tr_format!(
+            "Could not verify the result history lock {path} ({error}).",
+            path = path,
+            error = source
+        ),
+        LockChanged => crate::tr_format!(
+            "The result history lock {path} changed before saving.",
+            path = path
+        ),
+        Replace(source) => crate::tr_format!(
+            "Could not replace result history {path} ({error}).",
+            path = path,
+            error = source
+        ),
+        ConfirmReplacement(source) => crate::tr_format!(
+            "Result history {path} was replaced. Could not confirm the change on disk ({error}).",
+            path = path,
+            error = source
         ),
     }
 }

@@ -1318,8 +1318,6 @@ catalog! {
     "Позже" => ("Later", "Později"),
     "Удалить из очереди" => ("Remove from queue", "Odebrat z fronty"),
     "Повторить запуск очереди" => ("Retry queue", "Zkusit spustit frontu znovu"),
-    "История не сохранена" => ("History not saved", "Historie nebyla uložena"),
-    "История не сохранена. Проверьте файл журнала и доступ к нему." => ("History not saved. Check the history file and its permissions.", "Historie nebyla uložena. Zkontrolujte soubor historie a jeho oprávnění."),
     "Копии раскрываются по манифесту; остальные результаты могут относиться только к выбранному объекту." => ("Copies expand from their manifest; other results may cover only the selected item.", "Kopie lze rozbalit podle manifestu. Ostatní výsledky mohou zahrnovat jen vybranou položku."),
     "До 100 операций и 100 000 строк; объём истории ограничен. Неполные записи помечены." => ("Up to 100 operations and 100,000 rows; history size is bounded. Incomplete records are marked.", "Nejvýše 100 operací a 100 000 řádků. Velikost historie je omezená. Neúplné záznamy jsou označené."),
     "Только выбранный объект; потомки не перечислены" => ("Selected item only; descendants not enumerated", "Pouze vybraná položka. Vnořené položky nebyly vypsány."),

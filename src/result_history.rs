@@ -1,7 +1,7 @@
 //! Completed operation results. Disk access and serialization belong to workers.
 use crate::file_error::MetadataWarning;
 use crate::operations::TransferError;
-use crate::recovery::same_owned_marker;
+use crate::recovery::{same_owned_marker, sync_directory};
 #[cfg(test)]
 use crate::test_ui::ContextExt as _;
 use crate::vfs::Location;
@@ -790,7 +790,7 @@ pub(crate) enum HistoryError {
     },
     Save {
         path: PathBuf,
-        source: io::Error,
+        problem: HistorySaveProblem,
     },
 }
 
@@ -807,6 +807,36 @@ pub(crate) enum HistoryOpenProblem {
     SizeLimit(u64),
     Json(serde_json::Error),
     UnsupportedVersion(u32),
+}
+
+#[derive(Debug)]
+pub(crate) enum HistorySaveProblem {
+    MissingParent,
+    Serialize(serde_json::Error),
+    SizeLimit(u64),
+    CreateTemporary(io::Error),
+    WriteTemporary(io::Error),
+    SyncTemporary(io::Error),
+    CheckLock(io::Error),
+    LockChanged,
+    Replace(io::Error),
+    ConfirmReplacement(io::Error),
+}
+
+impl HistoryError {
+    fn lost_lock(&self) -> bool {
+        match self {
+            Self::Save {
+                problem: HistorySaveProblem::LockChanged,
+                ..
+            } => true,
+            Self::Save {
+                problem: HistorySaveProblem::CheckLock(source),
+                ..
+            } => source.kind() == io::ErrorKind::NotFound,
+            _ => false,
+        }
+    }
 }
 
 struct Append {
@@ -829,8 +859,8 @@ enum HistoryDelivery {
 pub(crate) struct HistorySender(HistoryDelivery);
 
 impl HistorySender {
-    /// Wait for the save attempt and report whether the record reached disk.
-    /// Recovery markers must remain available when persistence fails.
+    /// Acknowledge only after the new history has been saved and confirmed.
+    /// Recovery markers must stay available when confirmation fails.
     pub fn append(&self, record: Record) -> Result<(), Arc<HistoryError>> {
         match &self.0 {
             HistoryDelivery::Unavailable => Err(Arc::new(HistoryError::Unavailable)),
@@ -852,7 +882,7 @@ pub(crate) struct History {
     sender: HistorySender,
     updates: Option<Receiver<Update>>,
     records: Vec<Record>,
-    pub error: Option<String>,
+    pub error: Option<Arc<HistoryError>>,
     path: Option<PathBuf>,
     loaded: bool,
     detail: Option<ItemResult>,
@@ -888,7 +918,7 @@ impl History {
                 ctx,
             ),
             None => Self {
-                error: Some(crate::i18n::history_error(&HistoryError::Unavailable)),
+                error: Some(Arc::new(HistoryError::Unavailable)),
                 ..Self::default()
             },
         }
@@ -903,7 +933,7 @@ impl History {
             .name("pawcommander-result-history".into())
             .spawn(move || {
                 let opened = open_store(&worker_path);
-                let (mut saved, lock, mut error) = match opened {
+                let (mut saved, mut lock, mut error) = match opened {
                     Ok((saved, lock)) => (saved, Some(lock), None),
                     Err(error) => (
                         Saved {
@@ -921,13 +951,12 @@ impl History {
                 ctx.request_repaint();
                 for request in requests {
                     saved.push(request.record);
-                    if lock.is_some() {
-                        error = save(&worker_path, &saved).err().map(|source| {
-                            Arc::new(HistoryError::Save {
-                                path: worker_path.clone(),
-                                source,
-                            })
-                        });
+                    if let Some(owned) = &lock {
+                        error = save(&worker_path, &saved, owned).err().map(Arc::new);
+                        if error.as_deref().is_some_and(HistoryError::lost_lock) {
+                            // Another writer may have published history under a different lock.
+                            lock = None;
+                        }
                     }
                     let _ = updates.send(Update {
                         records: saved.records.clone(),
@@ -955,7 +984,7 @@ impl History {
                     source,
                 });
                 Self {
-                    error: Some(crate::i18n::history_error(&error)),
+                    error: Some(error.clone()),
                     sender: HistorySender(HistoryDelivery::Failed(error)),
                     path: Some(path),
                     ..Self::default()
@@ -974,14 +1003,15 @@ impl History {
                 match updates.try_recv() {
                     Ok(update) => {
                         self.records = update.records;
-                        self.error = update.error.as_deref().map(crate::i18n::history_error);
+                        self.error = update.error;
                         self.loaded = true;
                     }
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
-                        self.error = self.path.as_ref().map(|path| {
-                            crate::i18n::history_error(&HistoryError::Disconnected(path.clone()))
-                        });
+                        self.error = self
+                            .path
+                            .as_ref()
+                            .map(|path| Arc::new(HistoryError::Disconnected(path.clone())));
                         break;
                     }
                 }
@@ -1042,13 +1072,9 @@ impl History {
                     ui.add(egui::Label::new(path.display().to_string()).selectable(true));
                 }
                 if let Some(error) = &self.error {
-                    ui.colored_label(
-                        ui.visuals().error_fg_color,
-                        crate::i18n::text!(
-                            "История не сохранена. Проверьте файл журнала и доступ к нему.",
-                        ),
-                    );
-                    ui.add(egui::Label::new(error).selectable(true));
+                    let message = egui::RichText::new(crate::i18n::history_error(error))
+                        .color(ui.visuals().error_fg_color);
+                    ui.add(egui::Label::new(message).selectable(true));
                 }
                 if self.records.is_empty() {
                     ui.label(if self.loaded {
@@ -1329,24 +1355,38 @@ fn read_history(path: &Path) -> Result<Saved, HistoryOpenProblem> {
     }
 }
 
-fn save(path: &Path, saved: &Saved) -> io::Result<()> {
-    let bytes = serde_json::to_vec(saved).map_err(io::Error::other)?;
+fn save(path: &Path, saved: &Saved, lock: &File) -> Result<(), HistoryError> {
+    use HistorySaveProblem::*;
+
+    let failure = |problem| HistoryError::Save {
+        path: path.to_owned(),
+        problem,
+    };
+    let bytes = serde_json::to_vec(saved).map_err(|source| failure(Serialize(source)))?;
     if bytes.len() as u64 > MAX_BYTES {
-        return Err(io::Error::other(
-            "History exceeds 32 MiB; existing file preserved",
-        ));
+        return Err(failure(SizeLimit(MAX_BYTES)));
     }
-    let parent = path
-        .parent()
-        .ok_or_else(|| io::Error::other("Missing history parent"))?;
-    let mut file = tempfile::NamedTempFile::new_in(parent)?;
-    file.write_all(&bytes)?;
-    file.as_file().sync_all()?;
-    file.persist(path).map_err(|error| error.error)?;
+    let parent = path.parent().ok_or_else(|| failure(MissingParent))?;
+    let mut file = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|source| failure(CreateTemporary(source)))?;
+    file.write_all(&bytes)
+        .map_err(|source| failure(WriteTemporary(source)))?;
+    file.as_file()
+        .sync_all()
+        .map_err(|source| failure(SyncTemporary(source)))?;
+
+    let lock_path = path.with_extension("lock");
+    let lock_error = |problem| HistoryError::Save {
+        path: lock_path.clone(),
+        problem,
+    };
+    if !same_owned_marker(lock, &lock_path).map_err(|source| lock_error(CheckLock(source)))? {
+        return Err(lock_error(LockChanged));
+    }
+    file.persist(path)
+        .map_err(|error| failure(Replace(error.error)))?;
     // Recovery may forget its pending marker only after the rename is durable.
-    #[cfg(unix)]
-    File::open(parent)?.sync_all()?;
-    Ok(())
+    sync_directory(parent).map_err(|source| failure(ConfirmReplacement(source)))
 }
 
 #[cfg(test)]
@@ -1622,7 +1662,7 @@ mod tests {
             });
         }
         saved.push(item);
-        save(&path, &saved).unwrap();
+        save(&path, &saved, &lock).unwrap();
         drop(lock);
         let (reopened, _lock) = open_store(&path).unwrap();
         assert_eq!(reopened.records[0].items.len(), 7);
@@ -1691,7 +1731,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("history.json");
         let (saved, lock) = open_store(&path).unwrap();
-        save(&path, &saved).unwrap();
+        save(&path, &saved, &lock).unwrap();
         let baseline = fs::read(&path).unwrap();
         let ctx = egui::Context::default();
         let mut history = History::open(path.clone(), &ctx);
@@ -1781,12 +1821,16 @@ mod tests {
     fn oversized_snapshot_preserves_previous_file_and_removes_tempfile() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("history.json");
-        let (mut saved, _lock) = open_store(&path).unwrap();
+        let (mut saved, lock) = open_store(&path).unwrap();
         saved.push(record());
-        save(&path, &saved).unwrap();
+        save(&path, &saved, &lock).unwrap();
         let baseline = fs::read(&path).unwrap();
         saved.records[0].message = "x".repeat(MAX_BYTES as usize);
-        assert!(save(&path, &saved).is_err());
+        assert!(matches!(
+            save(&path, &saved, &lock),
+            Err(HistoryError::Save { path: failed, problem: HistorySaveProblem::SizeLimit(limit) })
+                if failed == path && limit == MAX_BYTES
+        ));
         assert_eq!(fs::read(&path).unwrap(), baseline);
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
     }
@@ -2116,11 +2160,16 @@ mod tests {
         assert!(history.sender().append(record()).is_ok());
         fs::remove_file(&path).unwrap();
         fs::create_dir(&path).unwrap();
+        let existing = path.join("existing");
+        fs::write(&existing, b"preserve the destination").unwrap();
         let error = history.sender().append(record()).unwrap_err();
-        assert!(
-            matches!(&*error, HistoryError::Save { path: failed, source }
-            if failed == &path && source.raw_os_error().is_some())
-        );
+        assert!(matches!(
+            &*error,
+            HistoryError::Save { path: failed, problem: HistorySaveProblem::Replace(source) }
+                if failed == &path && source.raw_os_error().is_some()
+        ));
+        assert_eq!(fs::read(&existing).unwrap(), b"preserve the destination");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
         history.poll();
         assert!(history.error.is_some());
         assert_eq!(
@@ -2128,6 +2177,7 @@ mod tests {
             2,
             "failed save stays reviewable in memory"
         );
+        fs::remove_file(existing).unwrap();
         fs::remove_dir(&path).unwrap();
         assert!(history.sender().append(record()).is_ok());
         history.poll();
@@ -2138,6 +2188,44 @@ mod tests {
             3,
             "successful retry persists earlier in-memory results"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn history_worker_preserves_newer_results_after_losing_its_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.json");
+        let lock = path.with_extension("lock");
+        let retired = dir.path().join("retired.lock");
+        let ctx = egui::Context::default();
+        let mut original = History::open(path.clone(), &ctx);
+        original.sender().append(record()).unwrap();
+
+        fs::rename(&lock, &retired).unwrap();
+        let replacement = History::open(path.clone(), &ctx);
+        let mut newer = record();
+        newer.message = "committed by the other writer".into();
+        replacement.sender().append(newer).unwrap();
+        let committed = fs::read(&path).unwrap();
+        let contents: Saved = serde_json::from_slice(&committed).unwrap();
+        assert_eq!(contents.records[1].message, "committed by the other writer");
+
+        let error = original.sender().append(record()).unwrap_err();
+        assert!(matches!(
+            &*error,
+            HistoryError::Save { path: changed, problem: HistorySaveProblem::LockChanged }
+                if changed == &lock
+        ));
+        assert_eq!(fs::read(&path).unwrap(), committed);
+
+        drop(replacement);
+        fs::rename(&retired, &lock).unwrap();
+        let retry = original.sender().append(record()).unwrap_err();
+        assert!(Arc::ptr_eq(&error, &retry));
+        original.poll();
+        assert_eq!(original.records.len(), 3);
+        assert_eq!(fs::read(path).unwrap(), committed);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
     }
 
     #[test]
