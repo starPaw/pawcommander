@@ -82,7 +82,7 @@ pub(super) enum Action {
     CreateChecksumManifest,
     VerifyChecksumManifest,
     CompareFolders(Option<egui::Id>),
-    CompareFiles,
+    CompareFiles(Option<egui::Id>),
     #[cfg(target_os = "macos")]
     SyncFolders(Option<egui::Id>),
     AddToArchive,
@@ -705,7 +705,7 @@ impl PawCommander {
             Action::CompareFolders(return_focus) => {
                 self.open_directory_comparison(return_focus, ctx)
             }
-            Action::CompareFiles => self.open_file_comparison(ctx),
+            Action::CompareFiles(return_focus) => self.open_file_comparison(return_focus, ctx),
             #[cfg(target_os = "macos")]
             Action::SyncFolders(return_focus) => self.open_folder_sync(return_focus, ctx),
             Action::Trash if !self.conflict_open() => {
