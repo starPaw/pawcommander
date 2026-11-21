@@ -42,7 +42,7 @@ impl Plan {
             if matches!(error, TransferError::Cancelled) {
                 progress.results.cancelled = true;
             }
-            return Err(error.to_string());
+            return Err(crate::i18n::file_error(&error));
         }
         let completed = self.roots.len();
         for (completed, root) in self.roots.into_iter().enumerate() {
@@ -83,7 +83,7 @@ impl Plan {
                 &source,
                 Some(target.display()),
                 outcome,
-                result.as_ref().err().map(ToString::to_string),
+                result.as_ref().err().map(crate::i18n::file_error),
             );
             if let Err(error) = result {
                 if matches!(error, TransferError::Cancelled) {
@@ -92,7 +92,7 @@ impl Plan {
                 return Err(crate::tr_format!(
                     "Completed items: {completed}. {error}",
                     completed = completed,
-                    error = error
+                    error = crate::i18n::file_error(&error)
                 ));
             }
         }
@@ -468,7 +468,7 @@ fn stale_target(target: &Location) -> TransferError {
 fn unconfirmed(target: &Location, error: TransferError) -> TransferError {
     TransferError::PublicationUnconfirmed(crate::tr_format!(
         "Inspect the possibly incomplete copy at {target}. The source was preserved. {error}",
-        error = error,
+        error = crate::i18n::file_error(&error),
         target = target
     ))
 }

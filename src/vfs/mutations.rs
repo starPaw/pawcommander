@@ -1,33 +1,41 @@
 use super::location::{normalize_remote, validate_name, Location};
 use super::sftp::remote;
+use super::transfer::rename_for_publication;
 use super::{err, MAX_TREE_DEPTH};
-use crate::operations::Progress;
+use crate::file_error::MutationError;
+use crate::operations::{Progress, TransferError};
 use crate::{archive, fs_ops};
-use ssh2::{RenameFlags, Sftp};
+use ssh2::Sftp;
 
-pub fn create_directory(parent: &Location, name: &str) -> Result<Location, String> {
-    validate_name(name).map_err(|error| crate::i18n::path_error(&error))?;
+pub fn create_directory(parent: &Location, name: &str) -> Result<Location, TransferError> {
+    validate_name(name)?;
     if let Some(path) = parent.local() {
         return fs_ops::create_directory(path, name).map(Location::Local);
     }
+    if parent.is_archive() {
+        return Err(MutationError::ReadOnlyArchive(parent.clone()).into());
+    }
     let target = parent.join(name);
-    remote(parent)?.mkdir(target.path(), 0o755).map_err(err)?;
+    remote(parent)?
+        .mkdir(target.path(), 0o755)
+        .map_err(|source| MutationError::CreateSftp {
+            destination: target.clone(),
+            source,
+        })?;
     Ok(target)
 }
 
-pub fn rename_entry(source: &Location, name: &str) -> Result<Location, String> {
-    validate_name(name).map_err(|error| crate::i18n::path_error(&error))?;
+pub fn rename_entry(source: &Location, name: &str) -> Result<Location, TransferError> {
+    validate_name(name)?;
     if let Some(path) = source.local() {
         return fs_ops::rename_entry(path, name).map(Location::Local);
     }
     let target = source
         .parent()
-        .ok_or(crate::i18n::text!("Нельзя переименовать корень"))?
+        .ok_or_else(|| MutationError::RenameRoot(source.clone()))?
         .join(name);
     if &target != source {
-        remote(source)?
-            .rename(source.path(), target.path(), Some(RenameFlags::empty()))
-            .map_err(err)?;
+        rename_for_publication(source, &target)?;
     }
     Ok(target)
 }

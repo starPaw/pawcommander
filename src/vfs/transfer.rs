@@ -2,7 +2,7 @@ use super::copy_metadata::{self, Mode as MetadataMode};
 use super::location::{validate_name, Location};
 use super::mutations::remove_remote_tree;
 use super::sftp::remote;
-use super::{err, TransferSummary, MAX_TREE_DEPTH};
+use super::{err, TransferFailure, TransferSummary, MAX_TREE_DEPTH};
 use crate::conflict::{Answer, Conflict, Decision, EntryDetails};
 use crate::fs_ops::TransferKind;
 use crate::operations::{Cancellation, CopyReader, Progress, TransferError};
@@ -340,9 +340,9 @@ pub fn transfer_with_conflicts(
     destination: &Location,
     kind: TransferKind,
     progress: &mut Progress,
-    decide: impl FnMut(Conflict) -> Result<Answer, String>,
+    decide: impl FnMut(Conflict) -> Result<Answer, TransferError>,
     moved: impl FnMut(&Location, &[PathBuf]),
-) -> Result<TransferSummary, String> {
+) -> Result<TransferSummary, TransferFailure> {
     progress.results.plan(sources.iter().map(|source| {
         let target = source
             .path()
@@ -370,30 +370,7 @@ pub fn transfer_with_conflicts(
             summary.cancelled = true;
             Ok(summary)
         }
-        Err(TransferError::PublicationUnconfirmed(error)) => {
-            let (completed, skipped, remaining) =
-                (summary.completed, summary.skipped, summary.remaining.len());
-            Err(crate::tr_format!(
-                "{error}. Server publication is unconfirmed. Completed: {completed}. Skipped: {skipped}. Remaining: {remaining}. Inspect the source and destination before retrying.", completed = completed, error = error, remaining = remaining, skipped = skipped
-            ))
-        }
-        Err(error @ TransferError::Failed(_)) if summary.preparing => {
-            Err(crate::i18n::file_error(&error))
-        }
-        Err(error @ TransferError::Failed(_)) => {
-            let error = crate::i18n::file_error(&error);
-            let (completed, skipped, remaining) =
-                (summary.completed, summary.skipped, summary.remaining.len());
-            let paths = summary
-                .remaining
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("; ");
-            Err(crate::tr_format!(
-                "{error}. Completed: {completed}. Skipped: {skipped}. Remaining: {remaining}: {paths}. Refresh both folders before retrying; check any recovery instructions.", completed = completed, error = error, paths = paths, remaining = remaining, skipped = skipped
-            ))
-        }
+        Err(error) => Err(TransferFailure { error, summary }),
     }
 }
 
@@ -402,7 +379,7 @@ pub(super) fn transfer_run(
     destination: &Location,
     kind: TransferKind,
     progress: &mut Progress,
-    mut decide: impl FnMut(Conflict) -> Result<Answer, String>,
+    mut decide: impl FnMut(Conflict) -> Result<Answer, TransferError>,
     mut moved: impl FnMut(&Location, &[PathBuf]),
     summary: &mut TransferSummary,
 ) -> Result<(), TransferError> {
@@ -703,14 +680,18 @@ pub(super) fn transfer_run(
         } else {
             outcome
         };
-        let mut reason = result.as_ref().err().map(ToString::to_string).or_else(|| {
-            history_warning.map(|error| {
-                crate::tr_format!(
-                    "Move completed, but per-item history is incomplete: {error}",
-                    error = error
-                )
-            })
-        });
+        let mut reason = result
+            .as_ref()
+            .err()
+            .map(crate::i18n::file_error)
+            .or_else(|| {
+                history_warning.map(|error| {
+                    crate::tr_format!(
+                        "Move completed, but per-item history is incomplete: {error}",
+                        error = error
+                    )
+                })
+            });
         if metadata_warning {
             let warning = crate::i18n::text!(
                 "Даты или права доступа сохранены частично. Подробности указаны в строках журнала.",
@@ -773,11 +754,13 @@ pub fn transfer(
             Err(crate::tr_format!(
                 "“{}” already exists. Overwriting is disabled.",
                 conflict.target.location
-            ))
+            )
+            .into())
         },
         |_, _| {},
     )
     .map(|report| report.completed)
+    .map_err(|failure| crate::i18n::transfer_failure(&failure))
 }
 
 pub(super) fn canonical(location: &Location) -> Result<PathBuf, String> {
@@ -795,7 +778,7 @@ pub(super) fn copy_item(
     progress: &mut Progress,
 ) -> Result<(), String> {
     copy_item_cancellable(item, expected, progress, MetadataMode::Final, || {})
-        .map_err(|e| e.to_string())
+        .map_err(|error| crate::i18n::file_error(&error))
 }
 
 #[cfg(target_os = "macos")]
@@ -851,14 +834,18 @@ pub(crate) fn copy_sftp_for_drop(
         (_, false) if progress.partial_copy_retained => Outcome::PartialCopyRetained,
         _ => Outcome::Failed,
     };
-    let reason = result.as_ref().err().map(ToString::to_string).or_else(|| {
-        warning.then(|| {
-            text!(
+    let reason = result
+        .as_ref()
+        .err()
+        .map(crate::i18n::file_error)
+        .or_else(|| {
+            warning.then(|| {
+                text!(
                 "Даты или права доступа сохранены частично. Подробности указаны в строках журнала.",
             )
-            .into()
-        })
-    });
+                .into()
+            })
+        });
     progress.results.record(source, None, outcome, reason);
     if committed {
         Ok(if warning {
@@ -870,7 +857,7 @@ pub(crate) fn copy_sftp_for_drop(
     } else {
         result
             .map(|()| text!("Файлы переданы принимающему приложению").into())
-            .map_err(|error| error.to_string())
+            .map_err(|error| crate::i18n::file_error(&error))
     }
 }
 
@@ -1237,8 +1224,7 @@ pub(super) fn check_copy_space(
 
 pub(super) fn rename_without_replacing(source: &Location, target: &Location) -> Result<(), String> {
     if let (Some(source), Some(target)) = (source.local(), target.local()) {
-        fs_ops::rename_no_replace(source, target)
-            .map_err(|e| fs_ops::rename_error(source, target, e))
+        fs_ops::rename_with_context(source, target).map_err(|error| crate::i18n::file_error(&error))
     } else {
         remote(source)?
             .rename(source.path(), target.path(), Some(RenameFlags::empty()))
@@ -1250,7 +1236,9 @@ pub(super) fn rename_for_publication(
     source: &Location,
     target: &Location,
 ) -> Result<(), TransferError> {
-    if target.remote() {
+    if let (Some(source), Some(target)) = (source.local(), target.local()) {
+        fs_ops::rename_with_context(source, target)
+    } else if target.remote() {
         // A failed session lookup occurs before any mutation and remains a
         // definite failure. Only an issued rename can lose its server reply.
         remote(source)?
@@ -1687,7 +1675,7 @@ pub(super) fn staging_result_typed(
             let unconfirmed = matches!(result, Err(TransferError::PublicationUnconfirmed(_)));
             let outcome = result
                 .err()
-                .map(|error| error.to_string())
+                .map(|error| crate::i18n::file_error(&error))
                 .unwrap_or_else(|| {
                     crate::tr_format!("Item {target} was published", target = target)
                 });

@@ -561,7 +561,9 @@ fn queued_copy_waits_for_destination_creation_and_source_rename() {
     let held = hold_queue(&mut app);
     let parent: Location = root.path().to_path_buf().into();
     app.start_progress_job(&ctx, "create destination", move |_| {
-        fs_ops::create_directory(&parent, "created later").map(|path| path.display())
+        fs_ops::create_directory(&parent, "created later")
+            .map(|path| path.display())
+            .map_err(|error| crate::i18n::file_error(&error))
     });
     app.start_transfer(
         &ctx,
@@ -573,7 +575,9 @@ fn queued_copy_waits_for_destination_creation_and_source_rename() {
     );
     let rename_source: Location = source.clone().into();
     app.start_progress_job(&ctx, "rename source", move |_| {
-        fs_ops::rename_entry(&rename_source, "renamed.txt").map(|path| path.display())
+        fs_ops::rename_entry(&rename_source, "renamed.txt")
+            .map(|path| path.display())
+            .map_err(|error| crate::i18n::file_error(&error))
     });
     app.start_transfer(
         &ctx,

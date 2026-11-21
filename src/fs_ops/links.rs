@@ -80,7 +80,7 @@ pub(crate) fn create(
     if target.as_os_str().is_empty() {
         return Err(text!("Введите путь к цели ссылки").into());
     }
-    let directory = directory_path(directory)?;
+    let directory = directory_path(directory).map_err(|error| crate::i18n::file_error(&error))?;
     let destination = directory.join(name);
     progress.checkpoint().map_err(|error| error.to_string())?;
     let cleanup_warning = match kind {

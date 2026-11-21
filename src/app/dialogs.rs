@@ -987,10 +987,12 @@ impl PawCommander {
                         .plan(vec![(parent.clone(), Some(target.display()))]);
                     progress.results.begin(&parent);
                     progress.item(&parent.path().join(&name));
-                    fs_ops::create_directory(&parent, &name).map(|p| {
-                        progress.results.target(&parent, p.display());
-                        crate::tr_format!("Folder created: {}", p.display())
-                    })
+                    fs_ops::create_directory(&parent, &name)
+                        .map(|p| {
+                            progress.results.target(&parent, p.display());
+                            crate::tr_format!("Folder created: {}", p.display())
+                        })
+                        .map_err(|error| crate::i18n::file_error(&error))
                 },
             ),
             Dialog::Rename { source, name } => self.start_described_job(
@@ -1002,9 +1004,13 @@ impl PawCommander {
                     source,
                     name
                 ),
-                move |progress| {
-                    fs_ops::rename_with_undo(&source, &name, progress)
-                        .map(|p| crate::tr_format!("Renamed: {}", p.display()))
+                move |progress| match fs_ops::rename_with_undo(&source, &name, progress) {
+                    Ok(path) => Ok(crate::tr_format!("Renamed: {}", path.display())),
+                    Err(error @ crate::operations::TransferError::Cancelled) => {
+                        progress.results.cancelled = true;
+                        Ok(crate::i18n::file_error(&error))
+                    }
+                    Err(error) => Err(crate::i18n::file_error(&error)),
                 },
             ),
             Dialog::BatchRename(editor) => {

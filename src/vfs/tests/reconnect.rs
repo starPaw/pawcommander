@@ -63,7 +63,13 @@ fn interrupt_rename(
         |_, _| panic!("a move without its reply cannot report completion"),
     );
     assert_eq!(disconnect.join().unwrap(), expected_marker);
-    assert!(operation.is_err(), "the client received the withheld reply");
+    let failure = operation.expect_err("the client received the withheld reply");
+    assert!(matches!(
+        failure.error,
+        TransferError::PublicationUnconfirmed(_)
+    ));
+    assert_eq!(failure.summary.completed, 0);
+    assert_eq!(failure.summary.remaining, std::slice::from_ref(source));
     assert_eq!(
         progress.results.root_outcomes(),
         [(source.clone(), Outcome::PublicationUnconfirmed)]

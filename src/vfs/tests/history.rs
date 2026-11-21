@@ -105,7 +105,13 @@ fn result_history_skip_preserves_selected_alias_after_later_cancel_or_failure() 
         );
         assert_eq!(result.is_ok(), cancelled);
         let record = std::mem::take(&mut progress.results)
-            .finish("copy".into(), 0, &result.map(|_| "Stopped".into()))
+            .finish(
+                "copy".into(),
+                0,
+                &result
+                    .map(|_| "Stopped".into())
+                    .map_err(|failure| crate::i18n::transfer_failure(&failure)),
+            )
             .unwrap();
         assert_eq!(record.items.len(), 3);
         assert_eq!(record.items[0].outcome, Outcome::Skipped);
@@ -178,9 +184,19 @@ fn copy_hash_failure_keeps_partial_batch_and_nested_history_truthful() {
         |_| panic!("no conflict"),
         |_, _| panic!("a copy must not consume cut sources"),
     );
-    assert!(result.as_ref().unwrap_err().contains("SHA-256"));
+    let failure = result.as_ref().unwrap_err();
+    assert!(matches!(failure.error, TransferError::Failed(_)));
+    assert_eq!(failure.summary.completed, 1);
+    assert_eq!(failure.summary.remaining, [source.clone(), pending.clone()]);
+    assert!(crate::i18n::transfer_failure(failure).contains("SHA-256"));
     let record = std::mem::take(&mut progress.results)
-        .finish("copy".into(), 0, &result.map(|_| "Copied".into()))
+        .finish(
+            "copy".into(),
+            0,
+            &result
+                .map(|_| "Copied".into())
+                .map_err(|failure| crate::i18n::transfer_failure(&failure)),
+        )
         .unwrap();
     let row = |source: &Location| {
         record
@@ -570,7 +586,13 @@ fn nested_result_history_keeps_private_copies_unconfirmed_after_later_failure() 
     );
     assert!(result.is_err());
     let record = std::mem::take(&mut progress.results)
-        .finish("copy".into(), 0, &result.map(|_| "Copied".into()))
+        .finish(
+            "copy".into(),
+            0,
+            &result
+                .map(|_| "Copied".into())
+                .map_err(|failure| crate::i18n::transfer_failure(&failure)),
+        )
         .unwrap();
     let row = |name: &str| {
         record
@@ -758,7 +780,13 @@ fn result_history_retains_partial_failure_and_actual_keep_both_target() {
     );
     assert!(result.is_err());
     let record = std::mem::take(&mut progress.results)
-        .finish("copy".into(), 0, &result.map(|_| String::new()))
+        .finish(
+            "copy".into(),
+            0,
+            &result
+                .map(|_| String::new())
+                .map_err(|failure| crate::i18n::transfer_failure(&failure)),
+        )
         .unwrap();
     assert_eq!(
         record

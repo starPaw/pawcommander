@@ -228,7 +228,7 @@ impl NewFile {
                 } else {
                     Outcome::Failed
                 };
-                let message = error.to_string();
+                let message = crate::i18n::file_error(&error);
                 progress
                     .results
                     .record(&target, None, outcome, Some(message.clone()));

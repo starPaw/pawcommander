@@ -3,7 +3,7 @@
 
 mod bandwidth;
 
-use crate::file_error::{Failure, ListingError, PathError};
+use crate::file_error::{Failure, ListingError, MutationError, PathError};
 use crate::vfs::{Endpoint, Location};
 use bandwidth::Pacer;
 pub(crate) use bandwidth::TransferLimits;
@@ -230,6 +230,12 @@ impl From<PathError> for TransferError {
 impl From<ListingError> for TransferError {
     fn from(error: ListingError) -> Self {
         Self::Failed(Failure::Listing(Box::new(error)))
+    }
+}
+
+impl From<MutationError> for TransferError {
+    fn from(error: MutationError) -> Self {
+        Self::Failed(Failure::Mutation(Box::new(error)))
     }
 }
 

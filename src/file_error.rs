@@ -1,3 +1,4 @@
+use crate::vfs::Location;
 use std::{error::Error, fmt, io, path::PathBuf, str::Utf8Error};
 
 #[derive(Debug)]
@@ -6,15 +7,18 @@ pub(crate) enum Failure {
     Io { source: io::Error, message: String },
     Path(PathError),
     Listing(Box<ListingError>),
+    ConflictClosed,
+    Mutation(Box<MutationError>),
 }
 
 impl Failure {
     pub(crate) fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Message(_) => None,
+            Self::Message(_) | Self::ConflictClosed => None,
             Self::Io { source, .. } => Some(source),
             Self::Path(error) => Some(error),
             Self::Listing(error) => Some(error.as_ref()),
+            Self::Mutation(error) => Some(error.as_ref()),
         }
     }
 }
@@ -25,6 +29,114 @@ impl fmt::Display for Failure {
             Self::Message(message) | Self::Io { message, .. } => f.write_str(message),
             Self::Path(error) => fmt::Display::fmt(error, f),
             Self::Listing(error) => fmt::Display::fmt(error, f),
+            Self::ConflictClosed => f.write_str("Conflict dialog closed"),
+            Self::Mutation(error) => fmt::Display::fmt(error, f),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum LocalPathAction {
+    OpenDirectory,
+    ResolveParent,
+    ResolveEntry,
+    ReadMetadata,
+    CheckDestination,
+    CreateDirectory,
+}
+
+#[derive(Debug)]
+pub(crate) enum MutationError {
+    LocalIo {
+        path: PathBuf,
+        action: LocalPathAction,
+        source: io::Error,
+    },
+    CurrentDirectory {
+        input: PathBuf,
+        source: io::Error,
+    },
+    NotDirectory(PathBuf),
+    ModifyRoot(PathBuf),
+    RenameRoot(Location),
+    UndoUnavailable(Location),
+    DestinationExists(PathBuf),
+    ReadOnlyArchive(Location),
+    RenameLocal {
+        from: PathBuf,
+        to: PathBuf,
+        source: io::Error,
+    },
+    CreateSftp {
+        destination: Location,
+        source: ssh2::Error,
+    },
+}
+
+impl MutationError {
+    pub(crate) fn local(
+        path: impl Into<PathBuf>,
+        action: LocalPathAction,
+        source: io::Error,
+    ) -> Self {
+        Self::LocalIo {
+            path: path.into(),
+            action,
+            source,
+        }
+    }
+}
+
+impl fmt::Display for MutationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LocalIo {
+                path,
+                action,
+                source,
+            } => write!(f, "{action:?} at {path:?}: {source}"),
+            Self::CurrentDirectory { input, source } => {
+                write!(
+                    f,
+                    "Could not determine the current folder for {input:?}: {source}"
+                )
+            }
+            Self::NotDirectory(path) => write!(f, "{path:?} is not a folder"),
+            Self::ModifyRoot(path) => write!(f, "Cannot modify the filesystem root {path:?}"),
+            Self::RenameRoot(path) => write!(f, "Cannot rename the root {}", path.path().display()),
+            Self::UndoUnavailable(path) => {
+                write!(f, "Undo unavailable for {}", path.path().display())
+            }
+            Self::DestinationExists(path) => write!(f, "Destination {path:?} already exists"),
+            Self::ReadOnlyArchive(path) => write!(f, "Archive location {path} is read-only"),
+            Self::RenameLocal { from, to, source } => {
+                write!(
+                    f,
+                    "Could not rename {from:?} to {to:?} without replacement: {source}"
+                )
+            }
+            Self::CreateSftp {
+                destination,
+                source,
+            } => {
+                write!(
+                    f,
+                    "Could not create the SFTP folder {}: {source}",
+                    destination.path().display()
+                )
+            }
+        }
+    }
+}
+
+impl Error for MutationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::LocalIo { source, .. }
+            | Self::CurrentDirectory { source, .. }
+            | Self::RenameLocal { source, .. } => Some(source),
+            Self::CreateSftp { source, .. } => Some(source),
+            _ => None,
         }
     }
 }
@@ -130,6 +242,7 @@ pub(crate) enum PathError {
     RemotePathEncoding(PathBuf),
     RemotePathSyntax(PathBuf),
     InvalidName(String),
+    InvalidLocalName(String),
 }
 
 impl fmt::Display for PathError {
@@ -154,7 +267,9 @@ impl fmt::Display for PathError {
             Self::RemotePathSyntax(path) => {
                 write!(f, "Expected an absolute POSIX SFTP path, got {path:?}")
             }
-            Self::InvalidName(name) => write!(f, "Invalid file name {name:?}"),
+            Self::InvalidName(name) | Self::InvalidLocalName(name) => {
+                write!(f, "Invalid file name {name:?}")
+            }
         }
     }
 }
@@ -169,4 +284,3 @@ impl Error for PathError {
         }
     }
 }
-use crate::vfs::Location;

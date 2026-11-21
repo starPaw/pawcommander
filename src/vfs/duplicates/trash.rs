@@ -100,7 +100,7 @@ impl TrashPlan {
                 ))
             }
             Err(error) => {
-                let error = error.to_string();
+                let error = crate::i18n::file_error(&error);
                 let reason = error.trim_end_matches('.');
                 Err(crate::tr_format!(
                     "{reason}. Moved to Trash: {completed}.",
@@ -195,8 +195,8 @@ fn trash_one(
                 return Err(retained(
                     crate::tr_format!(
                         "{error}. Could not restore the file to its original path: {restore_error}",
-                        error = error,
-                        restore_error = restore_error
+                        error = crate::i18n::file_error(&error),
+                        restore_error = crate::i18n::file_error(&restore_error)
                     )
                     .into(),
                     staging,
@@ -211,7 +211,7 @@ fn trash_one(
     });
     match result {
         Ok(()) => Ok(None),
-        Err(error) if committed => Ok(Some(error.to_string())),
+        Err(error) if committed => Ok(Some(crate::i18n::file_error(&error))),
         Err(error) => Err(error),
     }
 }

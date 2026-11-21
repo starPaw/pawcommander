@@ -3,8 +3,9 @@ use super::directory::{FolderVisit, AUTO_REFRESH_INTERVAL};
 use super::state::FolderMode;
 use super::PawCommander;
 use crate::conflict::{Answer, Conflict, ConflictDialog, Decision};
+use crate::file_error::Failure;
 use crate::fs_ops::TransferKind;
-use crate::operations::{Cancellation, Progress, ProgressView};
+use crate::operations::{Cancellation, Progress, ProgressView, TransferError};
 use crate::vfs as fs_ops;
 use crate::vfs::Location;
 use eframe::egui;
@@ -131,12 +132,12 @@ fn ask_conflict(
     ctx: &egui::Context,
     cancellation: &Cancellation,
     conflict: Conflict,
-) -> Result<Answer, String> {
+) -> Result<Answer, TransferError> {
     let (reply, answer) = mpsc::channel();
     let dialog = ConflictDialog::new(conflict, reply);
     events
         .send(TransferEvent::Conflict(Box::new(dialog)))
-        .map_err(|_| crate::i18n::text!("Диалог конфликта закрыт"))?;
+        .map_err(|_| TransferError::Failed(Failure::ConflictClosed))?;
     ctx.request_repaint();
     Ok(wait_for_conflict_answer(&answer, cancellation))
 }
@@ -367,7 +368,7 @@ impl PawCommander {
         description: String,
         work: impl FnOnce(
                 &mut Progress,
-                &mut dyn FnMut(Conflict) -> Result<Answer, String>,
+                &mut dyn FnMut(Conflict) -> Result<Answer, TransferError>,
             ) -> Result<String, String>
             + Send
             + 'static,
@@ -870,7 +871,7 @@ impl PawCommander {
                 })));
                 worker_ctx.request_repaint();
             }
-            let summary = result?;
+            let summary = result.map_err(|failure| crate::i18n::transfer_failure(&failure))?;
             let mut message = crate::i18n::transfer_finished(
                 summary.completed,
                 summary.skipped,
@@ -1001,7 +1002,7 @@ impl PawCommander {
                         )),
                         Err(error) => Err(crate::tr_format!(
                             "{error}. Available for another attempt: {remaining}.",
-                            error = error,
+                            error = crate::i18n::file_error(&error),
                             remaining = remaining
                         )),
                     }

@@ -160,7 +160,6 @@ impl Directory {
             .map_err(|error| {
                 crate::fs_ops::rename_error(from.path(), to.path(), io::Error::from(error))
             })
-            .map_err(Into::into)
         } else {
             rename_for_publication(&from, &to)
         }
@@ -179,7 +178,7 @@ fn held_metadata(descriptor: &OwnedFd) -> Result<EntryMetadata, TransferError> {
 pub(super) fn retained(error: TransferError, staging: &Location) -> TransferError {
     TransferError::PublicationUnconfirmed(crate::tr_format!(
         "{error}. Temporary folder retained for inspection: {staging}.",
-        error = error,
+        error = crate::i18n::file_error(&error),
         staging = staging
     ))
 }

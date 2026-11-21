@@ -12,7 +12,9 @@ fn history_undo_owns_one_queued_request_survives_remove_and_spawn_failure() {
     app.history = crate::result_history::History::for_test(history_path.clone(), &ctx);
     let original = source.clone();
     app.start_progress_job(&ctx, "rename", move |progress| {
-        crate::vfs::rename_with_undo(&original, "renamed", progress).map(|path| path.display())
+        crate::vfs::rename_with_undo(&original, "renamed", progress)
+            .map(|path| path.display())
+            .map_err(|error| crate::i18n::file_error(&error))
     });
     poll_queue_until(&mut app, &ctx, |app| app.jobs.current.is_none());
     assert_eq!(app.jobs.undo.len(), 1);
@@ -111,7 +113,9 @@ fn history_undo_is_not_offered_when_result_persistence_failed() {
     let mut app = PawCommander::new(&cc, Some(root.path().into()));
     app.history = crate::result_history::History::for_test(blocker.join("history.json"), &ctx);
     app.start_progress_job(&ctx, "rename", move |progress| {
-        crate::vfs::rename_with_undo(&source, "renamed", progress).map(|path| path.display())
+        crate::vfs::rename_with_undo(&source, "renamed", progress)
+            .map(|path| path.display())
+            .map_err(|error| crate::i18n::file_error(&error))
     });
     poll_queue_until(&mut app, &ctx, |app| app.jobs.current.is_none());
     assert!(app.jobs.undo.is_empty() && app.history.undoable.is_empty());
