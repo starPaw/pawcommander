@@ -107,6 +107,8 @@ impl PawCommander {
                 #[cfg(target_os = "macos")]
                 Command::DiskUsage => self.can_analyze_disk_usage(),
                 #[cfg(target_os = "macos")]
+                Command::Collections => !self.conflict_open(),
+                #[cfg(target_os = "macos")]
                 Command::SyncFolders => self.can_open_folder_sync(),
                 Command::AddToArchive => {
                     idle && !writable && !self.archive_add_sources().is_empty()
