@@ -115,6 +115,15 @@ impl PawCommander {
                                     self.open_extensions(None, Some(button.id), ctx);
                                     ui.close();
                                 }
+                                let report = ui.add_enabled(
+                                    !self.conflict_open(),
+                                    egui::Button::new(crate::i18n::text!("Диагностический отчёт…")),
+                                );
+                                paint_focus(ui, &report, 5);
+                                if report.clicked() {
+                                    self.open_diagnostics(button.id, ctx);
+                                    ui.close();
+                                }
                             }
                             let shortcuts = ui.button(crate::i18n::text!("Горячие клавиши"));
                             paint_focus(ui, &shortcuts, 5);

@@ -770,6 +770,14 @@ pub(crate) struct History {
     pub undo_requested: Option<String>,
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) struct DiagnosticFailure<'a> {
+    pub(crate) finished: u64,
+    pub(crate) label: &'a str,
+    pub(crate) message: &'a str,
+    pub(crate) reason: Option<&'a str>,
+}
+
 impl History {
     #[cfg(test)]
     pub(crate) fn for_test(path: PathBuf, ctx: &egui::Context) -> Self {
@@ -869,6 +877,33 @@ impl History {
                 }
             }
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn diagnostics_loaded(&self) -> bool {
+        self.loaded
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn diagnostic_failures(&self) -> impl Iterator<Item = DiagnosticFailure<'_>> {
+        self.records.iter().rev().filter_map(|record| {
+            let failed_item = record.items.iter().find(|item| {
+                matches!(
+                    item.outcome,
+                    Outcome::Failed
+                        | Outcome::PublicationUnconfirmed
+                        | Outcome::CopiedSourceRemaining
+                )
+            });
+            ((record.failed && !record.cancelled) || failed_item.is_some()).then(|| {
+                DiagnosticFailure {
+                    finished: record.finished,
+                    label: &record.label,
+                    message: &record.message,
+                    reason: failed_item.and_then(|item| item.reason.as_deref()),
+                }
+            })
+        })
     }
 
     pub fn show(&mut self, ctx: &egui::Context, open: &mut bool) {

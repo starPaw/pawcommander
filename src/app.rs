@@ -13,6 +13,8 @@ mod comparison;
 mod compatible_names;
 #[cfg(target_os = "macos")]
 mod custom_actions;
+#[cfg(target_os = "macos")]
+mod diagnostics;
 mod dialogs;
 mod directory;
 mod directory_compare;
@@ -23,6 +25,8 @@ mod drives;
 #[cfg(target_os = "macos")]
 mod duplicates;
 mod entry_widget;
+#[cfg(target_os = "macos")]
+mod export_file;
 #[cfg(target_os = "macos")]
 mod extensions;
 #[cfg(target_os = "macos")]
