@@ -30,6 +30,8 @@ pub(super) enum ComparisonBody {
     #[cfg(target_os = "macos")]
     Diagnostics(Box<super::diagnostics::DiagnosticDialog>),
     #[cfg(target_os = "macos")]
+    Help(Box<super::help::HelpDialog>),
+    #[cfg(target_os = "macos")]
     Collections(Box<super::collections::CollectionsDialog>),
     #[cfg(target_os = "macos")]
     NewFile(Box<super::file_templates::FileTemplatesDialog>),
@@ -42,6 +44,8 @@ pub(super) enum ComparisonBody {
 pub(super) enum ComparisonResponse {
     Open,
     Close,
+    #[cfg(target_os = "macos")]
+    OpenCommandPalette(String),
     #[cfg(target_os = "macos")]
     ApplySync(super::folder_sync::Plan),
     #[cfg(target_os = "macos")]
@@ -101,6 +105,8 @@ impl ComparisonDialog {
             #[cfg(target_os = "macos")]
             ComparisonBody::Diagnostics(view) => view.poll(),
             #[cfg(target_os = "macos")]
+            ComparisonBody::Help(_) => {}
+            #[cfg(target_os = "macos")]
             ComparisonBody::Collections(view) => view.poll(),
             #[cfg(target_os = "macos")]
             ComparisonBody::NewFile(view) => view.poll(),
@@ -135,6 +141,8 @@ impl ComparisonDialog {
             ComparisonBody::ViewerExtensions(view) => return view.show(ctx),
             #[cfg(target_os = "macos")]
             ComparisonBody::Diagnostics(view) => return view.show(ctx),
+            #[cfg(target_os = "macos")]
+            ComparisonBody::Help(view) => return view.show(ctx),
             #[cfg(target_os = "macos")]
             ComparisonBody::Collections(view) => return view.show(ctx, catalog),
             #[cfg(target_os = "macos")]
@@ -197,6 +205,11 @@ impl PawCommander {
         self.comparison = None;
         #[cfg(target_os = "macos")]
         match response {
+            ComparisonResponse::OpenCommandPalette(query) => {
+                let focus = self.palette_focus_to_restore.take();
+                Self::restore_focus(ctx, focus);
+                self.open_command_palette(ctx, focus, query);
+            }
             ComparisonResponse::ApplySync(plan) => self.enqueue_folder_sync(plan, ctx),
             ComparisonResponse::ApplyCompatibleNames(plan) => {
                 self.enqueue_compatible_names(*plan, ctx)

@@ -18,11 +18,15 @@ pub enum PaletteOutcome {
 }
 
 impl CommandPalette {
-    pub fn new(previous_focus: Option<egui::Id>, focused_file: Option<Location>) -> Self {
+    pub fn new(
+        previous_focus: Option<egui::Id>,
+        focused_file: Option<Location>,
+        query: String,
+    ) -> Self {
         Self {
             previous_focus,
             focused_file,
-            query: String::new(),
+            query,
             highlighted: None,
             focus_query: true,
         }
@@ -92,7 +96,9 @@ impl CommandPalette {
                 node.set_label(text!("Поиск команд…"));
             });
 
-            let matches = matching_commands(&self.query);
+            let matches: Vec<_> = Command::matching(&self.query)
+                .filter(|&command| command != Command::Palette)
+                .collect();
             let available: Vec<_> = matches
                 .iter()
                 .copied()
@@ -181,16 +187,4 @@ impl CommandPalette {
             modal.inner
         }
     }
-}
-
-fn matching_commands(query: &str) -> Vec<Command> {
-    let query = query.to_lowercase();
-    Command::ALL
-        .into_iter()
-        .filter(|&command| command != Command::Palette)
-        .filter(|command| {
-            let label = command.label().to_lowercase();
-            query.split_whitespace().all(|word| label.contains(word))
-        })
-        .collect()
 }

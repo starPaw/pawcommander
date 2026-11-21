@@ -145,6 +145,8 @@ Drag `dist/PawCommander.app` into Applications if you want to keep it there. The
 
 ## A few shortcuts to settle in
 
+On macOS, open **Settings → Help…** to learn how to use both panes and search for actions with your current shortcuts. **Open Command Palette** carries your search over so you can run a command.
+
 These are the default bindings. Use **Settings → Keyboard Shortcuts** to customize them or select the Commander profile.
 
 `Cmd/Ctrl` means Command on macOS and Control on Linux / Windows. Some Mac keyboards also require `Fn` for function keys.

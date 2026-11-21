@@ -41,6 +41,8 @@ mod folder_sync;
 mod footer;
 #[cfg(target_os = "macos")]
 mod git_status;
+#[cfg(target_os = "macos")]
+mod help;
 mod jobs;
 mod keyboard;
 #[cfg(target_os = "macos")]

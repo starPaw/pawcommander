@@ -25,8 +25,10 @@ impl PawCommander {
             Command::Search => return self.open_search(),
             Command::Palette => {
                 let previous_focus = ctx.memory(|memory| memory.focused());
-                return self.open_command_palette(ctx, previous_focus);
+                return self.open_command_palette(ctx, previous_focus, String::new());
             }
+            #[cfg(target_os = "macos")]
+            Command::Help => return self.open_help(None, ctx),
             Command::FolderJump => {
                 let previous_focus = ctx.memory(|memory| memory.focused());
                 self.folder_jump = Some(FolderJump::new(previous_focus));
