@@ -3,7 +3,9 @@ use super::{index::IndexStatus, Job, Results};
 #[cfg(test)]
 use crate::test_ui::ContextExt as _;
 use crate::{
+    file_error::{AccessAction, AccessError, MutationError},
     i18n::text,
+    operations::TransferError,
     theme::paint_focus,
     vfs::{search::SftpSearchConnection, Location},
 };
@@ -78,9 +80,7 @@ impl Action {
                             checked();
                         }
                         Err(cause) => {
-                            error.get_or_insert_with(|| {
-                                path_error(path, &crate::i18n::file_error(&cause))
-                            });
+                            error.get_or_insert(cause);
                             break;
                         }
                     }
@@ -96,7 +96,7 @@ impl Action {
                     Ok(Some(is_directory)) => directory = is_directory,
                     Ok(None) => missing.push(path.clone()),
                     Err(cause) => {
-                        error.get_or_insert_with(|| path_error(path, &cause));
+                        error.get_or_insert(cause);
                         break;
                     }
                 }
@@ -104,15 +104,17 @@ impl Action {
                 continue;
             }
             let Some(local) = path.local() else {
-                error.get_or_insert_with(|| crate::archive::readonly().into());
+                error.get_or_insert_with(|| MutationError::ReadOnlyArchive(path.clone()).into());
                 break;
             };
+            let check_error =
+                |cause| AccessError::new(path, AccessAction::CheckSearchResult, cause).into();
             match local.symlink_metadata() {
                 Ok(metadata) if opening => {
                     if metadata.is_symlink() {
                         match local.metadata() {
                             Ok(target) => directory = target.is_dir(),
-                            Err(cause) => error = Some(path_error(path, &cause)),
+                            Err(cause) => error = Some(check_error(cause)),
                         }
                     } else {
                         directory = metadata.is_dir();
@@ -128,7 +130,7 @@ impl Action {
                     missing.push(path.clone());
                 }
                 Err(cause) => {
-                    error.get_or_insert_with(|| path_error(path, &cause));
+                    error.get_or_insert_with(|| check_error(cause));
                 }
             }
         }
@@ -148,20 +150,11 @@ impl Action {
     }
 }
 
-fn path_error(path: &Location, error: &impl std::fmt::Display) -> String {
-    let path = path.display();
-    crate::tr_format!(
-        "Could not check search result {path}: {error}",
-        error = error,
-        path = path
-    )
-}
-
 enum Validation {
     Ready(ReadyAction),
     Unavailable {
         missing: Vec<Location>,
-        error: Option<String>,
+        error: Option<TransferError>,
     },
 }
 
@@ -392,7 +385,7 @@ impl Panel {
         None
     }
 
-    fn remove_missing(&mut self, missing: Vec<Location>, error: Option<String>) {
+    fn remove_missing(&mut self, missing: Vec<Location>, error: Option<TransferError>) {
         let missing: BTreeSet<_> = missing.into_iter().collect();
         if let Some(snapshot) = &mut self.snapshot {
             snapshot
@@ -402,7 +395,7 @@ impl Panel {
             snapshot.selected.retain(|path| !missing.contains(path));
         }
         self.error = match missing.len() {
-            0 => error,
+            0 => None,
             1 => {
                 let path = missing.first().expect("one missing path").display();
                 Some(crate::tr_format!(
@@ -413,6 +406,15 @@ impl Panel {
                 "{count} items no longer exist at their original paths and were removed from the search results.", count = count
             )),
         };
+        if let Some(error) = error {
+            let detail = crate::i18n::file_error(&error);
+            if let Some(message) = &mut self.error {
+                message.push('\n');
+                message.push_str(&detail);
+            } else {
+                self.error = Some(detail);
+            }
+        }
     }
 
     pub(crate) fn show(
@@ -555,15 +557,18 @@ impl Panel {
                             ui.spinner();
                             ui.label(text!("Открытие файла…"));
                         });
-                    } else if !snapshot.results.warning.is_empty() {
-                        let warning = &snapshot.results.warning;
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(warning).color(ui.visuals().warn_fg_color),
+                    } else {
+                        let warning = snapshot.results.warning();
+                        if !warning.is_empty() {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(warning.as_ref())
+                                        .color(ui.visuals().warn_fg_color),
+                                )
+                                .truncate(),
                             )
-                            .truncate(),
-                        )
-                        .on_hover_text(warning);
+                            .on_hover_text(warning.as_ref());
+                        }
                     }
                     snapshot.rows(ui);
                 });
@@ -664,7 +669,7 @@ mod tests {
                 })
                 .collect(),
             limited: false,
-            warning: String::new(),
+            warning: String::new().into(),
         }
     }
 
@@ -731,6 +736,26 @@ mod tests {
         };
         assert_eq!(paths, [Location::Local(present)]);
         assert_eq!(captured, destination);
+    }
+
+    #[test]
+    fn missing_rows_are_removed_and_the_other_failure_remains_visible() {
+        let root = tempfile::tempdir().unwrap();
+        let stale = root.path().join("missing.txt");
+        let denied = root.path().join("denied.txt");
+        let mut panel = Panel::default();
+        panel.replace(results(&[&stale, &denied]), false, "txt".into(), None);
+        let error = AccessError::new(
+            &Location::Local(denied.clone()),
+            AccessAction::CheckSearchResult,
+            io::Error::from(io::ErrorKind::PermissionDenied),
+        );
+        panel.remove_missing(vec![stale.into()], Some(error.into()));
+        let message = panel.error.unwrap();
+        assert!(message.contains("missing.txt") && message.contains("denied.txt"));
+        let snapshot = panel.snapshot.unwrap();
+        assert_eq!(snapshot.results.matches.len(), 1);
+        assert_eq!(snapshot.results.matches[0].path.path(), denied);
     }
 
     #[test]

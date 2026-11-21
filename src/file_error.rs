@@ -17,6 +17,7 @@ pub(crate) enum Failure {
     Connection(Box<ConnectionError>),
     Access(Box<AccessError>),
     Preview(Box<PreviewError>),
+    Search(Box<SearchError>),
     ComparisonPane {
         right: bool,
         cause: Box<TransferError>,
@@ -49,6 +50,7 @@ impl Failure {
             Self::Connection(error) => Some(error.as_ref()),
             Self::Access(error) => Some(error.as_ref()),
             Self::Preview(error) => Some(error.as_ref()),
+            Self::Search(error) => Some(error.as_ref()),
             Self::ComparisonPane { cause, .. } => Some(cause.as_ref()),
             Self::Listing(error) => Some(error.as_ref()),
             Self::Mutation(error) => Some(error.as_ref()),
@@ -66,6 +68,7 @@ impl fmt::Display for Failure {
             Self::Connection(error) => fmt::Display::fmt(error, f),
             Self::Access(error) => fmt::Display::fmt(error, f),
             Self::Preview(error) => fmt::Display::fmt(error, f),
+            Self::Search(error) => fmt::Display::fmt(error, f),
             Self::ComparisonPane { right, cause } => {
                 let pane = if *right { "Right pane" } else { "Left pane" };
                 write!(f, "{pane} · {cause}")
@@ -189,6 +192,7 @@ pub(crate) enum AccessAction {
     ReadOpenMetadata,
     ReadChildren,
     ReadFile,
+    CheckSearchResult,
     #[cfg(target_os = "macos")]
     WritePreviewCache,
 }
@@ -320,6 +324,39 @@ impl fmt::Display for PreviewError {
 }
 
 impl Error for PreviewError {}
+
+#[derive(Debug)]
+pub(crate) enum SearchError {
+    RequiresSftpConnection(Location),
+    DifferentSftpConnection(Location),
+    DirectoryChanged {
+        location: Location,
+        resolved: PathBuf,
+    },
+    MissingFileType(Location),
+}
+
+impl fmt::Display for SearchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RequiresSftpConnection(location) => {
+                write!(f, "Search requires an SFTP connection for {location}")
+            }
+            Self::DifferentSftpConnection(location) => write!(
+                f,
+                "Search result {location} belongs to a different SFTP connection"
+            ),
+            Self::DirectoryChanged { location, resolved } => write!(
+                f,
+                "Folder {location} now resolves to {}",
+                resolved.display()
+            ),
+            Self::MissingFileType(location) => write!(f, "Missing SFTP file type for {location}"),
+        }
+    }
+}
+
+impl Error for SearchError {}
 
 #[derive(Debug)]
 pub(crate) enum RecoveryNotice {
