@@ -921,7 +921,7 @@ fn finish_copy(
             )
             .map_err(|error| {
                 if preserve {
-                    TransferError::PublicationUnconfirmed(error)
+                    TransferError::publication_unconfirmed(error)
                 } else if cancel.is_requested() {
                     TransferError::Cancelled
                 } else {
@@ -1197,9 +1197,9 @@ fn retained(stage: &Location, message: &str) -> String {
 
 fn retained_error(stage: &Location, error: TransferError) -> TransferError {
     match error {
-        TransferError::PublicationUnconfirmed(message) => {
-            TransferError::PublicationUnconfirmed(retained(stage, &message))
-        }
+        error @ TransferError::PublicationUnconfirmed(_) => TransferError::publication_unconfirmed(
+            retained(stage, &crate::i18n::file_error(&error)),
+        ),
         other => retained(stage, &crate::i18n::file_error(&other)).into(),
     }
 }

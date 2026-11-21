@@ -284,7 +284,7 @@ impl BatchRenamePreview {
                 rename(&source, &target)?;
                 let receipt = capture
                     .finish(&source, &manifest)
-                    .map_err(TransferError::PublicationUnconfirmed)?;
+                    .map_err(TransferError::publication_unconfirmed)?;
                 progress.results.descendants(
                     &source,
                     &row.target(),

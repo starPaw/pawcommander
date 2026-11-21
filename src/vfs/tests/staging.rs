@@ -39,19 +39,30 @@ fn local_rename_denial_is_definite_and_preserves_both_files() {
 
 #[test]
 fn unknown_publication_survives_staging_cleanup_failure() {
+    use crate::file_error::Failure;
+
     let staging: Location = PathBuf::from("/private-staging").into();
     let target: Location = PathBuf::from("/destination").into();
     let result = staging_result_typed(
-        Err(TransferError::PublicationUnconfirmed("reply lost".into())),
-        Err("cleanup refused".into()),
+        Err(TransferError::publication_unconfirmed("reply lost".into())),
+        Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied).into()),
         &staging,
         &target,
     );
     match result {
-        Err(TransferError::PublicationUnconfirmed(message)) => {
-            assert!(message.contains("reply lost"));
-            assert!(message.contains("cleanup refused"));
-            assert!(message.contains("private-staging"));
+        Err(TransferError::PublicationUnconfirmed(Failure::StagingCleanup(error))) => {
+            assert_eq!(error.staging, staging);
+            assert_eq!(error.target, target);
+            assert!(matches!(
+                error.operation,
+                Some(TransferError::PublicationUnconfirmed(Failure::Message(ref message)))
+                    if message == "reply lost"
+            ));
+            assert!(matches!(
+                error.cleanup,
+                TransferError::Failed(Failure::Io { ref source, .. })
+                    if source.kind() == std::io::ErrorKind::PermissionDenied
+            ));
         }
         other => panic!("uncertain publication became retryable: {other:?}"),
     }

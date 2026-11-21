@@ -184,11 +184,15 @@ impl Cancellation {
 pub(crate) enum TransferError {
     Cancelled,
     Failed(Failure),
-    /// The server may have published the item before its reply was lost.
-    PublicationUnconfirmed(String),
+    /// The server may have changed the item before its reply was lost.
+    PublicationUnconfirmed(Failure),
 }
 
 impl TransferError {
+    pub(crate) fn publication_unconfirmed(message: String) -> Self {
+        Self::PublicationUnconfirmed(Failure::Message(message))
+    }
+
     pub fn is_cancelled_io(error: &io::Error) -> bool {
         error.get_ref().is_some_and(|e| e.is::<Cancelled>())
     }
@@ -235,7 +239,7 @@ impl From<ListingError> for TransferError {
 
 impl From<MutationError> for TransferError {
     fn from(error: MutationError) -> Self {
-        Self::Failed(Failure::Mutation(Box::new(error)))
+        Self::Failed(error.into())
     }
 }
 
@@ -243,8 +247,9 @@ impl std::fmt::Display for TransferError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Cancelled => f.write_str(&crate::tr_format!("Operation cancelled")),
-            Self::Failed(error) => std::fmt::Display::fmt(error, f),
-            Self::PublicationUnconfirmed(error) => f.write_str(error),
+            Self::Failed(error) | Self::PublicationUnconfirmed(error) => {
+                std::fmt::Display::fmt(error, f)
+            }
         }
     }
 }
@@ -252,8 +257,8 @@ impl std::fmt::Display for TransferError {
 impl std::error::Error for TransferError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Failed(error) => error.source(),
-            Self::Cancelled | Self::PublicationUnconfirmed(_) => None,
+            Self::Failed(error) | Self::PublicationUnconfirmed(error) => error.source(),
+            Self::Cancelled => None,
         }
     }
 }

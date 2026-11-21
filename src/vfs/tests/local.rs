@@ -90,7 +90,37 @@ fn local_operations_keep_existing_conflict_and_trash_policy() {
     );
     assert!(transfer(std::slice::from_ref(&a), &b, TransferKind::Copy).is_err());
     let remote = resolve("sftp://alice@example.com/a", &local).unwrap();
-    assert!(trash_entries(&[remote.with_path("/".into())]).is_err());
+    let remote_root = remote.with_path("/".into());
+    let failure = trash_entries(std::slice::from_ref(&remote_root)).unwrap_err();
+    assert!(matches!(
+        failure.error,
+        TransferError::Failed(crate::file_error::Failure::Mutation(error))
+            if matches!(error.as_ref(), crate::file_error::MutationError::InvalidSftpRemoval(path) if path == &remote_root)
+    ));
+    assert_eq!(failure.completed, 0);
+}
+
+#[test]
+fn cancelled_trash_preflight_keeps_the_selection() {
+    let fixture = tempfile::tempdir().unwrap();
+    let source: Location = fixture.path().join("source").into();
+    fs::write(source.path(), b"preserve on cancellation").unwrap();
+    let mut progress = Progress::default();
+    progress.cancellation().request();
+
+    let failure =
+        trash_entries_with_progress(std::slice::from_ref(&source), &mut progress).unwrap_err();
+    assert!(matches!(failure.error, TransferError::Cancelled));
+    assert_eq!(failure.completed, 0);
+    assert!(!failure.partial_remote);
+    assert_eq!(
+        progress.results.root_outcomes(),
+        [(source.clone(), crate::result_history::Outcome::NotStarted)]
+    );
+    assert_eq!(
+        fs::read(source.path()).unwrap(),
+        b"preserve on cancellation"
+    );
 }
 
 #[test]

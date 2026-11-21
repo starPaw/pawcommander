@@ -4,6 +4,7 @@ use super::mutations::remove_remote_tree;
 use super::sftp::remote;
 use super::{err, TransferFailure, TransferSummary, MAX_TREE_DEPTH};
 use crate::conflict::{Answer, Conflict, Decision, EntryDetails};
+use crate::file_error::{Failure, StagingCleanupError};
 use crate::fs_ops::TransferKind;
 use crate::operations::{Cancellation, CopyReader, Progress, TransferError};
 use crate::{archive, fs_ops};
@@ -954,7 +955,7 @@ fn copy_to_smb(
     source.verify(&item.source, &cancel, true)?;
     progress.checkpoint()?;
     let unconfirmed = |error: &dyn std::fmt::Display| {
-        TransferError::PublicationUnconfirmed(crate::tr_format!(
+        TransferError::publication_unconfirmed(crate::tr_format!(
             "SMB copy is unconfirmed. Check {target} for an incomplete copy before retrying ({error})", error = error, target = target,
         ))
     };
@@ -1158,7 +1159,7 @@ fn copy_transfer(
         match publication {
             Err(TransferError::PublicationUnconfirmed(error)) => {
                 *preserve = true;
-                return Err(TransferError::PublicationUnconfirmed(crate::tr_format!(
+                return Err(TransferError::publication_unconfirmed(crate::tr_format!(
                     "{error}. Temporary folder retained for inspection at {staging}.",
                     error = error,
                     staging = staging
@@ -1243,7 +1244,7 @@ pub(super) fn rename_for_publication(
         // definite failure. Only an issued rename can lose its server reply.
         remote(source)?
             .rename(source.path(), target.path(), Some(RenameFlags::empty()))
-            .map_err(|error| TransferError::PublicationUnconfirmed(err(error)))
+            .map_err(|error| TransferError::publication_unconfirmed(err(error)))
     } else {
         rename_without_replacing(source, target).map_err(TransferError::from)
     }
@@ -1270,7 +1271,7 @@ pub(super) fn publish_item(
 
 fn publication_error(target: &Location, attempted: bool, error: String) -> TransferError {
     if target.remote() && attempted {
-        TransferError::PublicationUnconfirmed(error)
+        TransferError::publication_unconfirmed(error)
     } else {
         TransferError::from(error)
     }
@@ -1410,7 +1411,7 @@ pub(super) fn with_staging(
     with_staging_typed(target, None, |staging, preserve| {
         work(staging, preserve).map_err(Into::into)
     })
-    .map_err(|error| error.to_string())
+    .map_err(|error| crate::i18n::file_error(&error))
 }
 
 static LOCAL_STAGING_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1533,8 +1534,13 @@ pub(super) fn staging_result(
     staging: &Location,
     target: &Location,
 ) -> Result<(), String> {
-    staging_result_typed(result.map_err(Into::into), cleanup, staging, target)
-        .map_err(|error| error.to_string())
+    staging_result_typed(
+        result.map_err(Into::into),
+        cleanup.map_err(Into::into),
+        staging,
+        target,
+    )
+    .map_err(|error| crate::i18n::file_error(&error))
 }
 
 pub(super) fn with_staging_typed(
@@ -1603,7 +1609,7 @@ fn staging_typed(
         let mut staging = LocalStaging::create(parent, prefix, proposed)?;
         let location = Location::Local(staging.path().into());
         if use_operation_marker && let Err(error) = crate::recovery::register_staging(&location) {
-            let cleanup = staging.close().map_err(err);
+            let cleanup = staging.close().map_err(Into::into);
             return staging_result_typed(Err(err(error).into()), cleanup, &location, target);
         }
         if preserve {
@@ -1614,7 +1620,12 @@ fn staging_typed(
             staging.keep();
             return result;
         }
-        return staging_result_typed(result, staging.close().map_err(err), &location, target);
+        return staging_result_typed(
+            result,
+            staging.close().map_err(Into::into),
+            &location,
+            target,
+        );
     }
 
     let sftp = remote(target)?;
@@ -1632,19 +1643,13 @@ fn staging_typed(
         Ok(()) => {}
         Err(e) if sftp.lstat(staging.path()).is_err() => return Err(err(e).into()),
         Err(e) => {
-            return Err(TransferError::PublicationUnconfirmed(crate::tr_format!(
+            return Err(TransferError::publication_unconfirmed(crate::tr_format!(
                 "Temporary folder creation at {staging} is unconfirmed: {e}. Inspect the registered location before retrying.", e = e, staging = staging
             )));
         }
     }
     if use_operation_marker && let Err(error) = crate::recovery::register_staging(&staging) {
-        let cleanup = remove_remote_tree(
-            &sftp,
-            &staging,
-            MAX_TREE_DEPTH + 1,
-            &mut Progress::default(),
-            false,
-        );
+        let cleanup = remove_remote_tree(&sftp, &staging, MAX_TREE_DEPTH + 1);
         return staging_result_typed(Err(err(error).into()), cleanup, &staging, target);
     }
     let result = work(&staging, &mut preserve);
@@ -1653,42 +1658,30 @@ fn staging_typed(
     }
     // The private staging directory adds one level above the payload, whose
     // source tree may already use all 128 supported descendant levels.
-    let cleanup = remove_remote_tree(
-        &sftp,
-        &staging,
-        MAX_TREE_DEPTH + 1,
-        &mut Progress::default(),
-        false,
-    );
+    let cleanup = remove_remote_tree(&sftp, &staging, MAX_TREE_DEPTH + 1);
     staging_result_typed(result, cleanup, &staging, target)
 }
 
 pub(super) fn staging_result_typed(
     result: Result<(), TransferError>,
-    cleanup: Result<(), String>,
+    cleanup: Result<(), TransferError>,
     staging: &Location,
     target: &Location,
 ) -> Result<(), TransferError> {
     match cleanup {
         Ok(()) => result,
-        Err(e) => {
+        Err(cleanup) => {
             let unconfirmed = matches!(result, Err(TransferError::PublicationUnconfirmed(_)));
-            let outcome = result
-                .err()
-                .map(|error| crate::i18n::file_error(&error))
-                .unwrap_or_else(|| {
-                    crate::tr_format!("Item {target} was published", target = target)
-                });
-            let message = crate::tr_format!(
-                "{outcome}. Temporary folder remains at {staging}: {e}",
-                e = e,
-                outcome = outcome,
-                staging = staging
-            );
+            let reason = Failure::StagingCleanup(Box::new(StagingCleanupError {
+                operation: result.err(),
+                cleanup,
+                staging: staging.clone(),
+                target: target.clone(),
+            }));
             Err(if unconfirmed {
-                TransferError::PublicationUnconfirmed(message)
+                TransferError::PublicationUnconfirmed(reason)
             } else {
-                TransferError::from(message)
+                TransferError::Failed(reason)
             })
         }
     }

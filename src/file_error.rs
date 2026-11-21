@@ -1,3 +1,4 @@
+use crate::operations::TransferError;
 use crate::vfs::Location;
 use std::{error::Error, fmt, io, path::PathBuf, str::Utf8Error};
 
@@ -9,6 +10,13 @@ pub(crate) enum Failure {
     Listing(Box<ListingError>),
     ConflictClosed,
     Mutation(Box<MutationError>),
+    StagingCleanup(Box<StagingCleanupError>),
+}
+
+impl From<MutationError> for Failure {
+    fn from(error: MutationError) -> Self {
+        Self::Mutation(Box::new(error))
+    }
 }
 
 impl Failure {
@@ -19,6 +27,7 @@ impl Failure {
             Self::Path(error) => Some(error),
             Self::Listing(error) => Some(error.as_ref()),
             Self::Mutation(error) => Some(error.as_ref()),
+            Self::StagingCleanup(error) => Some(error.as_ref()),
         }
     }
 }
@@ -31,6 +40,47 @@ impl fmt::Display for Failure {
             Self::Listing(error) => fmt::Display::fmt(error, f),
             Self::ConflictClosed => f.write_str("Conflict dialog closed"),
             Self::Mutation(error) => fmt::Display::fmt(error, f),
+            Self::StagingCleanup(error) => fmt::Display::fmt(error, f),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct StagingCleanupError {
+    pub(crate) staging: Location,
+    pub(crate) target: Location,
+    pub(crate) operation: Option<TransferError>,
+    pub(crate) cleanup: TransferError,
+}
+
+impl fmt::Display for StagingCleanupError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(error) = &self.operation {
+            write!(f, "{error}. ")?;
+        } else {
+            write!(f, "Item {} was published. ", self.target)?;
+        }
+        if matches!(self.cleanup, TransferError::PublicationUnconfirmed(_)) {
+            write!(
+                f,
+                "Cleanup at {} is unconfirmed: {}",
+                self.staging, self.cleanup
+            )
+        } else {
+            write!(
+                f,
+                "Temporary folder remains at {}: {}",
+                self.staging, self.cleanup
+            )
+        }
+    }
+}
+
+impl Error for StagingCleanupError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self.operation.as_ref() {
+            Some(error) if !matches!(error, TransferError::Cancelled) => Some(error),
+            _ => Some(&self.cleanup),
         }
     }
 }
@@ -43,6 +93,13 @@ pub(crate) enum LocalPathAction {
     ReadMetadata,
     CheckDestination,
     CreateDirectory,
+}
+
+#[derive(Debug)]
+pub(crate) enum SftpRemovalAction {
+    Inspect,
+    RemoveFile,
+    RemoveDirectory,
 }
 
 #[derive(Debug)]
@@ -69,6 +126,21 @@ pub(crate) enum MutationError {
     },
     CreateSftp {
         destination: Location,
+        source: ssh2::Error,
+    },
+    Trash {
+        path: PathBuf,
+        source: trash::Error,
+    },
+    InvalidSftpRemoval(Location),
+    SftpRemovalDepth(Location),
+    OpenSftpRemoval {
+        location: Location,
+        reason: String,
+    },
+    RemoveSftp {
+        location: Location,
+        action: SftpRemovalAction,
         source: ssh2::Error,
     },
 }
@@ -125,6 +197,26 @@ impl fmt::Display for MutationError {
                     destination.path().display()
                 )
             }
+            Self::Trash { path, source } => {
+                write!(f, "Could not move {path:?} to Trash: {source}")
+            }
+            Self::InvalidSftpRemoval(location) => {
+                write!(f, "Invalid SFTP deletion path {location}")
+            }
+            Self::SftpRemovalDepth(location) => {
+                write!(f, "Folder nesting is too deep at {location}")
+            }
+            Self::OpenSftpRemoval { location, reason } => {
+                write!(
+                    f,
+                    "Could not open SFTP for deletion at {location}: {reason}"
+                )
+            }
+            Self::RemoveSftp {
+                location,
+                action,
+                source,
+            } => write!(f, "{action:?} at {location}: {source}"),
         }
     }
 }
@@ -135,7 +227,8 @@ impl Error for MutationError {
             Self::LocalIo { source, .. }
             | Self::CurrentDirectory { source, .. }
             | Self::RenameLocal { source, .. } => Some(source),
-            Self::CreateSftp { source, .. } => Some(source),
+            Self::CreateSftp { source, .. } | Self::RemoveSftp { source, .. } => Some(source),
+            Self::Trash { source, .. } => Some(source),
             _ => None,
         }
     }

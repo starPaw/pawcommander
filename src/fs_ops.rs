@@ -5,6 +5,7 @@ use crate::file_error::{
     ListingError, ListingErrorKind, LocalPathAction, MutationError, PathError,
 };
 use crate::operations::{Cancellation, CopyReader, Progress, TransferError};
+use crate::vfs::DeletionFailure;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
@@ -278,59 +279,50 @@ fn transfer(sources: &[PathBuf], destination: &Path, kind: TransferKind) -> Resu
     crate::vfs::transfer(&sources, &destination.to_path_buf().into(), kind)
 }
 
-pub fn trash_entries(paths: &[PathBuf], progress: &mut Progress) -> Result<usize, String> {
-    let paths =
-        normalize_selection(paths, progress).map_err(|error| crate::i18n::file_error(&error))?;
+pub fn trash_entries(paths: &[PathBuf], progress: &mut Progress) -> Result<usize, DeletionFailure> {
+    let paths = normalize_selection(paths, progress)?;
     progress.results.plan(
         paths
             .iter()
             .map(|entry| (crate::vfs::Location::Local(entry.original.clone()), None)),
     );
     for (completed, entry) in paths.iter().enumerate() {
-        progress
-            .results
-            .begin(&crate::vfs::Location::Local(entry.original.clone()));
+        let original = crate::vfs::Location::Local(entry.original.clone());
+        progress.results.begin(&original);
         let path = &entry.source;
         progress.item(path);
-        let cancel = progress.cancellation();
-        let captured = SourceManifest::capture_observed(path, &cancel, &mut |observed, _| {
-            if let Ok(relative) = observed.strip_prefix(path) {
-                progress
-                    .results
-                    .removing(&crate::vfs::Location::Local(entry.original.join(relative)));
+        let result = (|| {
+            let cancel = progress.cancellation();
+            let captured = SourceManifest::capture_observed(path, &cancel, &mut |observed, _| {
+                if let Ok(relative) = observed.strip_prefix(path) {
+                    progress.results.removing(&original.join(relative));
+                }
+            });
+            let captured = match captured.and_then(|manifest| manifest.verify(&cancel, |_, _| {})) {
+                Ok(()) => true,
+                Err(error) if TransferError::is_cancelled_io(&error) => return Err(error.into()),
+                Err(_) => {
+                    progress.results.abandon_group();
+                    false
+                }
+            };
+            progress.check_cancelled()?;
+            // Use the operating system's Trash, with no permanent-deletion fallback.
+            trash::delete(path).map_err(|source| MutationError::Trash {
+                path: path.clone(),
+                source,
+            })?;
+            if captured {
+                progress.results.trash_descendants_unconfirmed();
             }
-        });
-        let captured = captured.and_then(|manifest| {
-            manifest.verify(&cancel, |_, _| {})?;
-            Ok(manifest)
-        });
-        let captured_ok = captured.is_ok();
-        match captured {
-            Ok(_) => {}
-            Err(error) if TransferError::is_cancelled_io(&error) => {
-                return Err(error.to_string());
-            }
-            Err(_) => progress.results.abandon_group(),
-        }
-        // Use the operating system's trash. There is deliberately no permanent
-        // deletion fallback when trash is unavailable for a volume.
-        if let Err(error) = trash::delete(path) {
-            return Err(crate::tr_format!(
-                "Could not move item “{}” to Trash: {error}. Already moved: {completed}.",
-                path.display(),
-                completed = completed,
-                error = error
-            ));
-        }
-        if captured_ok {
-            progress.results.trash_descendants_unconfirmed();
-        }
-        progress.results.record(
-            &crate::vfs::Location::Local(entry.original.clone()),
-            None,
-            crate::result_history::Outcome::Completed,
-            None,
-        );
+            Ok(())
+        })();
+        progress.results.removed(&original, &result);
+        result.map_err(|error| DeletionFailure {
+            error,
+            completed,
+            partial_remote: false,
+        })?;
     }
     Ok(paths.len())
 }

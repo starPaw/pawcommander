@@ -1115,9 +1115,17 @@ impl PawCommander {
                     paths.len(),
                     paths.first().map(Location::display).unwrap_or_default()
                 ),
-                move |progress| {
-                    fs_ops::trash_entries_with_progress(&paths, progress)
-                        .map(|n| crate::tr_format!("Items processed: {n}", n = n))
+                move |progress| match fs_ops::trash_entries_with_progress(&paths, progress) {
+                    Ok(n) => Ok(crate::tr_format!("Items processed: {n}", n = n)),
+                    Err(failure) => {
+                        let message = crate::i18n::deletion_failure(&failure);
+                        if matches!(failure.error, crate::operations::TransferError::Cancelled) {
+                            progress.results.cancelled = true;
+                            Ok(message)
+                        } else {
+                            Err(message)
+                        }
+                    }
                 },
             ),
         }

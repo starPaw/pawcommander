@@ -301,7 +301,7 @@ impl Execution<'_> {
                         .and_then(|()| backup.rename(name, &parent, name));
                     if let Err(restore) = restore {
                         return Err(retained(
-                            TransferError::PublicationUnconfirmed(crate::tr_format!(
+                            TransferError::publication_unconfirmed(crate::tr_format!(
                                 "{error}. Could not restore the previous item: {restore}",
                                 error = crate::i18n::file_error(&error),
                                 restore = crate::i18n::file_error(&restore)

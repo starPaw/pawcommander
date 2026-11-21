@@ -163,7 +163,7 @@ fn apply_root(
             copy.write(&root.item.source, &stage, OsStr::new("payload"))
                 .map_err(|error| match error {
                     // Only the private draft could have been created.
-                    TransferError::PublicationUnconfirmed(message) => TransferError::from(message),
+                    TransferError::PublicationUnconfirmed(reason) => TransferError::Failed(reason),
                     error => error,
                 })?;
             root.manifest.verify(&cancel, |_, _| {})?;
@@ -466,7 +466,7 @@ fn stale_target(target: &Location) -> TransferError {
 }
 
 fn unconfirmed(target: &Location, error: TransferError) -> TransferError {
-    TransferError::PublicationUnconfirmed(crate::tr_format!(
+    TransferError::publication_unconfirmed(crate::tr_format!(
         "Inspect the possibly incomplete copy at {target}. The source was preserved. {error}",
         error = crate::i18n::file_error(&error),
         target = target
