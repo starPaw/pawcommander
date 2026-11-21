@@ -1,4 +1,5 @@
 //! Completed operation results. Disk access and serialization belong to workers.
+use crate::operations::TransferError;
 #[cfg(test)]
 use crate::test_ui::ContextExt as _;
 use crate::vfs::Location;
@@ -341,18 +342,27 @@ impl Results {
     }
 
     /// A confirmed deletion remains completed if a later sibling or ancestor
-    /// fails. Root completion is recorded by the operation's existing caller.
-    pub fn removed(&mut self, source: &Location, result: &Result<(), String>) {
-        if !self.observed_group {
-            return;
-        }
-        if let Some(&index) = self.nested_index.get(source) {
-            self.items[index].outcome = if result.is_ok() {
-                Outcome::Completed
-            } else {
-                Outcome::Failed
-            };
-            self.reason(index, result.as_ref().err().map(String::as_str));
+    /// fails. Preserve uncertainty when the server did not return a receipt.
+    pub fn removed(&mut self, source: &Location, result: &Result<(), TransferError>) {
+        let outcome = match result {
+            Ok(()) => Outcome::Completed,
+            Err(TransferError::Cancelled) => Outcome::Cancelled,
+            Err(TransferError::PublicationUnconfirmed(_)) => Outcome::PublicationUnconfirmed,
+            Err(TransferError::Failed(_)) => Outcome::Failed,
+        };
+        if self.active_source.as_ref() == Some(source) {
+            self.record(
+                source,
+                None,
+                outcome,
+                result.as_ref().err().map(crate::i18n::file_error),
+            );
+        } else if self.observed_group
+            && let Some(&index) = self.nested_index.get(source)
+        {
+            self.items[index].outcome = outcome;
+            let reason = result.as_ref().err().map(crate::i18n::file_error);
+            self.reason(index, reason.as_deref());
         }
     }
 

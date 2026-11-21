@@ -1,19 +1,72 @@
 use super::text;
 use crate::file_error::{
     ArchiveMemberError, Failure, ListingError, ListingErrorKind, LocalPathAction, MutationError,
-    PathError,
+    PathError, StagingCleanupError,
 };
 use crate::operations::TransferError;
-use crate::vfs::TransferFailure;
+use crate::vfs::{DeletionFailure, TransferFailure};
 
 pub(crate) fn file_error(error: &TransferError) -> String {
     match error {
-        TransferError::Failed(Failure::Path(error)) => path_error(error),
-        TransferError::Failed(Failure::Listing(error)) => listing_error(error),
-        TransferError::Failed(Failure::ConflictClosed) => text!("Диалог конфликта закрыт").into(),
-        TransferError::Failed(Failure::Mutation(error)) => mutation_error(error),
-        _ => error.to_string(),
+        TransferError::Failed(reason) | TransferError::PublicationUnconfirmed(reason) => {
+            match reason {
+                Failure::Path(error) => path_error(error),
+                Failure::Listing(error) => listing_error(error),
+                Failure::ConflictClosed => text!("Диалог конфликта закрыт").into(),
+                Failure::Mutation(reason) => {
+                    if matches!(error, TransferError::PublicationUnconfirmed(_))
+                        && let MutationError::RemoveSftp {
+                            location, source, ..
+                        } = reason.as_ref()
+                    {
+                        return crate::tr_format!(
+                            "SFTP deletion at {location} is unconfirmed: {error}. Check the folder before trying again",
+                            error = source,
+                            location = location
+                        );
+                    }
+                    mutation_error(reason)
+                }
+                Failure::StagingCleanup(error) => staging_cleanup_error(error),
+                _ => error.to_string(),
+            }
+        }
+        TransferError::Cancelled => crate::tr_format!("Operation cancelled"),
     }
+}
+
+pub(crate) fn deletion_failure(failure: &DeletionFailure) -> String {
+    let DeletionFailure {
+        error,
+        completed,
+        partial_remote,
+    } = failure;
+    if let TransferError::Failed(Failure::Mutation(reason)) = error
+        && let MutationError::Trash { path, source } = reason.as_ref()
+    {
+        return crate::tr_format!(
+            "Could not move item “{}” to Trash: {error}. Already moved: {completed}.",
+            path.display(),
+            error = source,
+            completed = completed
+        );
+    }
+    let message = file_error(error);
+    if *partial_remote {
+        return crate::tr_format!(
+            "{e}. Items fully deleted: {completed}. The current folder may have been partly deleted.",
+            e = message,
+            completed = completed
+        );
+    }
+    if *completed > 0 {
+        return crate::tr_format!(
+            "{error}. Items processed: {n}.",
+            error = message,
+            n = completed
+        );
+    }
+    message
 }
 
 pub(crate) fn transfer_failure(failure: &TransferFailure) -> String {
@@ -140,7 +193,56 @@ fn mutation_error(error: &MutationError) -> String {
             text!("Не удалось создать папку"),
             destination.path().display(),
         ),
+        Trash { path, source } => crate::tr_format!(
+            "Could not move item “{}” to Trash: {error}",
+            path.display(),
+            error = source
+        ),
+        InvalidSftpRemoval(location) => format!(
+            "{} «{}»",
+            text!("Недопустимый путь удаления SFTP"),
+            location.path().display()
+        ),
+        SftpRemovalDepth(location) => format!(
+            "{} «{}»",
+            text!("Слишком большая глубина папок"),
+            location.path().display()
+        ),
+        OpenSftpRemoval { location, reason } => crate::tr_format!(
+            "Could not open SFTP for deletion at {location}: {error}",
+            error = reason,
+            location = location
+        ),
+        RemoveSftp {
+            location, source, ..
+        } => crate::tr_format!(
+            "Could not delete SFTP item {location}: {error}",
+            error = source,
+            location = location
+        ),
     }
+}
+
+fn staging_cleanup_error(error: &StagingCleanupError) -> String {
+    let outcome =
+        error.operation.as_ref().map(file_error).unwrap_or_else(|| {
+            crate::tr_format!("Item {target} was published", target = error.target)
+        });
+    let detail = file_error(&error.cleanup);
+    if matches!(error.cleanup, TransferError::PublicationUnconfirmed(_)) {
+        return crate::tr_format!(
+            "{outcome}. Cleanup at {staging} is unconfirmed: {e}",
+            outcome = outcome,
+            staging = error.staging,
+            e = detail
+        );
+    }
+    crate::tr_format!(
+        "{outcome}. Temporary folder remains at {staging}: {e}",
+        outcome = outcome,
+        staging = error.staging,
+        e = detail
+    )
 }
 
 fn listing_error(error: &ListingError) -> String {

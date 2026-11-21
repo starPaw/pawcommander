@@ -65,6 +65,7 @@ pub use listing::{
 };
 pub(crate) use location::JumpHost;
 pub use location::{resolve, Endpoint, Location};
+pub(crate) use mutations::DeletionFailure;
 pub use mutations::{create_directory, trash_entries_with_progress};
 #[cfg(test)]
 pub use mutations::{rename_entry, trash_entries};

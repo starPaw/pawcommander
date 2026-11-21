@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
-fn disconnect_at_rename(
+fn disconnect_at_request(
     fixture: &Path,
     source: &Location,
     session: &ssh2::Session,
@@ -27,7 +27,7 @@ fn disconnect_at_rename(
             }
             if Instant::now() >= until {
                 let _ = socket.shutdown(Shutdown::Both);
-                panic!("SFTP rename never reached {}", marker.display());
+                panic!("SFTP request never reached {}", marker.display());
             }
             thread::sleep(Duration::from_millis(10));
         }
@@ -45,7 +45,7 @@ fn interrupt_rename(
     drop(remote(destination).unwrap());
     let endpoint = destination.sftp_endpoint().unwrap();
     let session = sessions().lock().unwrap()[endpoint].clone();
-    let disconnect = disconnect_at_rename(fixture, source, &session, Duration::from_secs(12));
+    let disconnect = disconnect_at_request(fixture, source, &session, Duration::from_secs(12));
     let mut progress = Progress::default();
     progress.retry = Some(RetryTransfer::new(kind, destination.clone()));
     let operation = transfer_with_conflicts(
@@ -101,7 +101,7 @@ fn check_lost_source_hold(fixture: &Path, remote_root: &Location) {
     drop(remote(&input).unwrap());
     let endpoint = input.sftp_endpoint().unwrap();
     let session = sessions().lock().unwrap()[endpoint].clone();
-    let disconnected = disconnect_at_rename(fixture, &source, &session, Duration::from_secs(45));
+    let disconnected = disconnect_at_request(fixture, &source, &session, Duration::from_secs(45));
     let (mut progress, _) = Progress::tracked_transfer();
     progress.resume_directory = Some(recovery.clone());
     let interrupted = transfer_with_conflicts(
@@ -151,6 +151,67 @@ fn check_lost_source_hold(fixture: &Path, remote_root: &Location) {
     println!("Resumed after the server moved the source into staging and lost its reply; wrote no file data");
 }
 
+fn check_lost_deletion_reply(fixture: &Path, remote_root: &Location) {
+    use crate::file_error::{Failure, MutationError, SftpRemovalAction};
+
+    let first = remote_root.join("removed-with-ack");
+    let folder = remote_root.join("partly-removed");
+    let child = folder.join("lost-remove.bin");
+    let later = remote_root.join("keep-after-lost-reply");
+    fs::create_dir(folder.path()).unwrap();
+    fs::write(first.path(), b"acknowledged").unwrap();
+    fs::write(child.path(), b"no acknowledgement").unwrap();
+    fs::write(later.path(), b"untouched").unwrap();
+
+    drop(remote(remote_root).unwrap());
+    let session = sessions().lock().unwrap()[remote_root.sftp_endpoint().unwrap()].clone();
+    let disconnect = disconnect_at_request(fixture, &child, &session, Duration::from_secs(15));
+    let mut progress = Progress::default();
+    let failure = trash_entries_with_progress(
+        &[first.clone(), folder.clone(), later.clone()],
+        &mut progress,
+    )
+    .unwrap_err();
+    assert_eq!(disconnect.join().unwrap(), "after");
+    assert!(
+        matches!(
+            &failure.error,
+            TransferError::PublicationUnconfirmed(Failure::Mutation(reason))
+                if matches!(reason.as_ref(), MutationError::RemoveSftp {
+                    location, action: SftpRemovalAction::RemoveFile, source
+                } if location == &child && matches!(source.code(), ssh2::ErrorCode::Session(_)))
+        ),
+        "wrong failure after lost deletion reply: {failure:?}"
+    );
+    assert_eq!(failure.completed, 1);
+    assert!(failure.partial_remote);
+    assert_eq!(
+        progress
+            .results
+            .items
+            .iter()
+            .map(|row| row.outcome)
+            .collect::<Vec<_>>(),
+        [
+            Outcome::Completed,
+            Outcome::PublicationUnconfirmed,
+            Outcome::NotStarted,
+            Outcome::PublicationUnconfirmed,
+        ]
+    );
+    assert_eq!(progress.results.items[3].source, child.display());
+    assert!(!progress.results.items[1].descendants_enumerated);
+    assert!(!first.path().exists());
+    assert!(!child.path().exists());
+    assert!(folder.path().is_dir());
+    assert_eq!(fs::read(later.path()).unwrap(), b"untouched");
+    fs::remove_file(later.path()).unwrap();
+    fs::remove_dir(folder.path()).unwrap();
+    println!(
+        "A lost deletion reply left the selected folder unconfirmed and preserved the later item"
+    );
+}
+
 #[test]
 #[ignore = "requires the disposable reply-drop subsystem from scripts/test-sftp.sh"]
 fn sftp_reconnect_checks_lost_publication_replies() {
@@ -170,6 +231,7 @@ fn sftp_reconnect_checks_lost_publication_replies() {
         path: fixture.join("output"),
     };
     fs::create_dir(remote_root.path()).unwrap();
+    check_lost_deletion_reply(&fixture, &remote_root);
     const CONTENTS: &[u8] = b"fixture data saved over SFTP";
     for (name, expected_marker, replace) in [
         ("lost-before.bin", "before", false),

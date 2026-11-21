@@ -216,7 +216,7 @@ impl UndoEntry {
         } else {
             // Rename was acknowledged, but the final object cannot be proven.
             // Never offer a second inverse action for this receipt.
-            Err(TransferError::PublicationUnconfirmed(unavailable()))
+            Err(TransferError::publication_unconfirmed(unavailable()))
         }
     }
 }

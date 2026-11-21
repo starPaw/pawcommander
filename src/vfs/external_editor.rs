@@ -110,9 +110,9 @@ impl RemoteEdit {
             &source,
             None,
             outcome,
-            result.as_ref().err().map(ToString::to_string),
+            result.as_ref().err().map(crate::i18n::file_error),
         );
-        result.map_err(|error| error.to_string())
+        result.map_err(|error| crate::i18n::file_error(&error))
     }
 
     fn upload(&mut self, progress: &mut Progress) -> Result<String, TransferError> {
@@ -159,7 +159,7 @@ impl RemoteEdit {
             )
             .map_err(|error| {
                 if *preserve {
-                    TransferError::PublicationUnconfirmed(crate::tr_format!(
+                    TransferError::publication_unconfirmed(crate::tr_format!(
                         "{error}. Inspect the destination and retained folder {staging}.",
                         error = error,
                         staging = staging

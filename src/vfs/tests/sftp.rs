@@ -2,6 +2,65 @@ use super::*;
 #[cfg(target_os = "macos")]
 use crate::vfs::cache_media_preview;
 
+fn check_sftp_deletion_results(remote_root: &Location) {
+    use crate::file_error::{Failure, MutationError, SftpRemovalAction};
+    use crate::result_history::Outcome;
+
+    let first = remote_root.join("deleted-first");
+    let missing = remote_root.join("missing-for-deletion");
+    let later = remote_root.join("untouched-by-deletion");
+    fs::write(first.path(), b"will be deleted").unwrap();
+    fs::write(later.path(), b"must remain").unwrap();
+    let mut progress = Progress::default();
+    let failure = trash_entries_with_progress(
+        &[first.clone(), missing.clone(), later.clone()],
+        &mut progress,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        failure.error,
+        TransferError::Failed(Failure::Mutation(reason))
+            if matches!(reason.as_ref(), MutationError::RemoveSftp {
+                location, action: SftpRemovalAction::Inspect, source,
+            } if location == &missing
+                && source.code() == ssh2::ErrorCode::SFTP(libssh2_sys::LIBSSH2_FX_NO_SUCH_FILE))
+    ));
+    assert_eq!(failure.completed, 1);
+    assert!(!failure.partial_remote);
+    assert_eq!(
+        progress
+            .results
+            .items
+            .iter()
+            .map(|row| row.outcome)
+            .collect::<Vec<_>>(),
+        [Outcome::Completed, Outcome::Failed, Outcome::NotStarted]
+    );
+    assert!(!first.path().exists());
+    assert_eq!(fs::read(later.path()).unwrap(), b"must remain");
+    fs::remove_file(later.path()).unwrap();
+
+    let folder = remote_root.join("cancelled-deletion");
+    let child = folder.join("confirmed-child");
+    fs::create_dir(folder.path()).unwrap();
+    fs::write(child.path(), b"will be deleted").unwrap();
+    let child_path = child.path().to_owned();
+    let cancel = crate::operations::Cancellation::at_checkpoint(move || !child_path.exists());
+    let mut progress = Progress::with_cancellation(cancel);
+    let failure =
+        trash_entries_with_progress(std::slice::from_ref(&folder), &mut progress).unwrap_err();
+    assert!(matches!(failure.error, TransferError::Cancelled));
+    assert_eq!(failure.completed, 0);
+    assert!(failure.partial_remote);
+    assert_eq!(progress.results.items[0].outcome, Outcome::Cancelled);
+    assert!(!progress.results.items[0].descendants_enumerated);
+    assert_eq!(progress.results.items[1].outcome, Outcome::Completed);
+    assert_eq!(progress.results.items[1].source, child.display());
+    assert!(folder.path().is_dir());
+    assert!(!child.path().exists());
+    fs::remove_dir(folder.path()).unwrap();
+}
+
 #[cfg(target_os = "macos")]
 fn check_promised_sftp_download(local_root: &Location, remote_root: &Location) {
     use crate::{
@@ -1017,6 +1076,7 @@ fn openssh_round_trip_and_host_verification() {
         crate::file_error::ListingErrorKind::OpenSftp(source)
             if source.code() == ssh2::ErrorCode::SFTP(libssh2_sys::LIBSSH2_FX_NO_SUCH_FILE)
     ));
+    check_sftp_deletion_results(&remote_root);
     #[cfg(target_os = "macos")]
     check_sftp_editor(
         &local_root,

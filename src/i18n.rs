@@ -7,7 +7,7 @@ pub(crate) mod display;
 mod file_errors;
 mod formats;
 pub(crate) use catalog::key;
-pub(crate) use file_errors::{file_error, path_error, transfer_failure};
+pub(crate) use file_errors::{deletion_failure, file_error, path_error, transfer_failure};
 #[cfg(target_os = "macos")]
 pub(crate) use formats::czech_format;
 pub(crate) use formats::russian_format;

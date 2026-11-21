@@ -124,7 +124,7 @@ fn write_archive(
         cancel.check()?;
         rename_for_publication(&payload, &target).map_err(|error| match error {
             TransferError::PublicationUnconfirmed(error) => {
-                TransferError::PublicationUnconfirmed(crate::tr_format!(
+                TransferError::publication_unconfirmed(crate::tr_format!(
                     "The server did not confirm publication of {target}: {error}",
                     error = error,
                     target = target

@@ -1,4 +1,4 @@
-"""Hold one selected rename reply so the test can close its SSH transport."""
+"""Hold selected mutation replies so the test can close its SSH transport."""
 
 import os
 from pathlib import Path
@@ -7,10 +7,14 @@ import subprocess
 import sys
 
 
+REMOVE = 13
 RENAME = 18
 STATUS = 101
 BEFORE = {"lost-before.bin"}
-AFTER = {"lost-after.bin", "lost-move-dir", "lost-replacement.bin", "lost-conflict.bin", "lost-held-after"}
+AFTER = {
+    "lost-after.bin", "lost-move-dir", "lost-replacement.bin", "lost-conflict.bin",
+    "lost-held-after", "lost-remove.bin",
+}
 
 
 def read_packet(stream):
@@ -47,13 +51,21 @@ def rename_target(packet):
     return target.name
 
 
+def mutation_name(packet):
+    if packet[0] == REMOVE:
+        size, = struct.unpack_from(">I", packet, 5)
+        name = Path(os.fsdecode(packet[9:9 + size])).name
+        return name if name == "lost-remove.bin" else None
+    return rename_target(packet)
+
+
 def run(fixture, sftp_server):
     with subprocess.Popen(
         [sftp_server], stdin=subprocess.PIPE, stdout=subprocess.PIPE
     ) as backend:
         try:
             while (request := read_packet(sys.stdin.buffer)) is not None:
-                name = rename_target(request)
+                name = mutation_name(request)
                 marker = fixture / ("held-" + name) if name in BEFORE | AFTER else None
                 hold = marker is not None and not marker.exists()
                 if hold and name in BEFORE:
@@ -67,7 +79,7 @@ def run(fixture, sftp_server):
                         write_packet(sys.stdout.buffer, response)
                         continue
                     if response[0] != STATUS or response[1:5] != request[1:5] or response[5:9] != b"\0" * 4:
-                        raise RuntimeError("The disposable server did not apply the rename")
+                        raise RuntimeError("The disposable server did not apply the mutation")
                     condition = "after"
                 staged = marker.with_suffix(".fixture")
                 staged.write_text(condition, encoding="ascii")
