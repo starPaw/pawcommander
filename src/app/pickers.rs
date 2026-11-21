@@ -92,6 +92,8 @@ impl PawCommander {
                 #[cfg(target_os = "macos")]
                 Command::NewFile => self.can_create_file(),
                 #[cfg(target_os = "macos")]
+                Command::CompatibleNames => self.can_preview_compatible_names(),
+                #[cfg(target_os = "macos")]
                 Command::CreateLink => idle && tab.path.local().is_some(),
                 Command::Rename => idle && has_selection && selected.len() == 1,
                 Command::Trash | Command::CreateArchive => idle && writable && has_selection,

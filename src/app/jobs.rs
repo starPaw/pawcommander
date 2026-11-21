@@ -209,6 +209,39 @@ impl PawCommander {
     }
 
     #[cfg(target_os = "macos")]
+    pub(super) fn enqueue_compatible_names(
+        &mut self,
+        plan: crate::vfs::compatible_names::Plan,
+        ctx: &egui::Context,
+    ) {
+        let label = crate::shortcuts::Command::CompatibleNames.label();
+        let description = format!("{label} · {}", plan.destination().display().escape_debug());
+        let verify = plan.kind() == TransferKind::Copy && self.settings.verify_copies;
+        let (_events, receive) = mpsc::channel();
+        self.submit_job(
+            ctx,
+            PendingJob {
+                label: label.into(),
+                description,
+                work: Box::new(move |progress| {
+                    progress.set_copy_verification(verify);
+                    plan.apply(progress)
+                }),
+                transfer: Some(TransferInteraction {
+                    events: receive,
+                    cut_generation: None,
+                    conflict: None,
+                    can_pause: true,
+                }),
+                cut: None,
+                retry_origin: None,
+                undo_origin: None,
+                native_completion: None,
+            },
+        );
+    }
+
+    #[cfg(target_os = "macos")]
     pub(super) fn accept_file_promises(&mut self, ctx: &egui::Context) {
         use crate::native_drag::{PromiseKind, PromiseRequest};
 

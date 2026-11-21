@@ -264,6 +264,13 @@ impl MoveSource {
         let scan = progress.cancellation().pausable_scan();
         let manifest =
             TransferSourceManifest::capture_move_observed(&item.source, &scan, &mut |_, _| {})?;
+        Self::from_manifest(item, manifest)
+    }
+
+    pub(super) fn from_manifest(
+        item: &TransferItem,
+        manifest: TransferSourceManifest,
+    ) -> Result<Self, TransferError> {
         let mut links = BTreeMap::new();
         for (path, entry) in &manifest.entries {
             if entry.children.is_none() && !entry.metadata.is_file() {
@@ -335,9 +342,39 @@ pub(super) fn remove_verified(
     removed: impl FnOnce(),
     observe: &mut impl FnMut(&Location, Phase) -> Result<(), TransferError>,
 ) -> Result<(), TransferError> {
+    remove_verified_at(
+        item,
+        source_plan,
+        verified_target,
+        None,
+        progress,
+        removed,
+        observe,
+    )
+}
+
+pub(super) fn remove_verified_at(
+    item: &TransferItem,
+    source_plan: MoveSource,
+    verified_target: Option<TransferSourceManifest>,
+    target_paths: Option<&BTreeMap<Location, Location>>,
+    progress: &mut Progress,
+    removed: impl FnOnce(),
+    observe: &mut impl FnMut(&Location, Phase) -> Result<(), TransferError>,
+) -> Result<(), TransferError> {
     let manifest = &source_plan.manifest;
     let links = &source_plan.links;
     let cancel = progress.cancellation();
+    let target_path = |original: &Location| {
+        if let Some(paths) = target_paths {
+            paths
+                .get(original)
+                .cloned()
+                .ok_or_else(|| changed(original))
+        } else {
+            Ok(mapped(original, &item.source, &item.target))
+        }
+    };
     progress.results.copied_source_remaining();
     let mut fully_removed = false;
     let result = (|| {
@@ -390,12 +427,19 @@ pub(super) fn remove_verified(
                     {
                         return Err(changed(&source).into());
                     }
-                    let target = mapped(original, &item.source, &item.target);
+                    let target = target_path(original)?;
                     let copied = target_manifest
                         .entries
                         .get(&target)
                         .ok_or_else(|| changed(&target))?;
-                    if entry.children != copied.children {
+                    let same_children = if target_paths.is_some() {
+                        // The compatible copier already verified the exact
+                        // output tree and the one-to-one mapping of every row.
+                        entry.children.is_some() == copied.children.is_some()
+                    } else {
+                        entry.children == copied.children
+                    };
+                    if !same_children {
                         return Err(changed(&target).into());
                     }
                 }
@@ -403,7 +447,7 @@ pub(super) fn remove_verified(
                 // Never remove an unenumerated entry or recursively delete.
                 for (index, (original, entry)) in manifest.entries.iter().enumerate().rev() {
                     let source = mapped(original, &item.source, &held);
-                    let target = mapped(original, &item.source, &item.target);
+                    let target = target_path(original)?;
                     let copied = &target_manifest.entries[&target];
                     progress.item(original.path());
                     observe(&source, Phase::BeforeRemove)?;

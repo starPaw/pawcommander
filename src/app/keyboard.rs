@@ -175,6 +175,8 @@ impl PawCommander {
             Command::CreateLink => Action::CreateLink,
             Command::Trash => Action::Trash,
             Command::CopyToPane => Action::Transfer(TransferKind::Copy),
+            #[cfg(target_os = "macos")]
+            Command::CompatibleNames => Action::CompatibleNames(None),
             Command::MoveToPane => Action::Transfer(TransferKind::Move),
         };
         self.action(action, ctx);

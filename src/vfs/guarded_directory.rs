@@ -77,6 +77,69 @@ impl Directory {
         Ok(())
     }
 
+    pub(super) fn exclusive_file(&self, name: &OsStr) -> Result<fs::File, TransferError> {
+        use rustix::fs::{openat, Mode, OFlags};
+
+        self.verify()?;
+        let descriptor = self
+            .descriptor
+            .as_ref()
+            .ok_or_else(|| stale(&self.location))?;
+        let file = openat(
+            descriptor,
+            name,
+            OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0o600),
+        )
+        .map_err(io::Error::from)?;
+        Ok(fs::File::from(file))
+    }
+
+    pub(super) fn exclusive_directory(&self, name: &OsStr) -> Result<Self, TransferError> {
+        use rustix::fs::{mkdirat, openat, Mode, OFlags};
+
+        self.verify()?;
+        let parent = self
+            .descriptor
+            .as_ref()
+            .ok_or_else(|| stale(&self.location))?;
+        mkdirat(parent, name, Mode::from_raw_mode(0o700)).map_err(io::Error::from)?;
+        let location = self.location.join(name);
+        let result = (|| {
+            let descriptor = openat(
+                parent,
+                name,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(io::Error::from)?;
+            let metadata = held_metadata(&descriptor)?;
+            let actual = canonical(&location)?;
+            let child = Self {
+                location: location.with_path(actual),
+                descriptor: Some(descriptor),
+                metadata,
+            };
+            child.verify()?;
+            Ok::<_, TransferError>(child)
+        })();
+        result.map_err(|error| {
+            TransferError::PublicationUnconfirmed(crate::tr_format!(
+                "Созданная папка {location} недоступна для проверки: {error}",
+                "The new folder {location} could not be verified: {error}"
+            ))
+        })
+    }
+
+    pub(super) fn current_metadata(&self) -> Result<EntryMetadata, TransferError> {
+        self.verify()?;
+        let descriptor = self
+            .descriptor
+            .as_ref()
+            .ok_or_else(|| stale(&self.location))?;
+        held_metadata(descriptor)
+    }
+
     pub(super) fn rename(
         &self,
         name: &OsStr,
@@ -101,6 +164,15 @@ impl Directory {
             rename_for_publication(&from, &to)
         }
     }
+}
+
+fn held_metadata(descriptor: &OwnedFd) -> Result<EntryMetadata, TransferError> {
+    let fd = rustix::io::dup(descriptor).map_err(io::Error::from)?;
+    let file = fs::File::from(fd);
+    Ok(EntryMetadata::Local(LocalEntryMetadata::from_file(
+        &file,
+        file.metadata()?,
+    )))
 }
 
 pub(super) fn retained(error: TransferError, staging: &Location) -> TransferError {

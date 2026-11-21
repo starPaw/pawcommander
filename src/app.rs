@@ -10,6 +10,8 @@ mod collections;
 mod column_view;
 mod comparison;
 #[cfg(target_os = "macos")]
+mod compatible_names;
+#[cfg(target_os = "macos")]
 mod custom_actions;
 mod dialogs;
 mod directory;

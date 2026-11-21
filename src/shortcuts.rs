@@ -62,6 +62,8 @@ pub enum Command {
     CreateLink,
     Trash,
     CopyToPane,
+    #[cfg(target_os = "macos")]
+    CompatibleNames,
     MoveToPane,
     FocusToolbar,
     #[serde(rename = "CommandPalette")]
@@ -70,7 +72,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Self; 43 + 9 * cfg!(target_os = "macos") as usize] = [
+    pub const ALL: [Self; 43 + 10 * cfg!(target_os = "macos") as usize] = [
         Self::EditPath,
         Self::Filter,
         Self::Search,
@@ -128,6 +130,8 @@ impl Command {
         Self::CreateLink,
         Self::Trash,
         Self::CopyToPane,
+        #[cfg(target_os = "macos")]
+        Self::CompatibleNames,
         Self::MoveToPane,
         Self::FocusToolbar,
         Self::Palette,
@@ -191,6 +195,8 @@ impl Command {
             Self::CreateLink => "Создать ссылку",
             Self::Trash => "В корзину с подтверждением",
             Self::CopyToPane => "Копировать в соседнюю панель",
+            #[cfg(target_os = "macos")]
+            Self::CompatibleNames => "Перенос с совместимыми именами",
             Self::MoveToPane => "Переместить в соседнюю панель",
             Self::FocusToolbar => "Фокус на панели инструментов",
             Self::Palette => "Палитра команд",
@@ -267,7 +273,7 @@ impl Profile {
             FolderJump => (CMD_SHIFT, Key::J),
             #[cfg(target_os = "macos")]
             CustomActions | SyncFolders | CreateLink | FindDuplicates | DiskUsage | Collections
-            | NewFile => return None,
+            | NewFile | CompatibleNames => return None,
             Preview
             | EditInZed
             | OpenTerminal

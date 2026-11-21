@@ -99,6 +99,8 @@ pub(super) enum Action {
     RemoveFromArchive,
     Trash,
     Transfer(TransferKind),
+    #[cfg(target_os = "macos")]
+    CompatibleNames(Option<egui::Id>),
     Bookmark,
     SaveWorkspace,
     OpenWorkspace(usize),
@@ -578,6 +580,8 @@ impl PawCommander {
                 }
             }
             Action::Copy(cut) => self.copy_files(cut),
+            #[cfg(target_os = "macos")]
+            Action::CompatibleNames(return_focus) => self.open_compatible_names(return_focus, ctx),
             Action::Paste(move_here) if self.drop_enabled() => self.paste_files(move_here, ctx),
             Action::Transfer(kind) if !self.conflict_open() && self.settings.split => {
                 let sources = self.selected();
