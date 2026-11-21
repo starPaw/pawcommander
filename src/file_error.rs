@@ -19,6 +19,7 @@ pub(crate) enum Failure {
     Preview(Box<PreviewError>),
     Search(Box<SearchError>),
     Scan(Box<ScanError>),
+    Permissions(Box<PermissionError>),
     ComparisonPane {
         right: bool,
         cause: Box<TransferError>,
@@ -53,6 +54,7 @@ impl Failure {
             Self::Preview(error) => Some(error.as_ref()),
             Self::Search(error) => Some(error.as_ref()),
             Self::Scan(error) => Some(error.as_ref()),
+            Self::Permissions(error) => Some(error.as_ref()),
             Self::ComparisonPane { cause, .. } => Some(cause.as_ref()),
             Self::Listing(error) => Some(error.as_ref()),
             Self::Mutation(error) => Some(error.as_ref()),
@@ -72,6 +74,7 @@ impl fmt::Display for Failure {
             Self::Preview(error) => fmt::Display::fmt(error, f),
             Self::Search(error) => fmt::Display::fmt(error, f),
             Self::Scan(error) => fmt::Display::fmt(error, f),
+            Self::Permissions(error) => fmt::Display::fmt(error, f),
             Self::ComparisonPane { right, cause } => {
                 let pane = if *right { "Right pane" } else { "Left pane" };
                 write!(f, "{pane} · {cause}")
@@ -436,6 +439,63 @@ impl Error for ScanError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::PropertiesStart(source) => Some(source),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum PermissionError {
+    InvalidRule,
+    InvalidSelection,
+    FolderChanged(Location),
+    ItemChanged(Location),
+    MissingMode(Location),
+    UnsupportedType(Location),
+    SetMode {
+        location: Location,
+        source: ssh2::Error,
+    },
+    ModeMismatch {
+        location: Location,
+        expected: u32,
+        actual: u32,
+    },
+    VerifyMode(TransferError),
+}
+
+impl fmt::Display for PermissionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidRule => f.write_str("Invalid permission rule"),
+            Self::InvalidSelection => f.write_str("Selection must be within one SFTP folder"),
+            Self::FolderChanged(location) => write!(f, "SFTP folder {location} changed"),
+            Self::ItemChanged(location) => write!(f, "SFTP item {location} changed"),
+            Self::MissingMode(location) => write!(f, "Missing permissions for {location}"),
+            Self::UnsupportedType(location) => write!(f, "Unsupported item type at {location}"),
+            Self::SetMode { location, source } => {
+                write!(f, "Could not change permissions on {location}: {source}")
+            }
+            Self::ModeMismatch {
+                location,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "The server set {actual:04o} instead of {expected:04o} on {location}"
+                )
+            }
+            Self::VerifyMode(cause) => write!(f, "Could not verify permissions: {cause}"),
+        }
+    }
+}
+
+impl Error for PermissionError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::SetMode { source, .. } => Some(source),
+            Self::VerifyMode(cause) => Some(cause),
             _ => None,
         }
     }

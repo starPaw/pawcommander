@@ -2,8 +2,8 @@ use super::text;
 use crate::file_error::{
     AccessAction, AccessCause, AccessError, ArchiveMemberError, ConnectionError, Failure,
     HostKeyError, KnownHostEntryError, KnownHostsError, ListingError, ListingErrorKind,
-    LocalPathAction, MutationError, PathError, PinError, PreviewError, PublicationError,
-    RecoveryNotice, ScanError, SearchError, SshStage, StagingCleanupError,
+    LocalPathAction, MutationError, PathError, PermissionError, PinError, PreviewError,
+    PublicationError, RecoveryNotice, ScanError, SearchError, SshStage, StagingCleanupError,
 };
 use crate::operations::TransferError;
 use crate::vfs::{DeletionFailure, TransferFailure};
@@ -18,6 +18,10 @@ pub(crate) fn file_error(error: &TransferError) -> String {
                 Failure::Preview(error) => preview_error(error),
                 Failure::Search(error) => search_error(error),
                 Failure::Scan(error) => scan_error(error),
+                Failure::Permissions(reason) => permission_error(
+                    reason,
+                    matches!(error, TransferError::PublicationUnconfirmed(_)),
+                ),
                 Failure::ComparisonPane { right, cause } => {
                     let pane = if *right {
                         text!("Правая панель")
@@ -254,6 +258,51 @@ fn scan_error(error: &ScanError) -> String {
         }
         #[cfg(target_os = "macos")]
         ScanError::DiskUsageLimit => return text!("Достигнут предел анализа места").into(),
+    };
+    format!("{message} · {location}")
+}
+
+fn permission_error(error: &PermissionError, unconfirmed: bool) -> String {
+    use PermissionError::*;
+    let (message, location) = match error {
+        InvalidRule => return text!(
+            "Введите восьмеричные или символьные права, например 0644 или u+rw,go-w.",
+        ).into(),
+        InvalidSelection => return text!("Выберите файлы или папки в одной папке SFTP.").into(),
+        FolderChanged(location) => (
+            text!("Папка SFTP изменилась. Обновите предпросмотр прав."),
+            location,
+        ),
+        ItemChanged(location) => (
+            text!("Объект SFTP изменился. Обновите предпросмотр прав."),
+            location,
+        ),
+        MissingMode(location) => (text!("Сервер SFTP не сообщил права доступа."), location),
+        UnsupportedType(location) => (
+            text!("Изменение прав доступно для обычных файлов и папок."),
+            location,
+        ),
+        SetMode { location, source } => {
+            let message = if unconfirmed {
+                text!("Связь с SFTP прервалась. Изменение прав не подтверждено.")
+            } else if source.code() == ssh2::ErrorCode::SFTP(libssh2_sys::LIBSSH2_FX_PERMISSION_DENIED) {
+                text!("Сервер SFTP отказал в доступе.")
+            } else {
+                text!("Не удалось изменить права доступа.")
+            };
+            return format!("{message} · {location}: {source}");
+        }
+        ModeMismatch { location, expected, actual } => {
+            let message = crate::tr_format!("The server set {:04o} instead of {:04o}.", actual, expected);
+            return format!("{message} · {location}");
+        }
+        VerifyMode(cause) if unconfirmed => return crate::tr_format!(
+            "The SFTP server accepted the permission change. The resulting permissions could not be verified. {}",
+            file_error(cause)
+        ),
+        VerifyMode(cause) => {
+            return crate::tr_format!("Could not verify the new permissions. {}", file_error(cause));
+        }
     };
     format!("{message} · {location}")
 }

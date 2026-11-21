@@ -273,6 +273,87 @@ fn check_lost_deletion_reply(fixture: &Path, remote_root: &Location) {
     );
 }
 
+#[cfg(target_os = "macos")]
+fn check_lost_permissions_replies(fixture: &Path, remote_root: &Location) {
+    use crate::file_error::{AccessAction, AccessCause, Failure, PermissionError};
+    use crate::vfs::{sftp::should_reopen, ModeRule, PermissionsPreview};
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = remote_root.join("permissions");
+    fs::create_dir(directory.path()).unwrap();
+    let directory = directory.with_path(directory.path().canonicalize().unwrap());
+    let known = directory.join("confirmed.txt");
+    let later = directory.join("later.txt");
+    let endpoint = directory.sftp_endpoint().unwrap();
+    let rule = ModeRule::parse("0600").unwrap();
+    for (name, stage, expected_mode) in [
+        ("lost-permissions-before.bin", "before", 0o644),
+        ("lost-permissions-after.bin", "after", 0o600),
+        ("lost-permissions-readback.bin", "readback", 0o600),
+    ] {
+        let target = directory.join(name);
+        let selected = [known.clone(), target.clone(), later.clone()];
+        for location in &selected {
+            fs::write(location.path(), b"unchanged bytes").unwrap();
+            fs::set_permissions(location.path(), fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let plan = PermissionsPreview::load(&selected, &rule, &Cancellation::default()).unwrap();
+        let session = sessions().lock().unwrap()[endpoint].clone();
+        let disconnect = disconnect_at_request(fixture, &target, &session, Duration::from_secs(12));
+        let mut progress = Progress::default();
+        let report = plan.apply(&mut progress).unwrap();
+        assert_eq!(disconnect.join().unwrap(), stage);
+        assert_eq!(
+            (
+                report.completed,
+                report.warned,
+                report.skipped,
+                report.failed
+            ),
+            (1, 0, 0, 0)
+        );
+        assert!(!report.cancelled);
+        let error = report.error.unwrap();
+        let TransferError::PublicationUnconfirmed(Failure::Permissions(reason)) = &error else {
+            panic!("permissions require inspection after a lost {stage} reply: {error:?}");
+        };
+        if stage == "readback" {
+            assert!(matches!(
+                reason.as_ref(),
+                PermissionError::VerifyMode(TransferError::Failed(Failure::Access(error)))
+                    if error.location == target && error.action == AccessAction::ReadMetadata
+                        && matches!(&error.cause, AccessCause::Sftp(source) if should_reopen(source))
+            ));
+        } else {
+            assert!(matches!(
+                reason.as_ref(),
+                PermissionError::SetMode { location, source }
+                    if location == &target && should_reopen(source)
+            ));
+        }
+        let rows = &progress.results.items;
+        assert_eq!(
+            rows.iter().map(|row| row.outcome).collect::<Vec<_>>(),
+            [
+                Outcome::Completed,
+                Outcome::PublicationUnconfirmed,
+                Outcome::NotStarted
+            ]
+        );
+        assert!(rows[1]
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains(&target.display()));
+        for (location, mode) in selected.iter().zip([0o600, expected_mode, 0o644]) {
+            let actual = fs::metadata(location.path()).unwrap();
+            assert_eq!(actual.permissions().mode() & 0o7777, mode);
+            assert_eq!(fs::read(location.path()).unwrap(), b"unchanged bytes");
+        }
+        println!("Permissions {stage}: confirmed earlier row, unconfirmed affected row and untouched later row");
+    }
+}
+
 #[test]
 #[ignore = "requires the disposable reply-drop subsystem from scripts/test-sftp.sh"]
 fn sftp_reconnect_checks_lost_publication_replies() {
@@ -293,6 +374,8 @@ fn sftp_reconnect_checks_lost_publication_replies() {
     };
     fs::create_dir(remote_root.path()).unwrap();
     check_lost_deletion_reply(&fixture, &remote_root);
+    #[cfg(target_os = "macos")]
+    check_lost_permissions_replies(&fixture, &remote_root);
     const CONTENTS: &[u8] = b"fixture data saved over SFTP";
     for (name, expected_marker, replace) in [
         ("lost-before.bin", "before", false),

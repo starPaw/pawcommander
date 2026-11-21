@@ -4,30 +4,38 @@ pub(crate) use mode::ModeRule;
 
 use super::location::{normalize_remote, Location};
 use super::sftp::{remote, should_reopen};
-use crate::i18n::text;
+use crate::file_error::{AccessAction, AccessCause, AccessError, Failure, PermissionError};
 use crate::operations::{Cancellation, Progress, TransferError};
 use crate::result_history::Outcome;
-use libssh2_sys::LIBSSH2_FX_PERMISSION_DENIED;
 use mode::MODE_BITS;
-use ssh2::{Error, ErrorCode, FileStat, Sftp};
+use ssh2::{FileStat, Sftp};
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
 
 pub(crate) struct PermissionsPreview {
     directory: Location,
-    canonical_directory: PathBuf,
+    canonical_directory: Location,
     pub(crate) rows: Vec<PermissionRow>,
     pub(crate) changes: usize,
 }
 
 pub(crate) struct PermissionRow {
     pub(crate) source: Location,
-    pub(crate) change: Result<PermissionChange, String>,
+    pub(crate) change: Result<PermissionChange, TransferError>,
 }
 
 pub(crate) struct PermissionChange {
     before: Stamp,
     pub(crate) after: u32,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct PermissionsReport {
+    pub(crate) completed: usize,
+    pub(crate) warned: usize,
+    pub(crate) skipped: usize,
+    pub(crate) failed: usize,
+    pub(crate) cancelled: bool,
+    pub(crate) error: Option<TransferError>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -40,67 +48,46 @@ struct Stamp {
     directory: bool,
 }
 
-enum ChangeError {
-    Failed(String),
-    Interrupted(String),
-    Cancelled,
-}
-
-enum ReadError {
-    Server(Error),
-    Unsupported(&'static str),
-}
-
-impl ReadError {
-    fn disconnected(&self) -> bool {
-        matches!(self, Self::Server(error) if should_reopen(error))
-    }
-
-    fn into_message(self) -> String {
-        match self {
-            Self::Server(error) => server_error(error),
-            Self::Unsupported(message) => message.into(),
-        }
-    }
-}
-
 impl PermissionsPreview {
     pub(crate) fn load(
         sources: &[Location],
         rule: &ModeRule,
         cancel: &Cancellation,
     ) -> Result<Self, TransferError> {
-        let invalid = || text!("Выберите файлы или папки в одной папке SFTP.").to_owned();
         let directory = sources
             .first()
             .filter(|source| source.remote())
             .and_then(Location::parent)
-            .ok_or_else(invalid)?;
+            .ok_or(PermissionError::InvalidSelection)?;
         for source in sources {
             if !source.same_backend(&directory)
                 || source.path().parent() != Some(directory.path())
                 || normalize_remote(source.path())?.as_os_str() != source.path().as_os_str()
             {
-                return Err(invalid().into());
+                return Err(PermissionError::InvalidSelection.into());
             }
         }
-        cancel.check()?;
-        let channel = remote(&directory)?;
-        let canonical_directory = channel.realpath(directory.path()).map_err(server_error)?;
+        let (channel, canonical_directory) = open_directory(&directory, cancel)?;
         let mut seen = HashSet::new();
         let mut rows = Vec::new();
         let mut changes = 0;
         for source in sources.iter().filter(|&source| seen.insert(source)) {
             cancel.check()?;
-            let path = canonical_directory.join(source.path().file_name().ok_or_else(invalid)?);
-            let change = match Stamp::read(&channel, &path) {
+            let name = source
+                .path()
+                .file_name()
+                .ok_or(PermissionError::InvalidSelection)?;
+            let target = canonical_directory.join(name);
+            let observed = Stamp::read(&channel, &target);
+            cancel.check()?;
+            let change = match observed {
                 Ok(before) => {
                     let after = rule.evaluate(before.perm, before.directory);
                     changes += usize::from(after != before.perm & MODE_BITS);
                     Ok(PermissionChange { before, after })
                 }
-                Err(error) if error.disconnected() => return Err(error.into_message().into()),
-                Err(error) => Err(error.into_message()),
+                Err(error) if read_disconnected(&error) => return Err(error),
+                Err(error) => Err(error),
             };
             rows.push(PermissionRow {
                 source: source.clone(),
@@ -119,29 +106,23 @@ impl PermissionsPreview {
         &self.directory
     }
 
-    pub(crate) fn apply(self, progress: &mut Progress) -> Result<String, TransferError> {
+    pub(crate) fn apply(self, progress: &mut Progress) -> Result<PermissionsReport, TransferError> {
         progress
             .results
             .plan_selected_items(self.rows.iter().map(|row| row.source.clone()));
         let cancel = progress.cancellation();
-        if cancel.check().is_err() {
-            progress.results.cancelled = true;
-            return Ok(text!("Операция остановлена пользователем").into());
-        }
-        let channel = remote(&self.directory)?;
-        if channel
-            .realpath(self.directory.path())
-            .map_err(server_error)?
-            != self.canonical_directory
-        {
-            return Err(text!("Папка SFTP изменилась. Обновите предпросмотр прав.").into());
+        let (channel, canonical) =
+            open_directory(&self.directory, &cancel).inspect_err(|error| {
+                progress.results.cancelled = matches!(error, TransferError::Cancelled);
+            })?;
+        if canonical != self.canonical_directory {
+            return Err(PermissionError::FolderChanged(self.directory).into());
         }
 
-        let (mut completed, mut warned, mut skipped, mut failed) = (0, 0, 0, 0);
-        let mut first_error = None;
+        let mut report = PermissionsReport::default();
         for row in self.rows {
             if cancel.check().is_err() {
-                progress.results.cancelled = true;
+                report.cancelled = true;
                 break;
             }
             progress.results.begin(&row.source);
@@ -152,57 +133,48 @@ impl PermissionsPreview {
                 Ok(change) if change.current() == change.after => (Outcome::Skipped, None),
                 Ok(change) => {
                     let name = row.source.path().file_name().expect("validated entry path");
-                    let path = self.canonical_directory.join(name);
-                    match change.apply(&channel, &path, &cancel) {
+                    let target = canonical.join(name);
+                    match change.apply(&channel, &target, &cancel) {
                         Ok(None) => (Outcome::Completed, None),
                         Ok(Some(warning)) => (Outcome::CompletedWithWarning, Some(warning)),
-                        Err(ChangeError::Failed(reason)) => (Outcome::Failed, Some(reason)),
-                        Err(ChangeError::Interrupted(reason)) => {
+                        Err(reason @ TransferError::PublicationUnconfirmed(_)) => {
                             stop = true;
-                            (Outcome::Failed, Some(reason))
+                            (Outcome::PublicationUnconfirmed, Some(reason))
                         }
-                        Err(ChangeError::Cancelled) => {
-                            progress.results.cancelled = true;
+                        Err(TransferError::Cancelled) => {
+                            report.cancelled = true;
                             stop = true;
                             (Outcome::Cancelled, None)
+                        }
+                        Err(reason) => {
+                            stop = read_disconnected(&reason);
+                            (Outcome::Failed, Some(reason))
                         }
                     }
                 }
             };
+            progress
+                .results
+                .record_with_error(&row.source, outcome, reason.as_ref());
             match outcome {
-                Outcome::Completed => completed += 1,
-                Outcome::CompletedWithWarning => warned += 1,
-                Outcome::Skipped => skipped += 1,
+                Outcome::Completed => report.completed += 1,
+                Outcome::CompletedWithWarning => report.warned += 1,
+                Outcome::Skipped => report.skipped += 1,
                 Outcome::Failed => {
-                    failed += 1;
-                    if first_error.is_none() {
-                        first_error.clone_from(&reason);
+                    report.failed += 1;
+                    if report.error.is_none() || stop {
+                        report.error = reason;
                     }
                 }
+                Outcome::PublicationUnconfirmed => report.error = reason,
                 _ => {}
             }
-            progress.results.record(&row.source, None, outcome, reason);
             if stop {
                 break;
             }
         }
-        let summary = crate::tr_format!(
-            "Changed {}. With warnings {}. Skipped {}. Failed {}.",
-            completed,
-            warned,
-            skipped,
-            failed
-        );
-        if let Some(reason) = first_error {
-            Err(format!("{summary} {reason}").into())
-        } else if progress.results.cancelled {
-            Ok(format!(
-                "{}. {summary}",
-                text!("Операция остановлена пользователем")
-            ))
-        } else {
-            Ok(summary)
-        }
+        progress.results.cancelled = report.cancelled;
+        Ok(report)
     }
 }
 
@@ -214,24 +186,16 @@ impl PermissionChange {
     fn apply(
         &self,
         channel: &Sftp,
-        path: &Path,
+        target: &Location,
         cancel: &Cancellation,
-    ) -> Result<Option<String>, ChangeError> {
+    ) -> Result<Option<TransferError>, TransferError> {
         // SFTP SETSTAT uses a path. Check the previewed attributes and the final
         // entry type immediately before requesting the change.
-        let current = Stamp::read(channel, path).map_err(|error| {
-            if error.disconnected() {
-                ChangeError::Interrupted(error.into_message())
-            } else {
-                ChangeError::Failed(error.into_message())
-            }
-        })?;
+        let current = Stamp::read(channel, target)?;
         if current != self.before {
-            return Err(ChangeError::Failed(
-                text!("Объект SFTP изменился. Обновите предпросмотр прав.").into(),
-            ));
+            return Err(PermissionError::ItemChanged(target.clone()).into());
         }
-        cancel.check().map_err(|_| ChangeError::Cancelled)?;
+        cancel.check()?;
         let attributes = FileStat {
             perm: Some(self.after),
             size: None,
@@ -240,41 +204,53 @@ impl PermissionChange {
             atime: None,
             mtime: None,
         };
-        channel.setstat(path, attributes).map_err(|error| {
-            if should_reopen(&error) {
-                ChangeError::Interrupted(unconfirmed_change())
-            } else {
-                ChangeError::Failed(server_error(error))
-            }
-        })?;
-        Ok(match Stamp::read(channel, path) {
-            Ok(actual) if actual.perm & MODE_BITS == self.after => None,
-            Ok(actual) => Some(crate::tr_format!(
-                "The server set {:04o} instead of {:04o}.",
-                actual.perm & MODE_BITS,
-                self.after
+        channel
+            .setstat(target.path(), attributes)
+            .map_err(|source| {
+                let disconnected = should_reopen(&source);
+                let error = TransferError::from(PermissionError::SetMode {
+                    location: target.clone(),
+                    source,
+                });
+                if disconnected {
+                    error.with_unconfirmed_publication()
+                } else {
+                    error
+                }
+            })?;
+        match Stamp::read(channel, target) {
+            Ok(actual) if actual.perm & MODE_BITS == self.after => Ok(None),
+            Ok(actual) => Ok(Some(
+                PermissionError::ModeMismatch {
+                    location: target.clone(),
+                    expected: self.after,
+                    actual: actual.perm & MODE_BITS,
+                }
+                .into(),
             )),
-            Err(error) if error.disconnected() => {
-                return Err(ChangeError::Interrupted(unconfirmed_change()));
+            Err(cause) => {
+                let disconnected = read_disconnected(&cause);
+                let error = TransferError::from(PermissionError::VerifyMode(cause));
+                if disconnected {
+                    Err(error.with_unconfirmed_publication())
+                } else {
+                    Ok(Some(error))
+                }
             }
-            Err(error) => Some(crate::tr_format!(
-                "Could not verify the new permissions. {}",
-                error.into_message()
-            )),
-        })
+        }
     }
 }
 
 impl Stamp {
-    fn read(channel: &Sftp, path: &Path) -> Result<Self, ReadError> {
-        let stat = channel.lstat(path).map_err(ReadError::Server)?;
-        let perm = stat.perm.ok_or_else(|| {
-            ReadError::Unsupported(text!("Сервер SFTP не сообщил права доступа."))
-        })?;
+    fn read(channel: &Sftp, target: &Location) -> Result<Self, TransferError> {
+        let stat = channel
+            .lstat(target.path())
+            .map_err(|error| AccessError::new(target, AccessAction::ReadMetadata, error))?;
+        let perm = stat
+            .perm
+            .ok_or_else(|| PermissionError::MissingMode(target.clone()))?;
         if !stat.is_file() && !stat.is_dir() {
-            return Err(ReadError::Unsupported(text!(
-                "Изменение прав доступно для обычных файлов и папок.",
-            )));
+            return Err(PermissionError::UnsupportedType(target.clone()).into());
         }
         Ok(Self {
             perm,
@@ -287,14 +263,22 @@ impl Stamp {
     }
 }
 
-fn unconfirmed_change() -> String {
-    text!("Связь с SFTP прервалась. Изменение прав не подтверждено.").into()
+fn open_directory(
+    directory: &Location,
+    cancel: &Cancellation,
+) -> Result<(Sftp, Location), TransferError> {
+    cancel.check()?;
+    let channel = remote(directory)
+        .map_err(|error| AccessError::new(directory, AccessAction::ResolvePath, error))?;
+    cancel.check()?;
+    let path = channel
+        .realpath(directory.path())
+        .map_err(|error| AccessError::new(directory, AccessAction::ResolvePath, error))?;
+    cancel.check()?;
+    Ok((channel, directory.with_path(path)))
 }
 
-fn server_error(error: Error) -> String {
-    if error.code() == ErrorCode::SFTP(LIBSSH2_FX_PERMISSION_DENIED) {
-        text!("Сервер SFTP отказал в доступе.").into()
-    } else {
-        error.to_string()
-    }
+fn read_disconnected(error: &TransferError) -> bool {
+    matches!(error, TransferError::Failed(Failure::Access(error))
+        if matches!(&error.cause, AccessCause::Sftp(source) if should_reopen(source)))
 }
