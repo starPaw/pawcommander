@@ -51,30 +51,49 @@ impl Player {
             }
         }
         self.update(ui.ctx());
-        if let Some(error) = &self.error {
-            ui.colored_label(ui.visuals().error_fg_color, error);
-            self.show_metadata(ui);
-            return;
-        }
-        if self.state.mode == Mode::Loading {
+        if self.error.is_none() && self.state.mode == Mode::Loading {
             ui.horizontal(|ui| {
                 ui.spinner();
                 ui.label(text("Подготовка медиафайла…"));
             });
             return;
         }
-        self.controls(ui);
-        self.show_metadata(ui);
-        ui.separator();
-        if let Some(texture) = &self.texture {
-            super::super::draw_image(ui, texture, ui.available_height().max(1.0));
+        let available_height = ui.available_height();
+        // Short windows need one scroll area so the controls and every field can be reached.
+        let scroll_preview = available_height < 200.0;
+        let mut draw = |ui: &mut egui::Ui| {
+            if let Some(error) = &self.error {
+                ui.colored_label(ui.visuals().error_fg_color, error);
+                self.show_metadata(ui, !scroll_preview);
+                return;
+            }
+            self.controls(ui);
+            self.show_metadata(ui, !scroll_preview);
+            ui.separator();
+            if let Some(texture) = &self.texture {
+                let height = if scroll_preview {
+                    available_height
+                } else {
+                    ui.available_height()
+                };
+                super::super::draw_image(ui, texture, height.max(1.0));
+            }
+        };
+        if scroll_preview {
+            egui::ScrollArea::vertical()
+                .id_salt("media-content")
+                .min_scrolled_height(0.0)
+                .auto_shrink([false, false])
+                .show(ui, draw);
+        } else {
+            draw(ui);
         }
     }
 
-    fn show_metadata(&self, ui: &mut egui::Ui) {
+    fn show_metadata(&self, ui: &mut egui::Ui, scroll_rows: bool) {
         use metadata::field;
 
-        metadata::section(ui, |ui| {
+        metadata::section(ui, scroll_rows, |ui| {
             field(
                 ui,
                 "Длительность",
@@ -380,7 +399,104 @@ fn timestamp(seconds: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::preview::media::{AudioMetadata, VideoMetadata};
     use crate::test_ui::ContextExt as _;
+
+    #[test]
+    fn short_media_preview_scrolls_to_channels_and_back_to_play() {
+        let ctx = egui::Context::default();
+        let cancel = Cancellation::default();
+        let (commands, _requested) = mpsc::channel();
+        let mut player = Player::new(Location::Local("fixture.mp4".into()));
+        player.controller = Some(Controller {
+            commands,
+            latest: Arc::new(Mutex::new(Update::default())),
+            cancel: cancel.clone(),
+        });
+        player.state = State {
+            mode: Mode::Paused,
+            duration: Some(12.0),
+            ..State::default()
+        };
+        player.metadata = Metadata {
+            video: Some(VideoMetadata {
+                dimensions: Some([352, 208]),
+                codec: Some(u32::from_be_bytes(*b"avc1")),
+                fps: Some(24.0),
+            }),
+            audio: Some(AudioMetadata {
+                codec: Some(u32::from_be_bytes(*b"aac ")),
+                sample_rate: Some(44100.0),
+                channels: Some(1),
+            }),
+        };
+        let draw = |player: &mut Player, events| {
+            ctx.run_test_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(360.0, 240.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    ui.style_mut().animation_time = 0.0;
+                    ui.add_space(142.0);
+                    player.show(ui, &cancel);
+                },
+            )
+        };
+        let visible = |frame: &egui::FullOutput, name: &str| {
+            frame
+                .shapes
+                .iter()
+                .find_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(label) if label.galley.job.text == name => {
+                        let center = label.pos + label.galley.size() * 0.5;
+                        clipped.clip_rect.contains(center).then_some(center)
+                    }
+                    _ => None,
+                })
+        };
+        draw(&mut player, vec![]);
+        let header = visible(&draw(&mut player, vec![]), text("Метаданные")).unwrap();
+        draw(&mut player, vec![egui::Event::PointerMoved(header)]);
+        for pressed in [true, false] {
+            draw(
+                &mut player,
+                vec![egui::Event::PointerButton {
+                    pos: header,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+        }
+        let scroll = |player: &mut Player, delta| {
+            draw(
+                player,
+                vec![
+                    egui::Event::PointerMoved(egui::pos2(100.0, 232.0)),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, delta),
+                        phase: egui::TouchPhase::Move,
+                        source: egui::MouseWheelSource::Unknown,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+            for _ in 0..12 {
+                draw(player, vec![]);
+            }
+            draw(player, vec![])
+        };
+        let bottom = scroll(&mut player, -700.0);
+        assert!(visible(&bottom, text("Каналы")).is_some());
+        let top = scroll(&mut player, 700.0);
+        assert!(visible(&top, text("Воспроизвести")).is_some());
+    }
 
     #[test]
     fn keyboard_seek_holds_the_requested_position_until_the_worker_finishes() {

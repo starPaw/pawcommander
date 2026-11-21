@@ -113,7 +113,7 @@ pub(super) fn dimensions([width, height]: [u32; 2]) -> String {
 }
 
 pub(super) fn show_image(ui: &mut egui::Ui, size: [u32; 2], exif: Option<&Exif>) {
-    section(ui, |ui| {
+    section(ui, true, |ui| {
         field(ui, "Разрешение", Some(&dimensions(size)));
         exif_fields(ui, exif);
     });
@@ -127,20 +127,26 @@ pub(super) fn exif_fields(ui: &mut egui::Ui, exif: Option<&Exif>) {
     }
 }
 
-pub(super) fn section(ui: &mut egui::Ui, fields: impl FnOnce(&mut egui::Ui)) {
-    let height = (ui.ctx().content_rect().height() * 0.4).clamp(36.0, 180.0);
+pub(super) fn section(ui: &mut egui::Ui, scroll_rows: bool, fields: impl FnOnce(&mut egui::Ui)) {
     egui::CollapsingHeader::new(text("Метаданные")).show(ui, |ui| {
-        egui::ScrollArea::vertical()
-            .id_salt("metadata-rows")
-            .max_height(height)
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
-                egui::Grid::new("metadata-fields")
-                    .num_columns(2)
-                    .min_col_width(88.0)
-                    .spacing([12.0, 5.0])
-                    .show(ui, fields);
-            });
+        let rows = |ui: &mut egui::Ui| {
+            egui::Grid::new("metadata-fields")
+                .num_columns(2)
+                .min_col_width(88.0)
+                .spacing([12.0, 5.0])
+                .show(ui, fields);
+        };
+        if scroll_rows {
+            let height = (ui.ctx().content_rect().height() * 0.4).clamp(36.0, 180.0);
+            egui::ScrollArea::vertical()
+                .id_salt("metadata-rows")
+                .max_height(height)
+                .min_scrolled_height(0.0)
+                .auto_shrink([false, true])
+                .show(ui, rows);
+        } else {
+            rows(ui);
+        }
     });
 }
 
