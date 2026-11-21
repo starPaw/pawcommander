@@ -182,6 +182,8 @@ pub(super) struct SftpForm {
     pub(super) error: Option<String>,
     pub(super) ssh_config: Option<crate::ssh_config::ResolvedHost>,
     pub(super) ssh_config_job: Option<Receiver<Result<crate::ssh_config::ResolvedHost, String>>>,
+    #[cfg(target_os = "macos")]
+    pub(super) show_identity_choices: bool,
 }
 
 impl Default for SftpForm {
@@ -199,6 +201,8 @@ impl Default for SftpForm {
             error: None,
             ssh_config: None,
             ssh_config_job: None,
+            #[cfg(target_os = "macos")]
+            show_identity_choices: false,
         }
     }
 }
@@ -304,7 +308,20 @@ impl PawCommander {
             ui.set_width(470.0);
             ui.heading(crate::i18n::text("Подключение SFTP"));
             ui.add_space(10.0);
-            ui.add_enabled_ui(!busy && !loading_config, |ui| {
+            #[cfg(target_os = "macos")]
+            {
+                form.show_config_result(ui);
+                if let Some(error) = &form.error {
+                    egui::ScrollArea::vertical()
+                        .id_salt("sftp_connection_error")
+                        .max_height((ctx.content_rect().height() * 0.25).clamp(65.0, 150.0))
+                        .show(ui, |ui| {
+                            let message = egui::RichText::new(error).color(colors.error);
+                            ui.add(egui::Label::new(message).wrap().selectable(true));
+                        });
+                }
+            }
+            let fields = |ui: &mut egui::Ui| ui.add_enabled_ui(!busy && !loading_config, |ui| {
                 egui::ComboBox::from_id_salt("saved_sftp_profiles").selected_text(crate::i18n::text("Сохранённые подключения")).show_ui(ui, |ui| {
                     for profile in &self.settings.sftp_profiles {
                         if ui.selectable_label(false, profile.display()).clicked()
@@ -359,8 +376,24 @@ impl PawCommander {
                 forget = ui.button(crate::i18n::text("Удалить сохранённый секрет")).clicked();
                 ui.weak(crate::i18n::text("При первом подключении сравните отпечаток ключа SSH с данными администратора."));
             });
-            form.show_config_result(ui);
-            if let Some(error) = &form.error { ui.colored_label(colors.error, error); }
+            #[cfg(target_os = "macos")]
+            {
+                let used = ui.cursor().top() - ui.min_rect().top();
+                let action_rows = if busy || loading_config { 2.0 } else { 1.0 };
+                let footer = (ui.spacing().interact_size.y + ui.spacing().item_spacing.y) * action_rows;
+                let height = (ctx.content_rect().height() - used - footer - 32.0).max(60.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("sftp_connection_fields")
+                    .max_height(height)
+                    .show(ui, fields);
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let mut fields = fields;
+                fields(ui);
+                form.show_config_result(ui);
+                if let Some(error) = &form.error { ui.colored_label(colors.error, error); }
+            }
             ui.horizontal(|ui| {
                 cancel = ui.add_enabled(!busy, egui::Button::new(crate::i18n::text("Отмена"))).clicked();
                 let label = if form.ssh_config.as_ref().is_some_and(|config| config.matched && !config.unsupported.is_empty()) {
