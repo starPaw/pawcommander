@@ -33,6 +33,7 @@ pub enum Icon {
     Sidebar,
     Info,
     Settings,
+    ChevronUp,
     ChevronDown,
     Breadcrumbs,
     Plus,
@@ -207,6 +208,9 @@ pub fn paint_on(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32,
                 painter.line_segment([pt(12.0, 12.4), pt(12.0, 17.6)], outline);
                 painter.line_segment([pt(9.4, 15.0), pt(14.6, 15.0)], outline);
             }
+        }
+        Icon::ChevronUp => {
+            line(&[(6.0, 15.0), (12.0, 9.0), (18.0, 15.0)]);
         }
         Icon::ChevronDown => {
             line(&[(6.0, 9.0), (12.0, 15.0), (18.0, 9.0)]);
