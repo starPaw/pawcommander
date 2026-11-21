@@ -6,9 +6,11 @@ use std::{error::Error, fmt, io, path::PathBuf, str::Utf8Error};
 mod archive;
 mod checksum;
 mod host_key;
+mod space;
 pub(crate) use archive::ArchiveError;
 pub(crate) use checksum::{ChecksumError, ManifestLineError};
 pub(crate) use host_key::{HostKeyError, KnownHostEntryError, KnownHostsError, PinError};
+pub(crate) use space::{ProbeAction, SftpSpaceFailure, SpaceError};
 
 #[derive(Debug)]
 pub(crate) enum Failure {
@@ -26,6 +28,7 @@ pub(crate) enum Failure {
     Permissions(Box<PermissionError>),
     Checksum(Box<ChecksumError>),
     Archive(Box<ArchiveError>),
+    Space(Box<SpaceError>),
     ComparisonPane {
         right: bool,
         cause: Box<TransferError>,
@@ -63,6 +66,7 @@ impl Failure {
             Self::Permissions(error) => Some(error.as_ref()),
             Self::Checksum(error) => Some(error.as_ref()),
             Self::Archive(error) => Some(error.as_ref()),
+            Self::Space(error) => Some(error.as_ref()),
             Self::ComparisonPane { cause, .. } => Some(cause.as_ref()),
             Self::Listing(error) => Some(error.as_ref()),
             Self::Mutation(error) => Some(error.as_ref()),
@@ -85,6 +89,7 @@ impl fmt::Display for Failure {
             Self::Permissions(error) => fmt::Display::fmt(error, f),
             Self::Checksum(error) => fmt::Display::fmt(error, f),
             Self::Archive(error) => fmt::Display::fmt(error, f),
+            Self::Space(error) => fmt::Display::fmt(error, f),
             Self::ComparisonPane { right, cause } => {
                 let pane = if *right { "Right pane" } else { "Left pane" };
                 write!(f, "{pane} · {cause}")

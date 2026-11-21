@@ -3,8 +3,8 @@ use crate::file_error::{
     AccessAction, AccessCause, AccessError, ArchiveError, ArchiveMemberError, ChecksumError,
     ConnectionError, Failure, HostKeyError, KnownHostEntryError, KnownHostsError, ListingError,
     ListingErrorKind, LocalPathAction, ManifestLineError, MutationError, PathError,
-    PermissionError, PinError, PreviewError, PublicationError, RecoveryNotice, ScanError,
-    SearchError, SshStage, StagingCleanupError,
+    PermissionError, PinError, PreviewError, ProbeAction, PublicationError, RecoveryNotice,
+    ScanError, SearchError, SpaceError, SshStage, StagingCleanupError,
 };
 use crate::operations::TransferError;
 use crate::vfs::{DeletionFailure, TransferFailure};
@@ -21,6 +21,7 @@ pub(crate) fn file_error(error: &TransferError) -> String {
                 Failure::Scan(error) => scan_error(error),
                 Failure::Checksum(error) => checksum_error(error),
                 Failure::Archive(error) => archive_error(error),
+                Failure::Space(error) => space_error(error),
                 Failure::Permissions(reason) => permission_error(
                     reason,
                     matches!(error, TransferError::PublicationUnconfirmed(_)),
@@ -53,6 +54,44 @@ pub(crate) fn connection_result_error(error: &TransferError) -> String {
         text!("Подключение отменено").into()
     } else {
         file_error(error)
+    }
+}
+
+fn space_error(error: &SpaceError) -> String {
+    match error {
+        SpaceError::MissingDestinationParent(target) => format!(
+            "{} · {target}", text!("Недопустимое назначение")
+        ),
+        SpaceError::LocalQuery { directory, source } => crate::tr_format!(
+            "Could not check available space in “{parent}”: {error}",
+            parent = directory.display(), error = source
+        ),
+        SpaceError::LocalWrite { directory, source } => crate::tr_format!(
+            "Not enough free space while copying into “{parent}”: {error}",
+            parent = directory.display(), error = source
+        ),
+        SpaceError::Insufficient { directory, required, available } => crate::tr_format!(
+            "Not enough free space in “{parent}”: about {required} bytes needed, {available} bytes available",
+            parent = directory, required = required, available = available
+        ),
+        SpaceError::SftpProbe(failure) => failure.causes.iter().map(|(action, source)| {
+            let parent = &failure.directory;
+            let probe = &failure.probe;
+            let probe_error = |message| format!("{message} «{probe}»: {source}");
+            match action {
+                ProbeAction::Query if source.code() == ssh2::ErrorCode::SFTP(libssh2_sys::LIBSSH2_FX_OP_UNSUPPORTED) => crate::tr_format!(
+                    "Could not check available SFTP space in {parent}. The server does not support fstatvfs@openssh.com ({error}). No new file data was written",
+                    parent = parent, error = source
+                ),
+                ProbeAction::Query => crate::tr_format!(
+                    "Could not check available SFTP space in {parent} using fstatvfs@openssh.com: {error}. No new file data was written",
+                    parent = parent, error = source
+                ),
+                ProbeAction::Open => probe_error(text!("Не удалось открыть проверочный файл SFTP")),
+                ProbeAction::Close => probe_error(text!("Не удалось закрыть проверочный файл SFTP")),
+                ProbeAction::Remove => probe_error(text!("Не удалось удалить проверочный файл SFTP")),
+            }
+        }).collect::<Vec<_>>().join(". "),
     }
 }
 
@@ -843,4 +882,54 @@ fn listing_error(error: &ListingError) -> String {
         }
     };
     format!("{action} «{path}»: {cause}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        file_error::SftpSpaceFailure,
+        vfs::{Endpoint, Location},
+    };
+    use ssh2::{Error, ErrorCode};
+
+    #[test]
+    fn space_probe_reports_unsupported_status_and_additional_cleanup_failure() {
+        let directory = Location::Sftp {
+            endpoint: Endpoint {
+                host: "localhost".into(),
+                port: 22,
+                user: "fixture".into(),
+                key: None,
+                jump: None,
+            },
+            path: "/target".into(),
+        };
+        let probe = directory.join(".staging").join("space-probe");
+        let report = SpaceError::SftpProbe(Box::new(SftpSpaceFailure {
+            directory: directory.clone(),
+            probe: probe.clone(),
+            causes: vec![
+                (
+                    ProbeAction::Query,
+                    Error::from_errno(ErrorCode::SFTP(libssh2_sys::LIBSSH2_FX_OP_UNSUPPORTED)),
+                ),
+                (
+                    ProbeAction::Remove,
+                    Error::from_errno(ErrorCode::SFTP(libssh2_sys::LIBSSH2_FX_PERMISSION_DENIED)),
+                ),
+            ],
+        }));
+        let message = space_error(&report);
+        assert!(message.contains(&directory.display()), "{message}");
+        assert!(
+            message.contains("does not support fstatvfs@openssh.com")
+                && message.contains("[SFTP(8)]"),
+            "{message}"
+        );
+        assert!(
+            message.contains(&probe.display()) && message.contains("[SFTP(3)]"),
+            "{message}"
+        );
+    }
 }

@@ -5,8 +5,8 @@ use super::sftp::remote;
 use super::{err, TransferFailure, TransferSummary, MAX_TREE_DEPTH};
 use crate::conflict::{Answer, Conflict, Decision, EntryDetails};
 use crate::file_error::{
-    AccessAction, AccessCause, AccessError, MutationError, PublicationError, RecoveryNotice,
-    StagingCleanupError,
+    AccessAction, AccessCause, AccessError, MutationError, ProbeAction, PublicationError,
+    RecoveryNotice, SftpSpaceFailure, SpaceError, StagingCleanupError,
 };
 use crate::fs_ops::TransferKind;
 use crate::operations::{Cancellation, CopyReader, Progress, TransferError};
@@ -1195,32 +1195,53 @@ pub(super) fn check_copy_space(
 ) -> Result<(), TransferError> {
     let parent = target
         .parent()
-        .ok_or(crate::i18n::text!("Недопустимое назначение"))?;
-    let available = if let Some(path) = parent.local() {
-        fs_ops::available_copy_space(path)?
-    } else {
-        // OpenSSH rejects fstatvfs on directory handles on some platforms.
-        // A private, empty probe uses the destination filesystem without writing
-        // payload bytes or opening/truncating an existing user file.
-        let sftp = remote(staging)?;
-        let probe = staging.join("space-probe");
-        let mut handle = sftp
-            .open_mode(
-                probe.path(),
-                OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCLUSIVE,
-                0o600,
-                OpenType::File,
-            )
-            .map_err(err)?;
-        let stat = handle.statvfs();
-        handle.close().map_err(err)?;
-        sftp.unlink(probe.path()).map_err(err)?;
-        let stat = stat.map_err(|e| crate::tr_format!(
-            "Could not check available SFTP space in {parent}: {e}. The server must support fstatvfs@openssh.com; no data for this item was written", e = e, parent = parent
-        ))?;
-        u128::from(stat.f_bavail) * u128::from(stat.f_frsize)
+        .ok_or_else(|| SpaceError::MissingDestinationParent(target.clone()))?;
+    if let Some(path) = parent.local() {
+        return fs_ops::check_local_copy_space(required, path);
+    }
+    let available = sftp_available_copy_space(&parent, staging)?;
+    fs_ops::ensure_copy_space(required, available, &parent)
+}
+
+fn sftp_available_copy_space(
+    directory: &Location,
+    staging: &Location,
+) -> Result<u128, TransferError> {
+    // OpenSSH rejects fstatvfs on directory handles on some platforms.
+    // Use an exclusive empty file on the destination filesystem.
+    let sftp = remote(staging)?;
+    let probe = staging.join("space-probe");
+    let failure = |causes| {
+        SpaceError::SftpProbe(Box::new(SftpSpaceFailure {
+            directory: directory.clone(),
+            probe: probe.clone(),
+            causes,
+        }))
     };
-    fs_ops::ensure_copy_space(required, available, parent).map_err(Into::into)
+    let mut handle = sftp
+        .open_mode(
+            probe.path(),
+            OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCLUSIVE,
+            0o600,
+            OpenType::File,
+        )
+        .map_err(|error| failure(vec![(ProbeAction::Open, error)]))?;
+    let stat = handle.statvfs();
+    let close = handle.close();
+    drop(handle);
+    let remove = sftp.unlink(probe.path());
+    if let (Ok(stat), Ok(()), Ok(())) = (&stat, &close, &remove) {
+        return Ok(u128::from(stat.f_bavail) * u128::from(stat.f_frsize));
+    }
+    let causes = [
+        (ProbeAction::Query, stat.err()),
+        (ProbeAction::Close, close.err()),
+        (ProbeAction::Remove, remove.err()),
+    ]
+    .into_iter()
+    .filter_map(|(action, error)| error.map(|error| (action, error)))
+    .collect();
+    Err(failure(causes).into())
 }
 
 pub(super) fn rename_for_publication(
@@ -1434,9 +1455,11 @@ impl LocalStaging {
                     crate::recovery::abandon_staging(&location).map_err(err)?;
                 }
                 Err(error) => {
-                    return Err(fs_ops::copy_space_error(parent, &error)
-                        .unwrap_or_else(|| err(error))
-                        .into());
+                    return Err(fs_ops::local_copy_error(
+                        Some(parent),
+                        error,
+                        ToString::to_string,
+                    ));
                 }
             }
         }
@@ -2048,13 +2071,8 @@ pub(super) fn copy_tree_entry(
         .get(source)
         .ok_or_else(|| changed_source(source))?;
     entry.verify(source, &cancel, false)?;
-    let local_write_error = |error| {
-        TransferError::io(error, |source| {
-            local_parent
-                .and_then(|parent| fs_ops::copy_space_error(parent, source))
-                .unwrap_or_else(|| err(source))
-        })
-    };
+    let local_write_error =
+        |error| fs_ops::local_copy_error(local_parent, error, ToString::to_string);
     if let Some(children) = &entry.children {
         if let Some(path) = target.local() {
             let mut directory = fs::DirBuilder::new();
