@@ -1339,6 +1339,7 @@ catalog! {
     "временный путь исходника" => ("the temporary path of the original", "dočasnou cestu zdroje"),
     "подтверждение удаления исходника" => ("confirmation of source removal", "potvrzení o odstranění zdroje"),
     "Не удалось создать папку записей восстановления" => ("Could not create the recovery records folder", "Nepodařilo se vytvořit složku záznamů obnovení"),
+    "Папка записей восстановления недоступна." => ("The recovery records folder is unavailable.", "Složka záznamů obnovení není dostupná."),
     "Не удалось создать временную запись восстановления в папке" => ("Could not create a temporary recovery record in", "Nepodařilo se vytvořit dočasný záznam obnovení ve složce"),
     "Не удалось записать начальные данные восстановления" => ("Could not write the initial recovery data to", "Nepodařilo se zapsat počáteční údaje obnovení do"),
     "Не удалось сохранить начальные данные восстановления на диск" => ("Could not save the initial recovery data to disk for", "Nepodařilo se uložit počáteční údaje obnovení na disk pro"),

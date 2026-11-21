@@ -3,8 +3,8 @@
 //! All I/O belongs on background workers. Legacy operation records are descriptions.
 //! A separate copy receipt can be selected after its previous worker releases it.
 use crate::file_error::{
-    RecoveryRecordAction, RecoveryRecordError, RecoveryRecordProblem, StagingError,
-    StagingRecordAction,
+    RecoveryRecordAction, RecoveryRecordError, RecoveryRecordProblem, RecoveryRecordSection,
+    StagingError, StagingRecordAction,
 };
 use crate::operations::TransferError;
 use crate::vfs::Location;
@@ -19,6 +19,8 @@ use std::sync::mpsc::{self, Receiver};
 const VERSION: u32 = 1;
 const MAX_BYTES: usize = 128 * 1024;
 const MAX_ENTRIES: usize = 4096;
+const MAX_REPORT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_INVALID_EVENT_DETAILS: usize = 8;
 const PREFIX: &str = "operation-";
 const SUFFIX: &str = ".json";
 
@@ -175,7 +177,7 @@ struct Saved {
 #[derive(Default)]
 pub(crate) struct Report {
     pub unfinished: Vec<Record>,
-    pub errors: Vec<TransferError>,
+    pub errors: Vec<RecoveryRecordError>,
     #[cfg(target_os = "macos")]
     copies: Vec<crate::vfs::resume_copy::Offer>,
 }
@@ -209,10 +211,6 @@ impl Recovery {
         }
         let Some(root) = dirs::data_local_dir() else {
             return Self {
-                report: Report {
-                    errors: vec!["No local application-data directory".into()],
-                    ..Default::default()
-                },
                 open: true,
                 ..Self::default()
             };
@@ -251,9 +249,12 @@ impl Recovery {
                 ctx.request_repaint();
             }
             Err(mpsc::TryRecvError::Disconnected) => {
-                self.report
-                    .errors
-                    .push("Recovery scan worker disconnected".into());
+                if let Some(directory) = &self.directory {
+                    self.report.errors.push(RecoveryRecordError::new(
+                        directory,
+                        RecoveryRecordProblem::ScanDisconnected,
+                    ));
+                }
                 self.receive = None;
                 self.open = true;
                 ctx.request_repaint();
@@ -270,7 +271,7 @@ impl Recovery {
     }
 
     fn scan_in_background(&mut self, ctx: &egui::Context) {
-        let Some(directory) = self.directory.clone() else {
+        let Some(directory) = self.directory.as_ref() else {
             return;
         };
         if self.receive.is_some() {
@@ -278,15 +279,19 @@ impl Recovery {
         }
         let (send, receive) = mpsc::channel();
         let ctx = ctx.clone();
+        let scanning = directory.clone();
         match std::thread::Builder::new()
             .name("pawcommander-recovery-scan".into())
             .spawn(move || {
-                let _ = send.send(scan(&directory));
+                let _ = send.send(scan(&scanning));
                 ctx.request_repaint();
             }) {
             Ok(_) => self.receive = Some(receive),
             Err(error) => {
-                self.report.errors.push(error.into());
+                self.report.errors.push(RecoveryRecordError::new(
+                    directory,
+                    RecoveryRecordProblem::ScanStart(error),
+                ));
                 self.open = true;
             }
         }
@@ -320,15 +325,17 @@ impl Recovery {
                 ));
                 if let Some(directory) = &self.directory {
                     ui.add(egui::Label::new(directory.display().to_string()).selectable(true).wrap());
+                } else {
+                    ui.colored_label(ui.visuals().error_fg_color, crate::i18n::text!("Папка записей восстановления недоступна."));
                 }
                 if !self.report.errors.is_empty() {
                     ui.colored_label(ui.visuals().error_fg_color, crate::tr_format!(
-                        "Some recovery records could not be read. Existing records were preserved."
+                        "Some recovery records could not be read completely. Existing records were preserved."
                     ));
                 }
                 if self.receive.is_some() {
                     ui.label(crate::tr_format!("Checking unfinished operations…"));
-                } else if !self.report.has_findings() {
+                } else if self.directory.is_some() && !self.report.has_findings() {
                     ui.label(crate::tr_format!("No unfinished operations found."));
                 }
                 egui::ScrollArea::both().show(ui, |ui| {
@@ -351,7 +358,7 @@ impl Recovery {
                         ui.separator();
                     }
                     for error in &self.report.errors {
-                        ui.add(egui::Label::new(crate::i18n::file_error(error)).selectable(true).wrap());
+                        ui.add(egui::Label::new(crate::i18n::recovery_record_error(error)).selectable(true).wrap());
                     }
                     for record in &self.report.unfinished {
                         let time = chrono::DateTime::from_timestamp(record.started as i64, 0)
@@ -605,43 +612,38 @@ pub(crate) fn same_owned_marker(owned: &File, path: &Path) -> io::Result<bool> {
 /// active in another worker/instance and are omitted from the recovery report.
 pub(crate) fn scan(directory: &Path) -> Report {
     let mut report = Report::default();
+    let read_directory =
+        |error| RecoveryRecordError::new(directory, RecoveryRecordProblem::ReadDirectory(error));
     let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return report,
         Err(error) => {
-            report.errors.push(error.into());
+            report.errors.push(read_directory(error));
             return report;
         }
     };
     let mut report_bytes = 0usize;
     for (index, entry) in entries.enumerate() {
         if index == MAX_ENTRIES {
-            report.errors.push(
-                format!(
-                "Recovery scan stopped after {MAX_ENTRIES} entries; additional records may exist"
-            )
-                .into(),
-            );
+            report.errors.push(RecoveryRecordError::new(
+                directory,
+                RecoveryRecordProblem::ScanLimit(MAX_ENTRIES),
+            ));
             break;
         }
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
-                report.errors.push(error.into());
+                report.errors.push(read_directory(error));
                 continue;
             }
         };
         if !is_marker_name(&entry.file_name()) {
             continue;
         }
-        let path = entry.path();
-        match read_record(&path) {
+        match read_record(&entry.path()) {
             Ok(Some((record, warnings))) => {
-                for warning in warnings {
-                    report
-                        .errors
-                        .push(format!("{}: {warning}", path.display()).into());
-                }
+                report.errors.extend(warnings);
                 report_bytes = report_bytes
                     .saturating_add(record.label.len())
                     .saturating_add(record.description.len())
@@ -659,18 +661,18 @@ pub(crate) fn scan(directory: &Path) -> Report {
                             .map(String::len)
                             .sum::<usize>(),
                     );
-                if report_bytes > 8 * 1024 * 1024 {
-                    report
-                        .errors
-                        .push("Recovery report exceeds 8 MiB; additional records may exist".into());
+                if report_bytes > MAX_REPORT_BYTES {
+                    report.errors.push(RecoveryRecordError::new(
+                        directory,
+                        RecoveryRecordProblem::ReportLimit(MAX_REPORT_BYTES),
+                    ));
                     break;
                 }
                 report.unfinished.push(record);
             }
             Ok(None) => {}
-            Err(error) => report.errors.push(TransferError::io(error, |error| {
-                format!("{}: {error}", path.display())
-            })),
+            Err(error) if error.is_missing() => {}
+            Err(error) => report.errors.push(error),
         }
     }
     report.unfinished.sort_by_key(|record| record.started);
@@ -678,9 +680,7 @@ pub(crate) fn scan(directory: &Path) -> Report {
     {
         let (copies, errors) = crate::vfs::resume_copy::scan(directory);
         report.copies = copies;
-        report
-            .errors
-            .extend(errors.into_iter().map(TransferError::from));
+        report.errors.extend(errors);
     }
     report
 }
@@ -694,9 +694,17 @@ fn is_marker_name(name: &std::ffi::OsStr) -> bool {
         })
 }
 
-fn read_record(path: &Path) -> io::Result<Option<(Record, Vec<String>)>> {
-    if !fs::symlink_metadata(path)?.file_type().is_file() {
-        return Err(io::Error::other("Recovery marker is not a regular file"));
+fn read_record(
+    path: &Path,
+) -> Result<Option<(Record, Vec<RecoveryRecordError>)>, RecoveryRecordError> {
+    let failure = |problem| RecoveryRecordError::new(path, problem);
+    let read = |error| failure(RecoveryRecordProblem::Read(error));
+    if !fs::symlink_metadata(path)
+        .map_err(read)?
+        .file_type()
+        .is_file()
+    {
+        return Err(failure(RecoveryRecordProblem::InvalidType));
     }
     let mut options = OpenOptions::new();
     options.read(true).write(true);
@@ -711,57 +719,83 @@ fn read_record(path: &Path) -> io::Result<Option<(Record, Vec<String>)>> {
         use std::os::windows::fs::OpenOptionsExt;
         options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
     }
-    let file = options.open(path)?;
-    let metadata = file.metadata()?;
+    let file = options.open(path).map_err(read)?;
+    let metadata = file.metadata().map_err(read)?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err(io::Error::other("Recovery marker is not a regular file"));
+        return Err(failure(RecoveryRecordProblem::InvalidType));
     }
     match file.try_lock() {
         Ok(()) => {}
         Err(TryLockError::WouldBlock) => return Ok(None),
-        Err(TryLockError::Error(error)) => return Err(error),
+        Err(TryLockError::Error(error)) => return Err(failure(RecoveryRecordProblem::Lock(error))),
     }
     let mut bytes = Vec::new();
-    (&file).take(MAX_BYTES as u64 + 1).read_to_end(&mut bytes)?;
+    (&file)
+        .take(MAX_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(read)?;
     if bytes.len() > MAX_BYTES {
-        return Err(io::Error::other("Recovery record exceeds 128 KiB"));
+        return Err(failure(RecoveryRecordProblem::SizeLimit(MAX_BYTES as u64)));
     }
-    let first_end = bytes
-        .iter()
-        .position(|byte| *byte == b'\n')
-        .unwrap_or(bytes.len());
-    let saved: Saved = serde_json::from_slice(&bytes[..first_end]).map_err(io::Error::other)?;
-    if saved.version != VERSION {
-        return Err(io::Error::other("Unsupported recovery record version"));
+    if !same_owned_marker(&file, path).map_err(read)? {
+        return Err(failure(RecoveryRecordProblem::IdentityChanged));
     }
+
+    let mut lines = bytes.split_inclusive(|byte| *byte == b'\n');
+    let header = lines.next().unwrap_or_default();
+    let invalid_header = |source| {
+        failure(RecoveryRecordProblem::Json {
+            section: RecoveryRecordSection::Header,
+            source,
+        })
+    };
+    #[derive(Deserialize)]
+    struct RecordVersion {
+        version: u32,
+    }
+    let version: RecordVersion = serde_json::from_slice(header).map_err(invalid_header)?;
+    if version.version != VERSION {
+        return Err(failure(RecoveryRecordProblem::UnsupportedVersion(
+            version.version,
+        )));
+    }
+    let saved: Saved = serde_json::from_slice(header).map_err(invalid_header)?;
     let mut record = saved.record;
     let mut warnings = Vec::new();
-    if first_end < bytes.len() {
-        let mut remainder = &bytes[first_end + 1..];
-        while !remainder.is_empty() {
-            let Some(end) = remainder.iter().position(|byte| *byte == b'\n') else {
-                warnings.push("Incomplete staging receipt preserved".into());
-                break;
-            };
-            if end > 0 {
-                match serde_json::from_slice::<StagingEvent>(&remainder[..end]) {
-                    Ok(StagingEvent::Created(receipt)) => {
-                        record
-                            .planned_staging
-                            .retain(|path| *path != receipt.location);
-                        record.staging.push(receipt);
-                    }
-                    Ok(StagingEvent::Planned { planned }) => record.planned_staging.push(planned),
-                    Ok(StagingEvent::Abandoned { abandoned }) => {
-                        record.planned_staging.retain(|path| *path != abandoned);
-                    }
-                    Err(error) => {
-                        warnings.push(format!("Invalid staging receipt preserved: {error}"))
-                    }
-                }
-            }
-            remainder = &remainder[end + 1..];
+    let mut omitted = 0;
+    for (index, line) in lines.enumerate() {
+        let number = index + 1;
+        let Some(event) = line.strip_suffix(b"\n") else {
+            warnings.push(failure(RecoveryRecordProblem::IncompleteEvent(number)));
+            break;
+        };
+        if event.is_empty() {
+            continue;
         }
+        match serde_json::from_slice::<StagingEvent>(event) {
+            Ok(StagingEvent::Created(receipt)) => {
+                record
+                    .planned_staging
+                    .retain(|path| *path != receipt.location);
+                record.staging.push(receipt);
+            }
+            Ok(StagingEvent::Planned { planned }) => record.planned_staging.push(planned),
+            Ok(StagingEvent::Abandoned { abandoned }) => {
+                record.planned_staging.retain(|path| *path != abandoned);
+            }
+            Err(source) if warnings.len() < MAX_INVALID_EVENT_DETAILS => {
+                warnings.push(failure(RecoveryRecordProblem::Json {
+                    section: RecoveryRecordSection::Event(number),
+                    source,
+                }));
+            }
+            Err(_) => omitted += 1,
+        }
+    }
+    if omitted > 0 {
+        warnings.push(failure(RecoveryRecordProblem::OmittedInvalidEvents(
+            omitted,
+        )));
     }
     Ok(Some((record, warnings)))
 }
@@ -982,26 +1016,86 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_staging_receipt_preserves_prior_receipts() {
+    fn damaged_staging_events_preserve_complete_events_before_and_after_them() {
         let root = tempfile::tempdir().unwrap();
         let owned = root.path().join("owned");
         fs::create_dir(&owned).unwrap();
         let pending = begin(root.path(), "copy", "one item", 5).unwrap();
+        let planned = Location::Local(root.path().join("planned"));
         pending
-            .run(|| register_staging(&crate::vfs::Location::Local(owned.clone())).unwrap())
+            .run(|| {
+                register_staging(&Location::Local(owned.clone())).unwrap();
+                OpenOptions::new()
+                    .append(true)
+                    .open(pending.path())
+                    .unwrap()
+                    .write_all(b"{damaged\n")
+                    .unwrap();
+                plan_staging(&planned).unwrap();
+            })
             .unwrap();
         let path = pending.path.clone();
         drop(pending);
         OpenOptions::new()
             .append(true)
-            .open(path)
+            .open(&path)
             .unwrap()
-            .write_all(b"{partial")
+            .write_all(
+                &serde_json::to_vec(&StagingEvent::Abandoned {
+                    abandoned: planned.display(),
+                })
+                .unwrap(),
+            )
             .unwrap();
+        let before = fs::read(&path).unwrap();
         let report = scan(root.path());
         assert_eq!(report.unfinished.len(), 1);
         assert_eq!(report.unfinished[0].staging.len(), 1);
-        assert_eq!(report.errors.len(), 1);
+        assert_eq!(
+            report.unfinished[0].staging[0].location,
+            owned.display().to_string()
+        );
+        assert_eq!(report.unfinished[0].planned_staging, [planned.display()]);
+        let [invalid, incomplete] = report.errors.as_slice() else {
+            panic!("Expected the damaged event and incomplete final event");
+        };
+        assert_eq!(invalid.path, path);
+        assert!(matches!(&invalid.problem, RecoveryRecordProblem::Json {
+            section: RecoveryRecordSection::Event(2), source,
+        } if source.line() == 1 && source.column() > 0));
+        assert_eq!(incomplete.path, path);
+        assert!(matches!(
+            incomplete.problem,
+            RecoveryRecordProblem::IncompleteEvent(4)
+        ));
+        assert_eq!(fs::read(path).unwrap(), before);
+    }
+
+    #[test]
+    fn invalid_event_details_are_bounded_without_hiding_later_receipts() {
+        let root = tempfile::tempdir().unwrap();
+        let pending = begin(root.path(), "copy", "fixture", 1).unwrap();
+        let planned = Location::Local(root.path().join("later"));
+        OpenOptions::new()
+            .append(true)
+            .open(pending.path())
+            .unwrap()
+            .write_all(b"!\n".repeat(MAX_INVALID_EVENT_DETAILS + 2).as_slice())
+            .unwrap();
+        pending.run(|| plan_staging(&planned).unwrap()).unwrap();
+        let path = pending.path.clone();
+        drop(pending);
+        let before = fs::read(&path).unwrap();
+        let report = scan(root.path());
+        assert_eq!(report.unfinished[0].planned_staging, [planned.display()]);
+        assert_eq!(report.errors.len(), MAX_INVALID_EVENT_DETAILS + 1);
+        let summary = report.errors.last().unwrap();
+        assert_eq!(summary.path, path);
+        assert!(matches!(
+            summary.problem,
+            RecoveryRecordProblem::OmittedInvalidEvents(2)
+        ));
+        assert_eq!(fs::read(path).unwrap(), before);
     }
 
     #[test]
@@ -1146,11 +1240,22 @@ mod tests {
         let corrupt = root.path().join("operation-corrupt.json");
         fs::write(&corrupt, b"{truncated").unwrap();
         let future = root.path().join("operation-future.json");
-        let bytes = br#"{"version":999,"record":{"label":"copy","description":"x","started":1}}"#;
+        let bytes = br#"{"version":999,"record":{"future":true}}"#;
         fs::write(&future, bytes).unwrap();
         let report = scan(root.path());
         assert!(report.unfinished.is_empty());
         assert_eq!(report.errors.len(), 2);
+        assert!(report.errors.iter().any(|error| error.path == corrupt
+            && matches!(
+                &error.problem, RecoveryRecordProblem::Json {
+                    section: RecoveryRecordSection::Header, source,
+                } if source.line() == 1 && source.column() > 0
+            )));
+        assert!(report.errors.iter().any(|error| error.path == future
+            && matches!(
+                error.problem,
+                RecoveryRecordProblem::UnsupportedVersion(999)
+            )));
         assert_eq!(fs::read(corrupt).unwrap(), b"{truncated");
         assert_eq!(fs::read(future).unwrap(), bytes);
     }
@@ -1164,6 +1269,10 @@ mod tests {
         let report = scan(root.path());
         assert!(report.unfinished.is_empty());
         assert_eq!(report.errors.len(), 1);
+        assert_eq!(report.errors[0].path, oversized);
+        assert!(
+            matches!(report.errors[0].problem, RecoveryRecordProblem::SizeLimit(limit) if limit == MAX_BYTES as u64)
+        );
         assert_eq!(fs::metadata(oversized).unwrap().len(), MAX_BYTES as u64 + 1);
     }
 
@@ -1175,6 +1284,12 @@ mod tests {
         let file = root.path().join("not-a-directory");
         fs::write(&file, b"keep me").unwrap();
         assert!(begin(&file, "copy", "source -> target", 0).is_err());
+        let report = scan(&file);
+        assert_eq!(report.errors.len(), 1);
+        assert_eq!(report.errors[0].path, file);
+        assert!(
+            matches!(&report.errors[0].problem, RecoveryRecordProblem::ReadDirectory(error) if error.raw_os_error().is_some())
+        );
         assert_eq!(fs::read(file).unwrap(), b"keep me");
     }
 
@@ -1204,6 +1319,10 @@ mod tests {
         let report = scan(root.path());
         assert!(report.unfinished.is_empty());
         assert_eq!(report.errors.len(), 2);
+        assert!(report
+            .errors
+            .iter()
+            .all(|error| matches!(error.problem, RecoveryRecordProblem::InvalidType)));
         assert_eq!(fs::read(target).unwrap(), b"keep me");
     }
 }

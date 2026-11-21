@@ -5,10 +5,10 @@ use std::{
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg(target_os = "macos")]
-pub(crate) enum ResumeRecordSection {
+pub(crate) enum RecoveryRecordSection {
     Header,
     Event(usize),
+    #[cfg(target_os = "macos")]
     AccessTimes,
 }
 
@@ -42,10 +42,10 @@ pub(crate) enum RecoveryRecordAction {
 
 #[derive(Debug)]
 pub(crate) enum RecoveryRecordProblem {
-    #[cfg(target_os = "macos")]
     Read(io::Error),
-    #[cfg(target_os = "macos")]
     ReadDirectory(io::Error),
+    ScanStart(io::Error),
+    ScanDisconnected,
     Lock(io::Error),
     Write {
         action: RecoveryRecordAction,
@@ -64,16 +64,17 @@ pub(crate) enum RecoveryRecordProblem {
     },
     InUse,
     AlreadyActive,
+    InvalidType,
     IdentityChanged,
     MissingParent,
     SizeLimit(u64),
-    #[cfg(target_os = "macos")]
     Json {
-        section: ResumeRecordSection,
+        section: RecoveryRecordSection,
         source: serde_json::Error,
     },
-    #[cfg(target_os = "macos")]
     UnsupportedVersion(u32),
+    IncompleteEvent(usize),
+    OmittedInvalidEvents(usize),
     #[cfg(target_os = "macos")]
     VersionMismatch {
         stored: u32,
@@ -89,8 +90,8 @@ pub(crate) enum RecoveryRecordProblem {
     InvalidProof,
     #[cfg(target_os = "macos")]
     InvalidName,
-    #[cfg(target_os = "macos")]
     ScanLimit(usize),
+    ReportLimit(usize),
 }
 
 #[derive(Debug)]
@@ -122,7 +123,6 @@ impl RecoveryRecordError {
         )
     }
 
-    #[cfg(target_os = "macos")]
     pub(crate) fn is_missing(&self) -> bool {
         matches!(&self.problem, RecoveryRecordProblem::Read(error) if error.kind() == io::ErrorKind::NotFound)
     }
@@ -132,13 +132,17 @@ impl fmt::Display for RecoveryRecordError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let path = self.path.display();
         match &self.problem {
-            #[cfg(target_os = "macos")]
             RecoveryRecordProblem::Read(error) => {
                 write!(f, "Could not read recovery record {path}: {error}")
             }
-            #[cfg(target_os = "macos")]
             RecoveryRecordProblem::ReadDirectory(error) => {
                 write!(f, "Could not read recovery folder {path}: {error}")
+            }
+            RecoveryRecordProblem::ScanStart(error) => {
+                write!(f, "Could not start recovery lookup in {path}: {error}")
+            }
+            RecoveryRecordProblem::ScanDisconnected => {
+                write!(f, "Lost contact with the recovery worker for {path}")
             }
             RecoveryRecordProblem::Lock(error) => {
                 write!(f, "Could not lock recovery record {path}: {error}")
@@ -156,6 +160,7 @@ impl fmt::Display for RecoveryRecordError {
             ),
             RecoveryRecordProblem::InUse => write!(f, "Recovery record {path} is in use"),
             RecoveryRecordProblem::AlreadyActive => write!(f, "The worker already has an active recovery record. Could not activate {path}"),
+            RecoveryRecordProblem::InvalidType => write!(f, "Expected a regular file for recovery record {path}"),
             RecoveryRecordProblem::IdentityChanged => {
                 write!(f, "Recovery record {path} changed identity")
             }
@@ -163,13 +168,17 @@ impl fmt::Display for RecoveryRecordError {
             RecoveryRecordProblem::SizeLimit(limit) => {
                 write!(f, "Recovery record {path} exceeds {limit} bytes")
             }
-            #[cfg(target_os = "macos")]
             RecoveryRecordProblem::Json { section, source } => {
                 write!(f, "Invalid {section:?} in recovery record {path}: {source}")
             }
-            #[cfg(target_os = "macos")]
             RecoveryRecordProblem::UnsupportedVersion(version) => {
                 write!(f, "Unsupported version {version} of recovery record {path}")
+            }
+            RecoveryRecordProblem::IncompleteEvent(event) => {
+                write!(f, "Event {event} in recovery record {path} is incomplete")
+            }
+            RecoveryRecordProblem::OmittedInvalidEvents(count) => {
+                write!(f, "Recovery record {path} has {count} additional invalid events")
             }
             #[cfg(target_os = "macos")]
             RecoveryRecordProblem::VersionMismatch { stored, expected } => write!(
@@ -195,11 +204,11 @@ impl fmt::Display for RecoveryRecordError {
             }
             #[cfg(target_os = "macos")]
             RecoveryRecordProblem::InvalidName => write!(f, "Invalid recovery record name in {path}"),
-            #[cfg(target_os = "macos")]
             RecoveryRecordProblem::ScanLimit(limit) => write!(
                 f,
                 "Stopped reading recovery folder {path} after {limit} entries"
             ),
+            RecoveryRecordProblem::ReportLimit(limit) => write!(f, "Recovery report for {path} reached the {limit}-byte limit"),
         }
     }
 }
@@ -208,13 +217,13 @@ impl Error for RecoveryRecordError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match &self.problem {
             RecoveryRecordProblem::Lock(error)
+            | RecoveryRecordProblem::Read(error)
+            | RecoveryRecordProblem::ReadDirectory(error)
+            | RecoveryRecordProblem::ScanStart(error)
             | RecoveryRecordProblem::Write { source: error, .. } => Some(error),
             #[cfg(target_os = "macos")]
-            RecoveryRecordProblem::Read(error)
-            | RecoveryRecordProblem::ReadDirectory(error)
-            | RecoveryRecordProblem::AppendRollback { source: error, .. } => Some(error),
+            RecoveryRecordProblem::AppendRollback { source: error, .. } => Some(error),
             RecoveryRecordProblem::Encode { source, .. } => Some(source),
-            #[cfg(target_os = "macos")]
             RecoveryRecordProblem::Json { source, .. } => Some(source),
             _ => None,
         }

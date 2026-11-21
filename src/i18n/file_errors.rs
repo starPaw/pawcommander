@@ -7,11 +7,12 @@ use crate::file_error::{
     ProbeAction, PublicationError, RecoveryNotice, ScanError, SearchError, SpaceError, SshStage,
     StagingCleanupError, StagingError, StagingRecordAction,
 };
-use crate::file_error::{RecoveryRecordAction, RecoveryRecordError, RecoveryRecordProblem};
+use crate::file_error::{
+    RecoveryRecordAction, RecoveryRecordError, RecoveryRecordProblem, RecoveryRecordSection,
+};
 #[cfg(target_os = "macos")]
 use crate::file_error::{
-    ResumeCheckError, ResumeCheckProblem, ResumeRecordEvent, ResumeRecordSection, ResumeRole,
-    SyncError,
+    ResumeCheckError, ResumeCheckProblem, ResumeRecordEvent, ResumeRole, SyncError,
 };
 use crate::operations::TransferError;
 use crate::result_history::HistoryError;
@@ -101,13 +102,17 @@ pub(crate) fn recovery_record_error(error: &RecoveryRecordError) -> String {
 
     let path = error.path.display();
     match &error.problem {
-        #[cfg(target_os = "macos")]
         Read(error) => crate::tr_format!(
             "Could not read recovery record {path}: {error}", path = path, error = error
         ),
-        #[cfg(target_os = "macos")]
         ReadDirectory(error) => crate::tr_format!(
             "Could not read recovery folder {path}: {error}", path = path, error = error
+        ),
+        ScanStart(error) => crate::tr_format!(
+            "Could not start recovery lookup in {path} ({error}).", path = path, error = error
+        ),
+        ScanDisconnected => crate::tr_format!(
+            "Lost contact with the recovery worker for {path}.", path = path
         ),
         Lock(error) => crate::tr_format!(
             "Could not lock recovery record {path}: {error}", path = path, error = error
@@ -145,28 +150,34 @@ pub(crate) fn recovery_record_error(error: &RecoveryRecordError) -> String {
         MissingParent => crate::tr_format!(
             "Recovery record {path} has no containing directory.", path = path
         ),
+        InvalidType => crate::tr_format!(
+            "Expected a regular file for recovery record {path}.", path = path
+        ),
         IdentityChanged => crate::tr_format!(
             "Recovery record {path} was replaced or is no longer a regular file", path = path
         ),
         SizeLimit(limit) => crate::tr_format!(
             "Recovery record {path} exceeds the {limit}-byte limit", path = path, limit = limit
         ),
-        #[cfg(target_os = "macos")]
-        Json { section: ResumeRecordSection::Header, source } => crate::tr_format!(
+        Json { section: RecoveryRecordSection::Header, source } => crate::tr_format!(
             "Could not decode the header of recovery record {path}: {error}", path = path, error = source
         ),
-        #[cfg(target_os = "macos")]
-        Json { section: ResumeRecordSection::Event(number), source } => crate::tr_format!(
+        Json { section: RecoveryRecordSection::Event(number), source } => crate::tr_format!(
             "Could not decode event {number} in recovery record {path}: {error}",
             number = number, path = path, error = source
         ),
         #[cfg(target_os = "macos")]
-        Json { section: ResumeRecordSection::AccessTimes, source } => format!(
+        Json { section: RecoveryRecordSection::AccessTimes, source } => format!(
             "{} · {path} ({source})", text!("Некорректная запись времени доступа для переноса")
         ),
-        #[cfg(target_os = "macos")]
         UnsupportedVersion(version) => crate::tr_format!(
             "Unsupported version {version} of recovery record {path}", version = version, path = path
+        ),
+        IncompleteEvent(number) => crate::tr_format!(
+            "Event {number} in recovery record {path} is incomplete.", number = number, path = path
+        ),
+        OmittedInvalidEvents(count) => crate::tr_format!(
+            "Additional invalid events in recovery record {path} ({count}).", path = path, count = count
         ),
         #[cfg(target_os = "macos")]
         VersionMismatch { stored, expected } => crate::tr_format!(
@@ -185,9 +196,12 @@ pub(crate) fn recovery_record_error(error: &RecoveryRecordError) -> String {
         InvalidProof => crate::tr_format!("Invalid transfer proof in recovery record {path}", path = path),
         #[cfg(target_os = "macos")]
         InvalidName => crate::tr_format!("Invalid recovery record name in {path}", path = path),
-        #[cfg(target_os = "macos")]
         ScanLimit(limit) => crate::tr_format!(
             "Stopped reading recovery folder {path} after {limit} entries", path = path, limit = limit
+        ),
+        ReportLimit(limit) => crate::tr_format!(
+            "Recovery report for {path} reached the {limit}-byte limit. More records may exist.",
+            path = path, limit = limit
         ),
     }
 }
