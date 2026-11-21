@@ -1,12 +1,14 @@
 //! Directory identity checks and descriptor-relative, no-replacement publication.
 use super::{
-    read_scope::{changed_during_read, local_subdirectory, ReadScope},
+    read_scope::{local_subdirectory, ReadScope},
     transfer::{
         canonical, entry_metadata, rename_for_publication, EntryMetadata, LocalEntryMetadata,
     },
     Location,
 };
-use crate::file_error::{PublicationError, RecoveryNotice};
+use crate::file_error::{
+    AccessAction, AccessError, MutationError, PublicationError, RecoveryNotice,
+};
 use crate::operations::{Cancellation, TransferError};
 use std::{ffi::OsStr, fs, io, os::fd::OwnedFd, path::Path};
 
@@ -19,7 +21,7 @@ pub(super) struct Directory {
 impl Directory {
     pub(super) fn from_scope(scope: &ReadScope) -> Result<Self, TransferError> {
         let location = scope.parent.location.clone();
-        let metadata = entry_metadata(&location)?.ok_or_else(changed_during_read)?;
+        let metadata = entry_metadata(&location)?.ok_or_else(|| stale(&location))?;
         Self::at(scope, Path::new(""), &metadata, &Cancellation::default())
     }
 
@@ -32,7 +34,7 @@ impl Directory {
         scope.parent.verify()?;
         let location = scope
             .checked_directory(relative, cancel)?
-            .ok_or_else(changed_during_read)?;
+            .ok_or_else(|| stale(&scope.parent.location.join(relative)))?;
         let descriptor = scope
             .descriptor
             .as_ref()
@@ -40,7 +42,8 @@ impl Directory {
                 local_subdirectory(root, relative, cancel)?
                     .map_or_else(|| rustix::io::dup(root).map_err(io::Error::from), Ok)
             })
-            .transpose()?;
+            .transpose()
+            .map_err(|error| AccessError::new(&location, AccessAction::OpenFile, error))?;
         let anchor = Self {
             location,
             descriptor,
@@ -48,9 +51,9 @@ impl Directory {
         };
         anchor.verify()?;
         if let Some(fd) = &anchor.descriptor {
-            let file = fs::File::from(rustix::io::dup(fd).map_err(io::Error::from)?);
-            let captured =
-                EntryMetadata::Local(LocalEntryMetadata::from_file(&file, file.metadata()?));
+            let captured = held_metadata(fd).map_err(|error| {
+                AccessError::new(&anchor.location, AccessAction::ReadOpenMetadata, error)
+            })?;
             if !expected.same_object(&captured) {
                 return Err(stale(&anchor.location));
             }
@@ -139,7 +142,7 @@ impl Directory {
             .descriptor
             .as_ref()
             .ok_or_else(|| stale(&self.location))?;
-        held_metadata(descriptor)
+        held_metadata(descriptor).map_err(TransferError::from)
     }
 
     pub(super) fn rename(
@@ -167,7 +170,7 @@ impl Directory {
     }
 }
 
-fn held_metadata(descriptor: &OwnedFd) -> Result<EntryMetadata, TransferError> {
+fn held_metadata(descriptor: &OwnedFd) -> io::Result<EntryMetadata> {
     let fd = rustix::io::dup(descriptor).map_err(io::Error::from)?;
     let file = fs::File::from(fd);
     Ok(EntryMetadata::Local(LocalEntryMetadata::from_file(
@@ -196,9 +199,5 @@ pub(super) fn open_staging(location: &Location) -> Result<ReadScope, TransferErr
 }
 
 pub(super) fn stale(location: &Location) -> TransferError {
-    crate::tr_format!(
-        "An item changed after planning: {location}. Build the plan again.",
-        location = location
-    )
-    .into()
+    MutationError::PlanChanged(location.clone()).into()
 }

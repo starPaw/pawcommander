@@ -349,6 +349,13 @@ impl From<SpaceError> for TransferError {
     }
 }
 
+#[cfg(target_os = "macos")]
+impl From<crate::file_error::SyncError> for TransferError {
+    fn from(error: crate::file_error::SyncError) -> Self {
+        Self::Failed(Failure::Sync(Box::new(error)))
+    }
+}
+
 impl From<ConnectionError> for TransferError {
     fn from(error: ConnectionError) -> Self {
         Self::Failed(Failure::Connection(Box::new(error)))

@@ -251,20 +251,20 @@ fn format_replacement_rollback_failed(
 ) -> String {
     match (language, remote) {
         #[cfg(target_os = "macos")]
-        (Language::Czech, false) => format!("{error}. Předchozí soubor se nepodařilo obnovit: {rollback}. Před opakováním zkontrolujte uloženou verzi v {backup}"),
+        (Language::Czech, false) => format!("{error}. Předchozí položku se nepodařilo obnovit: {rollback}. Před opakováním zkontrolujte uloženou verzi v {backup}"),
         #[cfg(target_os = "macos")]
-        (Language::Czech, true) => format!("{error}. Obnovení předchozího souboru se nepodařilo potvrdit: {rollback}. Před opakováním zkontrolujte původní cíl {target} a možnou zálohu {backup}"),
+        (Language::Czech, true) => format!("{error}. Obnovení předchozí položky se nepodařilo potvrdit: {rollback}. Před opakováním zkontrolujte původní cíl {target} a možnou zálohu {backup}"),
         (Language::English, false) => format!(
-            "{error}. Could not restore the previous file: {rollback}. Check the saved version at {backup} before retrying"
+            "{error}. Could not restore the previous item: {rollback}. Check the saved version at {backup} before retrying"
         ),
         (Language::Russian, false) => format!(
-            "{error}. Не удалось восстановить прежний файл: {rollback}. Перед повтором проверьте сохранённую версию в {backup}"
+            "{error}. Не удалось восстановить прежний объект: {rollback}. Перед повтором проверьте сохранённую версию в {backup}"
         ),
         (Language::English, true) => format!(
-            "{error}. Could not confirm restoration of the previous file: {rollback}. Check the original destination {target} and the possible backup {backup} before retrying"
+            "{error}. Could not confirm restoration of the previous item: {rollback}. Check the original destination {target} and the possible backup {backup} before retrying"
         ),
         (Language::Russian, true) => format!(
-            "{error}. Не удалось подтвердить восстановление прежнего файла: {rollback}. Перед повтором проверьте исходное назначение {target} и возможную резервную копию {backup}"
+            "{error}. Не удалось подтвердить восстановление прежнего объекта: {rollback}. Перед повтором проверьте исходное назначение {target} и возможную резервную копию {backup}"
         ),
     }
 }
@@ -369,13 +369,13 @@ mod tests {
         for (english, local_guidance, remote_guidance) in [
             (
                 true,
-                format!("publish error. Could not restore the previous file: rollback error. Check the saved version at {backup} before retrying"),
-                format!("publish error. Could not confirm restoration of the previous file: rollback error. Check the original destination {target} and the possible backup {backup} before retrying"),
+                format!("publish error. Could not restore the previous item: rollback error. Check the saved version at {backup} before retrying"),
+                format!("publish error. Could not confirm restoration of the previous item: rollback error. Check the original destination {target} and the possible backup {backup} before retrying"),
             ),
             (
                 false,
-                format!("publish error. Не удалось восстановить прежний файл: rollback error. Перед повтором проверьте сохранённую версию в {backup}"),
-                format!("publish error. Не удалось подтвердить восстановление прежнего файла: rollback error. Перед повтором проверьте исходное назначение {target} и возможную резервную копию {backup}"),
+                format!("publish error. Не удалось восстановить прежний объект: rollback error. Перед повтором проверьте сохранённую версию в {backup}"),
+                format!("publish error. Не удалось подтвердить восстановление прежнего объекта: rollback error. Перед повтором проверьте исходное назначение {target} и возможную резервную копию {backup}"),
             ),
         ] {
             let local = format_replacement_rollback_failed(

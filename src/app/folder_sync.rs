@@ -7,8 +7,12 @@ use super::{
 };
 use crate::{
     i18n::text,
+    operations::TransferError,
     shortcuts::Command,
-    vfs::{Exclusions, Location, Reconcile, ReconcileConflict, SyncChange, SyncPlan, TwoWayPlan},
+    vfs::{
+        Exclusions, Location, Reconcile, ReconcileConflict, SyncChange, SyncPlan, SyncReport,
+        TwoWayPlan,
+    },
 };
 use eframe::egui::{self, Key};
 use std::path::{Path, PathBuf};
@@ -415,9 +419,26 @@ impl PawCommander {
             ctx,
             label,
             format!("{} {direction} {}", left.display(), right.display()),
-            move |progress| match plan {
-                Plan::OneWay(plan) => plan.apply(progress),
-                Plan::TwoWay(plan) => plan.apply(progress),
+            move |progress| {
+                let SyncReport { completed, result } = match plan {
+                    Plan::OneWay(plan) => plan.apply(progress),
+                    Plan::TwoWay(plan) => plan.apply(progress),
+                };
+                match result {
+                    Ok(()) => Ok(crate::tr_format!(
+                        "Synchronization complete. Completed: {completed}.",
+                        completed = completed
+                    )),
+                    Err(TransferError::Cancelled) => Ok(crate::tr_format!(
+                        "Synchronization stopped. Completed: {completed}.",
+                        completed = completed
+                    )),
+                    Err(error) => Err(crate::tr_format!(
+                        "{error}\nCompleted: {completed}.",
+                        completed = completed,
+                        error = crate::i18n::file_error(&error)
+                    )),
+                }
             },
         );
     }

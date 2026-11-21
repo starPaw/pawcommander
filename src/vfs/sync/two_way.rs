@@ -8,9 +8,10 @@ pub(in crate::vfs) use tests::two_way_round_trip;
 use super::{
     apply::{self, Execution},
     check_new_name, observe_folders, revalidate_folders, Budget, Exclusions, Kind, ReadScope,
-    Snapshot, SyncChange, SyncRow,
+    Snapshot, SyncChange, SyncReport, SyncRow,
 };
 use crate::{
+    file_error::SyncError,
     i18n::text,
     operations::{Cancellation, Progress, TransferError},
     vfs::{transfer::validate_source_child_name, Location},
@@ -189,7 +190,7 @@ impl TwoWayPlan {
         self.store.check_roots(&self.observed)?;
         if self.store.read(&cancel)? != self.baseline || self.store.read_run()? != self.interrupted
         {
-            return Err(text!("Общее состояние изменилось. Постройте план заново.").into());
+            return Err(SyncError::BaselineChanged.into());
         }
         if let Some(run) = &self.interrupted {
             self.store.check_stage(run, &self.observed)?;
@@ -224,9 +225,12 @@ impl TwoWayPlan {
         Ok(())
     }
 
-    pub(crate) fn apply(&self, progress: &mut Progress) -> Result<String, String> {
+    pub(crate) fn apply(&self, progress: &mut Progress) -> SyncReport {
         if !self.can_apply() {
-            return Err(text!("Для применения нужен план без нерешённых конфликтов.").into());
+            return SyncReport {
+                completed: 0,
+                result: Err(SyncError::UnresolvedConflicts.into()),
+            };
         }
         let rows: Vec<_> = self
             .rows
@@ -270,11 +274,8 @@ impl TwoWayPlan {
             self.store.check_stage(&run, &self.observed)?;
             let (_, final_state) = observe_folders(&self.folders, &self.exclusions, progress)?;
             self.store.check_roots(&final_state)?;
-            if !final_state.iter().all(|side| matches_tree(side, &target)) {
-                return Err(text!(
-                    "После применения содержимое папок отличается от плана. Постройте план заново.",
-                )
-                .into());
+            if let Some(folder) = final_state.iter().find(|side| !matches_tree(side, &target)) {
+                return Err(SyncError::ResultMismatch(folder.root.clone()).into());
             }
             lock.save(&target, &cancel)?;
             lock.finish_run()

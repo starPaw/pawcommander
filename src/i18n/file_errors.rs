@@ -1,4 +1,6 @@
 use super::text;
+#[cfg(target_os = "macos")]
+use crate::file_error::SyncError;
 use crate::file_error::{
     AccessAction, AccessCause, AccessError, ArchiveError, ArchiveMemberError, ChecksumError,
     ConnectionError, Failure, HostKeyError, KnownHostEntryError, KnownHostsError, ListingError,
@@ -24,6 +26,8 @@ pub(crate) fn file_error(error: &TransferError) -> String {
                 Failure::Archive(error) => archive_error(error),
                 Failure::Metadata(error) => metadata_error(error),
                 Failure::Space(error) => space_error(error),
+                #[cfg(target_os = "macos")]
+                Failure::Sync(error) => sync_error(error),
                 Failure::Permissions(reason) => permission_error(
                     reason,
                     matches!(error, TransferError::PublicationUnconfirmed(_)),
@@ -60,6 +64,35 @@ fn metadata_error(error: &MetadataError) -> String {
         MetadataError::CleanupDirectoryChanged(target) => format!(
             "{} · {target}",
             text!("Временная папка изменилась перед очисткой")
+        ),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn sync_error(error: &SyncError) -> String {
+    match error {
+        SyncError::NameCollision(location) => crate::tr_format!(
+            "Names collide at the destination: {location}", location = location
+        ),
+        SyncError::RetainedStage(location) => crate::tr_format!(
+            "Found a sync staging folder: {location}. Wait for any running synchronization to finish. If it was interrupted, inspect the retained versions before building a new plan.", location = location
+        ),
+        SyncError::Overlap { source, destination } => format!(
+            "{} · {source} → {destination}",
+            text!("Источник и назначение синхронизации пересекаются")
+        ),
+        SyncError::PlanLimit => text!(
+            "Достигнут предел плана: 100 000 объектов или 32 МиБ данных о путях"
+        ).into(),
+        SyncError::ExcludedPath { target, excluded } => crate::tr_format!(
+            "Replacing or deleting {location} would affect the excluded path {excluded}.",
+            location = target, excluded = excluded.display()
+        ),
+        SyncError::BaselineChanged => text!("Общее состояние изменилось. Постройте план заново.").into(),
+        SyncError::UnresolvedConflicts => text!("Для применения нужен план без нерешённых конфликтов.").into(),
+        SyncError::ResultMismatch(folder) => format!(
+            "{} · {folder}",
+            text!("После применения содержимое папок отличается от плана. Постройте план заново.")
         ),
     }
 }
@@ -372,6 +405,8 @@ fn access_error(error: &AccessError) -> String {
         AccessAction::ReadChildren => text!("Не удалось прочитать папку"),
         AccessAction::ReadFile => text!("Не удалось прочитать файл"),
         AccessAction::ReadLink => text!("Не удалось прочитать символическую ссылку"),
+        #[cfg(target_os = "macos")]
+        AccessAction::CreateLink => text!("Не удалось создать символическую ссылку"),
         AccessAction::WriteFile => text!("Не удалось записать файл"),
         AccessAction::FlushFile => text!("Не удалось записать буфер файла"),
         AccessAction::SyncFile => text!("Не удалось сохранить данные файла"),
@@ -743,6 +778,10 @@ fn mutation_error(error: &MutationError, unconfirmed: bool) -> String {
             path.display()
         ),
         SourceChanged(path) => super::source_changed_during_copy(path),
+        #[cfg(target_os = "macos")]
+        PlanChanged(location) => crate::tr_format!(
+            "An item changed after planning: {location}. Build the plan again.", location = location
+        ),
         #[cfg(target_os = "macos")]
         SmbSourceNotRegular(path) => format!(
             "{} · {path}",

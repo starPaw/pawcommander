@@ -88,7 +88,7 @@ pub(crate) use sftp_properties::{visit_properties, PropertyEvent};
 #[cfg(target_os = "macos")]
 pub(crate) use sync::{Exclusions, Reconcile, ReconcileConflict, TwoWayPlan};
 #[cfg(target_os = "macos")]
-pub(crate) use sync::{SyncChange, SyncPlan};
+pub(crate) use sync::{SyncChange, SyncPlan, SyncReport};
 #[cfg(target_os = "macos")]
 pub(crate) use transfer::copy_sftp_for_drop;
 #[cfg(test)]

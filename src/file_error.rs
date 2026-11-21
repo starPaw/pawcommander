@@ -8,11 +8,15 @@ mod checksum;
 mod host_key;
 mod metadata;
 mod space;
+#[cfg(target_os = "macos")]
+mod sync;
 pub(crate) use archive::ArchiveError;
 pub(crate) use checksum::{ChecksumError, ManifestLineError};
 pub(crate) use host_key::{HostKeyError, KnownHostEntryError, KnownHostsError, PinError};
 pub(crate) use metadata::{MetadataError, MetadataField, MetadataWarning};
 pub(crate) use space::{ProbeAction, SftpSpaceFailure, SpaceError};
+#[cfg(target_os = "macos")]
+pub(crate) use sync::SyncError;
 
 #[derive(Debug)]
 pub(crate) enum Failure {
@@ -32,6 +36,8 @@ pub(crate) enum Failure {
     Archive(Box<ArchiveError>),
     Metadata(Box<MetadataError>),
     Space(Box<SpaceError>),
+    #[cfg(target_os = "macos")]
+    Sync(Box<SyncError>),
     ComparisonPane {
         right: bool,
         cause: Box<TransferError>,
@@ -71,6 +77,8 @@ impl Failure {
             Self::Archive(error) => Some(error.as_ref()),
             Self::Metadata(error) => Some(error.as_ref()),
             Self::Space(error) => Some(error.as_ref()),
+            #[cfg(target_os = "macos")]
+            Self::Sync(error) => Some(error.as_ref()),
             Self::ComparisonPane { cause, .. } => Some(cause.as_ref()),
             Self::Listing(error) => Some(error.as_ref()),
             Self::Mutation(error) => Some(error.as_ref()),
@@ -95,6 +103,8 @@ impl fmt::Display for Failure {
             Self::Archive(error) => fmt::Display::fmt(error, f),
             Self::Metadata(error) => fmt::Display::fmt(error, f),
             Self::Space(error) => fmt::Display::fmt(error, f),
+            #[cfg(target_os = "macos")]
+            Self::Sync(error) => fmt::Display::fmt(error, f),
             Self::ComparisonPane { right, cause } => {
                 let pane = if *right { "Right pane" } else { "Left pane" };
                 write!(f, "{pane} · {cause}")
@@ -220,6 +230,8 @@ pub(crate) enum AccessAction {
     ReadChildren,
     ReadFile,
     ReadLink,
+    #[cfg(target_os = "macos")]
+    CreateLink,
     WriteFile,
     FlushFile,
     SyncFile,
@@ -789,6 +801,8 @@ pub(crate) enum MutationError {
     DestinationExists(Location),
     SourceChanged(Location),
     #[cfg(target_os = "macos")]
+    PlanChanged(Location),
+    #[cfg(target_os = "macos")]
     SmbSourceNotRegular(Location),
     ReadOnlyArchive(Location),
     RenameLocal {
@@ -863,6 +877,8 @@ impl fmt::Display for MutationError {
             }
             Self::DestinationExists(location) => write!(f, "Destination {location} already exists"),
             Self::SourceChanged(location) => write!(f, "Source changed during copying: {location}"),
+            #[cfg(target_os = "macos")]
+            Self::PlanChanged(location) => write!(f, "An item changed after planning: {location}"),
             #[cfg(target_os = "macos")]
             Self::SmbSourceNotRegular(source) => {
                 write!(f, "SMB uploads require a regular file: {source}")
