@@ -115,7 +115,13 @@ impl Player {
                     crate::i18n::key!("Частота кадров"),
                     video
                         .fps
-                        .map(|rate| format!("{rate:.2} {}", text!("кадр/с")))
+                        .map(|rate| {
+                            format!(
+                                "{} {}",
+                                crate::i18n::display::decimal(rate, 2),
+                                text!("кадр/с")
+                            )
+                        })
                         .as_deref(),
                 );
             }
@@ -130,7 +136,9 @@ impl Player {
                     crate::i18n::key!("Частота дискретизации"),
                     audio
                         .sample_rate
-                        .map(|rate| format!("{rate:.0} {}", text!("Гц")))
+                        .map(|rate| {
+                            format!("{} {}", crate::i18n::display::decimal(rate, 0), text!("Гц"))
+                        })
                         .as_deref(),
                 );
                 field(
@@ -198,7 +206,6 @@ impl Player {
         } else {
             self.seek_widget = None;
             ui.label(crate::tr_format!(
-                "{} / Длительность недоступна",
                 "{} / Duration unavailable",
                 timestamp(seconds)
             ));

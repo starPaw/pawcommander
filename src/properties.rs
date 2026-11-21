@@ -172,9 +172,9 @@ impl Properties {
                         crate::i18n::text!("Подсчёт завершён")
                     });
                 }
-                ui.label(crate::tr_format!("Размер файлов: {} байт", "File size: {} bytes", summary.bytes));
-                ui.label(crate::tr_format!("Файлов: {} · Папок: {} · Ссылок: {} · Других: {}", "Files: {} · Folders: {} · Links: {} · Other: {}",
-                    summary.files, summary.directories, summary.links, summary.other
+                ui.label(crate::tr_format!("File size: {} bytes", crate::i18n::display::integer(summary.bytes)));
+                ui.label(crate::tr_format!("Files: {} · Folders: {} · Links: {} · Other: {}",
+                    crate::i18n::display::integer(summary.files), crate::i18n::display::integer(summary.directories), crate::i18n::display::integer(summary.links), crate::i18n::display::integer(summary.other)
                 ));
                 ui.small(crate::i18n::text!("Включая выбранные объекты и скрытые файлы. Ссылки не раскрываются. Размер — сумма длин обычных файлов, не занятое место на диске."));
                 egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
@@ -185,7 +185,7 @@ impl Properties {
                     }
                     if summary.errors > 0 {
                         ui.separator();
-                        ui.label(crate::tr_format!("Ошибок чтения: {}", "Read errors: {}", summary.errors));
+                        ui.label(crate::tr_format!("Read errors: {}", crate::i18n::display::integer(summary.errors)));
                         for error in &summary.error_examples {
                             ui.label(error);
                         }
@@ -203,9 +203,10 @@ fn date(value: Option<SystemTime>) -> String {
     value.map_or_else(
         || crate::i18n::text!("недоступно").into(),
         |time| {
-            DateTime::<Local>::from(time)
-                .format("%Y-%m-%d %H:%M:%S %:z")
-                .to_string()
+            crate::i18n::display::date(
+                DateTime::<Local>::from(time),
+                crate::i18n::display::DateStyle::Zoned,
+            )
         },
     )
 }
@@ -221,17 +222,13 @@ fn details(metadata: &Metadata) -> String {
         )
     };
     #[cfg(not(unix))]
-    let permissions = crate::tr_format!(
-        "Только чтение: {}",
-        "Read-only: {}",
-        metadata.permissions().readonly()
-    );
+    let permissions = crate::tr_format!("Read-only: {}", metadata.permissions().readonly());
     crate::tr_format!(
-        "Права: {permissions}\nИзменён: {}\nСоздан: {}\nДоступ: {}",
         "Permissions: {permissions}\nModified: {}\nCreated: {}\nAccessed: {}",
         date(metadata.modified().ok()),
         date(metadata.created().ok()),
-        date(metadata.accessed().ok())
+        date(metadata.accessed().ok()),
+        permissions = permissions
     )
 }
 

@@ -44,7 +44,6 @@ impl Platform {
         let handle = frame.window_handle().map_err(|e| e.to_string())?;
         let RawWindowHandle::Win32(handle) = handle.as_raw() else {
             return Err(crate::tr_format!(
-                "Окно не поддерживает системное перетаскивание",
                 "The window does not support native drag and drop"
             ));
         };

@@ -564,8 +564,9 @@ fn restore_held_source(
 
 fn retained_source(held: &Location, error: TransferError) -> TransferError {
     crate::tr_format!(
-        "{error} Проверьте исходную папку и сохранённый адрес {held}.",
-        "{error} Check the original folder and retained location {held}."
+        "{error} Check the original folder and retained location {held}.",
+        error = error,
+        held = held
     )
     .into()
 }
@@ -777,26 +778,26 @@ pub(crate) fn resume(
     result
         .map(|result| match (moving, result) {
             (true, Completion::Copied(offset)) => crate::tr_format!(
-                "Перенос продолжен с позиции {offset} байт и завершён.",
-                "Move resumed at byte {offset} and completed."
+                "Move resumed at byte {offset} and completed.",
+                offset = offset
             ),
             (true, Completion::FolderCopied(bytes)) => crate::tr_format!(
-                "Перенос папки завершён. Использовано сохранённых байтов: {bytes}.",
-                "Folder move completed. Reused {bytes} staged bytes."
+                "Folder move completed. Reused {bytes} staged bytes.",
+                bytes = bytes
             ),
             (true, Completion::AlreadyPresent) => {
                 text!("Перенос завершён после сверки копии.").into()
             }
             (false, Completion::Copied(offset)) => crate::tr_format!(
-                "Копирование продолжено с позиции {offset} байт и завершено.",
-                "Copy resumed at byte {offset} and completed."
+                "Copy resumed at byte {offset} and completed.",
+                offset = offset
             ),
             (false, Completion::AlreadyPresent) => {
                 text!("В назначении подтверждена полная копия.").into()
             }
             (false, Completion::FolderCopied(bytes)) => crate::tr_format!(
-                "Копирование папки завершено. Использовано сохранённых байтов: {bytes}.",
-                "Folder copy completed. Reused {bytes} staged bytes."
+                "Folder copy completed. Reused {bytes} staged bytes.",
+                bytes = bytes
             ),
         })
         .map(|mut message| {
@@ -1188,8 +1189,9 @@ fn changed_target() -> TransferError {
 
 fn retained(stage: &Location, message: &str) -> String {
     crate::tr_format!(
-        "{message} Временная копия сохранена: {stage}. См. «Восстановление после сбоя».",
-        "{message} Partial copy retained at {stage}. See Crash recovery."
+        "{message} Partial copy retained at {stage}. See Crash recovery.",
+        message = message,
+        stage = stage
     )
 }
 

@@ -196,9 +196,9 @@ fn inspect_source(
 
 fn report_path(path: &Location, exists: bool) -> String {
     if exists {
-        crate::tr_format!("Найдено {path}", "Found {path}")
+        crate::tr_format!("Found {path}", path = path)
     } else {
-        crate::tr_format!("Отсутствует {path}", "Missing {path}")
+        crate::tr_format!("Missing {path}", path = path)
     }
 }
 

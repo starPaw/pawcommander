@@ -219,10 +219,7 @@ impl From<&str> for TransferError {
 impl std::fmt::Display for TransferError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Cancelled => f.write_str(&crate::tr_format!(
-                "Операция отменена",
-                "Operation cancelled"
-            )),
+            Self::Cancelled => f.write_str(&crate::tr_format!("Operation cancelled")),
             Self::Failed(error) => f.write_str(error),
             Self::PublicationUnconfirmed(error) => f.write_str(error),
         }
@@ -774,7 +771,6 @@ impl<R: Read> Read for ProgressReader<'_, R> {
 
 fn copy_hash_mismatch(path: &Path) -> io::Error {
     io::Error::other(crate::tr_format!(
-        "Проверка SHA-256 не пройдена для {}. Копия не опубликована; источник сохранён",
         "SHA-256 verification failed for {}. Copy was not published; source was preserved",
         path.display()
     ))

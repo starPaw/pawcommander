@@ -53,10 +53,7 @@ impl ConnectionJob {
                 ctx.request_repaint();
             })
             .map_err(|error| {
-                crate::tr_format!(
-                    "Не удалось запустить подключение SFTP ({error})",
-                    "Could not start SFTP connection ({error})"
-                )
+                crate::tr_format!("Could not start SFTP connection ({error})", error = error)
             })?;
         Ok(Self {
             pane,
@@ -160,8 +157,7 @@ impl ConnectionJob {
             if let Some(remaining) = remaining.filter(|_| can_submit) {
                 let seconds = remaining.as_secs_f64().ceil() as u64;
                 ui.label(crate::tr_format!(
-                    "На ответ {seconds} с",
-                    "{seconds} s to respond"
+                    "{seconds} s to respond", seconds = seconds
                 ));
                 ctx.request_repaint_after(Duration::from_secs(1));
             }

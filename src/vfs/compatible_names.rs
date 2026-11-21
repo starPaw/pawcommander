@@ -222,8 +222,8 @@ impl Layout<'_> {
         let entry = &self.manifest.entries[source];
         if !entry.metadata.is_file() && entry.children.is_none() {
             return Err(crate::tr_format!(
-                "Совместимый перенос поддерживает обычные файлы и папки. Проверьте {source}.",
-                "Compatible transfer supports regular files and folders. Check {source}."
+                "Compatible transfer supports regular files and folders. Check {source}.",
+                source = source
             )
             .into());
         }

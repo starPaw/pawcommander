@@ -43,13 +43,13 @@ pub(crate) fn run(arguments: impl IntoIterator<Item = OsString>) -> ExitCode {
         .into_iter()
         .filter_map(|key| std::env::var(key).ok())
         .find(|locale| !locale.is_empty());
-    let language = if locale
+    let language = match locale
         .as_deref()
-        .is_some_and(|locale| locale.split(['_', '.', '@', '-']).next() == Some("ru"))
+        .and_then(|locale| locale.split(['_', '.', '@', '-']).next())
     {
-        Language::Russian
-    } else {
-        Language::English
+        Some("ru") => Language::Russian,
+        Some("cs") => Language::Czech,
+        _ => Language::English,
     };
     crate::i18n::set_language(language);
     match parse(arguments).and_then(execute) {
@@ -165,14 +165,16 @@ fn checked_folder(folder: &Path) -> Result<PathBuf, Error> {
     }
     let path = std::path::absolute(folder).map_err(|error| {
         Error::Startup(crate::tr_format!(
-            "Не удалось разрешить путь {folder:?} ({error})",
-            "Could not resolve the path {folder:?} ({error})"
+            "Could not resolve the path {folder:?} ({error})",
+            error = error,
+            folder = folder
         ))
     })?;
     fs::read_dir(&path).map_err(|error| {
         Error::Target(crate::tr_format!(
-            "Не удалось открыть папку {path:?} ({error})",
-            "Could not open the folder {path:?} ({error})"
+            "Could not open the folder {path:?} ({error})",
+            error = error,
+            path = path
         ))
     })?;
     Ok(path)
@@ -188,8 +190,8 @@ fn read_profile(path: Option<&Path>) -> Result<Option<Vec<u8>>, Error> {
         Ok(profile) => Ok(Some(profile)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(Error::Startup(crate::tr_format!(
-            "Не удалось прочитать сохранённые настройки ({error})",
-            "Could not read saved settings ({error})"
+            "Could not read saved settings ({error})",
+            error = error
         ))),
     }
 }
@@ -197,12 +199,12 @@ fn read_profile(path: Option<&Path>) -> Result<Option<Vec<u8>>, Error> {
 fn workspace_error(error: WorkspaceError, name: &str) -> Error {
     match error {
         WorkspaceError::Missing => Error::Target(crate::tr_format!(
-            "Рабочее пространство {name:?} не найдено",
-            "Workspace {name:?} was not found"
+            "Workspace {name:?} was not found",
+            name = name
         )),
         WorkspaceError::Incompatible => Error::Target(crate::tr_format!(
-            "Пути рабочего пространства {name:?} несовместимы с системой",
-            "Workspace {name:?} contains incompatible paths"
+            "Workspace {name:?} contains incompatible paths",
+            name = name
         )),
         WorkspaceError::Corrupt => {
             Error::Startup(text!("Не удалось прочитать сохранённые рабочие пространства.").into())
@@ -224,16 +226,16 @@ fn launch_isolated(startup: Startup, profile: Option<&[u8]>) -> Result<(), Error
 
 fn profile_error(error: io::Error) -> Error {
     Error::Startup(crate::tr_format!(
-        "Не удалось подготовить настройки для окна ({error})",
-        "Could not prepare settings for the window ({error})"
+        "Could not prepare settings for the window ({error})",
+        error = error
     ))
 }
 
 fn launch(startup: Startup, persistence_path: Option<PathBuf>) -> Result<(), Error> {
     crate::run_gui(startup, persistence_path).map_err(|error| {
         Error::Startup(crate::tr_format!(
-            "Не удалось запустить PawCommander ({error})",
-            "Could not start PawCommander ({error})"
+            "Could not start PawCommander ({error})",
+            error = error
         ))
     })
 }

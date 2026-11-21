@@ -391,10 +391,7 @@ impl eframe::App for PawCommander {
         // Suspend those handlers so Enter cannot submit an unrelated operation.
         if self.recovery.is_open() && !self.conflict_open() {
             egui::CentralPanel::default().show(ui, |ui| {
-                ui.label(crate::tr_format!(
-                    "Закройте отчёт восстановления, чтобы продолжить работу.",
-                    "Close the recovery report to continue."
-                ));
+                ui.label(crate::tr_format!("Close the recovery report to continue."));
             });
             self.recovery.show(ctx);
             #[cfg(target_os = "macos")]
@@ -468,11 +465,7 @@ impl eframe::App for PawCommander {
                     let ui = &mut card.content_ui;
                     ui.set_min_size(ui.available_size());
                     if selected.len() > 1 {
-                        ui.label(crate::tr_format!(
-                            "Выбрано объектов: {}",
-                            "Selected items: {}",
-                            selected.len()
-                        ));
+                        ui.label(crate::tr_format!("Selected items: {}", selected.len()));
                     }
                     self.preview.show(ui, selected.first(), fingerprint);
                     card.end(panel_ui);

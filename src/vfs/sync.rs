@@ -179,8 +179,8 @@ fn check_new_name(
 
 fn name_collision(location: &Location) -> TransferError {
     crate::tr_format!(
-        "Имена конфликтуют в назначении: {location}",
-        "Names collide at the destination: {location}"
+        "Names collide at the destination: {location}",
+        location = location
     )
     .into()
 }
@@ -202,8 +202,7 @@ fn is_sync_staging(name: &OsStr) -> bool {
 
 fn retained_stage(location: &Location) -> TransferError {
     crate::tr_format!(
-        "Найдена временная папка синхронизации: {location}. Дождитесь завершения активной операции. Если она прервалась, проверьте сохранённые версии перед новым планом.",
-        "Found a sync staging folder: {location}. Wait for any running synchronization to finish. If it was interrupted, inspect the retained versions before building a new plan."
+        "Found a sync staging folder: {location}. Wait for any running synchronization to finish. If it was interrupted, inspect the retained versions before building a new plan.", location = location
     ).into()
 }
 
@@ -352,8 +351,9 @@ impl Snapshot {
             let location = self.root.join(path);
             let excluded = excluded.display();
             return Err(crate::tr_format!(
-                "Замена или удаление {location} затронет исключённый путь {excluded}.",
-                "Replacing or deleting {location} would affect the excluded path {excluded}."
+                "Replacing or deleting {location} would affect the excluded path {excluded}.",
+                excluded = excluded,
+                location = location
             )
             .into());
         }

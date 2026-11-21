@@ -452,7 +452,6 @@ impl PawCommander {
                 let history_started = crate::result_history::now();
                 if recovery_directory.is_none() && !cfg!(test) {
                     fail_to_start(crate::tr_format!(
-                        "Операция не начата: папка данных приложения для восстановления недоступна.",
                         "Operation not started: application data directory for recovery is unavailable."
                     ));
                     return;
@@ -472,8 +471,8 @@ impl PawCommander {
                     Ok(pending) => pending,
                     Err(error) => {
                         fail_to_start(crate::tr_format!(
-                            "Операция не начата: не удалось сохранить запись восстановления: {error}",
-                            "Operation not started: could not save recovery record: {error}"
+                            "Operation not started: could not save recovery record: {error}",
+                            error = error
                         ));
                         return;
                     }
@@ -481,8 +480,7 @@ impl PawCommander {
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     if let Some(pending) = pending.as_ref() {
                         pending.run(|| work(&mut reporter)).map_err(|error| crate::tr_format!(
-                            "Операция не начата: не удалось активировать запись восстановления: {error}",
-                            "Operation not started: could not activate recovery record: {error}"
+                            "Operation not started: could not activate recovery record: {error}", error = error
                         ))?
                     } else {
                         work(&mut reporter)
@@ -512,13 +510,11 @@ impl PawCommander {
                         && let Err(error) = pending.complete()
                     {
                         result = Err(crate::tr_format!(
-                                "Операция завершилась, но очистка записи восстановления не подтверждена: {error}. Проверьте журнал результатов.",
-                                "Operation finished, but recovery record cleanup could not be confirmed: {error}. Check result history."
+                                "Operation finished, but recovery record cleanup could not be confirmed: {error}. Check result history.", error = error
                             ));
                     }
                 } else if !persisted && recovery_directory.is_some() {
                     result = Err(crate::tr_format!(
-                        "Операция завершилась, но журнал результатов не сохранён. Проверьте файлы в обеих папках; запись восстановления сохранена, если была создана.",
                         "Operation finished, but result history was not saved. Check files in both folders; the recovery record was retained if created."
                     ));
                 }
@@ -541,10 +537,7 @@ impl PawCommander {
             #[cfg(not(test))]
             let spawn_result = builder.spawn(worker);
             if let Err(error) = spawn_result {
-                let error = crate::tr_format!(
-                    "Не удалось запустить операцию: {error}",
-                    "Could not start operation: {error}"
-                );
+                let error = crate::tr_format!("Could not start operation: {error}", error = error);
                 #[cfg(target_os = "macos")]
                 if let Some(completion) = native_completion {
                     let _ = completion.send(Err(error.clone()));
@@ -647,7 +640,7 @@ impl PawCommander {
         self.submit_transfer(
             ctx,
             TransferRequest {
-                label: crate::tr_format!("Повтор незавершённого", "Retry unfinished items"),
+                label: crate::tr_format!("Retry unfinished items"),
                 sources: job.transfer.sources(),
                 destination: job.transfer.destination.clone(),
                 kind: job.transfer.kind,
@@ -694,8 +687,9 @@ impl PawCommander {
                                 send(job);
                             }
                             Ok(crate::tr_format!(
-                                "Проверено объектов {checked}. Готово к повтору {ready_count}.",
-                                "Checked {checked} items. Ready to retry {ready_count}."
+                                "Checked {checked} items. Ready to retry {ready_count}.",
+                                checked = checked,
+                                ready_count = ready_count
                             ))
                         }
                         Err(crate::operations::TransferError::Cancelled) => {
@@ -949,17 +943,18 @@ impl PawCommander {
                     progress.undo = batch;
                     match result {
                         Ok(completed) => Ok(crate::tr_format!(
-                            "Отменено изменений: {completed}",
-                            "Changes undone: {completed}"
+                            "Changes undone: {completed}",
+                            completed = completed
                         )),
                         Err(crate::operations::TransferError::Cancelled) => Ok(crate::tr_format!(
-                            "Отмена изменений остановлена. Возвращено: {}. Осталось: {remaining}.",
                             "Undo stopped. Restored: {}. Remaining: {remaining}.",
-                            before - remaining
+                            before - remaining,
+                            remaining = remaining
                         )),
                         Err(error) => Err(crate::tr_format!(
-                            "{error}. Доступно для следующей попытки: {remaining}.",
-                            "{error}. Available for another attempt: {remaining}."
+                            "{error}. Available for another attempt: {remaining}.",
+                            error = error,
+                            remaining = remaining
                         )),
                     }
                 }),

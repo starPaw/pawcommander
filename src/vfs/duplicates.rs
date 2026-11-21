@@ -318,8 +318,8 @@ fn same_contents(
 
 fn changed_since_search(location: &Location) -> TransferError {
     crate::tr_format!(
-        "Объект изменился после поиска или недоступен: {location}. Выполните поиск заново.",
-        "An item changed after the search or is unavailable: {location}. Run a fresh search."
+        "An item changed after the search or is unavailable: {location}. Run a fresh search.",
+        location = location
     )
     .into()
 }

@@ -74,8 +74,8 @@ impl TextEncoding {
         let bytes = codec.encode(value).ok_or_else(|| {
             let encoding = self.label();
             crate::tr_format!(
-                "Некоторые символы отсутствуют в {encoding}. Выберите другую кодировку.",
-                "Some characters cannot be represented in {encoding}. Choose a different encoding."
+                "Some characters cannot be represented in {encoding}. Choose a different encoding.",
+                encoding = encoding
             )
         })?;
         let total = bytes.len() + bom.len();
@@ -214,10 +214,7 @@ impl NewFile {
                     .results
                     .record(&target, None, Outcome::Completed, None);
                 let path = target.display().escape_debug().to_string();
-                Ok(crate::tr_format!(
-                    "Файл создан: {path}",
-                    "File created: {path}"
-                ))
+                Ok(crate::tr_format!("File created: {path}", path = path))
             }
             Err(TransferError::Cancelled) => {
                 progress.results.cancelled = true;

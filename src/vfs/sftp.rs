@@ -110,7 +110,7 @@ fn open_verified(
     let control = control.as_ref();
     let addresses = (host, endpoint.port)
         .to_socket_addrs()
-        .map_err(|e| format!("Не удалось найти сервер: {e}"))?;
+        .map_err(|e| crate::tr_format!("Could not resolve the server: {e}", e = e))?;
     let mut tcp = None;
     for address in addresses {
         if let Some(control) = control {
@@ -121,7 +121,9 @@ fn open_verified(
             break;
         }
     }
-    let tcp = tcp.ok_or("Не удалось подключиться к серверу SFTP (тайм-аут 10 с на адрес)")?;
+    let tcp = tcp.ok_or(crate::i18n::text!(
+        "Не удалось подключиться к серверу SFTP (тайм-аут 10 с на адрес)"
+    ))?;
     if let Some(control) = control {
         let socket = tcp.try_clone().map_err(err)?;
         control.attach(move || {
@@ -144,7 +146,7 @@ fn validate_endpoint(endpoint: &Endpoint) -> Result<(), String> {
         || endpoint.user.chars().any(char::is_control)
         || endpoint.port == 0
     {
-        return Err("Укажите сервер, пользователя и порт 1–65535".into());
+        return Err(crate::i18n::text!("Укажите сервер, пользователя и порт 1–65535").into());
     }
     Ok(())
 }
@@ -183,8 +185,9 @@ fn at_target(endpoint: &Endpoint, error: String) -> String {
     if endpoint.jump.is_some() {
         let address = endpoint.label();
         crate::tr_format!(
-            "Конечный сервер {address} · {error}",
-            "Target host {address} · {error}"
+            "Target host {address} · {error}",
+            address = address,
+            error = error
         )
     } else {
         error
@@ -235,8 +238,7 @@ impl<'a> PrimaryAuth<'a> {
             Self::KeyFile(key, phrase) => session.userauth_pubkey_file(user, None, key, phrase).map_err(err),
             Self::Agent => session.userauth_agent(user).map_err(|error| {
                 crate::tr_format!(
-                    "SSH-agent ({error}). Добавьте ключ в agent или укажите ключ или пароль в диалоге SFTP.",
-                    "SSH agent ({error}). Add a key to the agent or supply a key or password in SFTP."
+                    "SSH agent ({error}). Add a key to the agent or supply a key or password in SFTP.", error = error
                 )
             }),
         }
@@ -359,12 +361,12 @@ fn connect_reviewed(
     };
     let imported = if save_key {
         if !password.is_empty() {
-            return Err("Для сохранения ключа очистите пароль аккаунта".into());
+            return Err(crate::i18n::text!("Для сохранения ключа очистите пароль аккаунта").into());
         }
         let key_path = endpoint
             .key
             .as_ref()
-            .ok_or("Укажите файл приватного ключа")?;
+            .ok_or(crate::i18n::text!("Укажите файл приватного ключа"))?;
         let mut bytes = Vec::new();
         fs::File::open(key_path)
             .map_err(err)?
@@ -372,11 +374,12 @@ fn connect_reviewed(
             .read_to_end(&mut bytes)
             .map_err(err)?;
         if bytes.len() > 64 * 1024 {
-            return Err("Ключ больше 64 КиБ".into());
+            return Err(crate::i18n::text!("Ключ больше 64 КиБ").into());
         }
         Some(
-            String::from_utf8(bytes)
-                .map_err(|_| "Ключ должен быть в текстовом формате OpenSSH/PEM")?,
+            String::from_utf8(bytes).map_err(|_| {
+                crate::i18n::text!("Ключ должен быть в текстовом формате OpenSSH/PEM")
+            })?,
         )
     } else {
         None
@@ -403,7 +406,7 @@ fn connect_reviewed(
         .realpath(Path::new(if path.is_empty() { "." } else { &path }))
         .map_err(err)?;
     if !sftp.stat(&path).map_err(err)?.is_dir() {
-        return Err("Начальный путь не является папкой".into());
+        return Err(crate::i18n::text!("Начальный путь не является папкой").into());
     }
     control.finalize()?;
     let saved_profile = save_key && used_key;
@@ -411,7 +414,7 @@ fn connect_reviewed(
         crate::credentials::save(
             &endpoint,
             &crate::credentials::SavedKey {
-                private_key: imported.ok_or("Не прочитан ключ")?,
+                private_key: imported.ok_or(crate::i18n::text!("Не прочитан ключ"))?,
                 passphrase: phrase.into(),
             },
         )?;
@@ -466,8 +469,7 @@ pub(super) fn cached_channel(
 
 fn sftp_open_error(error: impl std::fmt::Display) -> String {
     crate::tr_format!(
-        "Не удалось открыть соединение SFTP ({error}). Для входа с паролем или MFA воспользуйтесь формой SFTP.",
-        "Could not open the SFTP connection ({error}). Use the SFTP dialog to sign in with a password or MFA."
+        "Could not open the SFTP connection ({error}). Use the SFTP dialog to sign in with a password or MFA.", error = error
     )
 }
 
@@ -496,7 +498,7 @@ pub(super) fn remote(location: &Location) -> Result<Sftp, String> {
         if location.is_archive() {
             return Err(archive::readonly().into());
         }
-        return Err("Ожидалось подключение SFTP".into());
+        return Err(crate::i18n::text!("Ожидалось подключение SFTP").into());
     };
     if let Some(channel) = cached(endpoint)? {
         return Ok(channel);

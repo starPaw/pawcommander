@@ -175,7 +175,7 @@ fn replacement_rollback_preserves_backup_when_target_is_recreated() {
 fn staging_cleanup_failure_preserves_primary_error_or_reports_publication() {
     let target: Location = PathBuf::from("/target/report.txt").into();
     let staging: Location = PathBuf::from("/target/.staging").into();
-    let published = crate::tr_format!("Объект {target} опубликован", "Item {target} was published");
+    let published = crate::tr_format!("Item {target} was published", target = target);
     let success_error =
         staging_result(Ok(()), Err("cleanup denied".into()), &staging, &target).unwrap_err();
     assert!(success_error.starts_with(&published), "{success_error}");

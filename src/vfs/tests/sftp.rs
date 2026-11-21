@@ -297,7 +297,7 @@ fn check_sftp_unsupported_names(local_root: &Location, remote_root: &Location) {
                     "{error}"
                 );
                 assert!(
-                    !error.contains("Осталась"),
+                    !error.contains("Temporary folder remains at"),
                     "{direction}/{index}/{late}: {error}"
                 );
                 assert_eq!(fs::read(target.path()).unwrap(), b"previous destination");
@@ -357,11 +357,16 @@ fn check_sftp_source_change_cleanup_at_depth_limit(local_root: &Location, remote
                 if copied {
                     error.contains("changed during copying")
                 } else {
-                    error.contains("Слишком большая глубина")
+                    error.contains(crate::i18n::text!(
+                        "Слишком большая глубина папок (более 128)"
+                    ))
                 },
                 "{direction}/{depth}: {error}"
             );
-            assert!(!error.contains("Осталась"), "{direction}/{depth}: {error}");
+            assert!(
+                !error.contains("Temporary folder remains at"),
+                "{direction}/{depth}: {error}"
+            );
             assert!(!target.path().exists());
             assert_eq!(
                 fs::read(sibling.path()).unwrap(),

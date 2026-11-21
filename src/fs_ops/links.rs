@@ -92,11 +92,7 @@ pub(crate) fn create(
             create_hard_link(&directory, &directory.join(target), &destination, progress)?
         }
     };
-    let created = crate::tr_format!(
-        "Ссылка создана: {}",
-        "Link created: {}",
-        destination.display()
-    );
+    let created = crate::tr_format!("Link created: {}", destination.display());
     Ok(match cleanup_warning {
         None => created,
         Some(warning) => format!("{created}. {warning}"),
@@ -161,9 +157,9 @@ fn create_hard_link(
     })();
     let warning = remove_staging(&staging).err().map(|error| {
         crate::tr_format!(
-            "Не удалось убрать временную папку «{}»: {error}",
             "Could not clean up the temporary folder “{}”: {error}",
-            staging.path.display()
+            staging.path.display(),
+            error = error
         )
     });
     match (result, warning) {
@@ -176,7 +172,6 @@ fn create_hard_link(
 fn create_error(destination: &Path, error: io::Error) -> String {
     match error.kind() {
         io::ErrorKind::AlreadyExists => crate::tr_format!(
-            "«{}» уже существует. Выберите другое имя.",
             "“{}” already exists. Choose another name.",
             destination.display()
         ),

@@ -98,7 +98,7 @@ pub(super) fn list_header(
                 egui::WidgetInfo::labeled(
                     egui::Role::Button,
                     ui.is_enabled(),
-                    crate::tr_format!("Сортировка: {label}", "Sort: {label}"),
+                    crate::tr_format!("Sort: {label}", label = label),
                 )
             });
             paint_focus(ui, &response, 4);
@@ -552,9 +552,8 @@ pub(super) fn render_pane(
                     |ui| {
                         ui.label(
                             RichText::new(crate::tr_format!(
-                                "Выбрано: {}",
                                 "Selected: {}",
-                                tab.selected.len()
+                                crate::i18n::display::integer(tab.selected.len())
                             ))
                             .size(11.0)
                             .color(colors.muted),
@@ -562,9 +561,8 @@ pub(super) fn render_pane(
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.label(
                                 RichText::new(crate::tr_format!(
-                                    "{} объектов",
                                     "{} items",
-                                    visible_count
+                                    crate::i18n::display::integer(visible_count)
                                 ))
                                 .size(11.0)
                                 .color(colors.muted),

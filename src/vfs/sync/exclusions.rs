@@ -35,8 +35,8 @@ impl Exclusions {
             {
                 let line = index + 1;
                 return Err(crate::tr_format!(
-                    "Исключение в строке {line} должно быть относительным именем или путём.",
-                    "The exclusion on line {line} must be a relative name or path."
+                    "The exclusion on line {line} must be a relative name or path.",
+                    line = line
                 )
                 .into());
             }

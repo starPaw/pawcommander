@@ -121,7 +121,6 @@ impl DirectoryComparison {
 
 fn show_result(ui: &mut egui::Ui, result: &Comparison, show_matches: &mut bool, run: u64) {
     ui.label(crate::tr_format!(
-        "Только слева: {} · только справа: {} · различаются: {} · ошибки чтения: {} · совпали: {}",
         "Only left: {} · only right: {} · different: {} · read errors: {} · matched: {}",
         result.left_only,
         result.right_only,

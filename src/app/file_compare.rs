@@ -86,8 +86,8 @@ impl FileComparisonDialog {
             }) {
             Ok(_) => External::Opening(result),
             Err(error) => External::Failed(crate::tr_format!(
-                "Не удалось запустить внешний инструмент: {error}",
-                "Could not launch the external tool: {error}"
+                "Could not launch the external tool: {error}",
+                error = error
             )),
         };
     }
@@ -191,13 +191,14 @@ impl FileComparisonDialog {
 fn show_result(ui: &mut egui::Ui, result: &FileComparison, show_matches: &mut bool, run: u64) {
     let [left, right] = result.sizes.map(human_size);
     ui.label(crate::tr_format!(
-        "Слева {left} · справа {right}",
-        "Left {left} · right {right}"
+        "Left {left} · right {right}",
+        left = left,
+        right = right
     ));
     if let Some(offset) = result.first_difference {
         ui.label(crate::tr_format!(
-            "Первое различие в байтах на 0x{offset:X}",
-            "First byte difference at 0x{offset:X}"
+            "First byte difference at 0x{offset:X}",
+            offset = offset
         ));
     }
     match &result.difference {
@@ -224,8 +225,9 @@ fn show_text(ui: &mut egui::Ui, diff: &TextDifference, show_matches: &mut bool, 
     if has_changes {
         let (added, removed) = (diff.added, diff.removed);
         ui.label(crate::tr_format!(
-            "Добавлено {added} · удалено {removed}",
-            "Added {added} · removed {removed}"
+            "Added {added} · removed {removed}",
+            added = added,
+            removed = removed
         ));
     } else {
         ui.label(text!("Строки текста совпадают"));
@@ -259,12 +261,11 @@ fn show_text(ui: &mut egui::Ui, diff: &TextDifference, show_matches: &mut bool, 
                     diff.context[index]
                 };
                 let value = match row {
-                    DiffRow::Gap(count) => RichText::new(crate::tr_format!(
-                        "… совпадающих строк {count}",
-                        "… {count} matching lines"
-                    ))
-                    .monospace()
-                    .weak(),
+                    DiffRow::Gap(count) => {
+                        RichText::new(crate::tr_format!("… {count} matching lines", count = count))
+                            .monospace()
+                            .weak()
+                    }
                     DiffRow::Line(index) => {
                         let line = &diff.lines[index];
                         let (sign, color) = match line.kind {

@@ -90,14 +90,15 @@ impl Plan {
                     progress.results.cancelled = true;
                 }
                 return Err(crate::tr_format!(
-                    "Завершено объектов: {completed}. {error}",
-                    "Completed items: {completed}. {error}"
+                    "Completed items: {completed}. {error}",
+                    completed = completed,
+                    error = error
                 ));
             }
         }
         Ok(crate::tr_format!(
-            "Перенос с совместимыми именами завершён. Объектов: {completed}",
-            "Transfer with compatible names finished. Items: {completed}"
+            "Transfer with compatible names finished. Items: {completed}",
+            completed = completed
         ))
     }
 
@@ -389,8 +390,8 @@ fn check_vacant(target: &Location, occupied: &HashSet<String>) -> Result<(), Tra
         return Ok(());
     }
     Err(crate::tr_format!(
-        "Имя назначения занято после предпросмотра: {target}. Пересчитайте план.",
-        "Destination name became occupied after preview: {target}. Rebuild the plan."
+        "Destination name became occupied after preview: {target}. Rebuild the plan.",
+        target = target
     )
     .into())
 }
@@ -455,24 +456,21 @@ fn beneath(root: &Location, relative: &Path) -> Location {
 }
 
 fn stale_source(source: &Location) -> TransferError {
-    crate::tr_format!(
-        "Исходный файл изменился: {source}",
-        "Source file changed: {source}"
-    )
-    .into()
+    crate::tr_format!("Source file changed: {source}", source = source).into()
 }
 
 fn stale_target(target: &Location) -> TransferError {
     crate::tr_format!(
-        "Назначение не совпадает с проверенной копией: {target}",
-        "Destination differs from the verified copy: {target}"
+        "Destination differs from the verified copy: {target}",
+        target = target
     )
     .into()
 }
 
 fn unconfirmed(target: &Location, error: TransferError) -> TransferError {
     TransferError::PublicationUnconfirmed(crate::tr_format!(
-        "Проверьте возможную неполную копию {target}. Источник сохранён. {error}",
-        "Inspect the possibly incomplete copy at {target}. The source was preserved. {error}"
+        "Inspect the possibly incomplete copy at {target}. The source was preserved. {error}",
+        error = error,
+        target = target
     ))
 }

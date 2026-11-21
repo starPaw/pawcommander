@@ -70,7 +70,7 @@ impl SearchMatch {
         }
         let label = if let Some(context) = &self.context {
             let line = context.line;
-            crate::tr_format!("Строка {line} · {address}", "Line {line} · {address}")
+            crate::tr_format!("Line {line} · {address}", address = address, line = line)
         } else {
             address
         };
@@ -324,8 +324,8 @@ impl Search {
             }
             Err(error) => {
                 self.error = Some(crate::tr_format!(
-                    "Не удалось запустить поиск: {error}",
-                    "Could not start search: {error}"
+                    "Could not start search: {error}",
+                    error = error
                 ));
             }
         }
@@ -444,8 +444,8 @@ impl Search {
             }
             Err(error) => {
                 self.error = Some(crate::tr_format!(
-                    "Не удалось проверить путь из индекса. {error}",
-                    "Could not check the indexed path. {error}"
+                    "Could not check the indexed path. {error}",
+                    error = error
                 ));
             }
         }
@@ -490,8 +490,8 @@ impl Search {
                 self.selected = None;
                 let path = path.display();
                 self.error = Some(crate::tr_format!(
-                    "Путь из индекса больше не существует: {path}",
-                    "The indexed path no longer exists: {path}"
+                    "The indexed path no longer exists: {path}",
+                    path = path
                 ));
             }
             Err(error) => {
@@ -499,10 +499,7 @@ impl Search {
                     crate::i18n::text!("Файловая система не ответила на проверку пути из индекса.")
                         .into()
                 } else {
-                    crate::tr_format!(
-                        "Не удалось проверить путь из индекса. {error}",
-                        "Could not check the indexed path. {error}"
-                    )
+                    crate::tr_format!("Could not check the indexed path. {error}", error = error)
                 });
             }
         }
@@ -549,7 +546,7 @@ impl Search {
                     Mode::Folder => {
                         if let Some(folder) = &self.folder {
                             let path = folder.display();
-                            let label = crate::tr_format!("Папка поиска: {path}", "Search folder: {path}");
+                            let label = crate::tr_format!("Search folder: {path}", path = path);
                             ui.add(egui::Label::new(&label).truncate()).on_hover_text(label);
                             let exclusions = ui.add(
                                 egui::TextEdit::singleline(&mut self.exclusions)
@@ -572,7 +569,7 @@ impl Search {
                                 let label = ui.label(crate::i18n::text!("Время поиска по SFTP, с"));
                                 ui.add(egui::DragValue::new(&mut seconds).range(1..=remote::MAX_SECONDS)).labelled_by(label.id);
                                 let depth = remote::DEFAULT_DEPTH;
-                                ui.small(crate::tr_format!("Глубина по умолчанию — {depth}. Меняется в фильтрах.", "Default depth is {depth}. Change it in Filters."));
+                                ui.small(crate::tr_format!("Default depth is {depth}. Change it in Filters.", depth = depth));
                             });
                             if seconds != self.remote_time_limit() {
                                 self.remote_seconds = Some(seconds);
@@ -683,9 +680,9 @@ impl Search {
                     let count = results.matches.len();
                     let limit = if results.limited { crate::i18n::text!("+ · Уточните запрос, показаны первые 1000") } else { "" };
                     ui.label(if has_context {
-                        crate::tr_format!("Строк с совпадениями: {count}{limit}", "Matching lines: {count}{limit}")
+                        crate::tr_format!("Matching lines: {count}{limit}", count = crate::i18n::display::integer(count), limit = limit)
                     } else {
-                        crate::tr_format!("Найдено: {count}{limit}", "Found: {count}{limit}")
+                        crate::tr_format!("Found: {count}{limit}", count = crate::i18n::display::integer(count), limit = limit)
                     });
                     if !results.warning.is_empty() {
                         ui.colored_label(ui.visuals().warn_fg_color, &results.warning);
@@ -931,12 +928,8 @@ fn run_folder(
 ) -> Result<Results, String> {
     check_cancelled(cancelled)?;
 
-    let directory = Directory::open(folder.to_path_buf()).map_err(|error| {
-        crate::tr_format!(
-            "Не удалось прочитать папку: {error}",
-            "Could not read folder: {error}"
-        )
-    })?;
+    let directory = Directory::open(folder.to_path_buf())
+        .map_err(|error| crate::tr_format!("Could not read folder: {error}", error = error))?;
     let mut directories = vec![directory];
     let mut matches = Vec::new();
     let mut depth_limited = false;
@@ -1049,8 +1042,8 @@ fn run_folder(
     let mut warnings = Vec::new();
     if unreadable > 0 {
         warnings.push(crate::tr_format!(
-            "Не удалось прочитать некоторые файлы или папки ({unreadable}).",
-            "Some files or folders could not be read ({unreadable})."
+            "Some files or folders could not be read ({unreadable}).",
+            unreadable = unreadable
         ));
     }
     if depth_limited {
@@ -1059,20 +1052,20 @@ fn run_folder(
     }
     if too_large > 0 {
         warnings.push(crate::tr_format!(
-            "Пропущены файлы больше 1 МиБ ({too_large}).",
-            "Skipped files larger than 1 MiB ({too_large})."
+            "Skipped files larger than 1 MiB ({too_large}).",
+            too_large = too_large
         ));
     }
     if binary > 0 {
         warnings.push(crate::tr_format!(
-            "Пропущены двоичные файлы и файлы не в UTF-8 ({binary}).",
-            "Skipped binary or non-UTF-8 files ({binary})."
+            "Skipped binary or non-UTF-8 files ({binary}).",
+            binary = binary
         ));
     }
     if long_lines > 0 {
         warnings.push(crate::tr_format!(
-            "Пропущены строки больше 64 КиБ ({long_lines}).",
-            "Skipped lines longer than 64 KiB ({long_lines})."
+            "Skipped lines longer than 64 KiB ({long_lines}).",
+            long_lines = long_lines
         ));
     }
     Ok(Results {
@@ -1113,12 +1106,9 @@ fn validate_index_query(query: &str) -> Result<(), String> {
 
 fn run(cli: &Path, query: &str, cancel: &AtomicBool, timeout: Duration) -> Result<Results, String> {
     validate_index_query(query)?;
-    let mut child = command(cli, query).spawn().map_err(|e| {
-        crate::tr_format!(
-            "Не удалось запустить locate: {e}",
-            "Could not start locate: {e}"
-        )
-    })?;
+    let mut child = command(cli, query)
+        .spawn()
+        .map_err(|e| crate::tr_format!("Could not start locate: {e}", e = e))?;
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
     // Drain both pipes concurrently; neither memory nor process time is unbounded.
@@ -1138,12 +1128,7 @@ fn run(cli: &Path, query: &str, cancel: &AtomicBool, timeout: Duration) -> Resul
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(e) => {
-                break Err(crate::tr_format!(
-                    "Ошибка ожидания locate: {e}",
-                    "Error waiting for locate: {e}"
-                ))
-            }
+            Err(e) => break Err(crate::tr_format!("Error waiting for locate: {e}", e = e)),
         }
     };
     if status.is_err() {
@@ -1163,7 +1148,7 @@ fn run(cli: &Path, query: &str, cancel: &AtomicBool, timeout: Duration) -> Resul
     // GNU locate/plocate return 1 for no matches. BSD may return 0 instead.
     let no_matches = status.code() == Some(1) && stdout.is_empty() && warning.is_empty();
     if !(status.success() || no_matches) {
-        return Err(crate::tr_format!("Ошибка locate ({status}). {warning}\nПроверьте наличие и актуальность базы locate.", "locate error ({status}). {warning}\nCheck that the locate index exists and is up to date."
+        return Err(crate::tr_format!("locate error ({status}). {warning}\nCheck that the locate index exists and is up to date.", status = status, warning = warning
         ));
     }
     let mut paths = Vec::new();

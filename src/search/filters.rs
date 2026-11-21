@@ -95,7 +95,6 @@ impl FilterInput {
                 .any(|ch| ch.is_control() || matches!(ch, '.' | '/' | '\\' | '*' | '?'))
         {
             return Err(crate::tr_format!(
-                "Введите одно расширение без маски, например txt.",
                 "Enter one extension without a wildcard, such as txt."
             ));
         }
@@ -104,21 +103,13 @@ impl FilterInput {
             parse_size(&self.minimum_size, self.size_unit)?,
             parse_size(&self.maximum_size, self.size_unit)?,
         )
-        .ok_or_else(|| {
-            crate::tr_format!(
-                "Минимальный размер должен быть не больше максимального.",
-                "Minimum size must be at most the maximum size."
-            )
-        })?;
+        .ok_or_else(|| crate::tr_format!("Minimum size must be at most the maximum size."))?;
         let modified = Bounds::new(
             parse_date(&self.modified_from)?,
             parse_date(&self.modified_through)?,
         )
         .ok_or_else(|| {
-            crate::tr_format!(
-                "Начальная дата должна быть не позже конечной.",
-                "The starting date must be on or before the ending date."
-            )
+            crate::tr_format!("The starting date must be on or before the ending date.")
         })?;
         let depth = parse_number(&self.depth, |depth| {
             (1..=MAX_OPEN_DIRECTORIES as u64)
@@ -127,8 +118,8 @@ impl FilterInput {
         })
         .map_err(|()| {
             crate::tr_format!(
-                "Введите максимальную глубину от 1 до {MAX_OPEN_DIRECTORIES}.",
-                "Enter a maximum depth from 1 to {MAX_OPEN_DIRECTORIES}."
+                "Enter a maximum depth from 1 to {MAX_OPEN_DIRECTORIES}.",
+                MAX_OPEN_DIRECTORIES = MAX_OPEN_DIRECTORIES
             )
         })?;
 
@@ -138,7 +129,6 @@ impl FilterInput {
         } else if extension.is_some() || size.active() {
             if !matches!(entry_type, EntryType::Any | EntryType::File) {
                 return Err(crate::tr_format!(
-                    "Для фильтра по размеру или расширению выберите обычные файлы или любой тип.",
                     "Choose Regular files or Any type when filtering by size or extension."
                 ));
             }
@@ -273,10 +263,7 @@ fn parse_number<T>(input: &str, convert: impl FnOnce(u64) -> Option<T>) -> Resul
 
 fn parse_size(input: &str, unit: SizeUnit) -> Result<Option<u64>, String> {
     parse_number(input, |size| size.checked_mul(unit.bytes())).map_err(|()| {
-        crate::tr_format!(
-            "Введите размер целым неотрицательным числом в выбранных единицах.",
-            "Enter a whole nonnegative size that fits in the selected unit."
-        )
+        crate::tr_format!("Enter a whole nonnegative size that fits in the selected unit.")
     })
 }
 
@@ -296,7 +283,6 @@ fn parse_date(input: &str) -> Result<Option<NaiveDate>, String> {
         return Ok(Some(date));
     }
     Err(crate::tr_format!(
-        "Введите действительную дату в формате ГГГГ-ММ-ДД.",
         "Enter a valid date in YYYY-MM-DD format."
     ))
 }

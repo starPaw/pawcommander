@@ -113,8 +113,8 @@ impl MountedShare {
         match mount_id(&self.path, true).map_err(mount_error)? {
             Some(id) if id == self.record.id => unmount(&self.path).map_err(|error| {
                 crate::tr_format!(
-                    "Не удалось отключить папку SMB ({error})",
-                    "Could not disconnect the SMB share ({error})"
+                    "Could not disconnect the SMB share ({error})",
+                    error = error
                 )
             })?,
             Some(_) => {
@@ -128,8 +128,8 @@ impl MountedShare {
             .err()
             .map(|error| {
                 crate::tr_format!(
-                    "SMB отключён. Не удалось удалить пустую папку подключения ({error})",
-                    "SMB disconnected. Could not remove its empty mount folder ({error})"
+                    "SMB disconnected. Could not remove its empty mount folder ({error})",
+                    error = error
                 )
             }))
     }
@@ -311,10 +311,7 @@ fn remove_mountpoint(base: &Path, path: &Path) -> io::Result<()> {
 }
 
 fn mount_error(error: io::Error) -> String {
-    crate::tr_format!(
-        "Не удалось открыть папку SMB ({error})",
-        "Could not open the SMB share ({error})"
-    )
+    crate::tr_format!("Could not open the SMB share ({error})", error = error)
 }
 
 fn mount(endpoint: &Endpoint, path: &Path, password: &str) -> Result<(), String> {
@@ -340,8 +337,8 @@ fn mount(endpoint: &Endpoint, path: &Path, password: &str) -> Result<(), String>
         0 => Ok(()),
         status if status > 0 => Err(mount_error(io::Error::from_raw_os_error(status))),
         status => Err(crate::tr_format!(
-            "Не удалось подключить SMB (NetFS {status})",
-            "Could not connect to SMB (NetFS {status})"
+            "Could not connect to SMB (NetFS {status})",
+            status = status
         )),
     }
 }

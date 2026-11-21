@@ -107,9 +107,9 @@ impl Index {
             .and_then(|(file, metadata)| Self::read(&file, metadata.len(), format, cancelled))
             .map_err(|error| {
                 crate::tr_format!(
-                    "Не удалось прочитать архив «{}»: {error}",
                     "Could not read archive “{}”: {error}",
-                    file.display()
+                    file.display(),
+                    error = error
                 )
             })
     }

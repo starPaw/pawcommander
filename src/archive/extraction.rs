@@ -105,10 +105,7 @@ impl<'a> Extraction<'a> {
                 continue;
             }
             let member = folder.get(name).ok_or_else(|| {
-                crate::tr_format!(
-                    "В архиве больше нет записи {source}",
-                    "Archive entry no longer exists: {source}"
-                )
+                crate::tr_format!("Archive entry no longer exists: {source}", source = source)
             })?;
             let mut plan = Selection {
                 index: &index,
@@ -165,7 +162,6 @@ impl<'a> Extraction<'a> {
             Ok(())
         } else {
             Err(crate::tr_format!(
-                "Архив изменился во время распаковки: {}",
                 "The archive changed during extraction: {}",
                 self.path.display()
             )
@@ -366,9 +362,9 @@ fn selection_required() -> &'static str {
 fn archive_read_error(path: &Path, error: io::Error) -> TransferError {
     TransferError::io(error, |error| {
         crate::tr_format!(
-            "Не удалось прочитать архив «{}»: {error}",
             "Could not read archive “{}”: {error}",
-            path.display()
+            path.display(),
+            error = error
         )
     })
 }

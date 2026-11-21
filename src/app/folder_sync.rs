@@ -215,7 +215,7 @@ fn show_exclusions(ui: &mut egui::Ui, input: &mut String) -> bool {
     let title = if lines == 0 {
         text!("Исключения").to_owned()
     } else {
-        crate::tr_format!("Исключения ({lines})", "Exclusions ({lines})")
+        crate::tr_format!("Exclusions ({lines})", lines = lines)
     };
     egui::CollapsingHeader::new(title)
         .id_salt("sync-exclusions")
@@ -241,8 +241,8 @@ fn show_preview(ui: &mut egui::Ui, preview: &Preview, run: u64) -> Option<Review
     };
     if excluded > 0 {
         ui.small(crate::tr_format!(
-            "Исключено объектов: {excluded}",
-            "Excluded items: {excluded}"
+            "Excluded items: {excluded}",
+            excluded = excluded
         ));
     }
     match &preview.plan {
@@ -260,7 +260,6 @@ fn show_one_way(ui: &mut egui::Ui, plan: &SyncPlan, run: u64) {
         return;
     }
     ui.label(crate::tr_format!(
-        "Копирования: {} · замены: {} · удаления: {}",
         "Copies: {} · replacements: {} · deletions: {}",
         plan.copies,
         plan.replacements,
@@ -293,7 +292,6 @@ fn show_two_way(ui: &mut egui::Ui, plan: &TwoWayPlan, run: u64) -> Option<Review
         return None;
     }
     ui.label(crate::tr_format!(
-        "Изменения: {} · конфликты: {}",
         "Changes: {} · conflicts: {}",
         plan.rows.len() - plan.conflicts,
         plan.conflicts

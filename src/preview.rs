@@ -501,7 +501,7 @@ impl Preview {
         };
         let before = self.encoding;
         let caption = before.map_or_else(
-            || crate::tr_format!("Авто ({})", "Auto ({})", actual.name()),
+            || crate::tr_format!("Auto ({})", actual.name()),
             |codec| codec.name().to_owned(),
         );
         ui.horizontal_wrapped(|ui| {
@@ -828,9 +828,10 @@ fn load_location(
             .mtime
             .and_then(|t| std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(t)))
             .map(|t| {
-                DateTime::<Local>::from(t)
-                    .format("%d.%m.%Y, %H:%M")
-                    .to_string()
+                crate::i18n::display::date(
+                    DateTime::<Local>::from(t),
+                    crate::i18n::display::DateStyle::Minutes,
+                )
             })
             .unwrap_or_else(|| crate::i18n::text!("Недоступно").into()),
         is_dir: stat.is_dir(),
@@ -871,16 +872,11 @@ fn load(
     quick_look: bool,
     encoding: Option<Codec>,
 ) -> Result<Loaded, String> {
-    let link_metadata = fs::symlink_metadata(path).map_err(|e| {
-        crate::tr_format!(
-            "Не удалось прочитать сведения: {e}",
-            "Could not read details: {e}"
-        )
-    })?;
+    let link_metadata = fs::symlink_metadata(path)
+        .map_err(|e| crate::tr_format!("Could not read details: {e}", e = e))?;
     let is_link = link_metadata.file_type().is_symlink();
-    let metadata = fs::metadata(path).map_err(|e| {
-        crate::tr_format!("Не удалось открыть объект: {e}", "Could not open item: {e}")
-    })?;
+    let metadata =
+        fs::metadata(path).map_err(|e| crate::tr_format!("Could not open item: {e}", e = e))?;
     let is_dir = metadata.is_dir();
     let kind = if is_link {
         if is_dir {
@@ -898,9 +894,10 @@ fn load(
     let modified = metadata
         .modified()
         .map(|time| {
-            DateTime::<Local>::from(time)
-                .format("%d.%m.%Y, %H:%M")
-                .to_string()
+            crate::i18n::display::date(
+                DateTime::<Local>::from(time),
+                crate::i18n::display::DateStyle::Minutes,
+            )
         })
         .unwrap_or_else(|_| crate::i18n::text!("Недоступно").into());
     let content = if is_dir {
@@ -996,23 +993,15 @@ fn image_content(bytes: &[u8], cancel: &Cancellation) -> Result<Content, String>
     cancel.check().map_err(|error| error.to_string())?;
     let mut reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
-        .map_err(|e| {
-            crate::tr_format!(
-                "Не удалось определить формат изображения: {e}",
-                "Could not detect image format: {e}"
-            )
-        })?;
+        .map_err(|e| crate::tr_format!("Could not detect image format: {e}", e = e))?;
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(IMAGE_EDGE_LIMIT);
     limits.max_image_height = Some(IMAGE_EDGE_LIMIT);
     limits.max_alloc = Some(128 * 1024 * 1024);
     reader.limits(limits);
-    let decoded = reader.decode().map_err(|e| {
-        crate::tr_format!(
-            "Предпросмотр изображения недоступен: {e}",
-            "Image preview unavailable: {e}"
-        )
-    })?;
+    let decoded = reader
+        .decode()
+        .map_err(|e| crate::tr_format!("Image preview unavailable: {e}", e = e))?;
     let original_size = [decoded.width(), decoded.height()];
     let thumbnail = decoded.thumbnail(1200, 1200).to_rgba8();
     cancel.check().map_err(|error| error.to_string())?;
@@ -1094,15 +1083,12 @@ fn open_regular(path: &Path) -> Result<File, String> {
 }
 
 fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
-    let file = open_regular(path).map_err(|e| {
-        crate::tr_format!("Не удалось прочитать файл: {e}", "Could not read file: {e}")
-    })?;
+    let file =
+        open_regular(path).map_err(|e| crate::tr_format!("Could not read file: {e}", e = e))?;
     let mut bytes = Vec::new();
     file.take(limit as u64 + 1)
         .read_to_end(&mut bytes)
-        .map_err(|e| {
-            crate::tr_format!("Не удалось прочитать файл: {e}", "Could not read file: {e}")
-        })?;
+        .map_err(|e| crate::tr_format!("Could not read file: {e}", e = e))?;
     Ok(bytes)
 }
 
@@ -1131,12 +1117,13 @@ fn format_size(bytes: u64) -> String {
         value /= 1024.0;
         unit += 1;
     }
+    let exact = format!("{} {}", crate::i18n::display::integer(bytes), units[0]);
     if unit == 0 {
-        crate::tr_format!("{bytes} Б", "{bytes} B")
+        exact
     } else {
-        crate::tr_format!(
-            "{value:.1} {} ({bytes} Б)",
-            "{value:.1} {} ({bytes} B)",
+        format!(
+            "{} {} ({exact})",
+            crate::i18n::display::decimal(value, 1),
             units[unit]
         )
     }

@@ -185,10 +185,7 @@ fn read_error(error: io::Error) -> String {
     if error.kind() == io::ErrorKind::UnexpectedEof {
         return changed();
     }
-    crate::tr_format!(
-        "Не удалось прочитать байты файла. {error}",
-        "Could not read file bytes. {error}"
-    )
+    crate::tr_format!("Could not read file bytes. {error}", error = error)
 }
 
 #[cfg(test)]

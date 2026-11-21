@@ -45,8 +45,8 @@ pub(crate) fn create_checksum_manifest(
     let mut published = false;
     match write_manifest(directory, name, sources, progress, &mut published) {
         Ok(()) => Ok(crate::tr_format!(
-            "Манифест SHA-256 создан: {target}",
-            "SHA-256 manifest created: {target}"
+            "SHA-256 manifest created: {target}",
+            target = target
         )),
         Err(TransferError::Cancelled) => {
             progress.results.cancelled = true;
@@ -103,9 +103,7 @@ fn write_manifest(
         let digest = scope
             .digest(relative, progress, &cancel)
             .map_err(|error| file_error(source, error))?
-            .ok_or_else(|| {
-                crate::tr_format!("Файл отсутствует: {source}", "File is missing: {source}")
-            })?;
+            .ok_or_else(|| crate::tr_format!("File is missing: {source}", source = source))?;
         manifest::append(&mut body, relative, digest)?;
     }
 
@@ -234,7 +232,6 @@ struct Totals {
 impl Totals {
     fn message(&self) -> String {
         crate::tr_format!(
-            "Совпало: {} · изменено: {} · отсутствует: {} · ошибки чтения: {}",
             "Matched: {} · changed: {} · missing: {} · read errors: {}",
             self.matched,
             self.changed,
@@ -246,11 +243,9 @@ impl Totals {
 
 fn ensure_absent(target: &Location) -> Result<(), TransferError> {
     if entry_metadata(target)?.is_some() {
-        return Err(crate::tr_format!(
-            "Файл или папка уже существует: {target}",
-            "File or folder already exists: {target}"
-        )
-        .into());
+        return Err(
+            crate::tr_format!("File or folder already exists: {target}", target = target).into(),
+        );
     }
     Ok(())
 }
@@ -258,8 +253,9 @@ fn ensure_absent(target: &Location) -> Result<(), TransferError> {
 fn file_error(source: &Location, error: TransferError) -> TransferError {
     match error {
         TransferError::Failed(error) => crate::tr_format!(
-            "Не удалось прочитать {source}: {error}",
-            "Could not read {source}: {error}"
+            "Could not read {source}: {error}",
+            error = error,
+            source = source
         )
         .into(),
         _ => error,

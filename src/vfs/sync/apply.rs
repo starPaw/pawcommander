@@ -48,19 +48,20 @@ pub(super) fn finish(
 ) -> Result<String, String> {
     match result {
         Ok(()) => Ok(crate::tr_format!(
-            "Синхронизация завершена. Выполнено: {completed}.",
-            "Synchronization complete. Completed: {completed}."
+            "Synchronization complete. Completed: {completed}.",
+            completed = completed
         )),
         Err(TransferError::Cancelled) => {
             progress.results.cancelled = true;
             Ok(crate::tr_format!(
-                "Синхронизация остановлена. Выполнено: {completed}.",
-                "Synchronization stopped. Completed: {completed}."
+                "Synchronization stopped. Completed: {completed}.",
+                completed = completed
             ))
         }
         Err(error) => Err(crate::tr_format!(
-            "{error}. Выполнено: {completed}.",
-            "{error}. Completed: {completed}."
+            "{error}. Completed: {completed}.",
+            completed = completed,
+            error = error
         )),
     }
 }
@@ -301,8 +302,9 @@ impl Execution<'_> {
                     if let Err(restore) = restore {
                         return Err(retained(
                             TransferError::PublicationUnconfirmed(crate::tr_format!(
-                                "{error}. Прежний объект не удалось вернуть: {restore}",
-                                "{error}. Could not restore the previous item: {restore}"
+                                "{error}. Could not restore the previous item: {restore}",
+                                error = error,
+                                restore = restore
                             )),
                             staging,
                         ));

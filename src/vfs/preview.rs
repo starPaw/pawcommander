@@ -31,12 +31,14 @@ fn preview_input(location: &Location) -> Result<(ssh2::FileStat, Option<ssh2::Fi
         return Ok((stat, None));
     }
     if !stat.is_file() {
-        return Err("Предпросмотр ссылок и специальных файлов SFTP недоступен".into());
+        return Err(
+            crate::i18n::text!("Предпросмотр ссылок и специальных файлов SFTP недоступен").into(),
+        );
     }
     let mut input = sftp.open(location.path()).map_err(err)?;
     let opened = input.stat().map_err(err)?;
     if !opened.is_file() {
-        return Err("Файл изменился перед чтением".into());
+        return Err(crate::i18n::text!("Файл изменился перед чтением").into());
     }
     Ok((opened, Some(input)))
 }

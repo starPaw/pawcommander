@@ -18,7 +18,9 @@ Choose **Column view** in the pane controls to browse the current folder alongsi
 
 Click a breadcrumb to navigate, or press `Cmd/Ctrl+L` to enter a path. The address editor offers folder completion. `Enter` opens the entered path; `Esc` returns to breadcrumbs. Use the sidebar for common folders and bookmarks.
 
-Choose a language under **Settings → Language**. English is the default; Russian is also available. File names and contents are unchanged. Choose Latte, Frappé, Macchiato, or Mocha under **Settings → Catppuccin**. System appearance switches between Latte and Frappé.
+Choose a language under **Settings → Language**. PawCommander defaults to English and saves your selection. On macOS you can choose **English**, **Русский**, or **Čeština**. File lists and properties use the selected language for dates, numbers, and sizes. Enter search filter dates as `YYYY-MM-DD`.
+
+Choose Latte, Frappé, Macchiato, or Mocha under **Settings → Catppuccin**. System appearance switches between Latte and Frappé.
 
 Opening a local or SFTP folder shows entries progressively while **Reading folder…** remains visible. File metadata is read in the background. Navigating away, refreshing, or closing the tab cancels the previous read between filesystem or SSH calls; an already blocked call must finish or time out first. If a read fails after showing entries, the partial listing stays visible with an error. Refreshing a previously complete listing replaces it as a whole. Large folders reuse the current filtered and sorted view between updates. The loaded listing stays in memory, so usage grows with the number of entries and the length of their names.
 

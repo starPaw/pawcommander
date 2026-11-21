@@ -281,17 +281,15 @@ impl Recovery {
         }
         #[cfg(target_os = "macos")]
         let mut resume = None;
-        egui::Window::new(crate::tr_format!("Восстановление после сбоя", "Crash recovery"))
+        egui::Window::new(crate::tr_format!("Crash recovery"))
             .id(egui::Id::unique("crash_recovery"))
             .open(&mut self.open)
             .default_size([780.0, 440.0])
             .show(ctx, |ui| {
                 ui.label(crate::tr_format!(
-                    "Обнаружены задания без подтверждённого завершения. Некоторые файлы могли быть обработаны. Сверьте обе папки и журнал результатов перед повтором.",
                     "These operations have no confirmed completion. Some files may have been processed. Check both folders and result history before retrying."
                 ));
                 ui.label(crate::tr_format!(
-                    "Временные копии перечислены только по сохранённым записям; их текущее содержимое не проверено. Запланированный адрес может содержать чужие данные. Ожидающие задания не отслеживаются. Автоматический повтор и удаление файлов не выполняются.",
                     "Temporary copies are listed only from saved receipts; their current contents are unverified. A planned location may contain someone else's data. Queued jobs are not tracked. No automatic retry or file removal is performed."
                 ));
                 if let Some(directory) = &self.directory {
@@ -299,14 +297,13 @@ impl Recovery {
                 }
                 if !self.report.errors.is_empty() {
                     ui.colored_label(ui.visuals().error_fg_color, crate::tr_format!(
-                        "Не все записи восстановления удалось прочитать. Существующие записи сохранены.",
                         "Some recovery records could not be read. Existing records were preserved."
                     ));
                 }
                 if self.receive.is_some() {
-                    ui.label(crate::tr_format!("Проверка незавершённых заданий…", "Checking unfinished operations…"));
+                    ui.label(crate::tr_format!("Checking unfinished operations…"));
                 } else if !self.report.has_findings() {
-                    ui.label(crate::tr_format!("Незавершённые задания не обнаружены.", "No unfinished operations found."));
+                    ui.label(crate::tr_format!("No unfinished operations found."));
                 }
                 egui::ScrollArea::both().show(ui, |ui| {
                     #[cfg(target_os = "macos")]
@@ -332,21 +329,19 @@ impl Recovery {
                     }
                     for record in &self.report.unfinished {
                         let time = chrono::DateTime::from_timestamp(record.started as i64, 0)
-                            .map(|time| time.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string())
+                            .map(|time| crate::i18n::display::date(time.with_timezone(&chrono::Local), crate::i18n::display::DateStyle::Seconds))
                             .unwrap_or_else(|| record.started.to_string());
                         ui.separator();
                         ui.add(egui::Label::new(format!("{time} · {}", record.label)).selectable(true).wrap());
                         ui.add(egui::Label::new(&record.description).selectable(true).wrap());
                         for staging in &record.staging {
                             ui.add(egui::Label::new(crate::tr_format!(
-                                "Зарегистрирована временная копия: {}",
                                 "Registered temporary copy: {}",
                                 staging.location
                             )).selectable(true).wrap());
                         }
                         for planned in &record.planned_staging {
                             ui.add(egui::Label::new(crate::tr_format!(
-                                "Запланированная временная папка (создание не подтверждено): {}",
                                 "Planned temporary folder (creation unconfirmed): {}",
                                 planned
                             )).selectable(true).wrap());

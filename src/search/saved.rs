@@ -60,7 +60,7 @@ impl Scope {
         };
         if let Some(folder) = folder {
             let path = folder.display();
-            crate::tr_format!("Папка поиска: {path}", "Search folder: {path}")
+            crate::tr_format!("Search folder: {path}", path = path)
         } else {
             text!("Путь сохранённого поиска несовместим с системой.").into()
         }
@@ -324,7 +324,7 @@ impl SavedSearch {
         let mut action = None;
         ui.horizontal(|ui| {
             let name = &self.name;
-            let run_label = crate::tr_format!("Запустить поиск «{name}»", "Run search “{name}”");
+            let run_label = crate::tr_format!("Run search “{name}”", name = name);
             let menu_width = ui.spacing().interact_size.x;
             let row_height = ui.spacing().interact_size.y.max(25.0);
             let run_width =
@@ -342,7 +342,7 @@ impl SavedSearch {
                 action = Some(Action::Run(index));
             }
             let menu = ui.add_sized([menu_width, row_height], egui::Button::new("…").truncate());
-            let menu_label = crate::tr_format!("Действия для «{name}»", "Actions for {name}");
+            let menu_label = crate::tr_format!("Actions for {name}", name = name);
             ui.ctx().accesskit_node_builder(menu.id, |node| {
                 node.set_label(menu_label.clone());
             });
@@ -670,7 +670,7 @@ mod tests {
             })
         };
         let _ = draw(&mut search, vec![]);
-        let label = crate::tr_format!("Действия для «{name}»", "Actions for {name}");
+        let label = crate::tr_format!("Actions for {name}", name = name);
         let click = |output: egui::FullOutput, label: &str| {
             let (target, _) = output
                 .platform_output

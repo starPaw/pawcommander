@@ -32,8 +32,9 @@ pub(super) fn open(
         tunnel(target, &jump.endpoint(), trust, auth.as_deref_mut(), login).map_err(|error| {
             let address = jump.label();
             crate::tr_format!(
-                "Промежуточный сервер {address} · {error}",
-                "Jump host {address} · {error}"
+                "Jump host {address} · {error}",
+                address = address,
+                error = error
             )
         })?;
     let mut session = Session::new().map_err(err)?;
@@ -80,8 +81,9 @@ fn tunnel(
         .map_err(|error| {
             let address = target.label();
             crate::tr_format!(
-                "Не удалось открыть туннель до {address} ({error})",
-                "Could not forward TCP to {address} ({error})"
+                "Could not forward TCP to {address} ({error})",
+                address = address,
+                error = error
             )
         })?;
     let (socket, peer) = UnixStream::pair().map_err(err)?;

@@ -138,8 +138,7 @@ impl Panel {
                             )
                             .clicked();
                         let folder = self.folder.display();
-                        let origin =
-                            crate::tr_format!("Папка запуска · {folder}", "Started in · {folder}");
+                        let origin = crate::tr_format!("Started in · {folder}", folder = folder);
                         ui.add(egui::Label::new(&origin).truncate())
                             .on_hover_text(origin);
                     });
@@ -157,8 +156,8 @@ impl Panel {
                                 || text!("Процесс терминала завершён.").into(),
                                 |code| {
                                     crate::tr_format!(
-                                        "Процесс терминала завершился с кодом {code}.",
-                                        "The terminal process exited with code {code}."
+                                        "The terminal process exited with code {code}.",
+                                        code = code
                                     )
                                 },
                             );

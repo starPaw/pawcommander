@@ -199,7 +199,6 @@ impl Preview {
                 ui.label(text!("Рабочая папка"));
                 ui.monospace(format!("{:?}", invocation.folder.as_os_str()));
                 ui.label(crate::tr_format!(
-                    "Аргументы ({})",
                     "Arguments ({})",
                     invocation.arguments.len()
                 ));

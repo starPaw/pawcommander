@@ -25,8 +25,8 @@ impl SftpForm {
             Ok(_) => self.ssh_config_job = Some(result),
             Err(error) => {
                 self.error = Some(crate::tr_format!(
-                    "Не удалось запустить чтение SSH config ({error})",
-                    "Could not start reading SSH config ({error})"
+                    "Could not start reading SSH config ({error})",
+                    error = error
                 ));
             }
         }
@@ -192,12 +192,9 @@ impl SftpForm {
         };
         let alias = &config.alias;
         let status = if config.matched {
-            crate::tr_format!("Загружен SSH-алиас {alias}", "Loaded SSH alias {alias}")
+            crate::tr_format!("Loaded SSH alias {alias}", alias = alias)
         } else {
-            crate::tr_format!(
-                "Для {alias} в SSH config не найдены параметры",
-                "No settings for {alias} found in SSH config"
-            )
+            crate::tr_format!("No settings for {alias} found in SSH config", alias = alias)
         };
         ui.label(status);
         if config.unsupported.is_empty() {
@@ -221,8 +218,9 @@ impl SftpForm {
                         ui.set_min_height(row_height);
                         ui.add(
                             egui::Label::new(crate::tr_format!(
-                                "{keyword} · строка {line}",
-                                "{keyword} · line {line}"
+                                "{keyword} · line {line}",
+                                keyword = keyword,
+                                line = line
                             ))
                             .truncate(),
                         );

@@ -234,10 +234,7 @@ impl PawCommander {
             }
             Err(error) => {
                 self.notice = Some((
-                    crate::tr_format!(
-                        "Не удалось запустить задачу SMB ({error})",
-                        "Could not start the SMB worker ({error})"
-                    ),
+                    crate::tr_format!("Could not start the SMB worker ({error})", error = error),
                     true,
                 ));
             }

@@ -169,11 +169,7 @@ impl Viewer {
                     )
                     .clicked();
                 if let Some(page) = page {
-                    ui.weak(crate::tr_format!(
-                        "Страница {}",
-                        "Page {}",
-                        page.text.index + 1
-                    ));
+                    ui.weak(crate::tr_format!("Page {}", page.text.index + 1));
                 }
                 let enter = ui.memory(|m| m.has_focus(id))
                     && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
@@ -280,10 +276,7 @@ impl Viewer {
                     }
                 } else if let Some(hit) = self.page.as_ref().and_then(|page| page.hit) {
                     let line = hit.start.line;
-                    ui.weak(crate::tr_format!(
-                        "Совпадение в строке {line}",
-                        "Match on line {line}"
-                    ));
+                    ui.weak(crate::tr_format!("Match on line {line}", line = line));
                 }
                 if enabled && (previous || shift_enter) {
                     Some(Direction::Backward)

@@ -18,23 +18,27 @@ use std::path::PathBuf;
 
 pub(super) fn place_button(ui: &mut egui::Ui, label: &str, selected: bool) -> bool {
     let colors = Palette::from_ctx(ui.ctx());
-    let icon = match label {
-        "Домашняя" | "Home" => Icon::Home,
-        "Рабочий стол" | "Desktop" => Icon::Desktop,
-        "Документы" | "Documents" => Icon::Document,
-        "Загрузки" | "Downloads" => Icon::Download,
-        "Изображения" | "Pictures" => Icon::Image,
-        "Музыка" | "Music" => Icon::Music,
-        "Видео" | "Videos" => Icon::Video,
-        "Файловая система"
-        | "Тома и диски"
-        | "Носители"
-        | "Filesystem"
-        | "Volumes and disks"
-        | "Media" => Icon::Drive,
-        x if x.starts_with("SFTP") => Icon::Server,
-        _ => Icon::Folder,
-    };
+    use crate::i18n::key;
+
+    let icon = [
+        (key!("Домашняя"), Icon::Home),
+        (key!("Рабочий стол"), Icon::Desktop),
+        (key!("Документы"), Icon::Document),
+        (key!("Загрузки"), Icon::Download),
+        (key!("Изображения"), Icon::Image),
+        (key!("Музыка"), Icon::Music),
+        (key!("Видео"), Icon::Video),
+        (key!("Файловая система"), Icon::Drive),
+        (key!("Тома и диски"), Icon::Drive),
+        (key!("Носители"), Icon::Drive),
+    ]
+    .into_iter()
+    .find_map(|(name, icon)| name.matches(label).then_some(icon))
+    .unwrap_or(if label.starts_with("SFTP") {
+        Icon::Server
+    } else {
+        Icon::Folder
+    });
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 31.0), Sense::click());
     response.widget_info(|| {
@@ -397,8 +401,8 @@ impl PawCommander {
                                                 }
                                             });
                                             let menu_label = crate::tr_format!(
-                                                "Действия для «{name}»",
-                                                "Actions for {name}"
+                                                "Actions for {name}",
+                                                name = name
                                             );
                                             ui.ctx().accesskit_node_builder(menu.id, |node| {
                                                 node.set_label(menu_label.clone());
@@ -470,7 +474,7 @@ impl PawCommander {
                                         path.to_string_lossy().chars().next().unwrap_or('?');
                                     if place_button(
                                         ui,
-                                        &crate::tr_format!("Диск {}:", "Drive {}:", drive),
+                                        &crate::tr_format!("Drive {}:", drive),
                                         current.local() == Some(path.as_path()),
                                     ) {
                                         actions.push(Action::Navigate(
@@ -549,11 +553,7 @@ impl PawCommander {
                                         ui.close();
                                     }
                                 });
-                                let label = crate::tr_format!(
-                                    "Действия для «{}»",
-                                    "Actions for {}",
-                                    workspace.name
-                                );
+                                let label = crate::tr_format!("Actions for {}", workspace.name);
                                 ui.ctx().accesskit_node_builder(menu.response.id, |node| {
                                     node.set_label(label.clone());
                                 });

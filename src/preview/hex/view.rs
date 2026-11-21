@@ -73,9 +73,9 @@ impl Document {
             } else {
                 let last = page.start + page.bytes.len() as u64 - 1;
                 ui.weak(crate::tr_format!(
-                    "Байты 0x{:X}–0x{last:X}",
                     "Bytes 0x{:X}–0x{last:X}",
                     page.start,
+                    last = last,
                 ));
                 ui.separator();
                 show_bytes(ui, page, std::mem::take(&mut self.reset_scroll));
@@ -213,10 +213,7 @@ impl Document {
                     }
                 } else if let Some(hit) = self.page.as_ref().and_then(|page| page.hit.as_ref()) {
                     let offset = hit.start;
-                    ui.weak(crate::tr_format!(
-                        "Совпадение на 0x{offset:X}",
-                        "Match at 0x{offset:X}",
-                    ));
+                    ui.weak(crate::tr_format!("Match at 0x{offset:X}", offset = offset,));
                 } else if self.pattern.is_none() && !self.query.trim().is_empty() {
                     ui.weak(text!("Введите пары hex-цифр, до 256 байтов."));
                 }

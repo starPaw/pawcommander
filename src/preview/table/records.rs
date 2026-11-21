@@ -152,14 +152,14 @@ impl<R: BufRead> Records<R> {
             fields += columns;
             if written > RECORD_BYTES || status == ReadRecordResult::OutputFull {
                 return Err(crate::tr_format!(
-                    "Запись {number} превышает 256 КиБ.",
-                    "Record {number} exceeds 256 KiB."
+                    "Record {number} exceeds 256 KiB.",
+                    number = number
                 ));
             }
             if fields > COLUMNS || status == ReadRecordResult::OutputEndsFull {
                 return Err(crate::tr_format!(
-                    "В записи {number} больше 256 столбцов.",
-                    "Record {number} has more than 256 columns."
+                    "Record {number} has more than 256 columns.",
+                    number = number
                 ));
             }
             match status {
@@ -174,9 +174,9 @@ impl<R: BufRead> Records<R> {
                         })
                         .ok_or_else(|| {
                             crate::tr_format!(
-                                "Запись {number} содержит недопустимый текст {}.",
                                 "Record {number} contains invalid {} text.",
-                                self.input.encoding.name()
+                                self.input.encoding.name(),
+                                number = number
                             )
                         })?;
                     self.position.records = number;
@@ -248,10 +248,7 @@ pub(super) fn detect(
 }
 
 pub(super) fn read_error(error: io::Error) -> String {
-    crate::tr_format!(
-        "Не удалось прочитать таблицу: {error}",
-        "Could not read table: {error}"
-    )
+    crate::tr_format!("Could not read table: {error}", error = error)
 }
 
 #[cfg(test)]

@@ -1,0 +1,20 @@
+PawCommander
+
+Použití
+  pawcommander [SLOŽKA]
+  pawcommander open SLOŽKA
+  pawcommander workspace NÁZEV
+  pawcommander search DOTAZ [SLOŽKA]
+  pawcommander --help
+
+Spuštění bez argumentů obnoví uloženou relaci.
+Otevřete složku nebo uloženou pracovní plochu, případně hledejte soubory podle názvu či masky.
+Při hledání bez parametru SLOŽKA se použije aktuální složka.
+Příkazy open, workspace a search otevírají samostatná okna s dočasným nastavením.
+Před argumenty začínající pomlčkou použijte --.
+
+Návratové kódy
+  0  Nápověda zobrazena nebo okno zavřeno běžným způsobem
+  1  Chyba nastavení nebo spuštění aplikace
+  2  Neplatné argumenty
+  3  Složka nebo pracovní plocha není dostupná

@@ -425,9 +425,5 @@ fn portable_limit() -> TransferError {
 }
 
 fn io_error(error: serde_json::Error) -> TransferError {
-    crate::tr_format!(
-        "Ошибка формата коллекции: {error}",
-        "Collection format error: {error}"
-    )
-    .into()
+    crate::tr_format!("Collection format error: {error}", error = error).into()
 }

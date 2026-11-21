@@ -202,7 +202,7 @@ pub(super) fn visit_sftp_directory(
         }
         let name = filename
             .to_str()
-            .ok_or("Имя файла SFTP не является UTF-8")?;
+            .ok_or(crate::i18n::text!("Имя файла SFTP не является UTF-8"))?;
         validate_name(name)?;
         let path = location.join(name);
         let is_symlink = stat.file_type().is_symlink();

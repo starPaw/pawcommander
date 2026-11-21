@@ -51,18 +51,16 @@ fn open_document(path: &Path) -> Result<(), String> {
     let details = String::from_utf8_lossy(&output.stderr);
     let details = details.trim();
     Err(crate::tr_format!(
-        "Terminal не принял запрос открытия ({status}). {details}",
-        "Terminal did not accept the open request ({status}). {details}"
+        "Terminal did not accept the open request ({status}). {details}",
+        details = details,
+        status = status
     )
     .trim_end()
     .to_owned())
 }
 
 fn launch_error(error: io::Error) -> String {
-    crate::tr_format!(
-        "Не удалось открыть терминал. {error}",
-        "Could not open the terminal. {error}"
-    )
+    crate::tr_format!("Could not open the terminal. {error}", error = error)
 }
 
 pub(super) fn ssh_command(endpoint: &Endpoint, path: &Path) -> Result<Command, String> {

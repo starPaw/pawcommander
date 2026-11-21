@@ -36,11 +36,10 @@ fn vault_error(error: keyring::Error) -> String {
         && field == "secret"
     {
         return crate::tr_format!(
-            "Ключ и фраза превышают ограничение системного хранилища ({limit} байт). Подключитесь через файл ключа или SSH-агент без сохранения.",
-            "The key and passphrase exceed the system credential store limit ({limit} bytes). Connect using the key file or SSH agent without saving."
+            "The key and passphrase exceed the system credential store limit ({limit} bytes). Connect using the key file or SSH agent without saving.", limit = limit
         );
     }
-    crate::tr_format!("Системное хранилище секретов недоступно: {error}. Ключ и фраза не записываются в настройки.", "System credential store unavailable: {error}. The key and passphrase are not written to settings.")
+    crate::tr_format!("System credential store unavailable: {error}. The key and passphrase are not written to settings.", error = error)
 }
 pub fn load(endpoint: &Endpoint) -> Result<Option<SavedKey>, String> {
     load_entry(&entry(endpoint)?)

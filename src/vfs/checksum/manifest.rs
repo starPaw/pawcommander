@@ -30,18 +30,13 @@ pub(super) fn parse(bytes: &[u8], cancel: &Cancellation) -> Result<Vec<Entry>, T
         }
         let entry = parse_line(line).ok_or_else(|| {
             let row = index + 1;
-            crate::tr_format!(
-                "Некорректная строка манифеста SHA-256 №{row}",
-                "Invalid SHA-256 manifest line {row}"
-            )
+            crate::tr_format!("Invalid SHA-256 manifest line {row}", row = row)
         })?;
         if !paths.insert(entry.path.clone()) {
             let row = index + 1;
-            return Err(crate::tr_format!(
-                "Повторяющийся путь в строке манифеста №{row}",
-                "Duplicate path in manifest line {row}"
-            )
-            .into());
+            return Err(
+                crate::tr_format!("Duplicate path in manifest line {row}", row = row).into(),
+            );
         }
         entries.push(entry);
     }
@@ -59,7 +54,6 @@ pub(super) fn append(
     let name = path.as_os_str().as_encoded_bytes();
     if relative_path(name).as_deref() != Some(path) {
         return Err(crate::tr_format!(
-            "Имя файла не подходит для манифеста: {}",
             "Filename cannot be used in the manifest: {}",
             path.display()
         )

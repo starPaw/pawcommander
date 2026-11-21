@@ -149,10 +149,12 @@ impl PawCommander {
                             let about = ui.button(crate::i18n::text!("О PawCommander"));
                             paint_focus(ui, &about, 5);
                             if about.clicked() { self.show_help = true; ui.close(); }
-                            let language_menu = ui.menu_button("Язык / Language", |ui| {
+                            let language_menu = ui.menu_button(crate::i18n::text!("Язык"), |ui| {
                                 for (language, label) in [
                                     (crate::i18n::Language::English, "English"),
                                     (crate::i18n::Language::Russian, "Русский"),
+                                    #[cfg(target_os = "macos")]
+                                    (crate::i18n::Language::Czech, "Čeština"),
                                 ] {
                                     if ui.selectable_value(&mut self.settings.language, language, label).changed() {
                                         crate::i18n::set_language(language);
@@ -189,7 +191,7 @@ impl PawCommander {
                                 }
                             });
                             ui.separator();
-                            if ui.button(crate::tr_format!("Восстановление после сбоя", "Crash recovery")).clicked() {
+                            if ui.button(crate::tr_format!("Crash recovery")).clicked() {
                                 self.recovery.reopen(ctx);
                                 ui.close();
                             }
@@ -244,9 +246,9 @@ impl PawCommander {
                                 }
                                 for (name, path) in [("locate", &self.tools.locate), ("Zed", &self.tools.zed), ("FileMerge", &self.tools.diff)] {
                                     if let Some(path) = path {
-                                        ui.label(crate::tr_format!("{name}: найден", "{name}: found")).on_hover_text(path.display().to_string());
+                                        ui.label(crate::tr_format!("{name}: found", name = name)).on_hover_text(path.display().to_string());
                                     } else {
-                                        ui.colored_label(ui.visuals().warn_fg_color, crate::tr_format!("{name}: не найден", "{name}: not found"));
+                                        ui.colored_label(ui.visuals().warn_fg_color, crate::tr_format!("{name}: not found", name = name));
                                     }
                                 }
                                 ui.small(crate::i18n::text!("locate: установите locate/plocate и создайте индекс средствами ОС."));

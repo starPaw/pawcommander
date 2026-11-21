@@ -64,11 +64,11 @@ fn details(stat: &FileStat) -> String {
         date(seconds.and_then(|seconds| UNIX_EPOCH.checked_add(Duration::from_secs(seconds))))
     };
     crate::tr_format!(
-        "Права: {permissions}\nИзменён: {}\nСоздан: {}\nДоступ: {}",
         "Permissions: {permissions}\nModified: {}\nCreated: {}\nAccessed: {}",
         remote_date(stat.mtime),
         text!("недоступно"),
-        remote_date(stat.atime)
+        remote_date(stat.atime),
+        permissions = permissions
     )
 }
 

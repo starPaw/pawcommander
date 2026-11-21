@@ -84,26 +84,28 @@ impl TrashPlan {
         })();
         match result {
             Ok(()) if cleanup_warnings > 0 => Ok(crate::tr_format!(
-                "В корзину перемещено: {completed}. Предупреждения об очистке: {cleanup_warnings}.",
-                "Moved to Trash: {completed}. Cleanup warnings: {cleanup_warnings}."
+                "Moved to Trash: {completed}. Cleanup warnings: {cleanup_warnings}.",
+                cleanup_warnings = cleanup_warnings,
+                completed = completed
             )),
             Ok(()) => Ok(crate::tr_format!(
-                "В корзину перемещено: {completed}.",
-                "Moved to Trash: {completed}."
+                "Moved to Trash: {completed}.",
+                completed = completed
             )),
             Err(TransferError::Cancelled) => {
                 progress.results.cancelled = true;
                 Ok(crate::tr_format!(
-                    "Операция остановлена. В корзину перемещено: {completed}.",
-                    "Operation stopped. Moved to Trash: {completed}."
+                    "Operation stopped. Moved to Trash: {completed}.",
+                    completed = completed
                 ))
             }
             Err(error) => {
                 let error = error.to_string();
                 let reason = error.trim_end_matches('.');
                 Err(crate::tr_format!(
-                    "{reason}. В корзину перемещено: {completed}.",
-                    "{reason}. Moved to Trash: {completed}."
+                    "{reason}. Moved to Trash: {completed}.",
+                    completed = completed,
+                    reason = reason
                 ))
             }
         }
@@ -177,9 +179,9 @@ fn trash_one(
             duplicate.verify(cancel)?;
             move_to_trash(held.path()).map_err(|error| {
                 crate::tr_format!(
-                    "Не удалось переместить «{}» в корзину: {error}",
                     "Could not move “{}” to Trash: {error}",
-                    location.display()
+                    location.display(),
+                    error = error
                 )
                 .into()
             })
@@ -192,8 +194,9 @@ fn trash_one(
             if let Err(restore_error) = restored {
                 return Err(retained(
                     crate::tr_format!(
-                        "{error}. Не удалось вернуть файл на прежнее место: {restore_error}",
-                        "{error}. Could not restore the file to its original path: {restore_error}"
+                        "{error}. Could not restore the file to its original path: {restore_error}",
+                        error = error,
+                        restore_error = restore_error
                     )
                     .into(),
                     staging,

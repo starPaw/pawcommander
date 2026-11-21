@@ -361,7 +361,6 @@ impl Results {
     pub fn trash_descendants_unconfirmed(&mut self) {
         if let Some((_, range)) = self.group.clone() {
             let reason = crate::tr_format!(
-                "Корень перемещён в корзину; результат вложенного элемента отдельно не подтверждён",
                 "The root was moved to Trash; this descendant has no separate confirmation"
             );
             for index in range {
@@ -638,19 +637,14 @@ impl Record {
     fn selected_items_only(&self) -> bool {
         // Older checksum and permission records stored only the translated command label.
         self.selected_items_only
-            || matches!(
-                self.label.as_str(),
-                "Create SHA-256 manifest"
-                    | "Создать манифест SHA-256"
-                    | "Verify SHA-256 manifest"
-                    | "Проверить манифест SHA-256"
-            )
-            || (matches!(
-                self.label.as_str(),
-                "Change permissions" | "Изменить права доступа"
-            ) && self.items.iter().all(|row| {
-                row.parent.is_none() && row.target.is_none() && row.source.starts_with("sftp://")
-            }))
+            || crate::i18n::key!("Создать манифест SHA-256").matches(&self.label)
+            || crate::i18n::key!("Проверить манифест SHA-256").matches(&self.label)
+            || (crate::i18n::key!("Изменить права доступа").matches(&self.label)
+                && self.items.iter().all(|row| {
+                    row.parent.is_none()
+                        && row.target.is_none()
+                        && row.source.starts_with("sftp://")
+                }))
     }
 
     fn weight(&self) -> usize {
@@ -885,22 +879,18 @@ impl History {
             .default_size([780.0, 560.0])
             .show(ctx, |ui| {
                 ui.label(crate::tr_format!(
-                    "Копии раскрываются по манифесту, SFTP-удаление — по посещённым элементам. Неполный обход отмечен.",
                     "Copies expand from their manifest; SFTP removal lists visited entries. Incomplete traversal is marked."
                 ));
                 ui.label(crate::i18n::text!(
                     "До 100 операций и 100 000 строк; объём истории ограничен. Неполные записи помечены.",
                 ));
                 ui.label(crate::tr_format!(
-                    "Нажмите «Подробнее», чтобы прочитать пути и причину целиком.",
                     "Choose Details to read the complete paths and reason."
                 ));
                 ui.label(crate::tr_format!(
-                    "Для прерванных передач SFTP проверка показывает состояние источника, назначения и сохранённых временных файлов.",
                     "For interrupted SFTP transfers, inspection shows the state of the source, destination and retained temporary files."
                 ));
                 ui.label(crate::tr_format!(
-                    "Undo возвращает подтверждённые переименования и переносы этого сеанса без перезаписи. Замены, копирования, удаления, непроверенные элементы и операции после перезапуска недоступны. Перед возвратом проверяются файлы и папки.",
                     "Undo reverses confirmed renames and moves from this session without overwriting. Replacements, copies, deletions, unverified items and operations from before restart are unavailable. Files and folders are checked before restoring."
                 ));
                 if let Some(path) = &self.path {
@@ -929,9 +919,7 @@ impl History {
                             let show_descendant_coverage = !record.selected_items_only();
                             let time = chrono::DateTime::from_timestamp(record.started as i64, 0)
                                 .map(|time| {
-                                    time.with_timezone(&chrono::Local)
-                                        .format("%Y-%m-%d %H:%M:%S")
-                                        .to_string()
+                                    crate::i18n::display::date(time.with_timezone(&chrono::Local), crate::i18n::display::DateStyle::Seconds)
                                 })
                                 .unwrap_or_default();
                             egui::CollapsingHeader::new(format!(
@@ -944,13 +932,13 @@ impl History {
                             .show(ui, |ui| {
                                 ui.add(egui::Label::new(&record.message).selectable(true).wrap());
                                 if let Some(count) = self.undoable.get(&record.id) {
-                                    if ui.button(crate::tr_format!("Отменить доступные изменения ({count})", "Undo available changes ({count})")).clicked() {
+                                    if ui.button(crate::tr_format!("Undo available changes ({count})", count = count)).clicked() {
                                         self.undo_requested = Some(record.id.clone());
                                     }
                                 } else {
                                     ui.label(crate::i18n::text!("Undo недоступен для этой операции"));
                                 }
-                                if self.retryable.contains(&record.id) && ui.button(crate::tr_format!("Проверить и повторить незавершённое", "Check and retry unfinished items")).clicked() {
+                                if self.retryable.contains(&record.id) && ui.button(crate::tr_format!("Check and retry unfinished items")).clicked() {
                                     self.retry_requested = Some(record.id.clone());
                                 }
                                 if self.inspectable.contains(&record.id)
@@ -960,7 +948,6 @@ impl History {
                                 }
                                 if record.omitted != 0 {
                                     ui.colored_label(ui.visuals().warn_fg_color, crate::tr_format!(
-                                        "Из-за лимита журнала не показано строк: {}. Это не меняет результат передачи.",
                                         "Rows omitted by history limits: {}. This does not change the transfer outcome.", record.omitted));
                                 }
                                 if record.details_truncated {
@@ -985,7 +972,7 @@ impl History {
                                         |ui, range| {
                                             for row in &record.items[range] {
                                                 ui.horizontal(|ui| {
-                                                if ui.small_button(crate::tr_format!("Подробнее", "Details")).clicked() {
+                                                if ui.small_button(crate::tr_format!("Details")).clicked() {
                                                     selected = Some(row.clone());
                                                 }
                                                 let source = single_line(&row.source);
@@ -997,7 +984,7 @@ impl History {
                                                 ui.add(
                                                     egui::Label::new(format!(
                                                         "{}\n{paths}\n{}",
-                                                        if show_descendant_coverage && row.parent.is_none() && !row.descendants_enumerated { format!("{} · {}", row.outcome.label(), crate::tr_format!("Потомки не перечислены полностью", "Descendants were not fully listed")) } else { row.outcome.label().to_owned() },
+                                                        if show_descendant_coverage && row.parent.is_none() && !row.descendants_enumerated { format!("{} · {}", row.outcome.label(), crate::tr_format!("Descendants were not fully listed")) } else { row.outcome.label().to_owned() },
                                                         single_line(
                                                             row.reason.as_deref().or(row.metadata_warning.as_deref()).unwrap_or("—")
                                                         )
@@ -1027,7 +1014,7 @@ impl History {
         }
         if let Some(row) = &self.detail {
             let mut detail_open = true;
-            egui::Window::new(crate::tr_format!("Результат файла", "File result"))
+            egui::Window::new(crate::tr_format!("File result"))
                 .id(egui::Id::unique("result_history_detail"))
                 .open(&mut detail_open)
                 .default_size([640.0, 360.0])
@@ -1044,13 +1031,12 @@ impl History {
 fn show_item_details(ui: &mut egui::Ui, row: &ItemResult) {
     ui.label(row.outcome.label());
     ui.add(
-        egui::Label::new(crate::tr_format!("Источник: {}", "Source: {}", row.source))
+        egui::Label::new(crate::tr_format!("Source: {}", row.source))
             .selectable(true)
             .wrap(),
     );
     ui.add(
         egui::Label::new(crate::tr_format!(
-            "Назначение: {}",
             "Destination: {}",
             row.target.as_deref().unwrap_or("—")
         ))
@@ -1059,7 +1045,6 @@ fn show_item_details(ui: &mut egui::Ui, row: &ItemResult) {
     );
     ui.add(
         egui::Label::new(crate::tr_format!(
-            "Причина: {}",
             "Reason: {}",
             row.reason.as_deref().unwrap_or("—")
         ))
@@ -1197,7 +1182,7 @@ mod tests {
     }
 
     #[test]
-    fn checksum_history_recognizes_legacy_manifest_commands_in_both_languages() {
+    fn checksum_history_recognizes_legacy_manifest_commands_in_all_languages() {
         let mut results = Results::default();
         results.plan([(local("SHA256SUMS"), None)]);
         let mut record = results
@@ -1208,6 +1193,10 @@ mod tests {
             "Создать манифест SHA-256",
             "Verify SHA-256 manifest",
             "Проверить манифест SHA-256",
+            #[cfg(target_os = "macos")]
+            "Vytvořit manifest SHA-256",
+            #[cfg(target_os = "macos")]
+            "Ověřit manifest SHA-256",
         ] {
             record.label = label.into();
             let saved = serde_json::to_value(&record).unwrap();

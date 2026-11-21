@@ -30,7 +30,6 @@ pub(crate) fn verify_archive(
     };
     let result = report.check(path, format, password);
     let summary = crate::tr_format!(
-        "Проверено записей: {}. Ошибки в записях: {}. Без проверки: {}.",
         "Verified entries: {}. Entry errors: {}. Unverified: {}.",
         report.passed,
         report.damaged,
@@ -51,17 +50,16 @@ pub(crate) fn verify_archive(
         report.progress.results.cancelled = true;
         (
             Outcome::Cancelled,
-            crate::tr_format!(
-                "Проверка архива остановлена. {summary}",
-                "Archive check stopped. {summary}"
-            ),
+            crate::tr_format!("Archive check stopped. {summary}", summary = summary),
         )
     } else if let Err(error) = result {
         (
             Outcome::Failed,
             crate::tr_format!(
-                "Проверка архива прервана: {error}. {summary} {details}",
-                "Archive check could not finish: {error}. {summary} {details}"
+                "Archive check could not finish: {error}. {summary} {details}",
+                details = details,
+                error = error,
+                summary = summary
             ),
         )
     } else if report.damaged != 0 {
@@ -303,7 +301,7 @@ impl Report<'_> {
             self.damaged += 1;
             Outcome::Failed
         };
-        let name = crate::tr_format!("Запись {index} · {name}", "Entry {index} · {name}");
+        let name = crate::tr_format!("Entry {index} · {name}", index = index, name = name);
         self.progress
             .results
             .diagnostic(self.source, &name, outcome, &error.to_string());

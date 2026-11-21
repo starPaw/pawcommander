@@ -146,10 +146,7 @@ impl ProfilePicker {
             Some(Edit::Remove) => {
                 let name = name.unwrap_or_default();
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(crate::tr_format!(
-                        "Удалить профиль «{name}»?",
-                        "Remove profile “{name}”?"
-                    ));
+                    ui.label(crate::tr_format!("Remove profile “{name}”?", name = name));
                     remove = ui.button(text!("Удалить")).clicked();
                     cancel = ui.button(text!("Отмена")).clicked();
                 });

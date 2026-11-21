@@ -405,11 +405,7 @@ fn member_exists(index: &Index, path: &Path) -> bool {
 fn occupied(path: &Path) -> io::Error {
     io::Error::new(
         io::ErrorKind::AlreadyExists,
-        crate::tr_format!(
-            "Путь уже используется в архиве: {}",
-            "Path is already used in the archive: {}",
-            path.display()
-        ),
+        crate::tr_format!("Path is already used in the archive: {}", path.display()),
     )
 }
 
@@ -569,10 +565,6 @@ fn read_tar(
 fn missing_entry(path: &Path) -> io::Error {
     io::Error::new(
         io::ErrorKind::NotFound,
-        crate::tr_format!(
-            "В архиве больше нет записи {}",
-            "Archive entry no longer exists: {}",
-            path.display()
-        ),
+        crate::tr_format!("Archive entry no longer exists: {}", path.display()),
     )
 }

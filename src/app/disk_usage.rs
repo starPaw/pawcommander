@@ -149,8 +149,8 @@ impl DiskUsage {
 fn show_summary(ui: &mut egui::Ui, analysis: &Analysis) {
     let size = human_size(analysis.nodes[0].allocated);
     ui.strong(crate::tr_format!(
-        "Учтено на диске: {size}",
-        "Allocated space counted: {size}"
+        "Allocated space counted: {size}",
+        size = size
     ));
     let status = match analysis.finish {
         Finish::Stopped => Some(text!("Анализ остановлен. Показаны частичные размеры.")),
@@ -166,9 +166,11 @@ fn show_summary(ui: &mut egui::Ui, analysis: &Analysis) {
         ui.colored_label(ui.visuals().warn_fg_color, status);
     }
     ui.label(crate::tr_format!(
-        "Файлов: {} · символьных ссылок пропущено: {} · дополнительных жёстких ссылок пропущено: {} · ошибок: {}",
         "Files: {} · symbolic links skipped: {} · extra hard links excluded: {} · read errors: {}",
-        analysis.files.len(), analysis.symlinks, analysis.hard_links, analysis.issues,
+        analysis.files.len(),
+        analysis.symlinks,
+        analysis.hard_links,
+        analysis.issues,
     ));
     ui.small(text!(
         "Размеры по выделенным блокам. Клоны APFS могут использовать общие блоки.",
@@ -321,15 +323,16 @@ fn node_detail(analysis: &Analysis, node: &Node) -> String {
         )
     } else {
         crate::tr_format!(
-            "{path}\nВыделено: {bytes} байт",
-            "{path}\nAllocated: {bytes} bytes"
+            "{path}\nAllocated: {bytes} bytes",
+            bytes = bytes,
+            path = path
         )
     };
     if node.kind == Kind::File {
         let bytes = node.logical;
         detail.push_str(&crate::tr_format!(
-            "\nРазмер файла: {bytes} байт",
-            "\nFile length: {bytes} bytes"
+            "\nFile length: {bytes} bytes",
+            bytes = bytes
         ));
     }
     if let Some(issue) = &node.issue {

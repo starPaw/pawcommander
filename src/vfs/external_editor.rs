@@ -160,8 +160,9 @@ impl RemoteEdit {
             .map_err(|error| {
                 if *preserve {
                     TransferError::PublicationUnconfirmed(crate::tr_format!(
-                        "{error}. Проверьте назначение и сохранённую папку {staging}.",
-                        "{error}. Inspect the destination and retained folder {staging}."
+                        "{error}. Inspect the destination and retained folder {staging}.",
+                        error = error,
+                        staging = staging
                     ))
                 } else if cancel.is_requested() {
                     TransferError::Cancelled

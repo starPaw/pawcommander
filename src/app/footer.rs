@@ -23,7 +23,6 @@ pub(super) fn operation_details(ui: &mut egui::Ui, progress: &Snapshot, paused: 
     }
     if let Some(verification) = &progress.verification {
         ui.label(crate::tr_format!(
-            "Прочитано для проверки: {} / {}",
             "Read for verification: {} / {}",
             human_size(verification.read),
             human_size(verification.expected)
@@ -50,33 +49,18 @@ pub(super) fn operation_details(ui: &mut egui::Ui, progress: &Snapshot, paused: 
                         .show_percentage(),
                 );
             } else {
-                ui.label(crate::tr_format!(
-                    "Записано: {written}",
-                    "Written: {written}"
-                ));
+                ui.label(crate::tr_format!("Written: {written}", written = written));
             }
             if !paused && let Some(speed) = transfer.bytes_per_second(now) {
-                ui.label(crate::tr_format!(
-                    "{}/с",
-                    "{}/s",
-                    human_size(speed.round() as u64)
-                ));
+                ui.label(crate::tr_format!("{}/s", human_size(speed.round() as u64)));
             }
             if !paused && let Some(seconds) = transfer.remaining_seconds(now) {
                 let time = if seconds < 60 {
-                    crate::tr_format!("{seconds} с", "{seconds} s")
+                    crate::tr_format!("{seconds} s", seconds = seconds)
                 } else {
-                    crate::tr_format!(
-                        "{} мин {:02} с",
-                        "{} min {:02} s",
-                        seconds / 60,
-                        seconds % 60
-                    )
+                    crate::tr_format!("{} min {:02} s", seconds / 60, seconds % 60)
                 };
-                ui.label(crate::tr_format!(
-                    "До конца файла: ≈ {time}",
-                    "File remaining: ≈ {time}"
-                ));
+                ui.label(crate::tr_format!("File remaining: ≈ {time}", time = time));
             }
             if !paused && transfer.stream_finished {
                 ui.label(crate::i18n::text!("Завершение записи…"));
@@ -86,30 +70,27 @@ pub(super) fn operation_details(ui: &mut egui::Ui, progress: &Snapshot, paused: 
     if progress.total_written > 0 {
         let total = human_size(progress.total_written);
         ui.label(if progress.reading_inputs {
-            crate::tr_format!(
-                "Прочитано из файлов: {total}",
-                "Read from source files: {total}"
-            )
+            crate::tr_format!("Read from source files: {total}", total = total)
         } else {
-            crate::tr_format!("Записано за операцию: {total}", "Total written: {total}")
+            crate::tr_format!("Total written: {total}", total = total)
         });
     }
 }
 
 pub(super) fn human_size(bytes: u64) -> String {
+    use crate::i18n::{display, text};
+
     if bytes < 1024 {
-        crate::tr_format!("{bytes} Б", "{bytes} B")
-    } else if bytes < 1024 * 1024 {
-        crate::tr_format!("{:.1} КБ", "{:.1} KB", bytes as f64 / 1024.0)
-    } else if bytes < 1024 * 1024 * 1024 {
-        crate::tr_format!("{:.1} МБ", "{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
-    } else {
-        crate::tr_format!(
-            "{:.1} ГБ",
-            "{:.1} GB",
-            bytes as f64 / (1024.0 * 1024.0 * 1024.0)
-        )
+        return format!("{} {}", display::integer(bytes), text!("Б"));
     }
+    let (scale, unit) = if bytes < 1024 * 1024 {
+        (1024.0, text!("КБ"))
+    } else if bytes < 1024 * 1024 * 1024 {
+        (1024.0 * 1024.0, text!("МБ"))
+    } else {
+        (1024.0 * 1024.0 * 1024.0, text!("ГБ"))
+    };
+    format!("{} {unit}", display::decimal(bytes as f64 / scale, 1))
 }
 
 impl PawCommander {
@@ -145,7 +126,6 @@ impl PawCommander {
                         self.show_history |= history_button(ui);
                         ui.add_visible(!paused || stopping, egui::Spinner::new());
                         ui.label(crate::tr_format!(
-                            "Файловые операции: {} · {} с",
                             "File operations: {} · {} s",
                             job.label,
                             job.started.elapsed().as_secs()
@@ -246,10 +226,9 @@ impl PawCommander {
                         let visible = self.tab().visible(self.folder_view(self.active)).len();
                         ui.label(
                             RichText::new(crate::tr_format!(
-                                "{} объектов  ·  Выбрано: {}",
                                 "{} items  ·  Selected: {}",
-                                visible,
-                                self.tab().selected.len()
+                                crate::i18n::display::integer(visible),
+                                crate::i18n::display::integer(self.tab().selected.len())
                             ))
                             .color(colors.muted),
                         );
@@ -308,7 +287,6 @@ impl PawCommander {
         let mut remove = None;
         let mut reorder = None;
         egui::CollapsingHeader::new(crate::tr_format!(
-            "Очередь: {} · одновременно: 1",
             "Queued: {} · concurrency: 1",
             self.pending_jobs.len()
         ))

@@ -46,8 +46,8 @@ impl<'a> Scanner<'a> {
                 .build()
                 .map_err(|error| {
                     crate::tr_format!(
-                        "Некорректное или слишком сложное регулярное выражение: {error}",
-                        "Invalid or too complex regular expression: {error}"
+                        "Invalid or too complex regular expression: {error}",
+                        error = error
                     )
                 })?;
             Pattern::Regex(regex)
