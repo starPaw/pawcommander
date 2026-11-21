@@ -1,11 +1,14 @@
 //! Native SMB shares use a unique, protected mount point and an OS credential entry.
+use crate::file_error::{AccessAction, AccessError, PublicationError};
 use crate::i18n::text;
+use crate::operations::TransferError;
+use crate::vfs::Location;
 use serde::{Deserialize, Serialize};
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{self, Read};
 use std::mem::MaybeUninit;
-use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::{
     ffi::OsStrExt,
     fs::{OpenOptionsExt, PermissionsExt},
@@ -363,25 +366,41 @@ pub(crate) fn is_smb_path(path: &Path) -> bool {
     mount_id(path, false).is_ok_and(|id| id.is_some())
 }
 
-pub(crate) fn open_upload(path: &Path) -> io::Result<File> {
-    let invalid = || io::Error::from(io::ErrorKind::InvalidInput);
+pub(crate) fn open_upload(target: &Location) -> Result<File, TransferError> {
+    let invalid = || {
+        AccessError::new(
+            target,
+            AccessAction::CreateFile,
+            io::Error::from(io::ErrorKind::InvalidInput),
+        )
+    };
+    let path = target.local().ok_or_else(invalid)?;
+    let parent_path = path.parent().ok_or_else(invalid)?;
+    let directory = Location::Local(parent_path.to_owned());
     let parent = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
-        .open(path.parent().ok_or_else(invalid)?)?;
+        .open(parent_path)
+        .map_err(|error| AccessError::new(&directory, AccessAction::OpenFile, error))?;
     let parent_fd = parent.as_raw_fd();
     let mut volume = MaybeUninit::<libc::statfs>::uninit();
+    let check_volume = |error| AccessError::new(&directory, AccessAction::CheckSmbVolume, error);
     // Check the opened directory and create relative to that handle so an
     // unmount or parent rename cannot redirect the upload to local storage.
     if unsafe { libc::fstatfs(parent_fd, volume.as_mut_ptr()) } != 0 {
-        return Err(io::Error::last_os_error());
+        return Err(check_volume(io::Error::last_os_error()).into());
     }
     let volume = unsafe { volume.assume_init() };
     if unsafe { CStr::from_ptr(volume.f_fstypename.as_ptr()) }.to_bytes() != b"smbfs" {
-        return Err(io::Error::from(io::ErrorKind::Unsupported));
+        return Err(check_volume(io::Error::from(io::ErrorKind::Unsupported)).into());
     }
-    let name =
-        CString::new(path.file_name().ok_or_else(invalid)?.as_bytes()).map_err(|_| invalid())?;
+    let name = CString::new(path.file_name().ok_or_else(invalid)?.as_bytes()).map_err(|error| {
+        AccessError::new(
+            target,
+            AccessAction::CreateFile,
+            io::Error::new(io::ErrorKind::InvalidInput, error),
+        )
+    })?;
     let fd = unsafe {
         libc::openat(
             parent_fd,
@@ -391,16 +410,52 @@ pub(crate) fn open_upload(path: &Path) -> io::Result<File> {
         )
     };
     if fd < 0 {
-        Err(io::Error::last_os_error())
+        Err(upload_create_error(target, io::Error::last_os_error()))
     } else {
         Ok(unsafe { File::from_raw_fd(fd) })
     }
+}
+
+fn upload_create_error(target: &Location, error: io::Error) -> TransferError {
+    let refused = matches!(
+        error.kind(),
+        io::ErrorKind::AlreadyExists
+            | io::ErrorKind::PermissionDenied
+            | io::ErrorKind::InvalidInput
+            | io::ErrorKind::NotFound
+            | io::ErrorKind::Unsupported
+    );
+    let cause = AccessError::new(target, AccessAction::CreateFile, error).into();
+    if refused {
+        cause
+    } else {
+        unconfirmed_upload(target, cause)
+    }
+}
+
+pub(crate) fn unconfirmed_upload(target: &Location, cause: TransferError) -> TransferError {
+    TransferError::PublicationUnconfirmed(
+        PublicationError::SmbUpload {
+            target: target.clone(),
+            cause,
+        }
+        .into(),
+    )
 }
 
 pub(crate) fn sync_upload(file: &File) -> io::Result<()> {
     // File::sync_all on macOS asks for F_FULLFSYNC. SMB uses the server's
     // ordinary flush operation, which the native fsync issues.
     if unsafe { libc::fsync(file.as_raw_fd()) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+pub(crate) fn close_upload(file: File) -> io::Result<()> {
+    // Ownership moves to close. Retrying a failed close could close a reused fd.
+    if unsafe { libc::close(file.into_raw_fd()) } == 0 {
         Ok(())
     } else {
         Err(io::Error::last_os_error())
@@ -472,16 +527,22 @@ mod tests {
 
     #[test]
     fn upload_and_cleanup_preserve_local_contents() {
+        use crate::file_error::{AccessCause, Failure};
+
         let temp = tempfile::tempdir().unwrap();
         let base = temp.path().join("connection-test");
         let endpoint = Endpoint::parse("smb://nas/Files", "", true).unwrap();
         let path = endpoint.mountpoint(&base);
         fs::create_dir_all(&path).unwrap();
         let created = path.join("upload");
-        assert_eq!(
-            open_upload(&created).unwrap_err().kind(),
-            io::ErrorKind::Unsupported
-        );
+        let error = open_upload(&Location::Local(created.clone())).unwrap_err();
+        let TransferError::Failed(Failure::Access(error)) = error else {
+            panic!("expected a definite SMB volume check failure");
+        };
+        assert_eq!(error.location, Location::Local(path.clone()));
+        assert_eq!(error.action, AccessAction::CheckSmbVolume);
+        assert!(matches!(error.cause, AccessCause::Local(source)
+            if source.kind() == io::ErrorKind::Unsupported));
         assert!(!created.exists());
         let existing = path.join("keep");
         fs::write(&existing, b"keep").unwrap();
@@ -491,5 +552,62 @@ mod tests {
         fs::write(base.join(RECORD), b"record").unwrap();
         remove_mountpoint(&base, &path).unwrap();
         assert!(!base.exists());
+    }
+
+    #[test]
+    fn smb_create_rejections_and_uncertainty_retain_the_original_errno() {
+        use crate::file_error::{AccessCause, Failure};
+
+        let target = Location::Local("/fixture/SMB/new-file".into());
+        for errno in [
+            libc::EEXIST,
+            libc::EACCES,
+            libc::EINVAL,
+            libc::ENOENT,
+            libc::ENOTSUP,
+        ] {
+            let result = upload_create_error(&target, io::Error::from_raw_os_error(errno));
+            let TransferError::Failed(Failure::Access(error)) = result else {
+                panic!("expected a definite rejection");
+            };
+            assert_eq!(error.location, target);
+            assert_eq!(error.action, AccessAction::CreateFile);
+            assert!(matches!(error.cause, AccessCause::Local(source)
+                if source.raw_os_error() == Some(errno)));
+        }
+        let error = upload_create_error(&target, io::Error::from_raw_os_error(libc::EIO));
+        let TransferError::PublicationUnconfirmed(Failure::Publication(error)) = error else {
+            panic!("expected an uncertain create result");
+        };
+        let PublicationError::SmbUpload {
+            target: path,
+            cause,
+        } = *error
+        else {
+            panic!("expected account of the SMB upload");
+        };
+        assert_eq!(path, target);
+        let TransferError::Failed(Failure::Access(error)) = cause else {
+            panic!("expected a typed create cause");
+        };
+        assert_eq!(error.location, target);
+        assert_eq!(error.action, AccessAction::CreateFile);
+        assert!(matches!(error.cause, AccessCause::Local(source)
+            if source.raw_os_error() == Some(libc::EIO)));
+    }
+
+    #[test]
+    fn smb_stop_after_creation_keeps_cancellation_as_the_unconfirmed_cause() {
+        use crate::file_error::Failure;
+
+        let target = Location::Local("/fixture/SMB/partial-file".into());
+        let error = unconfirmed_upload(&target, TransferError::Cancelled);
+        assert!(matches!(
+            error,
+            TransferError::PublicationUnconfirmed(Failure::Publication(reason))
+                if matches!(reason.as_ref(), PublicationError::SmbUpload {
+                    target: path, cause: TransferError::Cancelled,
+                } if path == &target)
+        ));
     }
 }

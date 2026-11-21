@@ -414,11 +414,19 @@ pub(super) fn finish_file(
     opened: &mut SourceReader,
 ) -> Result<Option<String>, TransferError> {
     match opened {
-        SourceReader::Local(file) => local_apply(file, wanted, Mode::Final, target, None),
+        SourceReader::Local(file) => finish_local_file(target, wanted, file),
         SourceReader::Remote(handle) => {
             RemoteObject::Handle(handle).apply(wanted, Mode::Final, target, None)
         }
     }
+}
+
+pub(super) fn finish_local_file(
+    target: &Location,
+    wanted: &Attributes,
+    file: &fs::File,
+) -> Result<Option<String>, TransferError> {
+    local_apply(file, wanted, Mode::Final, target, None)
 }
 
 pub(super) fn finish_directory(

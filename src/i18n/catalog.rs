@@ -735,6 +735,7 @@ catalog! {
     "Не удалось записать буфер файла" => ("Could not flush the file", "Vyrovnávací paměť souboru se nepodařilo zapsat"),
     "Не удалось сохранить данные файла" => ("Could not sync the file", "Data souboru se nepodařilo synchronizovat"),
     "Не удалось закрыть файл" => ("Could not close the file", "Soubor se nepodařilo zavřít"),
+    "Не удалось проверить SMB-том назначения" => ("Could not verify the SMB destination volume", "Cílový svazek SMB se nepodařilo ověřit"),
     "Не удалось перейти к нужной позиции в файле" => ("Could not seek to the requested position in the file", "Nepodařilo se přejít na požadovanou pozici v souboru"),
     "Не удалось сохранить сведения о файле" => ("Could not save file metadata", "Metadata souboru se nepodařilo uložit"),
     "Не удалось прочитать элемент папки" => ("Could not read folder entry", "Položku složky se nepodařilo načíst"),
