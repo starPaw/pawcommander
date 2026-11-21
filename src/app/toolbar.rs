@@ -83,7 +83,7 @@ impl PawCommander {
                             }
                             data.get_temp::<bool>(menu_id.with("focus_entry")).unwrap_or(false)
                         });
-                        let shown = egui::Popup::menu(&button).id(menu_id).show(|ui| {
+                        let settings_items = |ui: &mut egui::Ui| {
                             let response = ui.button(crate::i18n::text("Доступность"));
                             if focus_entry && !ui.is_sizing_pass() {
                                 response.request_focus();
@@ -252,6 +252,26 @@ impl PawCommander {
                                 if ui.button(crate::i18n::text("Проверить снова")).clicked() { self.tools = crate::tools::Tools::detect(); }
                             });
                             paint_focus(ui, &tools_menu.response, 5);
+                            let focused = ui.memory(|memory| memory.focused());
+                            if let Some(response) = focused.and_then(|id| ctx.read_response(id))
+                                && response.layer_id == ui.layer_id()
+                                && response.gained_focus()
+                                && !ui.clip_rect().contains_rect(response.rect)
+                            {
+                                response.scroll_to_me(None);
+                            }
+                        };
+                        let shown = egui::Popup::menu(&button).id(menu_id).show(|ui| {
+                            let frame_height = egui::Frame::popup(ui.style()).total_margin().sum().y;
+                            let height = (ctx.content_rect().bottom() - button.rect.bottom() - frame_height)
+                                .max(1.0);
+                            let mut scroll = egui::ScrollArea::vertical()
+                                .id_salt("settings_scroll")
+                                .max_height(height);
+                            if opened {
+                                scroll = scroll.vertical_scroll_offset(0.0);
+                            }
+                            scroll.show(ui, settings_items);
                         });
                         if shown.is_some() && !egui::Popup::is_id_open(ctx, menu_id) && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
                             button.request_focus();
