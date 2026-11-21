@@ -1,8 +1,9 @@
 use super::text;
 use crate::file_error::{
     AccessAction, AccessCause, AccessError, ArchiveMemberError, ConnectionError, Failure,
-    ListingError, ListingErrorKind, LocalPathAction, MutationError, PathError, PublicationError,
-    RecoveryNotice, SshStage, StagingCleanupError,
+    HostKeyError, KnownHostEntryError, KnownHostsError, ListingError, ListingErrorKind,
+    LocalPathAction, MutationError, PathError, PinError, PublicationError, RecoveryNotice,
+    SshStage, StagingCleanupError,
 };
 use crate::operations::TransferError;
 use crate::vfs::{DeletionFailure, TransferFailure};
@@ -80,6 +81,7 @@ fn connection_error(error: &ConnectionError) -> String {
             };
             format!("{prefix}: {source}")
         }
+        ConnectionError::HostKey(error) => host_key_error(error),
         #[cfg(target_os = "macos")]
         ConnectionError::Forward { target, source } => crate::tr_format!(
             "Could not forward TCP to {address} ({error})",
@@ -106,6 +108,58 @@ fn connection_error(error: &ConnectionError) -> String {
         ConnectionError::InteractiveTimeout => text!("Время интерактивной SSH-аутентификации истекло").into(),
         ConnectionError::HostKeyTimeout => text!("Время проверки ключа сервера SSH истекло").into(),
         ConnectionError::Finalized => text!("Подключение SSH уже завершено").into(),
+    }
+}
+
+fn host_key_error(error: &HostKeyError) -> String {
+    match error {
+        HostKeyError::HomeUnavailable => text!("Не найдена домашняя папка").into(),
+        HostKeyError::KeyUnavailable => text!("Сервер не предоставил ключ SSH").into(),
+        HostKeyError::Unverified => text!("Ключ сервера SSH не подтверждён. Откройте форму SFTP и проверьте отпечаток.").into(),
+        HostKeyError::PinDirectoryUnavailable => text!("Не найдена папка для доверенных ключей PawCommander").into(),
+        HostKeyError::KnownHosts { path, cause } => {
+            let error = match cause {
+                KnownHostsError::Read(source) => source.to_string(),
+                KnownHostsError::Initialize(source) => source.to_string(),
+                KnownHostsError::Entry { line, cause } => {
+                    let error = match cause {
+                        KnownHostEntryError::Format => text!("Некорректная запись known_hosts").into(),
+                        KnownHostEntryError::Encoding(source) => source.to_string(),
+                        KnownHostEntryError::Parse(source) => source.to_string(),
+                    };
+                    crate::tr_format!("known_hosts line {line}: {error}", line = line, error = error)
+                }
+                KnownHostsError::Check => text!("Ошибка проверки записи known_hosts").into(),
+                KnownHostsError::Revoked => text!("Ключ сервера SSH отозван").into(),
+                KnownHostsError::CertificateAuthority => text!("Для этого сервера в known_hosts указан центр сертификации SSH. Проверьте сертификат через OpenSSH.").into(),
+            };
+            crate::tr_format!(
+                "Could not verify the SSH host key using {path} ({error})",
+                path = path.display(),
+                error = error
+            )
+        }
+        HostKeyError::KnownHostsChanged { path, received } => crate::tr_format!(
+            "{changed} The server presented {fingerprint}. Verify the fingerprint with the administrator and review the entry in {path}.",
+            changed = text!("Ключ сервера SSH изменился."), fingerprint = received, path = path.display()
+        ),
+        HostKeyError::Pin { path, cause } => {
+            let path = path.display();
+            let error = match cause {
+                PinError::Read(source) | PinError::Write(source) => source.to_string(),
+                PinError::Json(source) => source.to_string(),
+                PinError::TooLarge => text!("Запись доверенного ключа слишком велика").into(),
+                PinError::Changed { saved, received } => return crate::tr_format!(
+                    "{changed} Saved fingerprint {saved}, received {received}. Verify the fingerprint with the administrator and review the record in {path}.",
+                    changed = text!("Ключ сервера SSH изменился."), path = path, received = received, saved = saved
+                ),
+            };
+            crate::tr_format!(
+                "Could not read or save the trusted SSH key in {path} ({error})",
+                path = path,
+                error = error
+            )
+        }
     }
 }
 

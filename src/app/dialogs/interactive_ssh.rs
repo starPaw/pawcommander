@@ -4,7 +4,7 @@ use crate::{
     theme::paint_focus,
     vfs::{
         AuthRequest, ConnectRequest, ConnectedLocation, ConnectionControl, ConnectionPrompt,
-        HostKeyRequest, InteractiveAuth,
+        HostKeyRequest, HostKeyRole, InteractiveAuth,
     },
 };
 use eframe::egui;
@@ -107,7 +107,13 @@ impl ConnectionJob {
         egui::Modal::new(egui::Id::unique("sftp_authentication")).show(ctx, |ui| {
             ui.set_width((ctx.content_rect().width() - 32.0).clamp(180.0, 470.0));
             if let Some(PendingPrompt::HostKey(request)) = &self.prompt {
-                ui.heading(request.title);
+                ui.heading(match request.role {
+                    HostKeyRole::Server => text!("Проверка ключа сервера"),
+                    #[cfg(target_os = "macos")]
+                    HostKeyRole::Jump => text!("Проверка ключа промежуточного сервера"),
+                    #[cfg(target_os = "macos")]
+                    HostKeyRole::Target => text!("Проверка ключа конечного сервера"),
+                });
                 ui.label(format!("{} · {}", request.key.address, request.key.algorithm));
                 ui.monospace(&request.key.fingerprint);
                 let copy = ui.button(text!("Копировать отпечаток"));

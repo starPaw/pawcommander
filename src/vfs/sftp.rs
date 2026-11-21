@@ -25,7 +25,7 @@ mod proxy_jump;
 pub(crate) use host_key::HostKey;
 pub(super) use host_key::TrustFiles;
 pub(crate) use interactive::{
-    AuthRequest, ConnectionControl, ConnectionPrompt, HostKeyRequest, InteractiveAuth,
+    AuthRequest, ConnectionControl, ConnectionPrompt, HostKeyRequest, HostKeyRole, InteractiveAuth,
 };
 
 const IO_TIMEOUT_MS: u32 = 20_000;

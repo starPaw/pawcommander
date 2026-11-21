@@ -81,7 +81,7 @@ pub use sftp::connect;
 pub(crate) use sftp::HostKey;
 pub(crate) use sftp::{
     connect_location, AuthRequest, ConnectRequest, ConnectedLocation, ConnectionControl,
-    ConnectionPrompt, HostKeyRequest, InteractiveAuth,
+    ConnectionPrompt, HostKeyRequest, HostKeyRole, InteractiveAuth,
 };
 #[cfg(target_os = "macos")]
 pub(crate) use sftp_properties::{visit_properties, PropertyEvent};

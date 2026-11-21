@@ -1,10 +1,10 @@
 use super::*;
-use crate::file_error::{ConnectionError, Failure, SshStage};
+use crate::file_error::{ConnectionError, Failure, HostKeyError, PinError, SshStage};
 use crate::i18n::connection_result_error;
 use crate::vfs::sftp::TrustFiles;
 use crate::vfs::{
     AuthRequest, ConnectRequest, ConnectedLocation, ConnectionControl, ConnectionPrompt,
-    HostKeyRequest, InteractiveAuth,
+    HostKeyRequest, HostKeyRole, InteractiveAuth,
 };
 use std::{sync::mpsc, thread};
 use zeroize::Zeroizing;
@@ -123,6 +123,7 @@ fn ssh_interactive_round_trip() {
     let timeout = Duration::from_secs(3);
     let unverified = fixture.start("unknown-host", false, timeout);
     let offered = unverified.host_key();
+    assert_eq!(offered.role, HostKeyRole::Server);
     assert_eq!(offered.key.fingerprint, fingerprints[0]);
     assert!(unverified.control.cancel());
     drop(offered);
@@ -220,9 +221,23 @@ fn ssh_interactive_round_trip() {
     assert!(records.next().is_none());
     let before = fs::read(&record).unwrap();
     let changed = fixture.start("changed-host", false, timeout);
-    let error = connection_result_error(&changed.finish().err().unwrap());
-    assert!(error.starts_with(crate::i18n::text!("Ключ сервера SSH изменился.")));
-    assert!(error.contains(fingerprints[0]) && error.contains(fingerprints[1]));
+    let error = changed.finish().err().unwrap();
+    let TransferError::Failed(Failure::Connection(cause)) = &error else {
+        panic!("lost connection cause: {error:?}");
+    };
+    let ConnectionError::HostKey(HostKeyError::Pin {
+        path,
+        cause: PinError::Changed { saved, received },
+    }) = cause.as_ref()
+    else {
+        panic!("lost key mismatch details: {cause:?}");
+    };
+    assert_eq!(path, &record);
+    assert_eq!(saved, fingerprints[0]);
+    assert_eq!(received, fingerprints[1]);
+    let message = connection_result_error(&error);
+    assert!(message.starts_with(crate::i18n::text!("Ключ сервера SSH изменился.")));
+    assert!(message.contains(fingerprints[0]) && message.contains(fingerprints[1]));
     assert!(changed.prompts.try_recv().is_err());
     assert_eq!(fs::read(&record).unwrap(), before);
     assert!(!sessions()
