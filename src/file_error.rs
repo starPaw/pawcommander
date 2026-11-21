@@ -221,6 +221,8 @@ pub(crate) enum AccessAction {
     CloseFile,
     SeekFile,
     WriteMetadata,
+    #[cfg(target_os = "macos")]
+    CheckSmbVolume,
     CheckSearchResult,
     #[cfg(target_os = "macos")]
     WritePreviewCache,
@@ -573,6 +575,19 @@ pub(crate) enum RecoveryNotice {
 pub(crate) enum PublicationError {
     DestinationChanged(Location),
     PayloadNotRegular(Location),
+    #[cfg(target_os = "macos")]
+    SmbUpload {
+        target: Location,
+        cause: TransferError,
+    },
+    #[cfg(target_os = "macos")]
+    SmbTargetChanged(Location),
+    #[cfg(target_os = "macos")]
+    SmbTargetSize {
+        target: Location,
+        expected: u64,
+        actual: u64,
+    },
     Backup {
         target: Location,
         backup: Location,
@@ -600,6 +615,25 @@ impl fmt::Display for PublicationError {
             ),
             Self::PayloadNotRegular(payload) => {
                 write!(f, "Source item {payload} is no longer a regular file")
+            }
+            #[cfg(target_os = "macos")]
+            Self::SmbUpload { target, cause } => {
+                write!(f, "SMB copy to {target} is unconfirmed: {cause}")
+            }
+            #[cfg(target_os = "macos")]
+            Self::SmbTargetChanged(target) => {
+                write!(f, "SMB destination {target} changed during copying")
+            }
+            #[cfg(target_os = "macos")]
+            Self::SmbTargetSize {
+                target,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "SMB destination {target} has {actual} bytes, expected {expected}"
+                )
             }
             Self::Backup {
                 target,
@@ -633,6 +667,10 @@ impl fmt::Display for PublicationError {
 impl Error for PublicationError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            #[cfg(target_os = "macos")]
+            Self::SmbUpload { cause, .. } => Some(cause),
+            #[cfg(target_os = "macos")]
+            Self::SmbTargetChanged(_) | Self::SmbTargetSize { .. } => None,
             Self::Backup { cause, .. } | Self::Retained { cause, .. } => Some(cause),
             Self::Rollback { cause, restore, .. } => {
                 if matches!(cause, TransferError::Cancelled) {
@@ -745,6 +783,8 @@ pub(crate) enum MutationError {
     UndoUnavailable(Location),
     DestinationExists(Location),
     SourceChanged(Location),
+    #[cfg(target_os = "macos")]
+    SmbSourceNotRegular(Location),
     ReadOnlyArchive(Location),
     RenameLocal {
         from: PathBuf,
@@ -818,6 +858,10 @@ impl fmt::Display for MutationError {
             }
             Self::DestinationExists(location) => write!(f, "Destination {location} already exists"),
             Self::SourceChanged(location) => write!(f, "Source changed during copying: {location}"),
+            #[cfg(target_os = "macos")]
+            Self::SmbSourceNotRegular(source) => {
+                write!(f, "SMB uploads require a regular file: {source}")
+            }
             Self::ReadOnlyArchive(path) => write!(f, "Archive location {path} is read-only"),
             Self::RenameLocal { from, to, source } => {
                 write!(

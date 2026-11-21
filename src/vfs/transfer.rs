@@ -940,21 +940,19 @@ fn copy_to_smb(
     progress: &mut Progress,
     published: impl FnOnce(),
 ) -> Result<(), TransferError> {
+    use crate::file_error::{Failure, ScanError};
     use std::io::{Seek, SeekFrom};
 
     let target = &item.target;
-    let target_path = target.local().expect("mounted SMB path");
     let cancel = progress.cancellation();
     progress.checkpoint()?;
-    let metadata = entry_metadata(&item.source)?.ok_or_else(|| changed_source(&item.source))?;
+    let source_changed = || ScanError::FileChanged(item.source.clone());
+    let metadata = entry_metadata(&item.source)?.ok_or_else(source_changed)?;
     if !metadata.is_file() {
-        return Err(crate::i18n::text!(
-            "В SMB можно скопировать обычные файлы со свободными именами.",
-        )
-        .into());
+        return Err(MutationError::SmbSourceNotRegular(item.source.clone()).into());
     }
     if matches!(&metadata, EntryMetadata::Remote(stat) if stat.size.is_none()) {
-        return Err(changed_source(&item.source).into());
+        return Err(ScanError::MissingFileVersion(item.source.clone()).into());
     }
     if let Some(retry) = &progress.retry {
         retry.verify_snapshot(item, Some(&metadata))?;
@@ -969,49 +967,83 @@ fn copy_to_smb(
     source.verify_metadata(&item.source, &input.metadata(&item.source)?)?;
     source.verify(&item.source, &cancel, true)?;
     progress.checkpoint()?;
-    let unconfirmed = |error: &dyn std::fmt::Display| {
-        TransferError::publication_unconfirmed(crate::tr_format!(
-            "SMB copy is unconfirmed. Check {target} for an incomplete copy before retrying ({error})", error = error, target = target,
-        ))
+    let mut file = crate::smb::open_upload(target)?;
+    let target_error = |action, error| AccessError::new(target, action, error);
+    let describe_source_error = |error| match &error {
+        TransferError::Failed(Failure::Mutation(reason))
+            if matches!(reason.as_ref(), MutationError::SourceChanged(_)) =>
+        {
+            source_changed().into()
+        }
+        _ => error,
     };
-    let mut file = crate::smb::open_upload(target_path).map_err(|error| match error.kind() {
-        io::ErrorKind::AlreadyExists
-        | io::ErrorKind::PermissionDenied
-        | io::ErrorKind::InvalidInput
-        | io::ErrorKind::NotFound
-        | io::ErrorKind::Unsupported => TransferError::from(error),
-        _ => unconfirmed(&error),
-    })?;
     let result = (|| -> Result<(), TransferError> {
-        let identity = EntryMetadata::Local(LocalEntryMetadata::from_file(&file, file.metadata()?));
-        let mut data = CopyReader::new((&mut input).take(size), progress.copy_verification());
-        let written = progress.copy(item.source.path(), Some(size), &mut data, &mut file)?;
-        crate::smb::sync_upload(&file)?;
-        if written != size || file.metadata()?.len() != size {
-            return Err(changed_source(&item.source).into());
+        let opened = file
+            .metadata()
+            .map_err(|error| target_error(AccessAction::ReadOpenMetadata, error))?;
+        let identity = EntryMetadata::Local(LocalEntryMetadata::from_file(&file, opened));
+        let mut data = CopyReader::new(
+            AccessStream::new(&mut input, &item.source).take(size),
+            progress.copy_verification(),
+        );
+        let written = progress.copy(
+            item.source.path(),
+            Some(size),
+            &mut data,
+            &mut AccessStream::new(&mut file, target),
+        )?;
+        cancel.check()?;
+        crate::smb::sync_upload(&file)
+            .map_err(|error| target_error(AccessAction::SyncFile, error))?;
+        if written != size {
+            return Err(source_changed().into());
+        }
+        let actual = file
+            .metadata()
+            .map_err(|error| target_error(AccessAction::ReadOpenMetadata, error))?
+            .len();
+        if actual != size {
+            return Err(PublicationError::SmbTargetSize {
+                target: target.clone(),
+                expected: size,
+                actual,
+            }
+            .into());
         }
         if let Some(hash) = data.finish() {
-            file.seek(SeekFrom::Start(0))?;
-            progress.verify_copy(item.source.path(), size, hash, &mut file)?;
+            file.seek(SeekFrom::Start(0))
+                .map_err(|error| target_error(AccessAction::SeekFile, error))?;
+            progress.verify_copy(
+                item.source.path(),
+                size,
+                hash,
+                &mut AccessStream::new(&mut file, target),
+            )?;
         }
-        source.verify_metadata(&item.source, &input.metadata(&item.source)?)?;
-        source.verify(&item.source, &cancel, true)?;
-        let warning = copy_metadata::finish_file(
-            &item.target,
+        source
+            .verify_metadata(&item.source, &input.metadata(&item.source)?)
+            .map_err(&describe_source_error)?;
+        source
+            .verify(&item.source, &cancel, true)
+            .map_err(describe_source_error)?;
+        let warning = copy_metadata::finish_local_file(
+            target,
             &copy_metadata::Attributes::from_entry(&source.metadata),
-            &mut SourceReader::Local(file),
+            &file,
         )?;
+        crate::smb::close_upload(file)
+            .map_err(|error| target_error(AccessAction::CloseFile, error))?;
         progress
             .results
             .note_metadata(&item.source, warning.as_deref());
-        if !entry_metadata(&item.target)?.is_some_and(|current| identity.same_object(&current)) {
-            return Err(changed_source(&item.target).into());
+        if !entry_metadata(target)?.is_some_and(|current| identity.same_object(&current)) {
+            return Err(PublicationError::SmbTargetChanged(target.clone()).into());
         }
         Ok(())
     })();
     // The destination was created exclusively. A failed upload can leave a
     // new partial file, and deleting its name could race another SMB client.
-    result.map_err(|error| unconfirmed(&error))?;
+    result.map_err(|error| crate::smb::unconfirmed_upload(target, error))?;
     published();
     Ok(())
 }

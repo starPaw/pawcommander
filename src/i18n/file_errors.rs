@@ -339,6 +339,8 @@ fn access_error(error: &AccessError) -> String {
         AccessAction::CloseFile => text!("Не удалось закрыть файл"),
         AccessAction::SeekFile => text!("Не удалось перейти к нужной позиции в файле"),
         AccessAction::WriteMetadata => text!("Не удалось сохранить сведения о файле"),
+        #[cfg(target_os = "macos")]
+        AccessAction::CheckSmbVolume => text!("Не удалось проверить SMB-том назначения"),
         AccessAction::CheckSearchResult => {
             return crate::tr_format!(
                 "Could not check search result {path}: {error}",
@@ -702,6 +704,11 @@ fn mutation_error(error: &MutationError, unconfirmed: bool) -> String {
             path.display()
         ),
         SourceChanged(path) => super::source_changed_during_copy(path),
+        #[cfg(target_os = "macos")]
+        SmbSourceNotRegular(path) => format!(
+            "{} · {path}",
+            text!("В SMB можно скопировать обычные файлы со свободными именами.")
+        ),
         ReadOnlyArchive(_) => text!("Эта операция недоступна внутри архива").into(),
         RenameLocal { from, to, source } => {
             #[cfg(unix)]
@@ -791,6 +798,20 @@ fn publication_error(error: &PublicationError) -> String {
         PublicationError::PayloadNotRegular(payload) => crate::tr_format!(
             "Source item {payload} is no longer a regular file",
             payload = payload
+        ),
+        #[cfg(target_os = "macos")]
+        PublicationError::SmbUpload { target, cause } => crate::tr_format!(
+            "SMB copy is unconfirmed. Check {target} for an incomplete copy before retrying ({error})",
+            target = target, error = file_error(cause)
+        ),
+        #[cfg(target_os = "macos")]
+        PublicationError::SmbTargetChanged(target) => crate::tr_format!(
+            "SMB destination {target} changed during copying", target = target
+        ),
+        #[cfg(target_os = "macos")]
+        PublicationError::SmbTargetSize { target, expected, actual } => crate::tr_format!(
+            "SMB destination {target} has {actual} bytes, expected {expected}",
+            target = target, actual = actual, expected = expected
         ),
         PublicationError::Backup {
             target,
