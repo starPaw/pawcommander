@@ -51,6 +51,32 @@ struct SearchMatch {
     context: Option<LineMatch>,
 }
 
+impl SearchMatch {
+    fn labels(&self) -> (String, String) {
+        let address = self.path.display();
+        if self.path.remote() {
+            let single_line = |text: &str| {
+                text.replace('\r', "\\r")
+                    .replace('\n', "\\n")
+                    .replace('\t', "\\t")
+            };
+            let name = single_line(&self.path.name());
+            let label = match self.path.path().parent() {
+                Some(parent) => format!("{name} · {}", single_line(&parent.to_string_lossy())),
+                None => name,
+            };
+            return (label, address);
+        }
+        let label = if let Some(context) = &self.context {
+            let line = context.line;
+            crate::tr_format!("Строка {line} · {address}", "Line {line} · {address}")
+        } else {
+            address
+        };
+        (label.clone(), label)
+    }
+}
+
 impl From<PathBuf> for SearchMatch {
     fn from(path: PathBuf) -> Self {
         Location::Local(path).into()
@@ -664,13 +690,8 @@ impl Search {
                         .show_rows(ui, row_height, results.matches.len(), |ui, rows| {
                             for index in rows {
                                 let hit = &results.matches[index];
-                                let path = hit.path.display();
                                 let line = hit.context.as_ref().map(|context| context.line);
-                                let label = if let Some(line) = line {
-                                    crate::tr_format!("Строка {line} · {path}", "Line {line} · {path}")
-                                } else {
-                                    path.to_string()
-                                };
+                                let (label, tooltip) = hit.labels();
                                 ui.push_id((&hit.path, line), |ui| {
                                     let response = ui.add(
                                         egui::Button::new(&label)
@@ -678,7 +699,7 @@ impl Search {
                                             .selected(self.selected == Some(index))
                                             .truncate()
                                             .min_size(egui::vec2(ui.available_width(), button_height)),
-                                    ).on_hover_text(label);
+                                    ).on_hover_text(tooltip);
                                     if response.clicked() {
                                         self.selected = Some(index);
                                     }
@@ -1147,6 +1168,20 @@ fn path_from_bytes(bytes: &[u8]) -> Result<PathBuf, String> {
 mod tests {
     use super::*;
     use std::{cell::Cell, fs};
+
+    #[test]
+    fn sftp_search_result_shows_readable_filename_and_preserves_its_address() {
+        let path = crate::vfs::resolve(
+            "sftp://user@example.test/team/yyyy-mm/Отчёт%20A%0AB.txt",
+            &Location::Local(PathBuf::from("/")),
+        )
+        .unwrap();
+        let address = path.display();
+        let (label, tooltip) = SearchMatch::from(path).labels();
+        assert_eq!(label, "Отчёт A\\nB.txt · /team/yyyy-mm");
+        assert_eq!(tooltip, address);
+        assert!(tooltip.contains("%0A"));
+    }
 
     fn run_folder(
         folder: &Path,

@@ -574,13 +574,8 @@ impl Snapshot {
         scroll.show_rows(ui, row_height, self.results.matches.len(), |ui, rows| {
             for index in rows {
                 let hit = &self.results.matches[index];
-                let path = hit.path.display();
                 let line = hit.context.as_ref().map(|context| context.line);
-                let label = if let Some(line) = line {
-                    crate::tr_format!("Строка {line} · {path}", "Line {line} · {path}")
-                } else {
-                    path.to_string()
-                };
+                let (label, tooltip) = hit.labels();
                 ui.push_id((&hit.path, line), |ui| {
                     let selected = self.selected.contains(&hit.path);
                     let response = ui
@@ -594,7 +589,7 @@ impl Snapshot {
                                     28.0_f32.max(excerpt_height),
                                 )),
                         )
-                        .on_hover_text(&label);
+                        .on_hover_text(tooltip);
                     if response.clicked() {
                         response.request_focus();
                         if selected {
