@@ -103,6 +103,8 @@ impl PawCommander {
                 Command::CompareFolders => self.can_compare_folders(),
                 Command::CompareFiles => self.files_to_compare().is_some(),
                 #[cfg(target_os = "macos")]
+                Command::FindDuplicates => self.can_find_duplicates(),
+                #[cfg(target_os = "macos")]
                 Command::SyncFolders => self.can_open_folder_sync(),
                 Command::AddToArchive => {
                     idle && !writable && !self.archive_add_sources().is_empty()

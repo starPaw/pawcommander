@@ -10,6 +10,7 @@ pub(crate) use two_way::{Reconcile, ReconcileConflict, TwoWayPlan};
 
 use super::{
     compare::{scan, MAX_ENTRIES, MAX_PATH_BYTES},
+    guarded_directory::stale,
     read_scope::{changed_during_read, ReadScope},
     transfer::{
         entry_metadata, validate_source_child_name, EntryMetadata, TransferSourceEntry,
@@ -180,14 +181,6 @@ fn name_collision(location: &Location) -> TransferError {
     crate::tr_format!(
         "Имена конфликтуют в назначении: {location}",
         "Names collide at the destination: {location}"
-    )
-    .into()
-}
-
-fn stale(location: &Location) -> TransferError {
-    crate::tr_format!(
-        "После построения плана объект изменился: {location}. Постройте план заново.",
-        "An item changed after planning: {location}. Build the plan again."
     )
     .into()
 }

@@ -18,7 +18,7 @@ pub(in crate::vfs) enum Entry {
 }
 
 pub(in crate::vfs) struct FileInfo {
-    pub(super) size: Option<u64>,
+    pub(in crate::vfs) size: Option<u64>,
     pub(super) modified: Option<Modified>,
 }
 

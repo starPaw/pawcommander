@@ -147,7 +147,7 @@ fn read_small(
     Ok(bytes)
 }
 
-fn stream_difference(
+pub(super) fn stream_difference(
     inputs: [&mut impl Read; 2],
     sizes: [u64; 2],
     cancel: &Cancellation,
