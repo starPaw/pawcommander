@@ -2,22 +2,16 @@ use super::{
     comparison::{
         show_pair, show_progress, ComparisonBody, ComparisonDialog, ComparisonResponse, Phase,
     },
+    sync_profiles::{Direction, Options, ProfilePicker, SyncProfile},
     PawCommander,
 };
 use crate::{
     i18n::text,
     shortcuts::Command,
-    vfs::{Location, Reconcile, ReconcileConflict, SyncChange, SyncPlan, TwoWayPlan},
+    vfs::{Exclusions, Location, Reconcile, ReconcileConflict, SyncChange, SyncPlan, TwoWayPlan},
 };
 use eframe::egui::{self, Key};
 use std::path::{Path, PathBuf};
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Direction {
-    LeftToRight,
-    RightToLeft,
-    Both,
-}
 
 pub(super) enum Plan {
     OneWay(Box<SyncPlan>),
@@ -46,18 +40,18 @@ enum Review {
 
 pub(super) struct FolderSyncDialog {
     folders: [Location; 2],
-    direction: Direction,
-    delete_extra: bool,
+    options: Options,
+    profile: ProfilePicker,
     phase: Phase<Preview>,
     run: u64,
 }
 
 impl FolderSyncDialog {
-    fn new(folders: [Location; 2]) -> Self {
+    fn new(folders: [Location; 2], options: Options, profile: ProfilePicker) -> Self {
         Self {
             folders,
-            direction: Direction::LeftToRight,
-            delete_extra: false,
+            options,
+            profile,
             phase: Phase::Ready,
             run: 0,
         }
@@ -69,17 +63,23 @@ impl FolderSyncDialog {
 
     fn build(&mut self, ctx: &egui::Context) {
         let mut folders = self.folders.clone();
-        let direction = self.direction;
+        let options = self.options.clone();
+        let direction = options.direction;
         if direction == Direction::RightToLeft {
             folders.swap(0, 1);
         }
-        let delete_extra = self.delete_extra;
         self.run = self.run.wrapping_add(1);
         self.phase = Phase::start(ctx, move |progress| {
+            let exclusions = Exclusions::parse(&options.exclusions)?;
             let plan = if direction == Direction::Both {
-                Plan::TwoWay(Box::new(TwoWayPlan::build(folders, progress)?))
+                Plan::TwoWay(Box::new(TwoWayPlan::build(folders, exclusions, progress)?))
             } else {
-                Plan::OneWay(Box::new(SyncPlan::build(folders, delete_extra, progress)?))
+                Plan::OneWay(Box::new(SyncPlan::build(
+                    folders,
+                    options.delete_extra,
+                    exclusions,
+                    progress,
+                )?))
             };
             Ok(Preview {
                 plan,
@@ -105,7 +105,11 @@ impl FolderSyncDialog {
         }
     }
 
-    pub(super) fn show(&mut self, ctx: &egui::Context) -> ComparisonResponse {
+    pub(super) fn show(
+        &mut self,
+        ctx: &egui::Context,
+        profiles: &mut Vec<SyncProfile>,
+    ) -> ComparisonResponse {
         let running = matches!(self.phase, Phase::Running(_));
         let mut build = false;
         let mut review = None;
@@ -115,22 +119,27 @@ impl FolderSyncDialog {
         let modal = egui::Modal::new(egui::Id::unique("folder_sync")).show(ctx, |ui| {
             ui.set_width((ctx.content_rect().width() - 44.0).clamp(200.0, 740.0));
             ui.heading(Command::SyncFolders.label());
-            show_pair(ui, &self.folders);
-            let options = (self.direction, self.delete_extra);
-            ui.add_enabled_ui(!running, |ui| {
+            let changed = ui.add_enabled_ui(!running, |ui| {
+                let pair_changed = self.profile.show(ui, profiles, &mut self.folders, &mut self.options);
+                show_pair(ui, &self.folders, ["Левая папка", "Правая папка"]);
+                let direction = self.options.direction;
+                let delete_extra = self.options.delete_extra;
                 ui.horizontal_wrapped(|ui| {
-                    ui.selectable_value(&mut self.direction, Direction::LeftToRight, text("Слева направо"));
-                    ui.selectable_value(&mut self.direction, Direction::RightToLeft, text("Справа налево"));
-                    ui.selectable_value(&mut self.direction, Direction::Both, text("В обе стороны"));
+                    ui.selectable_value(&mut self.options.direction, Direction::LeftToRight, text("Слева направо"));
+                    ui.selectable_value(&mut self.options.direction, Direction::RightToLeft, text("Справа налево"));
+                    ui.selectable_value(&mut self.options.direction, Direction::Both, text("В обе стороны"));
                 });
-                if self.direction != Direction::Both {
+                if self.options.direction != Direction::Both {
                     ui.checkbox(
-                        &mut self.delete_extra,
+                        &mut self.options.delete_extra,
                         text("Удалять лишние объекты в назначении"),
                     );
                 }
-            });
-            if options != (self.direction, self.delete_extra) {
+                let exclusions_changed = show_exclusions(ui, &mut self.options.exclusions);
+                pair_changed || direction != self.options.direction
+                    || delete_extra != self.options.delete_extra || exclusions_changed
+            }).inner;
+            if changed {
                 self.phase = Phase::Ready;
             }
             ui.separator();
@@ -201,9 +210,40 @@ impl FolderSyncDialog {
     }
 }
 
+fn show_exclusions(ui: &mut egui::Ui, input: &mut String) -> bool {
+    let lines = input.lines().filter(|line| !line.trim().is_empty()).count();
+    let title = if lines == 0 {
+        text("Исключения").to_owned()
+    } else {
+        crate::tr_format!("Исключения ({lines})", "Exclusions ({lines})")
+    };
+    egui::CollapsingHeader::new(title)
+        .id_salt("sync-exclusions")
+        .show(ui, |ui| {
+            ui.small(text("Одно имя или относительный путь на строку. Подстановки * и ? работают внутри имени."));
+            ui.add(
+                egui::TextEdit::multiline(input)
+                    .desired_rows(3)
+                    .desired_width(ui.available_width())
+                    .char_limit(8192)
+                    .hint_text("*.tmp\n.git\ncache/previews"),
+            ).changed()
+        }).body_returned.unwrap_or_default()
+}
+
 fn show_preview(ui: &mut egui::Ui, preview: &Preview, run: u64) -> Option<Review> {
     if preview.checked {
         ui.label(text("План проверен"));
+    }
+    let excluded = match &preview.plan {
+        Plan::OneWay(plan) => plan.excluded_count(),
+        Plan::TwoWay(plan) => plan.excluded_count(),
+    };
+    if excluded > 0 {
+        ui.small(crate::tr_format!(
+            "Исключено объектов: {excluded}",
+            "Excluded items: {excluded}"
+        ));
     }
     match &preview.plan {
         Plan::OneWay(plan) => {
@@ -347,6 +387,10 @@ fn show_relative_path(ui: &mut egui::Ui, path: &Path) {
 }
 
 impl PawCommander {
+    pub(super) fn can_open_folder_sync(&self) -> bool {
+        !self.conflict_open() && (self.can_compare_folders() || !self.sync_profiles.is_empty())
+    }
+
     pub(super) fn enqueue_folder_sync(&mut self, plan: Plan, ctx: &egui::Context) {
         let (folders, label, direction) = match &plan {
             Plan::OneWay(plan) => (plan.folders(), "Синхронизация папок", '→'),
@@ -365,13 +409,37 @@ impl PawCommander {
     }
 
     pub(super) fn open_folder_sync(&mut self, return_focus: Option<egui::Id>, ctx: &egui::Context) {
-        if self.comparison.is_none() && self.can_compare_folders() {
-            let folders = [
-                self.panes[0].tab().path.clone(),
-                self.panes[1].tab().path.clone(),
-            ];
+        if self.comparison.is_none() && self.can_open_folder_sync() {
+            let current = self.can_compare_folders().then(|| {
+                [
+                    self.panes[0].tab().path.clone(),
+                    self.panes[1].tab().path.clone(),
+                ]
+            });
+            let (folders, options, selected) = if let Some(folders) = &current {
+                (folders.clone(), Options::default(), None)
+            } else if let Some(saved) =
+                self.sync_profiles
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, profile)| {
+                        Some((profile.folders()?, profile.options.clone(), Some(index)))
+                    })
+            {
+                saved
+            } else {
+                self.notice = Some((
+                    text("Папки профиля несовместимы с этой системой.").into(),
+                    true,
+                ));
+                return;
+            };
             self.comparison = Some(ComparisonDialog::new(
-                ComparisonBody::Sync(FolderSyncDialog::new(folders)),
+                ComparisonBody::Sync(Box::new(FolderSyncDialog::new(
+                    folders,
+                    options,
+                    ProfilePicker::new(current, selected),
+                ))),
                 return_focus,
                 ctx,
             ));

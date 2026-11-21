@@ -291,6 +291,14 @@ Later plans use the saved state to distinguish new items from deletions. If both
 
 After a stop or interruption, build a fresh plan for the same two folders. Differences from an interrupted run require a choice before you can apply the new plan. If PawCommander reports a retained staging folder, use the displayed path to inspect the copies. An original held during replacement or deletion is under `previous` inside that folder. Restore it if its original name is free. Save any other needed versions outside both synchronized folders and move the retained staging folder out of the pair before building a new plan. If the folders match after recovery, **Save common state** completes the review.
 
+## Sync profiles on macOS
+
+Open the two local or SFTP folders, then open **Folder sync preview**. Choose the direction and exclusions, then use **Save profile** to name this setup. A profile keeps the two folder locations, the direction, exclusions and the one-way option to remove destination-only items. You can build a fresh preview for a saved pair while browsing elsewhere. Use **Use folders from panes** to replace a saved pair and **Update profile** to save edits or rename it.
+
+Enter one exclusion per line. A name such as `*.tmp` or `.git` matches at any depth. Use `cache/previews` for a path from the folder root, or `./cache` to match `cache` only at the root. `*` and `?` match within a name. Matching is case-insensitive. Excluding a folder also excludes its contents. The preview counts each excluded folder once per pane. Deleting or replacing a folder that contains an excluded item stops planning and identifies the protected path.
+
+Changing the exclusion rules starts a new comparison scope for two-way sync. The next verified save or successful application establishes the shared state for that scope.
+
 ## Compare files
 
 Select one regular file in each pane and choose **Compare files** from the command palette or Settings. Local and SFTP files can be compared. The result shows both sizes and the first differing byte. For text, the dialog shows additions, removals and neighboring lines with their original line numbers. **Show matches** expands the rest of the text. Byte differences remain visible when decoded lines match across encodings or line endings.

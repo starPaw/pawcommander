@@ -1,7 +1,9 @@
 //! Folder synchronization from reviewed, revalidated snapshots.
 mod apply;
+mod exclusions;
 mod two_way;
 
+pub(crate) use exclusions::Exclusions;
 #[cfg(test)]
 pub(super) use two_way::two_way_round_trip;
 pub(crate) use two_way::{Reconcile, ReconcileConflict, TwoWayPlan};
@@ -46,6 +48,7 @@ pub(crate) struct SyncRow {
 pub(crate) struct SyncPlan {
     folders: [Location; 2],
     observed: [Snapshot; 2],
+    exclusions: Exclusions,
     pub(crate) rows: Vec<SyncRow>,
     pub(crate) copies: usize,
     pub(crate) replacements: usize,
@@ -57,12 +60,14 @@ impl SyncPlan {
     pub(crate) fn build(
         folders: [Location; 2],
         delete_extra: bool,
+        exclusions: Exclusions,
         progress: &mut Progress,
     ) -> Result<Self, TransferError> {
-        let (_, observed) = observe_folders(&folders, progress)?;
+        let (_, observed) = observe_folders(&folders, &exclusions, progress)?;
         let mut plan = Self {
             folders,
             observed,
+            exclusions,
             rows: Vec::new(),
             copies: 0,
             replacements: 0,
@@ -98,6 +103,9 @@ impl SyncPlan {
                 }
                 _ => continue,
             };
+            if change != SyncChange::Copy {
+                destination.protect_excluded(path)?;
+            }
             if source.root.remote() || destination.root.remote() {
                 for name in path.iter() {
                     validate_source_child_name(&source.root, name)?;
@@ -117,7 +125,14 @@ impl SyncPlan {
     }
 
     fn revalidate(&self, progress: &mut Progress) -> Result<[ReadScope; 2], TransferError> {
-        revalidate_folders(&self.folders, &self.observed, progress)
+        revalidate_folders(&self.folders, &self.observed, &self.exclusions, progress)
+    }
+
+    pub(crate) fn excluded_count(&self) -> usize {
+        self.observed
+            .iter()
+            .map(|snapshot| snapshot.excluded.len())
+            .sum()
     }
 }
 
@@ -214,17 +229,22 @@ struct Observed {
 struct Snapshot {
     root: Location,
     entries: BTreeMap<PathBuf, Observed>,
+    excluded: BTreeSet<PathBuf>,
 }
 
 fn revalidate_folders(
     folders: &[Location; 2],
     observed: &[Snapshot; 2],
+    exclusions: &Exclusions,
     progress: &mut Progress,
 ) -> Result<[ReadScope; 2], TransferError> {
-    let (scopes, current) = observe_folders(folders, progress)?;
+    let (scopes, current) = observe_folders(folders, exclusions, progress)?;
     let cancel = progress.cancellation();
     for (before, after) in observed.iter().zip(current) {
-        if before.root != after.root || before.entries.len() != after.entries.len() {
+        if before.root != after.root
+            || before.entries.len() != after.entries.len()
+            || before.excluded != after.excluded
+        {
             return Err(stale(&before.root));
         }
         for (path, entry) in &before.entries {
@@ -246,6 +266,7 @@ fn revalidate_folders(
 
 fn observe_folders(
     folders: &[Location; 2],
+    exclusions: &Exclusions,
     progress: &mut Progress,
 ) -> Result<([ReadScope; 2], [Snapshot; 2]), TransferError> {
     let cancel = progress.cancellation();
@@ -260,8 +281,8 @@ fn observe_folders(
     )?;
     let mut budget = Budget::default();
     let observed = [
-        Snapshot::read(&source, &mut budget, &cancel, progress)?,
-        Snapshot::read(&destination, &mut budget, &cancel, progress)?,
+        Snapshot::read(&source, exclusions, &mut budget, progress)?,
+        Snapshot::read(&destination, exclusions, &mut budget, progress)?,
     ];
     Ok(([source, destination], observed))
 }
@@ -319,7 +340,26 @@ impl Snapshot {
         Self {
             root: scope.parent.location.clone(),
             entries: BTreeMap::new(),
+            excluded: BTreeSet::new(),
         }
+    }
+
+    fn protect_excluded(&self, path: &Path) -> Result<(), TransferError> {
+        if self.excluded.is_empty() {
+            return Ok(());
+        }
+        if let Some(excluded) = self.excluded.range(path.to_owned()..).next()
+            && excluded.starts_with(path)
+        {
+            let location = self.root.join(path);
+            let excluded = excluded.display();
+            return Err(crate::tr_format!(
+                "Замена или удаление {location} затронет исключённый путь {excluded}.",
+                "Replacing or deleting {location} would affect the excluded path {excluded}."
+            )
+            .into());
+        }
+        Ok(())
     }
 
     fn subtree<'a>(&'a self, path: &'a Path) -> impl Iterator<Item = (&'a PathBuf, &'a Observed)> {
@@ -330,8 +370,8 @@ impl Snapshot {
 
     fn read(
         scope: &ReadScope,
+        exclusions: &Exclusions,
         budget: &mut Budget,
-        cancel: &Cancellation,
         progress: &mut Progress,
     ) -> Result<Self, TransferError> {
         let mut snapshot = Self::empty(scope);
@@ -339,8 +379,8 @@ impl Snapshot {
             scope,
             PathBuf::new(),
             scan::Entry::Directory,
+            exclusions,
             budget,
-            cancel,
             progress,
         )?;
         scope.parent.verify()?;
@@ -352,10 +392,11 @@ impl Snapshot {
         scope: &ReadScope,
         relative: PathBuf,
         entry: scan::Entry,
+        exclusions: &Exclusions,
         budget: &mut Budget,
-        cancel: &Cancellation,
         progress: &mut Progress,
     ) -> Result<(), TransferError> {
+        let cancel = progress.cancellation();
         cancel.check()?;
         let location = self.root.join(&relative);
         let metadata = entry_metadata(&location)?.ok_or_else(changed_during_read)?;
@@ -366,10 +407,15 @@ impl Snapshot {
                 }
                 progress.item(location.path());
                 let mut children = BTreeMap::new();
-                scan::visit(scope, &relative, cancel, &mut |name, child| {
+                scan::visit(scope, &relative, &cancel, &mut |name, child| {
                     let path = relative.join(&name);
                     if is_sync_staging(&name) {
                         return Err(retained_stage(&self.root.join(&path)));
+                    }
+                    if exclusions.skips(&path) {
+                        budget.visit(path.as_os_str().len())?;
+                        self.excluded.insert(path);
+                        return Ok(());
                     }
                     budget.visit(path.as_os_str().len() + child.extra_path_bytes())?;
                     if children.insert(path, child).is_some() {
@@ -378,13 +424,13 @@ impl Snapshot {
                     Ok(())
                 })?;
                 for (path, child) in children {
-                    self.observe(scope, path, child, budget, cancel, progress)?;
+                    self.observe(scope, path, child, exclusions, budget, progress)?;
                 }
                 Kind::Directory
             }
             scan::Entry::File(_) if metadata.is_file() => Kind::File(
                 scope
-                    .digest(&relative, progress, cancel)?
+                    .digest(&relative, progress, &cancel)?
                     .ok_or_else(changed_during_read)?,
             ),
             scan::Entry::Link(target) if is_link(&metadata) => Kind::Link(target.into_os_string()),
@@ -395,7 +441,7 @@ impl Snapshot {
             metadata,
             children: None,
         };
-        version.verify(&location, cancel, false)?;
+        version.verify(&location, &cancel, false)?;
         self.entries.insert(relative, Observed { kind, version });
         Ok(())
     }

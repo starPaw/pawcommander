@@ -104,6 +104,7 @@ pub(super) struct BaselineStore {
     pub(super) path: PathBuf,
     pair: [RootId; 2],
     pub(super) panes: [usize; 2],
+    exclusions: Vec<String>,
 }
 
 pub(super) struct PairLock<'a> {
@@ -115,6 +116,8 @@ pub(super) struct PairLock<'a> {
 struct WriteRecord<'a> {
     version: u32,
     pair: &'a [RootId; 2],
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    exclusions: &'a [String],
     entries: Vec<(String, DiskKind)>,
 }
 
@@ -122,6 +125,8 @@ struct WriteRecord<'a> {
 struct ReadRecord {
     version: u32,
     pair: [RootId; 2],
+    #[serde(default)]
+    exclusions: Vec<String>,
     entries: Vec<(String, DiskKind)>,
 }
 
@@ -133,7 +138,11 @@ enum DiskKind {
 }
 
 impl BaselineStore {
-    pub(super) fn new(directory: PathBuf, observed: &[Snapshot; 2]) -> Result<Self, TransferError> {
+    pub(super) fn new(
+        directory: PathBuf,
+        observed: &[Snapshot; 2],
+        exclusions: &[String],
+    ) -> Result<Self, TransferError> {
         let (pair, panes) = capture_pair(observed)?;
         check_storage_location(&directory, &pair)?;
         let seed = serde_json::to_vec(&pair).map_err(err)?;
@@ -144,6 +153,7 @@ impl BaselineStore {
             path,
             pair,
             panes,
+            exclusions: exclusions.to_vec(),
         })
     }
 
@@ -200,6 +210,9 @@ impl BaselineStore {
             {
                 return Err(invalid());
             }
+        }
+        if record.exclusions != self.exclusions {
+            return Ok(None);
         }
         Ok(Some(tree))
     }
@@ -266,6 +279,7 @@ impl PairLock<'_> {
             &WriteRecord {
                 version: VERSION,
                 pair: &self.store.pair,
+                exclusions: &self.store.exclusions,
                 entries,
             },
             MAX_FILE_BYTES,

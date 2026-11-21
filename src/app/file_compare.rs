@@ -100,7 +100,7 @@ impl FileComparisonDialog {
         let modal = egui::Modal::new(egui::Id::unique("file_comparison")).show(ctx, |ui| {
             ui.set_width((ctx.content_rect().width() - 44.0).clamp(200.0, 820.0));
             ui.heading(Command::CompareFiles.label());
-            show_pair(ui, &self.files);
+            show_pair(ui, &self.files, ["Левая панель", "Правая панель"]);
             ui.separator();
             match &mut self.phase {
                 Phase::Ready => {}

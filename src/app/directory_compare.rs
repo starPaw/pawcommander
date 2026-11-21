@@ -49,7 +49,7 @@ impl DirectoryComparison {
         let modal = egui::Modal::new(egui::Id::unique("directory_comparison")).show(ctx, |ui| {
             ui.set_width((ctx.content_rect().width() - 44.0).clamp(200.0, 740.0));
             ui.heading(Command::CompareFolders.label());
-            show_pair(ui, &self.folders);
+            show_pair(ui, &self.folders, ["Левая панель", "Правая панель"]);
             let before = self.mode;
             ui.add_enabled_ui(!running, |ui| {
                 ui.horizontal_wrapped(|ui| {

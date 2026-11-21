@@ -66,6 +66,9 @@ impl PawCommander {
 
     pub(super) const WORKSPACES_KEY: &str = "pawcommander.workspaces";
 
+    #[cfg(target_os = "macos")]
+    pub(super) const SYNC_PROFILES_KEY: &str = "pawcommander.sync_profiles";
+
     pub(super) const BOOKMARKS_KEY: &str = "pawcommander.bookmarks";
 
     pub(super) const FOLDER_VIEWS_KEY: &str = "pawcommander.folder_views";
@@ -83,6 +86,11 @@ impl PawCommander {
         let workspaces = cc
             .storage
             .and_then(|storage| eframe::get_value(storage, Self::WORKSPACES_KEY))
+            .unwrap_or_default();
+        #[cfg(target_os = "macos")]
+        let sync_profiles = cc
+            .storage
+            .and_then(|storage| eframe::get_value(storage, Self::SYNC_PROFILES_KEY))
             .unwrap_or_default();
         let folder_views = cc
             .storage
@@ -174,6 +182,8 @@ impl PawCommander {
             bookmark_menu_open: None,
             bookmark_editor: None,
             workspaces,
+            #[cfg(target_os = "macos")]
+            sync_profiles,
             preview: Preview::new(),
             thumbnails: Thumbnails::new(&cc.egui_ctx),
             quick_look: None,

@@ -49,7 +49,7 @@ fn plan_lists_the_exact_changes_including_a_replaced_directory() {
     symlink("missing", destination.join("link").path()).unwrap();
 
     let mut progress = Progress::default();
-    let plan = SyncPlan::build(pair.clone(), false, &mut progress).unwrap();
+    let plan = SyncPlan::build(pair.clone(), false, Exclusions::default(), &mut progress).unwrap();
     assert_eq!(
         rows(&plan),
         [
@@ -75,7 +75,7 @@ fn plan_lists_the_exact_changes_including_a_replaced_directory() {
         Path::new("missing")
     );
 
-    let mirror = SyncPlan::build(pair, true, &mut progress).unwrap();
+    let mirror = SyncPlan::build(pair, true, Exclusions::default(), &mut progress).unwrap();
     assert_eq!(rows(&mirror)[Path::new("extra")], SyncChange::Delete);
     assert_eq!(mirror.deletions, 2);
 }
@@ -91,6 +91,7 @@ fn plan_rejects_nested_or_aliased_folders() {
     let error = SyncPlan::build(
         [alias.into(), nested.into()],
         true,
+        Exclusions::default(),
         &mut Progress::default(),
     )
     .err()
@@ -105,7 +106,7 @@ fn plan_rejects_nested_or_aliased_folders() {
 fn verification_rejects_new_items_even_when_they_were_not_in_the_plan() {
     let (_temporary, pair) = folders();
     let mut progress = Progress::default();
-    let plan = SyncPlan::build(pair.clone(), false, &mut progress).unwrap();
+    let plan = SyncPlan::build(pair.clone(), false, Exclusions::default(), &mut progress).unwrap();
     fs::write(pair[1].join("new-extra").path(), b"unexpected").unwrap();
     assert!(plan.verify(&mut progress).is_err());
     assert_eq!(
@@ -133,7 +134,7 @@ fn apply_publishes_verified_copies_and_both_type_replacements() {
     fs::write(target.join("extra").path(), b"keep").unwrap();
 
     let mut progress = Progress::default();
-    let plan = SyncPlan::build(pair.clone(), false, &mut progress).unwrap();
+    let plan = SyncPlan::build(pair.clone(), false, Exclusions::default(), &mut progress).unwrap();
     let row_count = plan.rows.len();
     plan.apply(&mut progress).unwrap();
     for (path, bytes) in [
@@ -185,7 +186,7 @@ fn apply_revalidates_before_its_first_mutation() {
     let time = UNIX_EPOCH + Duration::from_secs(1_650_000_000);
     set_modified(item.path(), time);
     let mut progress = Progress::default();
-    let plan = SyncPlan::build(pair.clone(), false, &mut progress).unwrap();
+    let plan = SyncPlan::build(pair.clone(), false, Exclusions::default(), &mut progress).unwrap();
     fs::write(item.path(), b"edit").unwrap();
     set_modified(item.path(), time);
     assert!(plan.apply(&mut progress).unwrap_err().contains("z-replace"));
@@ -196,6 +197,77 @@ fn apply_revalidates_before_its_first_mutation() {
         .all(|(_, status)| *status == Outcome::NotStarted));
     assert_eq!(fs::read(item.path()).unwrap(), b"edit");
     assert!(!target.join("a-copy").path().exists());
+}
+
+#[test]
+fn profile_exclusions_filter_new_subtrees_and_protect_items_on_both_sides() {
+    let (_temporary, [left, right]) = folders();
+    fs::create_dir_all(left.join("new/cache").path()).unwrap();
+    fs::write(left.join("new/cache/value").path(), b"cache").unwrap();
+    fs::write(left.join("new/ignored.tmp").path(), b"temporary").unwrap();
+    fs::write(left.join("new/keep").path(), b"include").unwrap();
+    fs::write(right.join("destination.TMP").path(), b"preserve").unwrap();
+    fs::write(right.join("root-only").path(), b"preserve").unwrap();
+    fs::write(left.join("new/root-only").path(), b"include nested").unwrap();
+    let exclusions = Exclusions::parse("cache\n*.tmp\n./root-only").unwrap();
+    let mut progress = Progress::default();
+    let plan = SyncPlan::build(
+        [left.clone(), right.clone()],
+        true,
+        exclusions,
+        &mut progress,
+    )
+    .unwrap();
+    assert_eq!(
+        rows(&plan),
+        [
+            ("new", SyncChange::Copy),
+            ("new/keep", SyncChange::Copy),
+            ("new/root-only", SyncChange::Copy)
+        ]
+        .map(|(path, change)| (PathBuf::from(path), change))
+        .into()
+    );
+    assert_eq!(plan.excluded_count(), 4);
+    plan.apply(&mut progress).unwrap();
+    assert_eq!(fs::read(right.join("new/keep").path()).unwrap(), b"include");
+    assert_eq!(
+        fs::read(right.join("new/root-only").path()).unwrap(),
+        b"include nested"
+    );
+    assert!(!right.join("new/cache").path().exists());
+    assert!(!right.join("new/ignored.tmp").path().exists());
+    assert_eq!(
+        fs::read(right.join("destination.TMP").path()).unwrap(),
+        b"preserve"
+    );
+    assert_eq!(
+        fs::read(right.join("root-only").path()).unwrap(),
+        b"preserve"
+    );
+}
+
+#[test]
+fn excluded_child_blocks_a_parent_replacement_or_deletion() {
+    let (_temporary, pair) = folders();
+    fs::create_dir_all(pair[1].join("branch/deep").path()).unwrap();
+    let protected = pair[1].join("branch/deep/keep.dat");
+    fs::write(protected.path(), b"protect me").unwrap();
+    for replacement in [false, true] {
+        if replacement {
+            fs::write(pair[0].join("branch").path(), b"regular file").unwrap();
+        }
+        let error = SyncPlan::build(
+            pair.clone(),
+            true,
+            Exclusions::parse("branch/deep/keep.???").unwrap(),
+            &mut Progress::default(),
+        )
+        .err()
+        .expect("the plan would remove an excluded descendant");
+        assert!(error.to_string().contains("branch/deep/keep.dat"));
+        assert_eq!(fs::read(protected.path()).unwrap(), b"protect me");
+    }
 }
 
 pub(in crate::vfs) fn sync_round_trip(remote: &Location) {
@@ -213,7 +285,13 @@ pub(in crate::vfs) fn sync_round_trip(remote: &Location) {
     let time = UNIX_EPOCH + Duration::from_secs(1_650_000_000);
     set_modified(peer.path(), time);
     let mut progress = Progress::default();
-    let plan = SyncPlan::build([source.clone(), destination.clone()], true, &mut progress).unwrap();
+    let plan = SyncPlan::build(
+        [source.clone(), destination.clone()],
+        true,
+        Exclusions::default(),
+        &mut progress,
+    )
+    .unwrap();
     assert_eq!((plan.copies, plan.replacements, plan.deletions), (1, 1, 1));
     plan.verify(&mut progress).unwrap();
     let channel = sftp::remote(&peer).unwrap();
@@ -229,8 +307,13 @@ pub(in crate::vfs) fn sync_round_trip(remote: &Location) {
     assert!(destination.join("extra").path().is_file());
     assert!(!destination.join(".new").path().exists());
 
-    let reverse =
-        SyncPlan::build([destination.clone(), source.clone()], false, &mut progress).unwrap();
+    let reverse = SyncPlan::build(
+        [destination.clone(), source.clone()],
+        false,
+        Exclusions::default(),
+        &mut progress,
+    )
+    .unwrap();
     assert_eq!(
         (reverse.copies, reverse.replacements, reverse.deletions),
         (1, 1, 0)
@@ -249,8 +332,13 @@ pub(in crate::vfs) fn sync_round_trip(remote: &Location) {
     fs::create_dir_all(destination.join("extra-tree/old").path()).unwrap();
     fs::write(destination.join("extra-tree/old/file").path(), b"old").unwrap();
     symlink(".new", source.join("link").path()).unwrap();
-    let upload =
-        SyncPlan::build([source.clone(), destination.clone()], true, &mut progress).unwrap();
+    let upload = SyncPlan::build(
+        [source.clone(), destination.clone()],
+        true,
+        Exclusions::default(),
+        &mut progress,
+    )
+    .unwrap();
     assert_eq!(
         (upload.copies, upload.replacements, upload.deletions),
         (2, 1, 4)
@@ -275,4 +363,27 @@ pub(in crate::vfs) fn sync_round_trip(remote: &Location) {
             .to_string_lossy()
             .starts_with(".pawcommander-")
     }));
+
+    fs::create_dir_all(source.join("new-folder/private").path()).unwrap();
+    fs::write(source.join("new-folder/private/keep").path(), b"local only").unwrap();
+    fs::write(source.join("new-folder/include").path(), b"copy").unwrap();
+    fs::write(destination.join("remote.log").path(), b"remote only").unwrap();
+    let plan = SyncPlan::build(
+        [source.clone(), destination.clone()],
+        true,
+        Exclusions::parse("new-folder/private\n*.log").unwrap(),
+        &mut progress,
+    )
+    .unwrap();
+    assert_eq!(plan.excluded_count(), 2);
+    plan.apply(&mut progress).unwrap();
+    assert_eq!(
+        fs::read(destination.join("new-folder/include").path()).unwrap(),
+        b"copy"
+    );
+    assert_eq!(
+        fs::read(destination.join("remote.log").path()).unwrap(),
+        b"remote only"
+    );
+    assert!(!destination.join("new-folder/private").path().exists());
 }

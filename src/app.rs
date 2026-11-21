@@ -36,6 +36,8 @@ mod sidebar;
 #[cfg(target_os = "macos")]
 mod smb_connections;
 mod state;
+#[cfg(target_os = "macos")]
+mod sync_profiles;
 mod tab_strip;
 mod tabs;
 mod toolbar;
@@ -92,6 +94,8 @@ pub struct PawCommander {
     bookmark_menu_open: Option<u64>,
     bookmark_editor: Option<BookmarkEditor>,
     workspaces: Vec<NamedWorkspace>,
+    #[cfg(target_os = "macos")]
+    sync_profiles: Vec<sync_profiles::SyncProfile>,
     preview: Preview,
     thumbnails: Thumbnails,
     quick_look: Option<QuickLook>,
@@ -685,6 +689,8 @@ impl eframe::App for PawCommander {
         eframe::set_value(storage, Self::BOOKMARKS_KEY, &saved_bookmarks);
         eframe::set_value(storage, Self::SESSION_KEY, &session);
         eframe::set_value(storage, Self::WORKSPACES_KEY, &self.workspaces);
+        #[cfg(target_os = "macos")]
+        eframe::set_value(storage, Self::SYNC_PROFILES_KEY, &self.sync_profiles);
         eframe::set_value(storage, Self::FOLDER_VIEWS_KEY, &saved_views);
         self.search.save(storage);
     }
