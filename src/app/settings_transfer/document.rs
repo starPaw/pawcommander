@@ -6,12 +6,7 @@ use crate::{
     theme::Theme,
 };
 use serde::{Deserialize, Serialize};
-use std::{
-    fs::File,
-    io::{Read, Write},
-    os::unix::fs::OpenOptionsExt,
-    path::Path,
-};
+use std::{fs::File, io::Read, os::unix::fs::OpenOptionsExt, path::Path};
 
 const FORMAT: &str = "pawcommander.settings";
 const VERSION: u32 = 1;
@@ -164,24 +159,14 @@ impl Preferences {
                 crate::tr_format!("Could not save the settings file ({error}).", error = error)
             }
         };
-        let parent = path
-            .parent()
-            .ok_or_else(|| text!("Выберите папку для файла настроек.").to_owned())?;
-        let mut file = tempfile::NamedTempFile::new_in(parent).map_err(export_error)?;
-        serde_json::to_writer_pretty(
-            &mut file,
-            &Export {
-                format: FORMAT,
-                version: VERSION,
-                preferences: self,
-            },
-        )
+        let mut contents = serde_json::to_vec_pretty(&Export {
+            format: FORMAT,
+            version: VERSION,
+            preferences: self,
+        })
         .map_err(|_| text!("Не удалось подготовить файл настроек."))?;
-        file.write_all(b"\n").map_err(export_error)?;
-        file.as_file().sync_all().map_err(export_error)?;
-        file.persist_noclobber(path)
-            .map_err(|error| export_error(error.error))?;
-        Ok(())
+        contents.push(b'\n');
+        super::super::export_file::write_new(path, &contents).map_err(export_error)
     }
 }
 

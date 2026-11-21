@@ -28,6 +28,8 @@ pub(super) enum ComparisonBody {
     #[cfg(target_os = "macos")]
     ViewerExtensions(Box<super::extensions::ExtensionsDialog>),
     #[cfg(target_os = "macos")]
+    Diagnostics(Box<super::diagnostics::DiagnosticDialog>),
+    #[cfg(target_os = "macos")]
     Collections(Box<super::collections::CollectionsDialog>),
     #[cfg(target_os = "macos")]
     NewFile(Box<super::file_templates::FileTemplatesDialog>),
@@ -62,6 +64,8 @@ pub(super) enum ComparisonResponse {
     #[cfg(target_os = "macos")]
     ViewerExtensionsChanged(crate::extensions::Catalog),
     #[cfg(target_os = "macos")]
+    ExportDiagnostic(std::path::PathBuf, String, mpsc::Sender<Result<(), String>>),
+    #[cfg(target_os = "macos")]
     CreateFile(
         crate::vfs::file_templates::NewFile,
         mpsc::Sender<Result<(), String>>,
@@ -95,6 +99,8 @@ impl ComparisonDialog {
             #[cfg(target_os = "macos")]
             ComparisonBody::ViewerExtensions(view) => view.poll(),
             #[cfg(target_os = "macos")]
+            ComparisonBody::Diagnostics(view) => view.poll(),
+            #[cfg(target_os = "macos")]
             ComparisonBody::Collections(view) => view.poll(),
             #[cfg(target_os = "macos")]
             ComparisonBody::NewFile(view) => view.poll(),
@@ -127,6 +133,8 @@ impl ComparisonDialog {
             ComparisonBody::SettingsTransfer(view) => return view.show(ctx),
             #[cfg(target_os = "macos")]
             ComparisonBody::ViewerExtensions(view) => return view.show(ctx),
+            #[cfg(target_os = "macos")]
+            ComparisonBody::Diagnostics(view) => return view.show(ctx),
             #[cfg(target_os = "macos")]
             ComparisonBody::Collections(view) => return view.show(ctx, catalog),
             #[cfg(target_os = "macos")]
@@ -175,6 +183,11 @@ impl PawCommander {
         #[cfg(target_os = "macos")]
         if let ComparisonResponse::ViewerExtensionsChanged(catalog) = response {
             self.extensions.catalog = catalog;
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        if let ComparisonResponse::ExportDiagnostic(path, draft, send) = response {
+            self.export_diagnostics(path, draft, send, ctx);
             return;
         }
         if matches!(response, ComparisonResponse::Open) {

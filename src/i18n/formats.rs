@@ -16,6 +16,7 @@ macro_rules! formats {
 }
 
 formats! {
+    "Could not save the diagnostic report ({error})." => ("Не удалось сохранить диагностический отчёт ({error}).", "Diagnostickou zprávu se nepodařilo uložit ({error})."),
     "Could not read the extension package ({error})." => ("Не удалось прочитать пакет расширения ({error}).", "Nepodařilo se přečíst balíček rozšíření ({error})."),
     "Unsupported extension API version {version}." => ("Версия API расширения {version} не поддерживается.", "Verze API rozšíření {version} není podporována."),
     "Could not start the viewer worker ({error})." => ("Не удалось запустить фоновый просмотрщик ({error}).", "Nepodařilo se spustit úlohu náhledu ({error})."),

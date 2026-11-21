@@ -43,6 +43,8 @@ On macOS, **Settings → Transfer settings…** lets you save appearance, keyboa
 
 On macOS, right-click a local file and choose **Preview with an extension…** to run a compatible read-only viewer. The built-in line counter works on text, Markdown, logs and CSV. Install compatible WebAssembly viewers under **Settings → Viewer extensions…**. [Build a viewer extension](docs/viewer-extensions.md)
 
+On macOS, **Settings → Diagnostic report…** prepares a local text report with the app version, macOS version, architecture and an error summary. Select **Add error details** to include recent messages. Review and edit the text before you save it to a file.
+
 On macOS, **Settings → Crash recovery** lists interrupted copies and copy-based moves of local and SFTP files and folders. PawCommander checks the source, destination and partial copy before continuing. For folders it keeps verified children and writes the remainder of incomplete files. **Check and resume move** verifies the full copy before removing the original. If an interruption leaves the intact original in a temporary folder, PawCommander checks it and finishes the move using the published copy. If verification fails, the files remain available for inspection.
 
 On macOS, a local Git working tree shows its branch beside the folder path. The current folder marks modified (`M`), untracked (`?`) and ignored (`!`) entries. Git status refreshes in the background without writing to the repository.
