@@ -3,6 +3,8 @@ use super::directory::{FolderVisit, AUTO_REFRESH_INTERVAL};
 use super::state::FolderMode;
 use super::PawCommander;
 use crate::conflict::{Answer, Conflict, ConflictDialog, Decision};
+#[cfg(target_os = "macos")]
+use crate::file_error::FilePromiseError;
 use crate::file_error::{Failure, MutationError};
 use crate::fs_ops::TransferKind;
 use crate::operations::{Cancellation, Progress, ProgressView, TransferError};
@@ -62,7 +64,7 @@ pub(super) struct Job {
     pub(super) undo: Option<Receiver<UndoJob>>,
 }
 
-pub(super) type JobWork = Box<dyn FnOnce(&mut Progress) -> Result<String, String> + Send>;
+pub(super) type JobWork = Box<dyn FnOnce(&mut Progress) -> Result<String, TransferError> + Send>;
 
 pub(super) type CutRequest = (u64, Vec<Location>);
 
@@ -77,7 +79,7 @@ pub(super) struct PendingJob {
     retry_origin: Option<RetryJob>,
     undo_origin: Option<UndoJob>,
     #[cfg(target_os = "macos")]
-    native_completion: Option<mpsc::Sender<Result<(), String>>>,
+    native_completion: Option<mpsc::Sender<Result<(), TransferError>>>,
 }
 
 #[derive(Default)]
@@ -173,7 +175,7 @@ impl PawCommander {
             PendingJob {
                 label: label.into(),
                 description,
-                work: Box::new(work),
+                work: Box::new(move |progress| work(progress).map_err(TransferError::from)),
                 transfer: None,
                 cut: None,
                 retry_origin: None,
@@ -201,7 +203,7 @@ impl PawCommander {
     pub(super) fn enqueue_new_file(
         &mut self,
         job: crate::vfs::file_templates::NewFile,
-        completion: mpsc::Sender<Result<(), String>>,
+        completion: mpsc::Sender<Result<(), TransferError>>,
         ctx: &egui::Context,
     ) {
         let label = crate::i18n::text!("Создание файла");
@@ -212,7 +214,7 @@ impl PawCommander {
             PendingJob {
                 label: label.into(),
                 description,
-                work: Box::new(move |progress| job.create(progress)),
+                work: Box::new(move |progress| job.create(progress).map_err(TransferError::from)),
                 transfer: Some(TransferInteraction {
                     events: receive,
                     cut_generation: None,
@@ -254,7 +256,7 @@ impl PawCommander {
                 description,
                 work: Box::new(move |progress| {
                     progress.set_copy_verification(verify);
-                    plan.apply(progress)
+                    plan.apply(progress).map_err(TransferError::from)
                 }),
                 transfer: Some(TransferInteraction {
                     events: receive,
@@ -272,54 +274,73 @@ impl PawCommander {
 
     #[cfg(target_os = "macos")]
     pub(super) fn accept_file_promises(&mut self, ctx: &egui::Context) {
-        use crate::native_drag::{PromiseKind, PromiseRequest};
+        while let Some(request) = self.native_drag.next_promise() {
+            self.enqueue_file_promise(request, ctx);
+        }
+    }
 
-        while let Some(PromiseRequest {
+    #[cfg(target_os = "macos")]
+    pub(super) fn enqueue_file_promise(
+        &mut self,
+        request: crate::native_drag::PromiseRequest,
+        ctx: &egui::Context,
+    ) {
+        use crate::native_drag::{PromiseKind, PromiseRequest};
+        use fs_ops::DropDelivery;
+
+        let PromiseRequest {
             source,
             kind,
             target,
             completion,
-        }) = self.native_drag.next_promise()
-        {
-            let label = crate::i18n::text!("Скачивание для принимающего приложения");
-            if self.jobs.start_failed || self.jobs.pending.len() >= MAX_PENDING_JOBS {
-                let error = crate::i18n::text!("Очередь файловых операций недоступна.").to_owned();
-                let _ = completion.send(Err(error.clone()));
-                self.notice = Some((error, true));
-                continue;
-            }
-            let description = format!("{label} · {source} → {}", target.display());
-            let recovery = self.recovery.directory();
-            let verify = self.settings.verify_copies;
-            let (_, events) = mpsc::channel();
-            self.submit_job(
-                ctx,
-                PendingJob {
-                    label: label.into(),
-                    description,
-                    work: Box::new(move |progress| {
-                        progress.resume_directory = recovery;
-                        progress.set_copy_verification(verify);
-                        fs_ops::copy_sftp_for_drop(
-                            &source,
-                            &target,
-                            matches!(kind, PromiseKind::Directory),
-                            progress,
-                        )
-                    }),
-                    transfer: Some(TransferInteraction {
-                        events,
-                        cut_generation: None,
-                        conflict: None,
-                        can_pause: true,
-                    }),
-                    cut: None,
-                    retry_origin: None,
-                    undo_origin: None,
-                    native_completion: Some(completion),
-                },
-            );
+        } = request;
+        if self.jobs.start_failed || self.jobs.pending.len() >= MAX_PENDING_JOBS {
+            let error = FilePromiseError::QueueUnavailable.into();
+            self.notice = Some((crate::i18n::file_error(&error), true));
+            let _ = completion.send(Err(error));
+            return;
         }
+        let label = crate::i18n::text!("Скачивание для принимающего приложения");
+        let description = format!("{label} · {source} → {}", target.display());
+        let recovery = self.recovery.directory();
+        let verify = self.settings.verify_copies;
+        let (_, events) = mpsc::channel();
+        self.submit_job(
+            ctx,
+            PendingJob {
+                label: label.into(),
+                description,
+                work: Box::new(move |progress| {
+                    progress.resume_directory = recovery;
+                    progress.set_copy_verification(verify);
+                    fs_ops::copy_sftp_for_drop(
+                        &source,
+                        &target,
+                        matches!(kind, PromiseKind::Directory),
+                        progress,
+                    )
+                    .map(|delivery| match delivery {
+                        DropDelivery::Completed => {
+                            crate::i18n::text!("Файлы переданы принимающему приложению").into()
+                        }
+                        DropDelivery::CompletedWithWarning => crate::i18n::text!(
+                            "Файл передан. Подробности о предупреждениях в журнале результатов."
+                        )
+                        .into(),
+                    })
+                }),
+                transfer: Some(TransferInteraction {
+                    events,
+                    cut_generation: None,
+                    conflict: None,
+                    can_pause: true,
+                }),
+                cut: None,
+                retry_origin: None,
+                undo_origin: None,
+                native_completion: Some(completion),
+            },
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -346,7 +367,6 @@ impl PawCommander {
                 work: Box::new(move |progress| {
                     crate::vfs::resume_copy::resume(&directory, &offer.id, progress)
                         .map(crate::i18n::resume_completion)
-                        .map_err(|error| crate::i18n::file_error(&error))
                 }),
                 transfer: Some(TransferInteraction {
                     events,
@@ -387,6 +407,7 @@ impl PawCommander {
                     work(progress, &mut |conflict| {
                         ask_conflict(&events, &worker_ctx, &cancel, conflict)
                     })
+                    .map_err(TransferError::from)
                 }),
                 transfer: Some(TransferInteraction {
                     events: receive,
@@ -478,17 +499,12 @@ impl PawCommander {
             #[cfg(target_os = "macos")]
             let worker_completion = native_completion.clone();
             let worker = move || {
-                #[cfg(target_os = "macos")]
-                let report_to_receiver = |result: &Result<String, String>| {
-                    if let Some(completion) = &worker_completion {
-                        let _ = completion.send(result.as_ref().map(|_| ()).map_err(Clone::clone));
-                    }
-                };
                 let fail_to_start = |error: String| {
-                    let result = Err(error);
                     #[cfg(target_os = "macos")]
-                    report_to_receiver(&result);
-                    let _ = tx.send(result);
+                    if let Some(completion) = &worker_completion {
+                        let _ = completion.send(Err(error.clone().into()));
+                    }
+                    let _ = tx.send(Err(error));
                     worker_ctx.request_repaint();
                 };
                 let work = worker_work.lock().unwrap().take().unwrap();
@@ -552,8 +568,12 @@ impl PawCommander {
                 };
                 // The native file promise acknowledges the file operation. History
                 // persistence and recovery record cleanup remain worker follow-up.
+                let display_result = result.as_ref().cloned().map_err(crate::i18n::file_error);
                 #[cfg(target_os = "macos")]
-                report_to_receiver(&result);
+                if let Some(completion) = worker_completion {
+                    let _ = completion.send(result.map(|_| ()));
+                }
+                let result = display_result;
                 let undo_id = undo_id.unwrap_or_else(|| reporter.results.id.clone());
                 let persisted = std::mem::take(&mut reporter.results)
                     .finish(history_label, history_started, &result)
@@ -598,11 +618,13 @@ impl PawCommander {
             #[cfg(not(test))]
             let spawn_result = builder.spawn(worker);
             if let Err(error) = spawn_result {
-                let error = crate::tr_format!("Could not start operation: {error}", error = error);
+                let message =
+                    crate::tr_format!("Could not start operation: {error}", error = error);
                 #[cfg(target_os = "macos")]
                 if let Some(completion) = native_completion {
-                    let _ = completion.send(Err(error.clone()));
-                    self.notice = Some((error, true));
+                    let error = TransferError::io(error, |_| message.clone());
+                    let _ = completion.send(Err(error));
+                    self.notice = Some((message, true));
                     continue;
                 }
                 self.jobs.pending.push_front(PendingJob {
@@ -617,7 +639,7 @@ impl PawCommander {
                     native_completion: None,
                 });
                 self.jobs.start_failed = true;
-                self.notice = Some((error, true));
+                self.notice = Some((message, true));
                 break;
             }
             self.jobs.current = Some(Job {
@@ -763,7 +785,7 @@ impl PawCommander {
                         }
                         Err(error) => {
                             send(job);
-                            Err(crate::i18n::file_error(&error))
+                            Err(error)
                         }
                     }
                 }),
@@ -1027,7 +1049,8 @@ impl PawCommander {
                             "{error}. Available for another attempt: {remaining}.",
                             error = crate::i18n::file_error(&error),
                             remaining = remaining
-                        )),
+                        )
+                        .into()),
                     }
                 }),
                 transfer: Some(TransferInteraction {
@@ -1052,6 +1075,10 @@ impl PawCommander {
             }
             if let Some(undo) = job.undo_origin {
                 self.remember_undo(undo);
+            }
+            #[cfg(target_os = "macos")]
+            if let Some(completion) = job.native_completion {
+                let _ = completion.send(Err(TransferError::Cancelled));
             }
         }
         if self.jobs.pending.is_empty() {

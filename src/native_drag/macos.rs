@@ -345,7 +345,10 @@ impl NativeDrag {
                         }
                         DragItem::Remote(path, kind) => {
                             promised = true;
-                            let provider = self.promises.provider(path, *kind, ctx, &result)?;
+                            let provider = self
+                                .promises
+                                .provider(path, *kind, ctx, &result)
+                                .map_err(|error| crate::i18n::file_error(&error))?;
                             let icon = NSImage::imageNamed(match kind {
                                 PromiseKind::Directory => NSImageNameFolder,
                                 PromiseKind::File => NSImageNameMultipleDocuments,

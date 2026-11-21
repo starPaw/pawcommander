@@ -8,12 +8,13 @@ use crate::file_error::{
     RetryProblem, ScanError, SearchError, SpaceError, SshStage, StagingCleanupError, StagingError,
     StagingRecordAction, TransferPlanError,
 };
-use crate::file_error::{
-    RecoveryRecordAction, RecoveryRecordError, RecoveryRecordProblem, RecoveryRecordSection,
-};
 #[cfg(target_os = "macos")]
 use crate::file_error::{
-    ResumeCheckError, ResumeCheckProblem, ResumeRecordEvent, ResumeRole, SyncError,
+    FilePromiseError, ResumeCheckError, ResumeCheckProblem, ResumeRecordEvent, ResumeRole,
+    SyncError,
+};
+use crate::file_error::{
+    RecoveryRecordAction, RecoveryRecordError, RecoveryRecordProblem, RecoveryRecordSection,
 };
 use crate::operations::TransferError;
 use crate::result_history::{HistoryError, HistoryOpenProblem, HistorySaveProblem};
@@ -50,6 +51,8 @@ pub(crate) fn file_error(error: &TransferError) -> String {
                 Failure::Listing(error) => listing_error(error),
                 Failure::ConflictClosed => text!("Диалог конфликта закрыт").into(),
                 Failure::Conflict(error) => conflict_error(error),
+                #[cfg(target_os = "macos")]
+                Failure::FilePromise(error) => file_promise_error(error),
                 Failure::Mutation(reason) => mutation_error(
                     reason,
                     matches!(error, TransferError::PublicationUnconfirmed(_)),
@@ -66,6 +69,31 @@ pub(crate) fn file_error(error: &TransferError) -> String {
             }
         }
         TransferError::Cancelled => crate::tr_format!("Operation cancelled"),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn file_promise_error(error: &FilePromiseError) -> String {
+    use FilePromiseError::*;
+
+    match error {
+        RemoteSourceRequired(path) => {
+            crate::tr_format!("Expected an SFTP source at {path}.", path = path)
+        }
+        SourceMissing(path) => {
+            crate::tr_format!("The dragged item no longer exists at {path}.", path = path)
+        }
+        SourceTypeChanged(path) => crate::tr_format!(
+            "The dragged item changed type at {path}. Refresh the folder and drag it again.",
+            path = path
+        ),
+        InvalidReceiverUrl => text!("Принимающее приложение не указало путь к файлу.").into(),
+        InvalidDestination(path) => crate::tr_format!(
+            "Invalid destination provided by the receiving application: {path}.",
+            path = path.display()
+        ),
+        QueueUnavailable => text!("Очередь файловых операций недоступна.").into(),
+        QueueDisconnected => text!("Очередь закрылась до подтверждения передачи файла.").into(),
     }
 }
 

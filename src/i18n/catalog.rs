@@ -1253,6 +1253,7 @@ catalog! {
     "Передача принимающему приложению отменена." => ("Delivery to the receiving application was cancelled.", "Doručení přijímající aplikaci bylo zrušeno."),
     "Принимающее приложение не указало путь к файлу." => ("The receiving application did not provide a file path.", "Přijímající aplikace neposkytla cestu k souboru."),
     "Очередь файловых операций недоступна." => ("The file operation queue is unavailable.", "Fronta souborových operací není dostupná."),
+    "Очередь закрылась до подтверждения передачи файла." => ("The queue closed before confirming file delivery.", "Fronta se ukončila před potvrzením doručení souboru."),
     "Скачивание для принимающего приложения" => ("Downloading for the receiving application", "Stahování pro přijímající aplikaci"),
     "Дождитесь завершения файловой операции, затем закройте окно." => ("Wait for the file operation to finish before closing the window.", "Před zavřením okna počkejte na dokončení souborové operace."),
     "Закрыть вкладку {name}" => ("Close tab {name}", "Zavřít kartu {name}"),

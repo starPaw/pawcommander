@@ -6,6 +6,8 @@ use std::{error::Error, fmt, io, path::PathBuf, str::Utf8Error};
 mod archive;
 mod checksum;
 mod conflict;
+#[cfg(target_os = "macos")]
+mod file_promise;
 mod host_key;
 mod metadata;
 mod recovery_record;
@@ -20,6 +22,8 @@ mod transfer_plan;
 pub(crate) use archive::ArchiveError;
 pub(crate) use checksum::{ChecksumError, ManifestLineError};
 pub(crate) use conflict::{ConflictError, ReplacementRefusal};
+#[cfg(target_os = "macos")]
+pub(crate) use file_promise::FilePromiseError;
 pub(crate) use host_key::{HostKeyError, KnownHostEntryError, KnownHostsError, PinError};
 pub(crate) use metadata::{MetadataError, MetadataField, MetadataWarning};
 #[cfg(target_os = "macos")]
@@ -63,6 +67,8 @@ pub(crate) enum Failure {
     Listing(Box<ListingError>),
     ConflictClosed,
     Conflict(Box<ConflictError>),
+    #[cfg(target_os = "macos")]
+    FilePromise(Box<FilePromiseError>),
     Mutation(Box<MutationError>),
     Publication(Box<PublicationError>),
     Staging(Box<StagingError>),
@@ -107,6 +113,8 @@ impl Failure {
             Self::ComparisonPane { cause, .. } => Some(cause.as_ref()),
             Self::Listing(error) => Some(error.as_ref()),
             Self::Conflict(error) => Some(error.as_ref()),
+            #[cfg(target_os = "macos")]
+            Self::FilePromise(error) => Some(error.as_ref()),
             Self::Mutation(error) => Some(error.as_ref()),
             Self::Publication(error) => Some(error.as_ref()),
             Self::Staging(error) => Some(error.as_ref()),
@@ -144,6 +152,8 @@ impl fmt::Display for Failure {
             Self::Listing(error) => fmt::Display::fmt(error, f),
             Self::ConflictClosed => f.write_str("Conflict dialog closed"),
             Self::Conflict(error) => fmt::Display::fmt(error, f),
+            #[cfg(target_os = "macos")]
+            Self::FilePromise(error) => fmt::Display::fmt(error, f),
             Self::Mutation(error) => fmt::Display::fmt(error, f),
             Self::Publication(error) => fmt::Display::fmt(error, f),
             Self::Staging(error) => fmt::Display::fmt(error, f),

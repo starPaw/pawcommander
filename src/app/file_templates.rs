@@ -6,6 +6,7 @@ use super::{
 };
 use crate::{
     i18n::text,
+    operations::TransferError,
     shortcuts::Command,
     vfs::{
         file_templates::{self, Library, NewFile, SavedTemplate, Source, TextEncoding},
@@ -64,7 +65,7 @@ enum Choice {
 
 struct Creation {
     target: Location,
-    result: Receiver<Result<(), String>>,
+    result: Receiver<Result<(), TransferError>>,
 }
 
 pub(super) struct FileTemplatesDialog {
@@ -393,9 +394,11 @@ impl FileTemplatesDialog {
         let pending = self.creating.as_ref()?;
         let error = match pending.result.try_recv() {
             Ok(Ok(())) => return Some(self.creating.take().unwrap().target),
-            Ok(Err(error)) => error,
+            Ok(Err(TransferError::Cancelled)) | Err(TryRecvError::Disconnected) => {
+                text!("Создание файла снято с очереди").into()
+            }
+            Ok(Err(error)) => crate::i18n::file_error(&error),
             Err(TryRecvError::Empty) => return None,
-            Err(TryRecvError::Disconnected) => text!("Создание файла снято с очереди").into(),
         };
         self.creating = None;
         self.notice = Some((error, true));
