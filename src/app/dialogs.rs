@@ -500,9 +500,95 @@ impl PawCommander {
         let Some(mut dialog) = self.dialog.take() else {
             return;
         };
+        let (confirm, cancel) = self.show_file_dialog(ctx, &mut dialog, colors);
+        let guard_close_key = match dialog {
+            Dialog::SelectionRule { .. } => true,
+            #[cfg(target_os = "macos")]
+            Dialog::EditCustomActions(_)
+            | Dialog::RunCustomAction(_)
+            | Dialog::ConnectSmb(_)
+            | Dialog::ExternalEditors(_) => true,
+            _ => false,
+        };
+        if guard_close_key && (confirm || cancel) {
+            let key = if cancel {
+                egui::Key::Escape
+            } else {
+                egui::Key::Enter
+            };
+            if ctx.input(|input| input.key_pressed(key)) {
+                self.guard_picker_close_key(ctx, &[key], key);
+            }
+        }
+        if let Dialog::SelectionRule {
+            kind,
+            tab,
+            location,
+            input,
+            scan,
+            ..
+        } = &mut dialog
+        {
+            if cancel {
+                ctx.request_repaint();
+                return;
+            }
+            if scan.is_none() && !confirm {
+                self.dialog = Some(dialog);
+                return;
+            }
+            let current = self.tab();
+            let rows = current.visible(self.folder_view(self.active));
+            if current.id != *tab
+                || current.path != *location
+                || scan
+                    .as_ref()
+                    .is_some_and(|scan| !Rc::ptr_eq(&scan.rows, &rows))
+            {
+                self.notice = Some((
+                    crate::i18n::text!("Папка или список изменились. Повторите выделение.").into(),
+                    false,
+                ));
+                ctx.request_repaint();
+                return;
+            }
+            if confirm {
+                *scan = kind
+                    .compile(input)
+                    .map(|rule| SelectionScan::new(rule, rows));
+            }
+            if let Some(scan) = scan
+                && scan.step(&current.entries, Instant::now() + Duration::from_millis(4))
+            {
+                self.apply_selection(
+                    SelectionChange::Matches(std::mem::take(&mut scan.matches)),
+                    ctx,
+                );
+                return;
+            }
+            self.dialog = Some(dialog);
+            ctx.request_repaint();
+            return;
+        }
+        if confirm && !cancel {
+            self.confirm_file_dialog(dialog, ctx);
+        } else if !cancel {
+            self.dialog = Some(dialog);
+        }
+        if self.dialog.is_none() && self.dialog_file_focus.is_some() {
+            ctx.request_repaint();
+        }
+    }
+
+    fn show_file_dialog(
+        &mut self,
+        ctx: &egui::Context,
+        dialog: &mut Dialog,
+        colors: Palette,
+    ) -> (bool, bool) {
         let mut cancel = false;
         let mut confirm = false;
-        let title = match &dialog {
+        let title = match &*dialog {
             Dialog::TransferLimits { .. } => crate::i18n::text!("Скорость передачи"),
             Dialog::SelectionRule { command, .. } => command.label(),
             Dialog::NewFolder { .. } => crate::i18n::text!("Новая папка"),
@@ -541,7 +627,7 @@ impl PawCommander {
         };
         // The modal blocks file interactions while a concrete destination is being confirmed.
         egui::Modal::new(egui::Id::unique("file_dialog")).show(ctx, |ui| {
-            let width: f32 = match &dialog {
+            let width: f32 = match &*dialog {
                 Dialog::BatchRename(_) | Dialog::ChangePermissions(_) => 605.0,
                 #[cfg(target_os = "macos")]
                 Dialog::EditCustomActions(_) | Dialog::RunCustomAction(_) | Dialog::ExternalEditors(_) => 605.0,
@@ -550,7 +636,7 @@ impl PawCommander {
             ui.set_width(width);
             ui.heading(title);
             ui.add_space(12.0);
-            match &mut dialog {
+            match &mut *dialog {
                 Dialog::TransferLimits { draft, endpoints } => {
                     super::transfer_limits::show_fields(ui, draft, endpoints);
                 }
@@ -767,7 +853,7 @@ impl PawCommander {
                 }
             }
             ui.add_space(16.0);
-            let valid = match &dialog {
+            let valid = match &*dialog {
                 Dialog::SelectionRule { kind, input, scan, .. } => {
                     scan.is_none() && kind.pattern(input).is_some()
                 }
@@ -799,36 +885,36 @@ impl PawCommander {
             };
             ui.horizontal(|ui| {
                 let cancel_button = ui.button(crate::i18n::text!("Отмена"));
-                if self.dialog_focus && matches!(dialog, Dialog::Trash { .. }) {
+                if self.dialog_focus && matches!(&*dialog, Dialog::Trash { .. }) {
                     cancel_button.request_focus();
                 }
                 #[cfg(target_os = "macos")]
-                if self.dialog_focus && matches!(dialog, Dialog::RunCustomAction(_)) {
+                if self.dialog_focus && matches!(&*dialog, Dialog::RunCustomAction(_)) {
                     cancel_button.request_focus();
                 }
                 cancel = cancel_button.clicked();
-                let label = if matches!(dialog, Dialog::Trash { .. }) {
-                    if matches!(&dialog, Dialog::Trash { paths } if paths.iter().any(Location::remote)) { crate::i18n::text!("Удалить навсегда") } else { crate::i18n::text!("В корзину") }
-                } else if matches!(dialog, Dialog::SelectionRule { .. }) {
+                let label = if matches!(&*dialog, Dialog::Trash { .. }) {
+                    if matches!(&*dialog, Dialog::Trash { paths } if paths.iter().any(Location::remote)) { crate::i18n::text!("Удалить навсегда") } else { crate::i18n::text!("В корзину") }
+                } else if matches!(&*dialog, Dialog::SelectionRule { .. }) {
                     crate::i18n::text!("Выделить")
-                } else if matches!(dialog, Dialog::BatchRename(_)) {
+                } else if matches!(&*dialog, Dialog::BatchRename(_)) {
                     crate::i18n::text!("Переименовать")
-                } else if matches!(dialog, Dialog::ChangePermissions(_)) {
+                } else if matches!(&*dialog, Dialog::ChangePermissions(_)) {
                     crate::i18n::text!("Применить")
-                } else if matches!(dialog, Dialog::CreateArchive { .. } | Dialog::CreateChecksumManifest { .. }) {
+                } else if matches!(&*dialog, Dialog::CreateArchive { .. } | Dialog::CreateChecksumManifest { .. }) {
                     crate::i18n::text!("Создать")
-                } else if matches!(dialog, Dialog::ExtractArchive { .. }) {
+                } else if matches!(&*dialog, Dialog::ExtractArchive { .. }) {
                     crate::i18n::text!("Распаковать")
-                } else if matches!(dialog, Dialog::VerifyArchive { .. }) {
+                } else if matches!(&*dialog, Dialog::VerifyArchive { .. }) {
                     crate::i18n::text!("Проверить")
-                } else if let Dialog::ArchiveEdit { edit, .. } = &dialog {
+                } else if let Dialog::ArchiveEdit { edit, .. } = &*dialog {
                     match edit {
                         ArchiveEdit::Add { .. } => crate::i18n::text!("Добавить"),
                         ArchiveEdit::Rename { .. } => crate::i18n::text!("Переименовать"),
                         ArchiveEdit::Remove(_) => crate::i18n::text!("Удалить"),
                     }
                 } else {
-                    match &dialog {
+                    match &*dialog {
                         #[cfg(target_os = "macos")]
                         Dialog::RunCustomAction(_) => crate::i18n::text!("Запустить"),
                         #[cfg(target_os = "macos")]
@@ -846,7 +932,7 @@ impl PawCommander {
                 };
                 confirm = ui.add_enabled(valid, button).clicked();
             });
-            let submit_on_enter = match dialog {
+            let submit_on_enter = match &*dialog {
                 Dialog::TransferLimits { .. } | Dialog::Trash { .. } | Dialog::BatchRename(_) | Dialog::ChangePermissions(_) | Dialog::CreateArchive { .. } | Dialog::ExtractArchive { .. } | Dialog::VerifyArchive { .. } | Dialog::ArchiveEdit { .. } => false,
                 #[cfg(target_os = "macos")]
                 Dialog::EditCustomActions(_) | Dialog::RunCustomAction(_) | Dialog::ConnectSmb(_) | Dialog::ExternalEditors(_) => false,
@@ -862,249 +948,171 @@ impl PawCommander {
                 cancel = true;
             }
         });
-        let guard_close_key = match dialog {
-            Dialog::SelectionRule { .. } => true,
+        (confirm, cancel)
+    }
+
+    fn confirm_file_dialog(&mut self, dialog: Dialog, ctx: &egui::Context) {
+        match dialog {
+            Dialog::TransferLimits { draft, .. } => self.apply_transfer_limits(draft, ctx),
+            Dialog::SelectionRule { .. } => unreachable!("rule handled above"),
             #[cfg(target_os = "macos")]
-            Dialog::EditCustomActions(_)
-            | Dialog::RunCustomAction(_)
-            | Dialog::ConnectSmb(_)
-            | Dialog::ExternalEditors(_) => true,
-            _ => false,
-        };
-        if guard_close_key && (confirm || cancel) {
-            let key = if cancel {
-                egui::Key::Escape
-            } else {
-                egui::Key::Enter
-            };
-            if ctx.input(|input| input.key_pressed(key)) {
-                self.guard_picker_close_key(ctx, &[key], key);
+            Dialog::EditCustomActions(editor) => {
+                self.settings.custom_actions = editor.into_templates();
             }
-        }
-        if let Dialog::SelectionRule {
-            kind,
-            tab,
-            location,
-            input,
-            scan,
-            ..
-        } = &mut dialog
-        {
-            if cancel {
-                ctx.request_repaint();
-                return;
-            }
-            if scan.is_none() && !confirm {
-                self.dialog = Some(dialog);
-                return;
-            }
-            let current = self.tab();
-            let rows = current.visible(self.folder_view(self.active));
-            if current.id != *tab
-                || current.path != *location
-                || scan
-                    .as_ref()
-                    .is_some_and(|scan| !Rc::ptr_eq(&scan.rows, &rows))
-            {
-                self.notice = Some((
-                    crate::i18n::text!("Папка или список изменились. Повторите выделение.").into(),
-                    false,
-                ));
-                ctx.request_repaint();
-                return;
-            }
-            if confirm {
-                *scan = kind
-                    .compile(input)
-                    .map(|rule| SelectionScan::new(rule, rows));
-            }
-            if let Some(scan) = scan
-                && scan.step(&current.entries, Instant::now() + Duration::from_millis(4))
-            {
-                self.apply_selection(
-                    SelectionChange::Matches(std::mem::take(&mut scan.matches)),
-                    ctx,
-                );
-                return;
-            }
-            self.dialog = Some(dialog);
-            ctx.request_repaint();
-            return;
-        }
-        if confirm && !cancel {
-            match dialog {
-                Dialog::TransferLimits { draft, .. } => self.apply_transfer_limits(draft, ctx),
-                Dialog::SelectionRule { .. } => unreachable!("rule handled above"),
-                #[cfg(target_os = "macos")]
-                Dialog::EditCustomActions(editor) => {
-                    self.settings.custom_actions = editor.into_templates();
+            #[cfg(target_os = "macos")]
+            Dialog::ExternalEditors(editors) => self.settings.external_editors = *editors,
+            #[cfg(target_os = "macos")]
+            Dialog::RunCustomAction(preview) => {
+                if let Some(invocation) = preview.into_invocation() {
+                    self.launch_custom_action(invocation, ctx);
                 }
-                #[cfg(target_os = "macos")]
-                Dialog::ExternalEditors(editors) => self.settings.external_editors = *editors,
-                #[cfg(target_os = "macos")]
-                Dialog::RunCustomAction(preview) => {
-                    if let Some(invocation) = preview.into_invocation() {
-                        self.launch_custom_action(invocation, ctx);
-                    }
-                }
-                #[cfg(target_os = "macos")]
-                Dialog::ConnectSmb(form) => self.connect_smb(*form, ctx),
-                #[cfg(target_os = "macos")]
-                Dialog::CreateLink(form) => form.submit(self, ctx),
-                Dialog::NewFolder { parent, name } => self.start_described_job(
-                    ctx,
+            }
+            #[cfg(target_os = "macos")]
+            Dialog::ConnectSmb(form) => self.connect_smb(*form, ctx),
+            #[cfg(target_os = "macos")]
+            Dialog::CreateLink(form) => form.submit(self, ctx),
+            Dialog::NewFolder { parent, name } => self.start_described_job(
+                ctx,
+                crate::i18n::text!("Создание папки"),
+                format!(
+                    "{}: {}",
                     crate::i18n::text!("Создание папки"),
-                    format!(
-                        "{}: {}",
-                        crate::i18n::text!("Создание папки"),
-                        parent.join(&name)
-                    ),
-                    move |progress| {
-                        let target = parent.join(&name);
-                        progress
-                            .results
-                            .plan(vec![(parent.clone(), Some(target.display()))]);
-                        progress.results.begin(&parent);
-                        progress.item(&parent.path().join(&name));
-                        fs_ops::create_directory(&parent, &name).map(|p| {
-                            progress.results.target(&parent, p.display());
-                            crate::tr_format!("Folder created: {}", p.display())
-                        })
-                    },
+                    parent.join(&name)
                 ),
-                Dialog::Rename { source, name } => self.start_described_job(
-                    ctx,
+                move |progress| {
+                    let target = parent.join(&name);
+                    progress
+                        .results
+                        .plan(vec![(parent.clone(), Some(target.display()))]);
+                    progress.results.begin(&parent);
+                    progress.item(&parent.path().join(&name));
+                    fs_ops::create_directory(&parent, &name).map(|p| {
+                        progress.results.target(&parent, p.display());
+                        crate::tr_format!("Folder created: {}", p.display())
+                    })
+                },
+            ),
+            Dialog::Rename { source, name } => self.start_described_job(
+                ctx,
+                crate::i18n::text!("Переименование"),
+                format!(
+                    "{}: {} → {}",
                     crate::i18n::text!("Переименование"),
-                    format!(
-                        "{}: {} → {}",
-                        crate::i18n::text!("Переименование"),
-                        source,
-                        name
-                    ),
-                    move |progress| {
-                        fs_ops::rename_with_undo(&source, &name, progress)
-                            .map(|p| crate::tr_format!("Renamed: {}", p.display()))
-                    },
+                    source,
+                    name
                 ),
-                Dialog::BatchRename(editor) => {
-                    if let Some(plan) = (*editor).into_plan() {
-                        self.start_batch_rename(ctx, plan);
-                    }
+                move |progress| {
+                    fs_ops::rename_with_undo(&source, &name, progress)
+                        .map(|p| crate::tr_format!("Renamed: {}", p.display()))
+                },
+            ),
+            Dialog::BatchRename(editor) => {
+                if let Some(plan) = (*editor).into_plan() {
+                    self.start_batch_rename(ctx, plan);
                 }
-                Dialog::ChangePermissions(editor) => {
-                    if let Some(plan) = (*editor).into_plan() {
-                        let label = Command::ChangePermissions.label();
-                        let description =
-                            format!("{label} ({}) · {}", plan.changes, plan.directory());
-                        self.start_stoppable_job(ctx, label, description, move |progress| {
-                            plan.apply(progress)
-                        });
-                    }
-                }
-                Dialog::CreateArchive {
-                    sources,
-                    directory,
-                    name,
-                    format,
-                    password,
-                } => {
-                    if let Ok(file) = fs_ops::archive_file_name(&name, format) {
-                        let label = Command::CreateArchive.label();
-                        let description = format!("{label} · {}", directory.join(file));
-                        self.start_stoppable_job(ctx, label, description, move |progress| {
-                            fs_ops::create_archive(
-                                &sources,
-                                &directory,
-                                &name,
-                                format,
-                                Some(password.as_str()),
-                                progress,
-                            )
-                        });
-                    }
-                }
-                Dialog::ExtractArchive {
-                    sources,
-                    archive_directory,
-                    other,
-                    address,
-                    password,
-                } => {
-                    if let Ok(directory) =
-                        extraction_destination(&address, &archive_directory, other.as_ref())
-                    {
-                        let label = Command::ExtractArchive.label();
-                        let description = format!("{label} · {}", directory.display());
-                        self.start_conflict_job(
-                            ctx,
-                            label,
-                            description,
-                            move |progress, decide| {
-                                fs_ops::extract_archive(
-                                    &sources,
-                                    &directory,
-                                    Some(password.as_str()),
-                                    progress,
-                                    decide,
-                                )
-                            },
-                        );
-                    }
-                }
-                Dialog::VerifyArchive { archive, password } => {
-                    let label = Command::VerifyArchive.label();
-                    let description = format!("{label} · {}", archive.display());
-                    self.start_stoppable_job(ctx, label, description, move |progress| {
-                        crate::archive::verify_archive(&archive, Some(password.as_str()), progress)
-                    });
-                }
-                Dialog::CreateChecksumManifest {
-                    sources,
-                    directory,
-                    name,
-                } => {
-                    if let Ok(file) = fs_ops::checksum_manifest_name(&name) {
-                        let label = Command::CreateChecksumManifest.label();
-                        let description = format!("{label} · {}", directory.join(file));
-                        self.start_stoppable_job(ctx, label, description, move |progress| {
-                            fs_ops::create_checksum_manifest(&directory, &name, &sources, progress)
-                        });
-                    }
-                }
-                Dialog::ArchiveEdit {
-                    archive,
-                    edit,
-                    password,
-                } => {
-                    let label = archive_edit_command(&edit).label();
-                    let description = format!("{label} · {}", archive.display());
-                    self.start_stoppable_job(ctx, label, description, move |progress| {
-                        fs_ops::edit_archive(&archive, edit, Some(password.as_str()), progress)
-                    });
-                }
-                Dialog::WorkspaceName { editing, name } => {
-                    self.save_workspace_name(editing, name);
-                }
-                Dialog::Trash { paths } => self.start_described_job(
-                    ctx,
-                    crate::i18n::text!("Удаление файлов"),
-                    format!(
-                        "{} ({}): {}",
-                        crate::i18n::text!("Удаление файлов"),
-                        paths.len(),
-                        paths.first().map(Location::display).unwrap_or_default()
-                    ),
-                    move |progress| {
-                        fs_ops::trash_entries_with_progress(&paths, progress)
-                            .map(|n| crate::tr_format!("Items processed: {n}", n = n))
-                    },
-                ),
             }
-        } else if !cancel {
-            self.dialog = Some(dialog);
-        }
-        if self.dialog.is_none() && self.dialog_file_focus.is_some() {
-            ctx.request_repaint();
+            Dialog::ChangePermissions(editor) => {
+                if let Some(plan) = (*editor).into_plan() {
+                    let label = Command::ChangePermissions.label();
+                    let description = format!("{label} ({}) · {}", plan.changes, plan.directory());
+                    self.start_stoppable_job(ctx, label, description, move |progress| {
+                        plan.apply(progress)
+                    });
+                }
+            }
+            Dialog::CreateArchive {
+                sources,
+                directory,
+                name,
+                format,
+                password,
+            } => {
+                if let Ok(file) = fs_ops::archive_file_name(&name, format) {
+                    let label = Command::CreateArchive.label();
+                    let description = format!("{label} · {}", directory.join(file));
+                    self.start_stoppable_job(ctx, label, description, move |progress| {
+                        fs_ops::create_archive(
+                            &sources,
+                            &directory,
+                            &name,
+                            format,
+                            Some(password.as_str()),
+                            progress,
+                        )
+                    });
+                }
+            }
+            Dialog::ExtractArchive {
+                sources,
+                archive_directory,
+                other,
+                address,
+                password,
+            } => {
+                if let Ok(directory) =
+                    extraction_destination(&address, &archive_directory, other.as_ref())
+                {
+                    let label = Command::ExtractArchive.label();
+                    let description = format!("{label} · {}", directory.display());
+                    self.start_conflict_job(ctx, label, description, move |progress, decide| {
+                        fs_ops::extract_archive(
+                            &sources,
+                            &directory,
+                            Some(password.as_str()),
+                            progress,
+                            decide,
+                        )
+                    });
+                }
+            }
+            Dialog::VerifyArchive { archive, password } => {
+                let label = Command::VerifyArchive.label();
+                let description = format!("{label} · {}", archive.display());
+                self.start_stoppable_job(ctx, label, description, move |progress| {
+                    crate::archive::verify_archive(&archive, Some(password.as_str()), progress)
+                });
+            }
+            Dialog::CreateChecksumManifest {
+                sources,
+                directory,
+                name,
+            } => {
+                if let Ok(file) = fs_ops::checksum_manifest_name(&name) {
+                    let label = Command::CreateChecksumManifest.label();
+                    let description = format!("{label} · {}", directory.join(file));
+                    self.start_stoppable_job(ctx, label, description, move |progress| {
+                        fs_ops::create_checksum_manifest(&directory, &name, &sources, progress)
+                    });
+                }
+            }
+            Dialog::ArchiveEdit {
+                archive,
+                edit,
+                password,
+            } => {
+                let label = archive_edit_command(&edit).label();
+                let description = format!("{label} · {}", archive.display());
+                self.start_stoppable_job(ctx, label, description, move |progress| {
+                    fs_ops::edit_archive(&archive, edit, Some(password.as_str()), progress)
+                });
+            }
+            Dialog::WorkspaceName { editing, name } => {
+                self.save_workspace_name(editing, name);
+            }
+            Dialog::Trash { paths } => self.start_described_job(
+                ctx,
+                crate::i18n::text!("Удаление файлов"),
+                format!(
+                    "{} ({}): {}",
+                    crate::i18n::text!("Удаление файлов"),
+                    paths.len(),
+                    paths.first().map(Location::display).unwrap_or_default()
+                ),
+                move |progress| {
+                    fs_ops::trash_entries_with_progress(&paths, progress)
+                        .map(|n| crate::tr_format!("Items processed: {n}", n = n))
+                },
+            ),
         }
     }
 }
