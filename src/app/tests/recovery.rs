@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn recovery_worker_tracks_active_operation_and_clears_known_completion() {
-    for fail in [false, true] {
+    for (fail, replaced) in [(false, false), (true, false), (false, true), (true, true)] {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("recovery");
         let ctx = egui::Context::default();
@@ -33,11 +33,38 @@ fn recovery_worker_tracks_active_operation_and_clears_known_completion() {
         observed.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
         assert!(crate::recovery::scan(&directory).unfinished.is_empty());
+        let marker = std::fs::read_dir(&directory)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        if replaced {
+            std::fs::rename(&marker, root.path().join("original-marker")).unwrap();
+            std::fs::write(&marker, b"preserve the replacement").unwrap();
+        }
         release.send(()).unwrap();
         poll_queue_until(&mut app, &ctx, |app| app.jobs.current.is_none());
         assert!(crate::recovery::scan(&directory).unfinished.is_empty());
-        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
-        assert_eq!(app.notice.as_ref().unwrap().1, fail);
+        let (notice, failed) = app.notice.as_ref().unwrap();
+        let message = if fail {
+            "known operation failure"
+        } else {
+            "done"
+        };
+        assert!(notice.contains(message), "{notice}");
+        assert_eq!(*failed, fail || replaced);
+        if replaced {
+            let history: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(root.path().join("history.json")).unwrap())
+                    .unwrap();
+            assert_eq!(history["records"][0]["message"], message);
+            assert_eq!(history["records"][0]["failed"], fail);
+            assert!(notice.contains(marker.to_str().unwrap()), "{notice}");
+            assert_eq!(std::fs::read(marker).unwrap(), b"preserve the replacement");
+        } else {
+            assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+        }
     }
 }
 
@@ -75,8 +102,12 @@ fn recovery_worker_refuses_to_start_without_persisted_marker() {
     });
     poll_queue_until(&mut app, &ctx, |app| app.jobs.current.is_none());
     assert!(!changed.exists());
-    assert_eq!(std::fs::read(directory).unwrap(), b"foreign file");
-    assert!(app.notice.as_ref().unwrap().1);
+    assert_eq!(std::fs::read(&directory).unwrap(), b"foreign file");
+    let (notice, failed) = app.notice.as_ref().unwrap();
+    assert!(
+        *failed && notice.contains(directory.to_str().unwrap()),
+        "{notice}"
+    );
 }
 
 #[test]
@@ -96,7 +127,18 @@ fn recovery_worker_retains_marker_when_history_cannot_be_saved() {
     });
     poll_queue_until(&mut app, &ctx, |app| app.jobs.current.is_none());
     assert_eq!(crate::recovery::scan(&directory).unfinished.len(), 1);
-    assert!(app.notice.as_ref().unwrap().1);
+    let marker = std::fs::read_dir(&directory)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let (notice, failed) = app.notice.as_ref().unwrap();
+    assert!(
+        *failed && notice.starts_with("finished operation"),
+        "{notice}"
+    );
+    assert!(notice.contains(marker.to_str().unwrap()), "{notice}");
 }
 
 #[test]

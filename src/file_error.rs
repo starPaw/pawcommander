@@ -7,10 +7,9 @@ mod archive;
 mod checksum;
 mod host_key;
 mod metadata;
+mod recovery_record;
 #[cfg(target_os = "macos")]
 mod resume_check;
-#[cfg(target_os = "macos")]
-mod resume_record;
 mod space;
 mod staging;
 #[cfg(target_os = "macos")]
@@ -19,13 +18,13 @@ pub(crate) use archive::ArchiveError;
 pub(crate) use checksum::{ChecksumError, ManifestLineError};
 pub(crate) use host_key::{HostKeyError, KnownHostEntryError, KnownHostsError, PinError};
 pub(crate) use metadata::{MetadataError, MetadataField, MetadataWarning};
+pub(crate) use recovery_record::{
+    RecoveryRecordAction, RecoveryRecordError, RecoveryRecordProblem,
+};
+#[cfg(target_os = "macos")]
+pub(crate) use recovery_record::{ResumeRecordEvent, ResumeRecordSection};
 #[cfg(target_os = "macos")]
 pub(crate) use resume_check::{ResumeCheckError, ResumeCheckProblem, ResumeRole};
-#[cfg(target_os = "macos")]
-pub(crate) use resume_record::{
-    ResumeRecordAction, ResumeRecordError, ResumeRecordEvent, ResumeRecordProblem,
-    ResumeRecordSection,
-};
 pub(crate) use space::{ProbeAction, SftpSpaceFailure, SpaceError};
 pub(crate) use staging::{StagingError, StagingRecordAction};
 #[cfg(target_os = "macos")]
@@ -62,8 +61,7 @@ pub(crate) enum Failure {
     Staging(Box<StagingError>),
     #[cfg(target_os = "macos")]
     ResumeCheck(Box<ResumeCheckError>),
-    #[cfg(target_os = "macos")]
-    ResumeRecord(Box<ResumeRecordError>),
+    RecoveryRecord(Box<RecoveryRecordError>),
     StagingCleanup(Box<StagingCleanupError>),
 }
 
@@ -104,8 +102,7 @@ impl Failure {
             Self::Staging(error) => Some(error.as_ref()),
             #[cfg(target_os = "macos")]
             Self::ResumeCheck(error) => Some(error.as_ref()),
-            #[cfg(target_os = "macos")]
-            Self::ResumeRecord(error) => Some(error.as_ref()),
+            Self::RecoveryRecord(error) => Some(error.as_ref()),
             Self::StagingCleanup(error) => Some(error.as_ref()),
         }
     }
@@ -139,8 +136,7 @@ impl fmt::Display for Failure {
             Self::Staging(error) => fmt::Display::fmt(error, f),
             #[cfg(target_os = "macos")]
             Self::ResumeCheck(error) => fmt::Display::fmt(error, f),
-            #[cfg(target_os = "macos")]
-            Self::ResumeRecord(error) => fmt::Display::fmt(error, f),
+            Self::RecoveryRecord(error) => fmt::Display::fmt(error, f),
             Self::StagingCleanup(error) => fmt::Display::fmt(error, f),
         }
     }
@@ -644,7 +640,7 @@ pub(crate) enum PublicationError {
     RecoveryFinalization {
         target: Location,
         moving: bool,
-        cause: ResumeRecordError,
+        cause: RecoveryRecordError,
     },
     Backup {
         target: Location,

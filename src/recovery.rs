@@ -2,7 +2,10 @@
 //!
 //! All I/O belongs on background workers. Legacy operation records are descriptions.
 //! A separate copy receipt can be selected after its previous worker releases it.
-use crate::file_error::{StagingError, StagingRecordAction};
+use crate::file_error::{
+    RecoveryRecordAction, RecoveryRecordError, RecoveryRecordProblem, StagingError,
+    StagingRecordAction,
+};
 use crate::operations::TransferError;
 use crate::vfs::Location;
 use eframe::egui;
@@ -395,10 +398,16 @@ pub(crate) fn begin(
     label: &str,
     description: &str,
     started: u64,
-) -> io::Result<PendingOperation> {
+) -> Result<PendingOperation, RecoveryRecordError> {
+    let size = || {
+        RecoveryRecordError::new(
+            directory,
+            RecoveryRecordProblem::SizeLimit(MAX_BYTES as u64),
+        )
+    };
     // Bound input before serialization as escaping can amplify its size.
     if label.len().saturating_add(description.len()) > MAX_BYTES {
-        return Err(io::Error::other("Recovery description exceeds 128 KiB"));
+        return Err(size());
     }
     let saved = Saved {
         version: VERSION,
@@ -410,10 +419,24 @@ pub(crate) fn begin(
             planned_staging: Vec::new(),
         },
     };
-    let bytes = serde_json::to_vec(&saved).map_err(io::Error::other)?;
-    if bytes.len() > MAX_BYTES {
-        return Err(io::Error::other("Recovery record exceeds 128 KiB"));
+    let bytes = serde_json::to_vec(&saved)
+        .map_err(|error| RecoveryRecordError::encoding(directory, error))?;
+    // The separator is part of the record read on restart.
+    if bytes.len() >= MAX_BYTES {
+        return Err(size());
     }
+    let (file, path) = store_record(directory, PREFIX, &[&bytes, b"\n"])?;
+    Ok(PendingOperation { file, path })
+}
+
+/// Store complete, locked evidence before allowing a worker to mutate files.
+pub(crate) fn store_record(
+    directory: &Path,
+    prefix: &str,
+    parts: &[&[u8]],
+) -> Result<(File, PathBuf), RecoveryRecordError> {
+    use RecoveryRecordAction::*;
+
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
@@ -421,41 +444,72 @@ pub(crate) fn begin(
         use std::os::unix::fs::DirBuilderExt;
         builder.mode(0o700);
     }
-    builder.create(directory)?;
+    builder
+        .create(directory)
+        .map_err(|error| RecoveryRecordError::io(directory, CreateDirectory, error))?;
     let mut temporary = tempfile::Builder::new()
-        .prefix(PREFIX)
+        .prefix(prefix)
         .suffix(".pending")
-        .tempfile_in(directory)?;
-    temporary.as_file().try_lock().map_err(io::Error::other)?;
-    temporary.write_all(&bytes)?;
-    temporary.write_all(b"\n")?;
-    temporary.as_file().sync_all()?;
-    // Publish only a complete, already locked record. A concurrent startup scan
-    // must never mistake a writer's partly serialized marker for corrupt data.
-    let path = temporary.path().with_extension("json");
+        .tempfile_in(directory)
+        .map_err(|error| RecoveryRecordError::io(directory, CreateFile, error))?;
+    let pending_path = temporary.path().to_owned();
+    match temporary.as_file().try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => {
+            return Err(RecoveryRecordError::new(
+                &pending_path,
+                RecoveryRecordProblem::InUse,
+            ));
+        }
+        Err(TryLockError::Error(error)) => {
+            return Err(RecoveryRecordError::new(
+                &pending_path,
+                RecoveryRecordProblem::Lock(error),
+            ));
+        }
+    }
+    for part in parts {
+        temporary
+            .as_file_mut()
+            .write_all(part)
+            .map_err(|error| RecoveryRecordError::io(&pending_path, WriteInitial, error))?;
+    }
+    temporary
+        .as_file()
+        .sync_all()
+        .map_err(|error| RecoveryRecordError::io(&pending_path, SyncInitial, error))?;
+    let path = pending_path.with_extension("json");
     let file = temporary
         .persist_noclobber(&path)
-        .map_err(|error| error.error)?;
-    // The marker remains conservative evidence if syncing its directory fails.
-    sync_directory(directory)?;
-    Ok(PendingOperation { file, path })
+        .map_err(|error| RecoveryRecordError::io(&path, Publish, error.error))?;
+    // A directory synchronization failure leaves the published evidence in place.
+    sync_directory(directory)
+        .map_err(|error| RecoveryRecordError::io(&path, SyncPublication, error))?;
+    Ok((file, path))
 }
 
 impl PendingOperation {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
     /// Activate this marker only on the worker thread running its operation.
-    pub fn run<R>(&self, work: impl FnOnce() -> R) -> io::Result<R> {
+    pub fn run<R>(&self, work: impl FnOnce() -> R) -> Result<R, RecoveryRecordError> {
         struct Clear;
         impl Drop for Clear {
             fn drop(&mut self) {
                 ACTIVE_MARKER.with(|active| *active.borrow_mut() = None);
             }
         }
-        let clone = self.file.try_clone()?;
+        let clone = self.file.try_clone().map_err(|error| {
+            RecoveryRecordError::io(&self.path, RecoveryRecordAction::Activate, error)
+        })?;
         ACTIVE_MARKER.with(|active| {
             let mut active = active.borrow_mut();
             if active.is_some() {
-                return Err(io::Error::other(
-                    "Recovery worker already has an active marker",
+                return Err(RecoveryRecordError::new(
+                    &self.path,
+                    RecoveryRecordProblem::AlreadyActive,
                 ));
             }
             *active = Some(clone);
@@ -465,28 +519,36 @@ impl PendingOperation {
         Ok(work())
     }
 
-    /// Call only after a normal worker return and successful result persistence.
+    /// Call after a confirmed startup refusal, or a normal return and result persistence.
     /// A caught panic or failed history save must drop the handle instead.
-    pub fn complete(self) -> io::Result<()> {
-        // Retain the lock through deletion so a scanner cannot report a worker
-        // in the small interval between releasing the handle and removal.
-        if !same_owned_marker(&self.file, &self.path)? {
-            return Err(io::Error::other(
-                "Recovery marker identity changed; file preserved",
-            ));
-        }
-        // Identity is checked immediately before unlinking. The application data
-        // directory must remain private: this is not an atomic compare-and-unlink
-        // against hostile same-user changes between these two system calls.
-        fs::remove_file(&self.path)?;
-        let result = sync_directory(
-            self.path
-                .parent()
-                .ok_or_else(|| io::Error::other("Missing recovery directory"))?,
-        );
-        drop(self.file);
-        result
+    pub fn complete(self) -> Result<(), RecoveryRecordError> {
+        remove_record(&self.file, &self.path)
     }
+}
+
+/// Keep the lock through removal. Recovery records live in an application-owned folder.
+pub(crate) fn remove_record(file: &File, path: &Path) -> Result<(), RecoveryRecordError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| RecoveryRecordError::new(path, RecoveryRecordProblem::MissingParent))?;
+    check_record_identity(file, path)?;
+    fs::remove_file(path)
+        .map_err(|error| RecoveryRecordError::io(path, RecoveryRecordAction::Remove, error))?;
+    sync_directory(parent)
+        .map_err(|error| RecoveryRecordError::io(path, RecoveryRecordAction::SyncRemoval, error))
+}
+
+pub(crate) fn check_record_identity(file: &File, path: &Path) -> Result<(), RecoveryRecordError> {
+    // The identity check and unlink rely on the application's private data directory.
+    if !same_owned_marker(file, path).map_err(|error| {
+        RecoveryRecordError::io(path, RecoveryRecordAction::CheckIdentity, error)
+    })? {
+        return Err(RecoveryRecordError::new(
+            path,
+            RecoveryRecordProblem::IdentityChanged,
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn same_owned_marker(owned: &File, path: &Path) -> io::Result<bool> {
@@ -1009,9 +1071,43 @@ mod tests {
         fs::rename(&pending.path, &original).unwrap();
         fs::write(&pending.path, b"foreign replacement").unwrap();
         let replaced_path = pending.path.clone();
-        assert!(pending.complete().is_err());
+        let error = pending.complete().unwrap_err();
+        assert_eq!(error.path, replaced_path);
+        assert!(matches!(
+            error.problem,
+            RecoveryRecordProblem::IdentityChanged
+        ));
         assert_eq!(fs::read(replaced_path).unwrap(), b"foreign replacement");
         assert!(original.is_file());
+    }
+
+    #[test]
+    fn activation_refusal_preserves_the_worker_that_already_holds_a_record() {
+        let root = tempfile::tempdir().unwrap();
+        let active = begin(root.path(), "copy", "running", 1).unwrap();
+        let refused = begin(root.path(), "copy", "not started", 2).unwrap();
+        let other = Location::Local(root.path().join("staging-candidate"));
+        active
+            .run(|| {
+                let error = refused
+                    .run(|| panic!("a refused operation performed work"))
+                    .unwrap_err();
+                assert_eq!(error.path, refused.path());
+                assert!(matches!(
+                    error.problem,
+                    RecoveryRecordProblem::AlreadyActive
+                ));
+                refused.complete().unwrap();
+                plan_staging(&other).unwrap();
+            })
+            .unwrap();
+        drop(active);
+        let report = scan(root.path());
+        let [record] = report.unfinished.as_slice() else {
+            panic!("Expected only the active record")
+        };
+        assert_eq!(record.description, "running");
+        assert_eq!(record.planned_staging, [other.display()]);
     }
 
     #[test]

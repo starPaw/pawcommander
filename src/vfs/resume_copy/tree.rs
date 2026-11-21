@@ -8,7 +8,7 @@ use super::{
     RenamedIdentity, SavedTime, Ticket, TransferError,
 };
 use crate::file_error::{
-    AccessAction, AccessError, ResumeCheckProblem, ResumeRecordProblem, ResumeRole,
+    AccessAction, AccessError, RecoveryRecordProblem, ResumeCheckProblem, ResumeRole,
 };
 use crate::operations::AccessStream;
 use crate::vfs::{
@@ -484,10 +484,10 @@ fn finish(
 ) -> Result<Completion, TransferError> {
     let receipt = &ticket.receipt;
     let Original::Folder(proof) = receipt.original else {
-        return Err(ticket.error(ResumeRecordProblem::InvalidProof).into());
+        return Err(ticket.error(RecoveryRecordProblem::InvalidProof).into());
     };
     if receipt.previous.is_some() {
-        return Err(ticket.error(ResumeRecordProblem::InvalidProof).into());
+        return Err(ticket.error(RecoveryRecordProblem::InvalidProof).into());
     }
     progress.partial_copy_retained = true;
     let owner = ticket.name();
@@ -528,7 +528,9 @@ fn finish(
             .as_ref()
             .is_some_and(|times| times.len() != snapshot.entries.len())
         {
-            return Err(ticket.error(ResumeRecordProblem::InvalidAccessTimes).into());
+            return Err(ticket
+                .error(RecoveryRecordProblem::InvalidAccessTimes)
+                .into());
         }
         draft_verified = true;
         if resuming && reused < snapshot.bytes {

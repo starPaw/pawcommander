@@ -19,7 +19,7 @@ use super::{
 use crate::app::SavedLocation;
 use crate::file_error::{
     AccessAction, AccessError, Failure, MutationError, PublicationError, RecoveryNotice,
-    ResumeCheckProblem, ResumeRecordError, ResumeRecordProblem, ResumeRole, StagingError,
+    RecoveryRecordError, RecoveryRecordProblem, ResumeCheckProblem, ResumeRole, StagingError,
 };
 use crate::i18n::text;
 use crate::operations::{AccessStream, Cancellation, Progress, TransferError};
@@ -275,7 +275,7 @@ fn receipts(directory: &Path) -> PathBuf {
     directory.join("resumable")
 }
 
-pub(crate) fn scan(directory: &Path) -> (Vec<Offer>, Vec<ResumeRecordError>) {
+pub(crate) fn scan(directory: &Path) -> (Vec<Offer>, Vec<RecoveryRecordError>) {
     let mut offers = Vec::new();
     let errors = journal::visit_available(&receipts(directory), |ticket| {
         let paths = ticket.paths()?;
@@ -547,7 +547,7 @@ fn restore_held_source(
             let held = location
                 .clone()
                 .into_location()
-                .ok_or_else(|| ticket.error(ResumeRecordProblem::InvalidPaths))?;
+                .ok_or_else(|| ticket.error(RecoveryRecordProblem::InvalidPaths))?;
             if entry_metadata(&held)?.is_some() || entry_metadata(&paths.source)?.is_none() {
                 return Err(retained_source(
                     &held,
@@ -559,7 +559,7 @@ fn restore_held_source(
         None => return Ok(None),
     };
     let stage = staging_at(&paths.source, &record.stage_name)
-        .ok_or_else(|| ticket.error(ResumeRecordProblem::InvalidPaths))?;
+        .ok_or_else(|| ticket.error(RecoveryRecordProblem::InvalidPaths))?;
     let held = stage.join("source");
     let result = (|| {
         let source_present = entry_metadata(&paths.source)?.is_some();
@@ -601,7 +601,7 @@ fn retained_source(held: &Location, error: TransferError) -> TransferError {
 fn discard_source_stage(ticket: &Ticket, paths: &Paths) -> Result<(), TransferError> {
     if let Some(HeldSource::Verified(record)) = &ticket.holding {
         let stage = staging_at(&paths.source, &record.stage_name)
-            .ok_or_else(|| ticket.error(ResumeRecordProblem::InvalidPaths))?;
+            .ok_or_else(|| ticket.error(RecoveryRecordProblem::InvalidPaths))?;
         if entry_metadata(&stage)?.is_some() {
             discard_stage(&stage, record.stage_identity, ticket.name(), &[])
                 .map_err(|error| retained_source(&stage.join("source"), error))?;
@@ -749,7 +749,7 @@ fn finish_record(
 fn completed_record_error(
     target: &Location,
     moving: bool,
-    cause: ResumeRecordError,
+    cause: RecoveryRecordError,
 ) -> TransferError {
     PublicationError::RecoveryFinalization {
         target: target.clone(),
@@ -766,12 +766,14 @@ pub(crate) fn resume(
 ) -> Result<ResumeCompletion, TransferError> {
     let directory = receipts(directory);
     if !journal::valid_name(OsStr::new(id)) {
-        return Err(ResumeRecordError::new(&directory, ResumeRecordProblem::InvalidName).into());
+        return Err(
+            RecoveryRecordError::new(&directory, RecoveryRecordProblem::InvalidName).into(),
+        );
     }
     let path = directory.join(id);
     let opened = Ticket::open(path.clone()).and_then(|ticket| {
         let ticket =
-            ticket.ok_or_else(|| ResumeRecordError::new(&path, ResumeRecordProblem::InUse))?;
+            ticket.ok_or_else(|| RecoveryRecordError::new(&path, RecoveryRecordProblem::InUse))?;
         let paths = ticket.paths()?;
         Ok((ticket, paths))
     });
@@ -881,7 +883,7 @@ fn finish_copy(
 ) -> Result<Completion, TransferError> {
     let receipt = &ticket.receipt;
     let Original::File(original) = &receipt.original else {
-        return Err(ticket.error(ResumeRecordProblem::InvalidProof).into());
+        return Err(ticket.error(RecoveryRecordProblem::InvalidProof).into());
     };
     let staged = ResumeRole::Staged;
     let owner = ticket.name();
