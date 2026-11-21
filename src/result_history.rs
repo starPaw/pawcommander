@@ -54,6 +54,13 @@ impl Outcome {
     }
 }
 
+pub(crate) enum ChecksumOutcome {
+    Matched,
+    Changed,
+    Missing,
+    Unreadable(TransferError),
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct ItemResult {
     pub source: String,
@@ -536,6 +543,23 @@ impl Results {
         error: Option<&TransferError>,
     ) {
         self.record(source, None, outcome, error.map(crate::i18n::file_error));
+    }
+
+    pub(crate) fn record_checksum(&mut self, source: &Location, outcome: ChecksumOutcome) {
+        use crate::i18n::text;
+
+        let (status, reason) = match outcome {
+            ChecksumOutcome::Matched => (Outcome::Completed, text!("SHA-256 совпала")),
+            ChecksumOutcome::Changed => {
+                (Outcome::Failed, text!("Файл изменён (SHA-256 не совпала)"))
+            }
+            ChecksumOutcome::Missing => (Outcome::Failed, text!("Файл отсутствует")),
+            ChecksumOutcome::Unreadable(error) => {
+                self.record_with_error(source, Outcome::Failed, Some(&error));
+                return;
+            }
+        };
+        self.record(source, None, status, Some(reason.into()));
     }
 
     pub fn finish(

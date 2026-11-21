@@ -602,7 +602,25 @@ impl PawCommander {
                     let label = Command::VerifyChecksumManifest.label();
                     let description = format!("{label} · {manifest}");
                     self.start_stoppable_job(ctx, label, description, move |progress| {
-                        crate::vfs::verify_checksum_manifest(&manifest, progress)
+                        let report = crate::vfs::verify_checksum_manifest(&manifest, progress)
+                            .map_err(|error| crate::i18n::file_error(&error))?;
+                        let summary = crate::tr_format!(
+                            "Matched: {} · changed: {} · missing: {} · read errors: {}",
+                            report.matched,
+                            report.changed,
+                            report.missing,
+                            report.errors,
+                        );
+                        if report.cancelled {
+                            Ok(format!(
+                                "{}\n{summary}",
+                                crate::i18n::text!("Проверка манифеста остановлена")
+                            ))
+                        } else if report.changed + report.missing + report.errors > 0 {
+                            Err(summary)
+                        } else {
+                            Ok(summary)
+                        }
                     });
                 }
             }

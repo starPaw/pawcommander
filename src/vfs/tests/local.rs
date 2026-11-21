@@ -74,7 +74,7 @@ fn local_mutations_keep_typed_conflicts_and_preserve_existing_items() {
     };
     assert!(matches!(
         failure.as_ref(),
-        MutationError::DestinationExists(path) if path == target.path()
+        MutationError::DestinationExists(location) if location == &target
     ));
     assert_eq!(fs::read(source.path()).unwrap(), b"source");
     assert_eq!(fs::read(target.path()).unwrap(), b"target");

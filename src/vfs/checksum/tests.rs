@@ -1,4 +1,5 @@
 use super::*;
+use crate::file_error::{Failure, ManifestLineError};
 use crate::operations::Cancellation;
 use std::fs;
 
@@ -13,13 +14,21 @@ pub(crate) fn checksum_round_trip(directory: &Location) {
         fs::write(path.path(), b"abc").unwrap();
     }
     let target = directory.join("SHA256SUMS");
-    create_checksum_manifest(directory, "SHA256SUMS", &paths, &mut Progress::default()).unwrap();
+    let created =
+        create_checksum_manifest(directory, "SHA256SUMS", &paths, &mut Progress::default())
+            .unwrap();
+    assert_eq!(created, target);
     let manifest = fs::read(target.path()).unwrap();
     assert!(manifest.starts_with(format!("{ABC}  file with spaces.txt\n").as_bytes()));
-    assert!(
+    let conflict =
         create_checksum_manifest(directory, "SHA256SUMS", &paths, &mut Progress::default())
-            .is_err()
-    );
+            .unwrap_err();
+    let canonical_target = target.with_path(target.path().canonicalize().unwrap());
+    assert!(matches!(
+        conflict,
+        TransferError::Failed(Failure::Mutation(reason))
+            if matches!(reason.as_ref(), MutationError::DestinationExists(location) if location == &canonical_target)
+    ));
     assert_eq!(fs::read(target.path()).unwrap(), manifest);
 
     let mut before = Progress::default();
@@ -33,16 +42,16 @@ pub(crate) fn checksum_round_trip(directory: &Location) {
     fs::write(edited.path(), b"xyz").unwrap();
     fs::remove_file(absent.path()).unwrap();
     let mut after = Progress::default();
-    let message = verify_checksum_manifest(&target, &mut after).unwrap_err();
+    let report = verify_checksum_manifest(&target, &mut after).unwrap();
     assert_eq!(
-        message,
-        Totals {
+        report,
+        ChecksumVerification {
             matched: 1,
             changed: 1,
             missing: 1,
             errors: 0,
+            cancelled: false,
         }
-        .message()
     );
     for (row, path, reason) in [
         (
@@ -67,6 +76,55 @@ pub(crate) fn checksum_round_trip(directory: &Location) {
     assert_eq!(fs::read(unchanged.path()).unwrap(), b"abc");
     assert_eq!(fs::read(edited.path()).unwrap(), b"xyz");
     assert_eq!(fs::read(target.path()).unwrap(), manifest);
+    #[cfg(target_os = "macos")]
+    if target.remote() {
+        check_sftp_read_denial(directory, &target, &unchanged);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn check_sftp_read_denial(directory: &Location, manifest: &Location, source: &Location) {
+    use crate::file_error::{AccessAction, AccessCause};
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = fs::metadata(source.path()).unwrap().permissions();
+    fs::set_permissions(source.path(), fs::Permissions::from_mode(0o000)).unwrap();
+    let mut progress = Progress::default();
+    let verification = verify_checksum_manifest(manifest, &mut progress);
+    let creation = create_checksum_manifest(
+        directory,
+        "blocked.sha256",
+        std::slice::from_ref(source),
+        &mut Progress::default(),
+    );
+    fs::set_permissions(source.path(), mode).unwrap();
+
+    assert_eq!(
+        verification.unwrap(),
+        ChecksumVerification {
+            matched: 0,
+            changed: 1,
+            missing: 1,
+            errors: 1,
+            cancelled: false,
+        }
+    );
+    let row = &progress.results.items[0];
+    assert_eq!(row.source, source.display());
+    assert_eq!(row.outcome, Outcome::Failed);
+    let location = source.with_path(source.path().canonicalize().unwrap());
+    let reason = row.reason.as_deref().unwrap();
+    assert!(reason.contains(&location.display()) && reason.contains("SFTP(3)"));
+    assert!(matches!(
+        creation,
+        Err(TransferError::Failed(Failure::Access(error)))
+            if error.location == location && error.action == AccessAction::OpenFile
+                && matches!(&error.cause, AccessCause::Sftp(source)
+                    if source.code() == ssh2::ErrorCode::SFTP(libssh2_sys::LIBSSH2_FX_PERMISSION_DENIED))
+    ));
+    assert!(!directory.join("blocked.sha256").path().exists());
+    assert_eq!(fs::read(source.path()).unwrap(), b"abc");
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 3);
 }
 
 #[test]
@@ -78,29 +136,56 @@ fn checksum_manifest_distinguishes_matches_changes_and_missing_files() {
 #[test]
 fn checksum_parser_validates_paths_and_normalized_duplicates_before_reading_files() {
     let cancel = Cancellation::default();
+    let location = Location::Local("SHA256SUMS".into());
     let tagged = format!(
         "\u{feff}# SHA-256\r\nSHA256 (./nested/data (copy)) = {}\r\n",
         ABC.to_uppercase()
     );
-    let entries = manifest::parse(tagged.as_bytes(), &cancel).unwrap();
+    let entries = manifest::parse(tagged.as_bytes(), &location, &cancel).unwrap();
     assert_eq!(entries[0].path, Path::new("nested/data (copy)"));
     assert_eq!(entries[0].digest[0..4], [0xba, 0x78, 0x16, 0xbf]);
-    for invalid in [
-        format!("{ABC}  ../outside.txt\n"),
-        format!("{ABC}  /outside.txt\n"),
-        format!("{ABC}  sub/../outside.txt\n"),
-        format!("{ABC}  dir/\n"),
-        format!("{ABC}  .\n"),
-        format!("{ABC}  nested/a\n{ABC} *./nested/a\n"),
-        format!("\\{ABC}  escaped\\qname\n"),
-        format!("{}x  invalid-digest\n", &ABC[..63]),
-        format!("{ABC}  nul\0name\n"),
+    for (invalid, expected) in [
+        (format!("{ABC}  ../outside.txt\n"), ManifestLineError::Path),
+        (format!("{ABC}  /outside.txt\n"), ManifestLineError::Path),
+        (
+            format!("{ABC}  sub/../outside.txt\n"),
+            ManifestLineError::Path,
+        ),
+        (format!("{ABC}  dir/\n"), ManifestLineError::Path),
+        (format!("{ABC}  .\n"), ManifestLineError::Path),
+        (
+            format!("\\{ABC}  escaped\\qname\n"),
+            ManifestLineError::Escape,
+        ),
+        (
+            format!("{}x  invalid-digest\n", &ABC[..63]),
+            ManifestLineError::Digest,
+        ),
+        (format!("{ABC}  nul\0name\n"), ManifestLineError::Path),
+        (
+            format!("{ABC}:missing separator\n"),
+            ManifestLineError::Format,
+        ),
     ] {
+        let bytes = format!("# A comment\r\n\n{invalid}");
+        let error = manifest::parse(bytes.as_bytes(), &location, &cancel).unwrap_err();
         assert!(
-            manifest::parse(invalid.as_bytes(), &cancel).is_err(),
+            matches!(
+                error,
+                TransferError::Failed(Failure::Checksum(error))
+                    if matches!(error.as_ref(), ChecksumError::InvalidLine { manifest, row: 3, source }
+                        if manifest == &location && *source == expected)
+            ),
             "{invalid:?}"
         );
     }
+    let bytes = format!("{ABC}  nested/a\n{ABC} *./nested/a\n");
+    assert!(matches!(
+        manifest::parse(bytes.as_bytes(), &location, &cancel),
+        Err(TransferError::Failed(Failure::Checksum(error)))
+            if matches!(error.as_ref(), ChecksumError::DuplicatePath { manifest, row: 2, path }
+                if manifest == &location && path == Path::new("nested/a"))
+    ));
 }
 
 #[cfg(target_os = "macos")]
@@ -161,16 +246,16 @@ fn checksum_manifest_refuses_links_and_accepts_real_nested_files() {
     )
     .unwrap();
     let mut progress = Progress::default();
-    let message = verify_checksum_manifest(&manifest, &mut progress).unwrap_err();
+    let report = verify_checksum_manifest(&manifest, &mut progress).unwrap();
     assert_eq!(
-        message,
-        Totals {
+        report,
+        ChecksumVerification {
             matched: 1,
             changed: 0,
             missing: 0,
             errors: 2,
+            cancelled: false,
         }
-        .message()
     );
     assert_eq!(fs::read(outside.join("data")).unwrap(), b"abc");
 }
@@ -192,14 +277,86 @@ fn checksum_manifest_stops_in_staging_and_preserves_inputs() {
         })
     });
     let mut progress = Progress::with_cancellation(cancel);
-    create_checksum_manifest(
+    let result = create_checksum_manifest(
         &directory,
         "SHA256SUMS",
         std::slice::from_ref(&source),
         &mut progress,
-    )
-    .unwrap();
+    );
+    assert!(matches!(result, Err(TransferError::Cancelled)));
     assert!(progress.results.cancelled);
     assert_eq!(fs::read(source.path()).unwrap(), b"abc");
     assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn checksum_invalid_manifest_keeps_the_diagnostic_on_the_manifest_row() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = Location::Local(temporary.path().canonicalize().unwrap());
+    let path = root.join("bad.sha256");
+    let bytes = format!("# fixture\n{ABC}  missing.txt\n{ABC} *./missing.txt\n");
+    fs::write(path.path(), &bytes).unwrap();
+    let mut progress = Progress::default();
+    let error = verify_checksum_manifest(&path, &mut progress).unwrap_err();
+    assert!(matches!(
+        &error,
+        TransferError::Failed(Failure::Checksum(error))
+            if matches!(error.as_ref(), ChecksumError::DuplicatePath { manifest, row: 3, path: relative }
+                if manifest == &path && relative == Path::new("missing.txt"))
+    ));
+    let [row] = progress.results.items.as_slice() else {
+        panic!("the invalid manifest must have one history row");
+    };
+    assert_eq!(row.source, path.display());
+    assert_eq!(row.outcome, Outcome::Failed);
+    assert_eq!(
+        row.reason.as_deref(),
+        Some(crate::i18n::file_error(&error).as_str())
+    );
+    assert_eq!(fs::read(path.path()).unwrap(), bytes.as_bytes());
+}
+
+#[test]
+fn checksum_verification_stop_keeps_completed_results() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = Location::Local(temporary.path().canonicalize().unwrap());
+    for name in ["first.txt", "stopping.txt", "later.txt"] {
+        fs::write(root.join(name).path(), b"abc").unwrap();
+    }
+    let manifest = root.join("SHA256SUMS");
+    fs::write(
+        manifest.path(),
+        format!("{ABC}  first.txt\n{ABC}  stopping.txt\n{ABC}  later.txt\n"),
+    )
+    .unwrap();
+    let (mut progress, mut view) = Progress::tracked();
+    let cancel = progress.cancellation();
+    let stopping = root.join("stopping.txt");
+    cancel.set_checkpoint(move || view.snapshot().item.as_deref() == Some(stopping.path()));
+    let report = verify_checksum_manifest(&manifest, &mut progress);
+    // Release the view held by the checkpoint, which owns another cancellation handle.
+    cancel.set_checkpoint(|| false);
+    assert_eq!(
+        report.unwrap(),
+        ChecksumVerification {
+            matched: 1,
+            cancelled: true,
+            ..ChecksumVerification::default()
+        }
+    );
+    assert!(progress.results.cancelled);
+    let record = std::mem::take(&mut progress.results)
+        .finish("Verify fixture".into(), 0, &Ok("Stopped".into()))
+        .unwrap();
+    assert_eq!(
+        record
+            .items
+            .iter()
+            .map(|row| row.outcome)
+            .collect::<Vec<_>>(),
+        [Outcome::Completed, Outcome::Cancelled, Outcome::NotStarted,]
+    );
+    assert_eq!(fs::read(root.join("first.txt").path()).unwrap(), b"abc");
+    assert_eq!(fs::read(root.join("stopping.txt").path()).unwrap(), b"abc");
+    assert_eq!(fs::read(root.join("later.txt").path()).unwrap(), b"abc");
 }
