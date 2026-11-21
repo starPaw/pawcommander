@@ -26,6 +26,8 @@ pub(super) enum ComparisonBody {
     #[cfg(target_os = "macos")]
     NewFile(Box<super::file_templates::FileTemplatesDialog>),
     #[cfg(target_os = "macos")]
+    CompatibleNames(Box<super::compatible_names::CompatibleNamesDialog>),
+    #[cfg(target_os = "macos")]
     Sync(Box<super::folder_sync::FolderSyncDialog>),
 }
 
@@ -34,6 +36,8 @@ pub(super) enum ComparisonResponse {
     Close,
     #[cfg(target_os = "macos")]
     ApplySync(super::folder_sync::Plan),
+    #[cfg(target_os = "macos")]
+    ApplyCompatibleNames(Box<crate::vfs::compatible_names::Plan>),
     #[cfg(target_os = "macos")]
     TrashDuplicates(Box<crate::vfs::duplicates::TrashPlan>),
     #[cfg(target_os = "macos")]
@@ -70,6 +74,8 @@ impl ComparisonDialog {
             #[cfg(target_os = "macos")]
             ComparisonBody::NewFile(view) => view.poll(),
             #[cfg(target_os = "macos")]
+            ComparisonBody::CompatibleNames(view) => view.poll(),
+            #[cfg(target_os = "macos")]
             ComparisonBody::Sync(view) => view.poll(),
         }
     }
@@ -92,6 +98,8 @@ impl ComparisonDialog {
             ComparisonBody::Collections(view) => return view.show(ctx, catalog),
             #[cfg(target_os = "macos")]
             ComparisonBody::NewFile(view) => return view.show(ctx, templates),
+            #[cfg(target_os = "macos")]
+            ComparisonBody::CompatibleNames(view) => return view.show(ctx),
             #[cfg(target_os = "macos")]
             ComparisonBody::Sync(view) => return view.show(ctx, profiles),
         };
@@ -130,6 +138,9 @@ impl PawCommander {
         #[cfg(target_os = "macos")]
         match response {
             ComparisonResponse::ApplySync(plan) => self.enqueue_folder_sync(plan, ctx),
+            ComparisonResponse::ApplyCompatibleNames(plan) => {
+                self.enqueue_compatible_names(*plan, ctx)
+            }
             ComparisonResponse::TrashDuplicates(plan) => self.enqueue_duplicate_trash(*plan, ctx),
             ComparisonResponse::RevealItem(path) => self.reveal_search_result(path, ctx),
             _ => {}

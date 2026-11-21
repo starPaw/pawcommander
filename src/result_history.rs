@@ -249,6 +249,13 @@ impl Results {
     /// Observe the existing source-manifest walk without extending it. These
     /// rows remain unstarted until copying begins; traversal alone publishes nothing.
     pub fn capturing(&mut self, source: &Location, target: &Location, entry: &Location) {
+        let Ok(relative) = entry.path().strip_prefix(source.path()) else {
+            return;
+        };
+        self.capturing_target(source, entry, &target.join(relative));
+    }
+
+    pub fn capturing_target(&mut self, source: &Location, entry: &Location, target: &Location) {
         let (Some(root), Some(original)) = (self.active, self.active_source.clone()) else {
             return;
         };
@@ -267,11 +274,9 @@ impl Results {
         if relative.as_os_str().is_empty() || self.nested_index.contains_key(entry) {
             return;
         }
-        if let Some(index) = self.add_row(
-            &original.join(relative),
-            Some(target.join(relative).display()),
-            Some(root),
-        ) {
+        if let Some(index) =
+            self.add_row(&original.join(relative), Some(target.display()), Some(root))
+        {
             self.nested_index.insert(entry.clone(), index);
             if let Some((_, range)) = &mut self.group {
                 range.end = self.items.len();

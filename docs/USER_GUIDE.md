@@ -311,6 +311,16 @@ Open a local or SFTP folder and choose **New file** from Settings or the command
 
 To reuse a file, select it in the pane before opening **New file** and choose **Selected file** as the template. **Save as template** stores a copy in PawCommander's settings for later use. You can also save an edited built-in template. File-based templates preserve the original bytes and accept files up to 4 MiB. After a name conflict, the form keeps your draft so you can enter a different name. PawCommander creates the file without replacing any existing item and selects the new file in the pane.
 
+## Transfer with compatible names on macOS
+
+Open two local folders, select regular files or folders in the source pane, and choose **Transfer with compatible names** from Settings or the command palette. Select **Copy** or **Move**, then choose **Preview names**. The preview lists each proposed path and the reason for the change, including changes within selected folders. Choose **Copy with these names** or **Move with these names** to apply the reviewed plan.
+
+The preview replaces Windows and FAT forbidden characters, prefixes reserved device names, trims trailing dots and spaces, and composes Unicode as NFC. It shortens names for the destination's length limits and uses numbered suffixes for case or Unicode collisions. Compatible names already in the selection keep priority over rewritten variants. The operation checks the source tree and the destination names again before applying the plan. [Windows file naming](https://learn.microsoft.com/en-gb/windows/win32/fileio/naming-a-file), [exFAT filename rules](https://learn.microsoft.com/en-us/windows/win32/fileio/exfat-specification), [Unicode normalization](https://www.unicode.org/reports/tr15/).
+
+On FAT and exFAT, the preview reserves space and names for macOS `._` metadata files. It gives selected files using that prefix a distinct name on the destination. On exFAT, files appear as PawCommander copies them. After an interruption, the result identifies any unfinished output for inspection. [AppleDouble file format](https://datatracker.ietf.org/doc/html/rfc1740#section-5).
+
+**Move** uses an exclusive rename to hold the original tree and verifies the copy before removing files. For a FAT, exFAT or read-only source, choose **Copy**. This command transfers the contents of local regular files and folders and attempts to preserve permissions and timestamps. The plan is limited to 100,000 entries and 32 MiB of paths. The destination limit counts macOS companion files when applicable.
+
 ## One-way folder synchronization on macOS
 
 Open the two folders and choose **Folder sync preview** from Settings or the command palette. Select the source direction and choose **Build plan**. The preview lists each planned copy, replacement and deletion by relative path. It compares regular files by SHA-256 and symbolic links by their target paths.
