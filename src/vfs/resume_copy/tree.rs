@@ -1,11 +1,11 @@
 //! Folder recovery verifies a fresh snapshot against the recorded fingerprint.
 //! Moves retain original access times separately because reading changes them.
 use super::{
-    copy_metadata, copy_suffix, discard_stage, entry_metadata, file_scope, manifest_error,
-    register_copy, rename_for_publication, required_metadata, retained_error, stage_contents,
-    stage_identity, verify_stamp, verify_target, Cancellation, Completion, EntryMetadata,
-    FileProof, Intent, Location, Original, Paths, Progress, Receipt, RenamedIdentity, SavedTime,
-    Ticket, TransferError,
+    copy_metadata, copy_suffix, discard_stage, entry_metadata, file_scope, finish_record,
+    manifest_error, register_copy, rename_for_publication, required_metadata, retained_error,
+    stage_contents, stage_identity, verify_stamp, verify_target, Cancellation, Completion,
+    EntryMetadata, FileProof, Intent, Location, Original, Paths, Progress, Receipt,
+    RenamedIdentity, SavedTime, Ticket, TransferError,
 };
 use crate::file_error::{
     AccessAction, AccessError, ResumeCheckProblem, ResumeRecordProblem, ResumeRole,
@@ -578,8 +578,7 @@ fn finish(
     } else {
         return result.map_err(|error| retained_error(&paths.stage, error));
     }
-    ticket.finish()?;
-    progress.partial_copy_retained = false;
+    finish_record(ticket, paths, progress, committed)?;
     result
 }
 

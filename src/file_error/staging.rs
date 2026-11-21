@@ -2,7 +2,7 @@ use crate::vfs::Location;
 use std::{error::Error, fmt, io};
 
 #[cfg(target_os = "macos")]
-use {crate::operations::TransferError, std::path::PathBuf};
+use {super::ResumeRecordError, crate::operations::TransferError};
 
 #[derive(Debug)]
 pub(crate) enum StagingRecordAction {
@@ -26,14 +26,12 @@ pub(crate) enum StagingError {
     #[cfg(target_os = "macos")]
     ResumeReceipt {
         staging: Location,
-        directory: PathBuf,
-        source: io::Error,
+        source: ResumeRecordError,
     },
     #[cfg(target_os = "macos")]
     ResumeReceiptCleanup {
-        receipt: PathBuf,
         cause: TransferError,
-        source: io::Error,
+        source: ResumeRecordError,
     },
 }
 
@@ -59,29 +57,11 @@ impl fmt::Display for StagingError {
                 write!(f, "Staging journal {action:?} for {staging}: {source}")
             }
             #[cfg(target_os = "macos")]
-            Self::ResumeReceipt {
-                staging,
-                directory,
-                source,
-            } => {
-                write!(
-                    f,
-                    "Could not save resume receipt for {staging} in {}: {source}",
-                    directory.display()
-                )
+            Self::ResumeReceipt { staging, source } => {
+                write!(f, "Could not save resume receipt for {staging}: {source}")
             }
             #[cfg(target_os = "macos")]
-            Self::ResumeReceiptCleanup {
-                receipt,
-                cause,
-                source,
-            } => {
-                write!(
-                    f,
-                    "{cause}. Could not confirm removal of resume receipt {}: {source}",
-                    receipt.display()
-                )
-            }
+            Self::ResumeReceiptCleanup { cause, source } => write!(f, "{cause}. {source}"),
         }
     }
 }

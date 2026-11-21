@@ -18,8 +18,8 @@ use super::{
 };
 use crate::app::SavedLocation;
 use crate::file_error::{
-    AccessAction, AccessError, Failure, MutationError, RecoveryNotice, ResumeCheckProblem,
-    ResumeRecordError, ResumeRecordProblem, ResumeRole, StagingError,
+    AccessAction, AccessError, Failure, MutationError, PublicationError, RecoveryNotice,
+    ResumeCheckProblem, ResumeRecordError, ResumeRecordProblem, ResumeRole, StagingError,
 };
 use crate::i18n::text;
 use crate::operations::{AccessStream, Cancellation, Progress, TransferError};
@@ -370,18 +370,12 @@ fn register_copy(
     let ticket = Ticket::create(&directory, receipt, folder_access_times).map_err(|source| {
         StagingError::ResumeReceipt {
             staging: stage.clone(),
-            directory: directory.clone(),
             source,
         }
     })?;
     if let Err(cause) = create_owner_marker(stage, ticket.name(), cancel) {
         if let Err(source) = ticket.finish() {
-            return Err(StagingError::ResumeReceiptCleanup {
-                receipt: directory.join(ticket.name()),
-                cause,
-                source,
-            }
-            .into());
+            return Err(StagingError::ResumeReceiptCleanup { cause, source }.into());
         }
         return Err(cause);
     }
@@ -706,7 +700,9 @@ fn finish_move(
                     record_source_stage(ticket, location, source_identity, &cancel)?;
                     held_root = Some(location.clone());
                 } else if phase == Phase::Removed && held_root.as_ref() == Some(location) {
-                    ticket.record(&Event::Removed)?;
+                    ticket
+                        .record(&Event::Removed)
+                        .map_err(|error| completed_record_error(&paths.target, true, error))?;
                 }
                 observe(location, phase)
             },
@@ -730,9 +726,37 @@ fn finish_move(
             extra,
         )?;
     }
-    ticket.finish()?;
+    finish_record(ticket, paths, progress, true)
+}
+
+fn finish_record(
+    ticket: &Ticket,
+    paths: &Paths,
+    progress: &mut Progress,
+    completed: bool,
+) -> Result<(), TransferError> {
+    // Staging has been cleaned up. An unremoved receipt is not a retained payload.
     progress.partial_copy_retained = false;
-    Ok(())
+    ticket.finish().map_err(|error| {
+        if completed {
+            completed_record_error(&paths.target, ticket.receipt.intent == Intent::Move, error)
+        } else {
+            error.into()
+        }
+    })
+}
+
+fn completed_record_error(
+    target: &Location,
+    moving: bool,
+    cause: ResumeRecordError,
+) -> TransferError {
+    PublicationError::RecoveryFinalization {
+        target: target.clone(),
+        moving,
+        cause,
+    }
+    .into()
 }
 
 pub(crate) fn resume(
@@ -768,6 +792,7 @@ pub(crate) fn resume(
         .plan([(paths.source.clone(), Some(paths.target.display()))]);
     progress.results.begin(&paths.source);
     progress.set_copy_endpoints(&paths.source, &paths.target);
+    progress.partial_copy_retained = true;
     let moving = ticket.receipt.intent == Intent::Move;
     let mut committed = false;
     let mut removed = false;
@@ -817,7 +842,8 @@ pub(crate) fn resume(
             Outcome::Cancelled
         }
         (Err(TransferError::PublicationUnconfirmed(_)), false) => Outcome::PublicationUnconfirmed,
-        _ => Outcome::PartialCopyRetained,
+        (_, false) if progress.partial_copy_retained => Outcome::PartialCopyRetained,
+        _ => Outcome::Failed,
     };
     if outcome == Outcome::CompletedWithWarning && reason.is_none() {
         reason = Some(partial_metadata.into());
@@ -1015,8 +1041,7 @@ fn finish_copy(
         return result.map_err(|error| retained_error(&paths.stage, error));
     };
     cleanup.map_err(|error| retained_error(&paths.stage, error))?;
-    ticket.finish()?;
-    progress.partial_copy_retained = false;
+    finish_record(ticket, paths, progress, committed)?;
     result
 }
 

@@ -22,7 +22,10 @@ pub(crate) use metadata::{MetadataError, MetadataField, MetadataWarning};
 #[cfg(target_os = "macos")]
 pub(crate) use resume_check::{ResumeCheckError, ResumeCheckProblem, ResumeRole};
 #[cfg(target_os = "macos")]
-pub(crate) use resume_record::{ResumeRecordError, ResumeRecordProblem, ResumeRecordSection};
+pub(crate) use resume_record::{
+    ResumeRecordAction, ResumeRecordError, ResumeRecordEvent, ResumeRecordProblem,
+    ResumeRecordSection,
+};
 pub(crate) use space::{ProbeAction, SftpSpaceFailure, SpaceError};
 pub(crate) use staging::{StagingError, StagingRecordAction};
 #[cfg(target_os = "macos")]
@@ -637,6 +640,12 @@ pub(crate) enum PublicationError {
         expected: u64,
         actual: u64,
     },
+    #[cfg(target_os = "macos")]
+    RecoveryFinalization {
+        target: Location,
+        moving: bool,
+        cause: ResumeRecordError,
+    },
     Backup {
         target: Location,
         backup: Location,
@@ -698,6 +707,15 @@ impl fmt::Display for PublicationError {
                     "SMB destination {target} has {actual} bytes, expected {expected}"
                 )
             }
+            #[cfg(target_os = "macos")]
+            Self::RecoveryFinalization {
+                target,
+                moving,
+                cause,
+            } => {
+                let operation = if *moving { "Move" } else { "Copy" };
+                write!(f, "{operation} completed at {target}. {cause}")
+            }
             Self::Backup {
                 target,
                 backup,
@@ -735,6 +753,8 @@ impl Error for PublicationError {
             Self::SmbUpload { cause, .. } => Some(cause),
             #[cfg(target_os = "macos")]
             Self::SmbTargetChanged(_) | Self::SmbTargetSize { .. } => None,
+            #[cfg(target_os = "macos")]
+            Self::RecoveryFinalization { cause, .. } => Some(cause),
             Self::Backup { cause, .. } | Self::Retained { cause, .. } => Some(cause),
             Self::Rollback { cause, restore, .. } => {
                 if matches!(cause, TransferError::Cancelled) {
