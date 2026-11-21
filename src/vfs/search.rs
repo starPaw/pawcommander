@@ -2,6 +2,7 @@ use super::listing::next_sftp_entry;
 use super::location::{normalize_remote, validate_name, Endpoint, Location};
 use super::sftp::{cached, should_reopen};
 use crate::i18n::text;
+use crate::operations::TransferError;
 use libssh2_sys::LIBSSH2_FX_NO_SUCH_FILE;
 use ssh2::{Error, ErrorCode, FileStat, Sftp};
 use std::cell::Cell;
@@ -19,7 +20,7 @@ pub(crate) struct SftpSearchConnection {
 }
 
 impl SftpSearchConnection {
-    pub(crate) fn open(location: &Location) -> Result<Self, String> {
+    pub(crate) fn open(location: &Location) -> Result<Self, TransferError> {
         let unavailable = || text!("Для поиска подключитесь к серверу по SFTP.").to_owned();
         let endpoint = location.sftp_endpoint().ok_or_else(unavailable)?;
         let channel = cached(endpoint)?.ok_or_else(unavailable)?;
@@ -97,7 +98,7 @@ pub(crate) fn walk(
     if can_read() {
         let connection = SftpSearchConnection::open(folder);
         if can_read() {
-            let connection = connection?;
+            let connection = connection.map_err(|error| crate::i18n::file_error(&error))?;
             let canonical = connection.channel.realpath(folder.path());
             if can_read() {
                 let path = normalize_remote(&canonical.map_err(super::err)?)

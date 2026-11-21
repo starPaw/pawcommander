@@ -5,7 +5,7 @@ pub(crate) use mode::ModeRule;
 use super::location::{normalize_remote, Location};
 use super::sftp::{remote, should_reopen};
 use crate::i18n::text;
-use crate::operations::{Cancellation, Progress};
+use crate::operations::{Cancellation, Progress, TransferError};
 use crate::result_history::Outcome;
 use libssh2_sys::LIBSSH2_FX_PERMISSION_DENIED;
 use mode::MODE_BITS;
@@ -69,7 +69,7 @@ impl PermissionsPreview {
         sources: &[Location],
         rule: &ModeRule,
         cancel: &Cancellation,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, TransferError> {
         let invalid = || text!("Выберите файлы или папки в одной папке SFTP.").to_owned();
         let directory = sources
             .first()
@@ -79,22 +79,19 @@ impl PermissionsPreview {
         for source in sources {
             if !source.same_backend(&directory)
                 || source.path().parent() != Some(directory.path())
-                || normalize_remote(source.path())
-                    .map_err(|error| crate::i18n::file_error(&error))?
-                    .as_os_str()
-                    != source.path().as_os_str()
+                || normalize_remote(source.path())?.as_os_str() != source.path().as_os_str()
             {
-                return Err(invalid());
+                return Err(invalid().into());
             }
         }
-        cancel.check().map_err(super::err)?;
+        cancel.check()?;
         let channel = remote(&directory)?;
         let canonical_directory = channel.realpath(directory.path()).map_err(server_error)?;
         let mut seen = HashSet::new();
         let mut rows = Vec::new();
         let mut changes = 0;
         for source in sources.iter().filter(|&source| seen.insert(source)) {
-            cancel.check().map_err(super::err)?;
+            cancel.check()?;
             let path = canonical_directory.join(source.path().file_name().ok_or_else(invalid)?);
             let change = match Stamp::read(&channel, &path) {
                 Ok(before) => {
@@ -102,7 +99,7 @@ impl PermissionsPreview {
                     changes += usize::from(after != before.perm & MODE_BITS);
                     Ok(PermissionChange { before, after })
                 }
-                Err(error) if error.disconnected() => return Err(error.into_message()),
+                Err(error) if error.disconnected() => return Err(error.into_message().into()),
                 Err(error) => Err(error.into_message()),
             };
             rows.push(PermissionRow {
@@ -122,7 +119,7 @@ impl PermissionsPreview {
         &self.directory
     }
 
-    pub(crate) fn apply(self, progress: &mut Progress) -> Result<String, String> {
+    pub(crate) fn apply(self, progress: &mut Progress) -> Result<String, TransferError> {
         progress
             .results
             .plan_selected_items(self.rows.iter().map(|row| row.source.clone()));
@@ -197,7 +194,7 @@ impl PermissionsPreview {
             failed
         );
         if let Some(reason) = first_error {
-            Err(format!("{summary} {reason}"))
+            Err(format!("{summary} {reason}").into())
         } else if progress.results.cancelled {
             Ok(format!(
                 "{}. {summary}",

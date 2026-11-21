@@ -1192,7 +1192,7 @@ pub(super) fn check_copy_space(
     required: u64,
     target: &Location,
     staging: &Location,
-) -> Result<(), String> {
+) -> Result<(), TransferError> {
     let parent = target
         .parent()
         .ok_or(crate::i18n::text!("Недопустимое назначение"))?;
@@ -1220,7 +1220,7 @@ pub(super) fn check_copy_space(
         ))?;
         u128::from(stat.f_bavail) * u128::from(stat.f_frsize)
     };
-    fs_ops::ensure_copy_space(required, available, parent)
+    fs_ops::ensure_copy_space(required, available, parent).map_err(Into::into)
 }
 
 pub(super) fn rename_for_publication(

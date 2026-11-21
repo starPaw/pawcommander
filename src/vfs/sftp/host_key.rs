@@ -1,4 +1,5 @@
 use super::{Endpoint, InteractiveAuth};
+use crate::operations::TransferError;
 use crate::{i18n::text, name_match::Mask};
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
@@ -91,7 +92,7 @@ impl TrustFiles {
         session: &Session,
         endpoint: &Endpoint,
         interactive: Option<&InteractiveAuth>,
-    ) -> Result<(), String> {
+    ) -> Result<(), TransferError> {
         let (key, _) = session
             .host_key()
             .ok_or_else(|| text!("Сервер не предоставил ключ SSH"))?;

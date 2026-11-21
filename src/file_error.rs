@@ -1,5 +1,6 @@
 use crate::operations::TransferError;
 use crate::vfs::Location;
+use std::net::SocketAddr;
 use std::{error::Error, fmt, io, path::PathBuf, str::Utf8Error};
 
 #[derive(Debug)]
@@ -10,6 +11,7 @@ pub(crate) enum Failure {
         message: String,
     },
     Path(PathError),
+    Connection(Box<ConnectionError>),
     Access(Box<AccessError>),
     ComparisonPane {
         right: bool,
@@ -40,6 +42,7 @@ impl Failure {
             Self::Message(_) | Self::ConflictClosed => None,
             Self::Io { source, .. } => Some(source),
             Self::Path(error) => Some(error),
+            Self::Connection(error) => Some(error.as_ref()),
             Self::Access(error) => Some(error.as_ref()),
             Self::ComparisonPane { cause, .. } => Some(cause.as_ref()),
             Self::Listing(error) => Some(error.as_ref()),
@@ -55,6 +58,7 @@ impl fmt::Display for Failure {
         match self {
             Self::Message(message) | Self::Io { message, .. } => f.write_str(message),
             Self::Path(error) => fmt::Display::fmt(error, f),
+            Self::Connection(error) => fmt::Display::fmt(error, f),
             Self::Access(error) => fmt::Display::fmt(error, f),
             Self::ComparisonPane { right, cause } => {
                 let pane = if *right { "Right pane" } else { "Left pane" };
@@ -65,6 +69,105 @@ impl fmt::Display for Failure {
             Self::Mutation(error) => fmt::Display::fmt(error, f),
             Self::Publication(error) => fmt::Display::fmt(error, f),
             Self::StagingCleanup(error) => fmt::Display::fmt(error, f),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum SshStage {
+    Session,
+    Handshake,
+    AuthenticationMethods,
+    Authentication,
+    Agent,
+    InteractiveAuthentication,
+    Channel,
+}
+
+#[derive(Debug)]
+pub(crate) enum ConnectionError {
+    InvalidEndpoint,
+    Resolve {
+        host: String,
+        source: io::Error,
+    },
+    Connect {
+        endpoint: String,
+        last: Option<(SocketAddr, io::Error)>,
+    },
+    Transport(io::Error),
+    Ssh {
+        stage: SshStage,
+        source: ssh2::Error,
+    },
+    #[cfg(target_os = "macos")]
+    Forward {
+        target: String,
+        source: ssh2::Error,
+    },
+    Route {
+        jump: bool,
+        address: String,
+        cause: TransferError,
+    },
+    Automatic(TransferError),
+    AuthenticationUnconfirmed {
+        interactive: bool,
+    },
+    UnsupportedAuthentication,
+    InteractiveTimeout,
+    HostKeyTimeout,
+    Finalized,
+}
+
+impl fmt::Display for ConnectionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidEndpoint => f.write_str("Invalid SSH endpoint"),
+            Self::Resolve { host, source } => write!(f, "Could not resolve {host}: {source}"),
+            Self::Connect { endpoint, last } => {
+                write!(f, "Could not connect to {endpoint}")?;
+                if let Some((address, source)) = last {
+                    write!(f, " ({address}): {source}")?;
+                }
+                Ok(())
+            }
+            Self::Transport(source) => write!(f, "Could not configure the SSH transport: {source}"),
+            Self::Ssh { stage, source } => write!(f, "SSH {stage:?}: {source}"),
+            #[cfg(target_os = "macos")]
+            Self::Forward { target, source } => {
+                write!(f, "Could not forward TCP to {target}: {source}")
+            }
+            Self::Route {
+                jump,
+                address,
+                cause,
+            } => {
+                let role = if *jump { "Jump host" } else { "Target host" };
+                write!(f, "{role} {address} · {cause}")
+            }
+            Self::Automatic(cause) => write!(f, "Automatic SFTP connection: {cause}"),
+            Self::AuthenticationUnconfirmed { .. } => f.write_str("Authentication unconfirmed"),
+            Self::UnsupportedAuthentication => {
+                f.write_str("No supported SSH authentication method")
+            }
+            Self::InteractiveTimeout => f.write_str("Interactive SSH authentication timed out"),
+            Self::HostKeyTimeout => f.write_str("SSH host key verification timed out"),
+            Self::Finalized => f.write_str("SSH connection already finalized"),
+        }
+    }
+}
+
+impl Error for ConnectionError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Resolve { source, .. } | Self::Transport(source) => Some(source),
+            Self::Connect { last, .. } => last.as_ref().map(|(_, error)| error as &dyn Error),
+            Self::Ssh { source, .. } => Some(source),
+            #[cfg(target_os = "macos")]
+            Self::Forward { source, .. } => Some(source),
+            Self::Route { cause, .. } | Self::Automatic(cause) => Some(cause),
+            _ => None,
         }
     }
 }
@@ -82,7 +185,7 @@ pub(crate) enum AccessAction {
 pub(crate) enum AccessCause {
     Local(io::Error),
     Sftp(ssh2::Error),
-    Connection(String),
+    Connection(Box<TransferError>),
 }
 
 impl From<io::Error> for AccessCause {
@@ -97,9 +200,9 @@ impl From<ssh2::Error> for AccessCause {
     }
 }
 
-impl From<String> for AccessCause {
-    fn from(message: String) -> Self {
-        Self::Connection(message)
+impl From<TransferError> for AccessCause {
+    fn from(error: TransferError) -> Self {
+        Self::Connection(Box::new(error))
     }
 }
 
@@ -108,7 +211,7 @@ impl fmt::Display for AccessCause {
         match self {
             Self::Local(error) => fmt::Display::fmt(error, f),
             Self::Sftp(error) => fmt::Display::fmt(error, f),
-            Self::Connection(message) => f.write_str(message),
+            Self::Connection(error) => fmt::Display::fmt(error, f),
         }
     }
 }
@@ -157,7 +260,7 @@ impl Error for AccessError {
         match &self.cause {
             AccessCause::Local(error) => Some(error),
             AccessCause::Sftp(error) => Some(error),
-            AccessCause::Connection(_) => None,
+            AccessCause::Connection(error) => Some(error.as_ref()),
         }
     }
 }
@@ -355,7 +458,7 @@ pub(crate) enum MutationError {
     OpenSftpRename {
         from: Location,
         to: Location,
-        reason: String,
+        reason: TransferError,
     },
     RenameSftp {
         from: Location,
@@ -374,7 +477,7 @@ pub(crate) enum MutationError {
     SftpRemovalDepth(Location),
     OpenSftpRemoval {
         location: Location,
-        reason: String,
+        reason: TransferError,
     },
     RemoveSftp {
         location: Location,
@@ -474,6 +577,9 @@ impl Error for MutationError {
             Self::CreateSftp { source, .. }
             | Self::RemoveSftp { source, .. }
             | Self::RenameSftp { source, .. } => Some(source),
+            Self::OpenSftpRename { reason, .. } | Self::OpenSftpRemoval { reason, .. } => {
+                Some(reason)
+            }
             Self::Trash { source, .. } => Some(source),
             _ => None,
         }

@@ -3,6 +3,68 @@ use super::*;
 use crate::vfs::cache_media_preview;
 
 #[cfg(target_os = "macos")]
+fn check_sftp_connection_errors(root: &Path) {
+    use crate::file_error::{ConnectionError, Failure, SshStage};
+    use crate::vfs::{
+        sftp::{connect_location_at, TrustFiles},
+        ConnectRequest, InteractiveAuth,
+    };
+    use std::{error::Error, io::Write, net::TcpListener};
+
+    let attempt = |host: &str, port| {
+        let (auth, prompts) = InteractiveAuth::new(|| {});
+        let request = ConnectRequest {
+            endpoint: Endpoint {
+                host: host.into(),
+                port,
+                user: "fixture".into(),
+                key: None,
+                jump: None,
+            },
+            path: ".".into(),
+            password: Default::default(),
+            passphrase: Default::default(),
+            jump_passphrase: Default::default(),
+            use_saved: false,
+            save_key: false,
+        };
+        let trust = TrustFiles::new(root.join("known_hosts"), None);
+        let error = connect_location_at(request, auth, &trust)
+            .err()
+            .expect("expected connection failure");
+        assert!(prompts.try_recv().is_err());
+        let TransferError::Failed(Failure::Connection(cause)) = error else {
+            panic!("lost connection cause: {error:?}");
+        };
+        cause
+    };
+
+    let invalid = "not:an:ipv6:address";
+    let resolve = attempt(invalid, 22);
+    assert!(matches!(resolve.as_ref(), ConnectionError::Resolve { host, .. } if host == invalid));
+    assert!(resolve.source().unwrap().is::<std::io::Error>());
+
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .write_all(b"SSH-2.0-fixture-without-key-exchange\r\n")
+            .unwrap();
+    });
+    let handshake = attempt("127.0.0.1", port);
+    server.join().unwrap();
+    assert!(matches!(
+        handshake.as_ref(),
+        ConnectionError::Ssh {
+            stage: SshStage::Handshake,
+            ..
+        }
+    ));
+    assert!(handshake.source().unwrap().is::<ssh2::Error>());
+}
+
+#[cfg(target_os = "macos")]
 fn check_sftp_access_errors(remote_root: &Location) {
     use crate::file_error::{AccessAction, AccessCause, Failure};
     use std::os::unix::fs::{symlink, PermissionsExt};
@@ -1038,6 +1100,8 @@ fn check_sftp_archive_round_trip(remote_root: &Location) {
 fn openssh_round_trip_and_host_verification() {
     let root =
         PathBuf::from(std::env::var_os("PAWCOMMANDER_TEST_SFTP_ROOT").expect("test server root"));
+    #[cfg(target_os = "macos")]
+    check_sftp_connection_errors(&root);
     let expected = Endpoint {
         host: std::env::var("PAWCOMMANDER_TEST_SFTP_HOST").unwrap_or_else(|_| "127.0.0.1".into()),
         port: std::env::var("PAWCOMMANDER_TEST_SFTP_PORT")
@@ -1352,9 +1416,11 @@ fn openssh_round_trip_and_host_verification() {
         TransferSourceManifest::capture(&source).unwrap().bytes,
         expected_size
     );
-    with_staging(&remote_root.join(source.name()), |staging, _| {
-        check_copy_space(expected_size, &remote_root.join(source.name()), staging)
-    })
+    super::super::transfer::with_staging_typed(
+        &remote_root.join(source.name()),
+        None,
+        |staging, _| check_copy_space(expected_size, &remote_root.join(source.name()), staging),
+    )
     .unwrap();
     let (mut progress, mut view) = Progress::tracked();
     progress.set_copy_verification(true);

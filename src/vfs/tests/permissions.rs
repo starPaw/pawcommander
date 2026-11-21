@@ -1,4 +1,4 @@
-use crate::i18n::text;
+use crate::i18n::{file_error, text};
 use crate::operations::{Cancellation, Progress};
 use crate::result_history::Outcome;
 use crate::vfs::{Location, ModeRule, PermissionsPreview};
@@ -27,7 +27,7 @@ pub(super) fn check(remote_root: &Location, server_denies: bool) {
             PermissionsPreview::load(std::slice::from_ref(&file), &numeric, &cancel).unwrap();
         let mut progress = Progress::default();
         let reason = text!("Сервер SFTP отказал в доступе.");
-        assert!(plan.apply(&mut progress).unwrap_err().contains(reason));
+        assert!(file_error(&plan.apply(&mut progress).unwrap_err()).contains(reason));
         assert_eq!(progress.results.items[0].outcome, Outcome::Failed);
         assert_eq!(progress.results.items[0].reason.as_deref(), Some(reason));
         assert_eq!(mode(&file), 0o444);
@@ -73,10 +73,7 @@ pub(super) fn check(remote_root: &Location, server_denies: bool) {
     fs::write(stale.path(), b"independent edit after preview").unwrap();
     let mut progress = Progress::default();
     let stale_reason = text!("Объект SFTP изменился. Обновите предпросмотр прав.");
-    assert!(plan
-        .apply(&mut progress)
-        .unwrap_err()
-        .contains(stale_reason));
+    assert!(file_error(&plan.apply(&mut progress).unwrap_err()).contains(stale_reason));
     assert_eq!(
         progress
             .results

@@ -78,7 +78,9 @@ impl Action {
                             checked();
                         }
                         Err(cause) => {
-                            error.get_or_insert_with(|| path_error(path, &cause));
+                            error.get_or_insert_with(|| {
+                                path_error(path, &crate::i18n::file_error(&cause))
+                            });
                             break;
                         }
                     }

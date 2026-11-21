@@ -1,4 +1,7 @@
 use super::{remote, sessions, Endpoint, Path, PathBuf};
+use crate::file_error::{ConnectionError, Failure};
+use crate::i18n::connection_result_error;
+use crate::operations::TransferError;
 use crate::vfs::{
     sftp::{connect_location_at, TrustFiles},
     ConnectRequest, ConnectedLocation, ConnectionControl, ConnectionPrompt, InteractiveAuth,
@@ -19,7 +22,7 @@ const JUMP_PHRASE: &str = "jump-test-passphrase";
 
 struct Connection {
     prompts: mpsc::Receiver<ConnectionPrompt>,
-    result: mpsc::Receiver<Result<ConnectedLocation, String>>,
+    result: mpsc::Receiver<Result<ConnectedLocation, TransferError>>,
     control: ConnectionControl,
 }
 
@@ -57,7 +60,7 @@ impl Connection {
         prompt
     }
 
-    fn finish(self) -> Result<ConnectedLocation, String> {
+    fn finish(self) -> Result<ConnectedLocation, TransferError> {
         let result = self.result.recv_timeout(WAIT).unwrap();
         assert!(
             self.prompts.try_recv().is_err(),
@@ -118,7 +121,7 @@ fn openssh_proxy_jump_verifies_both_hosts_and_forwards_sftp() {
         .approve();
     let _target = cancelled.key(port, &target_hash, "Verify target host key");
     assert!(cancelled.control.cancel());
-    assert!(cancelled.finish().is_err());
+    assert!(matches!(cancelled.finish(), Err(TransferError::Cancelled)));
     assert!(!sessions().lock().unwrap().contains_key(&endpoint));
 
     let accepted = Connection::launch(&endpoint, &root, fresh_trust(), JUMP_PHRASE);
@@ -150,7 +153,8 @@ fn openssh_proxy_jump_verifies_both_hosts_and_forwards_sftp() {
         .finish()
         .err()
         .expect("Jump host must reject the wrong phrase");
-    assert!(error.contains("Jump host"), "{error}");
+    let message = connection_result_error(&error);
+    assert!(message.contains("Jump host"), "{message}");
 
     let denied_target = Endpoint {
         host: "localhost".into(),
@@ -161,6 +165,22 @@ fn openssh_proxy_jump_verifies_both_hosts_and_forwards_sftp() {
         .finish()
         .err()
         .expect("PermitOpen must reject localhost");
+    let TransferError::Failed(Failure::Connection(route)) = &error else {
+        panic!("lost connection cause: {error:?}");
+    };
+    let ConnectionError::Route {
+        jump: true,
+        cause: TransferError::Failed(Failure::Connection(forward)),
+        ..
+    } = route.as_ref()
+    else {
+        panic!("lost jump host context: {route:?}");
+    };
+    assert!(
+        matches!(forward.as_ref(), ConnectionError::Forward { target, source }
+        if *target == denied_target.label() && matches!(source.code(), ssh2::ErrorCode::Session(_)))
+    );
+    let error = connection_result_error(&error);
     assert!(
         error.contains("Jump host") && error.contains("Could not forward TCP"),
         "{error}"
@@ -188,6 +208,7 @@ fn openssh_proxy_jump_verifies_both_hosts_and_forwards_sftp() {
         let error = result
             .err()
             .expect("Host verification must reject the mismatched key");
+        let error = connection_result_error(&error);
         assert!(
             error.contains(expected_stage) && error.contains(actual_hash),
             "{error}"

@@ -1,5 +1,6 @@
 use crate::{
     i18n::text,
+    operations::TransferError,
     theme::paint_focus,
     vfs::{
         AuthRequest, ConnectRequest, ConnectedLocation, ConnectionControl, ConnectionPrompt,
@@ -15,7 +16,7 @@ use zeroize::Zeroizing;
 
 pub(in crate::app) struct ConnectionJob {
     pub pane: usize,
-    pub result: mpsc::Receiver<Result<ConnectedLocation, String>>,
+    pub result: mpsc::Receiver<Result<ConnectedLocation, TransferError>>,
     target: String,
     control: ConnectionControl,
     requests: mpsc::Receiver<ConnectionPrompt>,

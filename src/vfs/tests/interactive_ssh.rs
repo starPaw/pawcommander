@@ -1,4 +1,6 @@
 use super::*;
+use crate::file_error::{ConnectionError, Failure, SshStage};
+use crate::i18n::connection_result_error;
 use crate::vfs::sftp::TrustFiles;
 use crate::vfs::{
     AuthRequest, ConnectRequest, ConnectedLocation, ConnectionControl, ConnectionPrompt,
@@ -16,7 +18,7 @@ struct Attempt {
     user: String,
     prompts: mpsc::Receiver<ConnectionPrompt>,
     control: ConnectionControl,
-    result: mpsc::Receiver<Result<ConnectedLocation, String>>,
+    result: mpsc::Receiver<Result<ConnectedLocation, TransferError>>,
 }
 
 impl Fixture {
@@ -89,7 +91,7 @@ impl Attempt {
         prompt
     }
 
-    fn finish(&self) -> Result<ConnectedLocation, String> {
+    fn finish(&self) -> Result<ConnectedLocation, TransferError> {
         self.result.recv_timeout(Duration::from_secs(5)).unwrap()
     }
 }
@@ -124,10 +126,7 @@ fn ssh_interactive_round_trip() {
     assert_eq!(offered.key.fingerprint, fingerprints[0]);
     assert!(unverified.control.cancel());
     drop(offered);
-    assert_eq!(
-        unverified.finish().err().unwrap(),
-        crate::i18n::text!("Подключение отменено")
-    );
+    assert!(matches!(unverified.finish(), Err(TransferError::Cancelled)));
     assert!(unverified.prompts.try_recv().is_err());
     assert!(!pins.exists());
 
@@ -172,15 +171,23 @@ fn ssh_interactive_round_trip() {
     let cancelled = fixture.start("cancel-fixture", true, timeout);
     let _prompt = cancelled.prompt();
     assert!(cancelled.control.cancel());
+    let error = cancelled.finish().err().unwrap();
+    assert!(matches!(error, TransferError::Cancelled));
     assert_eq!(
-        cancelled.finish().err().unwrap(),
+        connection_result_error(&error),
         crate::i18n::text!("Подключение отменено")
     );
 
     let expired = fixture.start("timeout-fixture", true, Duration::from_millis(180));
     let _prompt = expired.prompt();
+    let error = expired.finish().err().unwrap();
+    assert!(matches!(
+        &error,
+        TransferError::Failed(Failure::Connection(cause))
+            if matches!(cause.as_ref(), ConnectionError::InteractiveTimeout)
+    ));
     assert_eq!(
-        expired.finish().err().unwrap(),
+        connection_result_error(&error),
         crate::i18n::text!("Время интерактивной SSH-аутентификации истекло")
     );
 
@@ -190,11 +197,21 @@ fn ssh_interactive_round_trip() {
         &["fixture-rejected-answer", "fixture-label"],
     );
     let error = rejected.finish().err().unwrap();
-    assert_eq!(
-        error,
-        crate::i18n::text!("Сервер не подтвердил интерактивную аутентификацию")
+    assert!(
+        matches!(
+            &error,
+            TransferError::Failed(Failure::Connection(cause))
+                if matches!(cause.as_ref(), ConnectionError::Ssh {
+                    stage: SshStage::InteractiveAuthentication, source,
+                } if source.code() == ssh2::ErrorCode::Session(libssh2_sys::LIBSSH2_ERROR_AUTHENTICATION_FAILED))
+        ),
+        "{error:?}"
     );
-    assert!(!error.contains("fixture-rejected-answer"));
+    let message = connection_result_error(&error);
+    assert!(message.starts_with(crate::i18n::text!(
+        "Сервер не подтвердил интерактивную аутентификацию"
+    )));
+    assert!(!message.contains("fixture-rejected-answer"));
     assert!(!fixture.root.join("legacy-pins").exists());
     assert!(!fixture.root.join("absent_hosts").exists());
 
@@ -203,7 +220,7 @@ fn ssh_interactive_round_trip() {
     assert!(records.next().is_none());
     let before = fs::read(&record).unwrap();
     let changed = fixture.start("changed-host", false, timeout);
-    let error = changed.finish().err().unwrap();
+    let error = connection_result_error(&changed.finish().err().unwrap());
     assert!(error.starts_with(crate::i18n::text!("Ключ сервера SSH изменился.")));
     assert!(error.contains(fingerprints[0]) && error.contains(fingerprints[1]));
     assert!(changed.prompts.try_recv().is_err());
