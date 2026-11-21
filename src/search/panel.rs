@@ -149,8 +149,9 @@ impl Action {
 fn path_error(path: &Location, error: &impl std::fmt::Display) -> String {
     let path = path.display();
     crate::tr_format!(
-        "Не удалось проверить результат поиска {path}: {error}",
-        "Could not check search result {path}: {error}"
+        "Could not check search result {path}: {error}",
+        error = error,
+        path = path
     )
 }
 
@@ -294,10 +295,7 @@ impl Panel {
     }
 
     fn report_launch_error(&mut self, e: io::Error, ctx: &egui::Context) {
-        self.reject(
-            crate::tr_format!("Не удалось открыть файл: {e}", "Could not open file: {e}"),
-            ctx,
-        );
+        self.reject(crate::tr_format!("Could not open file: {e}", e = e), ctx);
     }
 
     fn start(&mut self, action: Action, ctx: &egui::Context) {
@@ -326,8 +324,8 @@ impl Panel {
             }
             Err(error) => {
                 self.error = Some(crate::tr_format!(
-                    "Не удалось запустить проверку результатов поиска: {error}",
-                    "Could not start checking search results: {error}"
+                    "Could not start checking search results: {error}",
+                    error = error
                 ));
             }
         }
@@ -406,13 +404,11 @@ impl Panel {
             1 => {
                 let path = missing.first().expect("one missing path").display();
                 Some(crate::tr_format!(
-                    "Результат поиска больше не существует: {path}",
-                    "Search result no longer exists: {path}"
+                    "Search result no longer exists: {path}", path = path
                 ))
             }
             count => Some(crate::tr_format!(
-                "Объектов больше нет на прежнем месте: {count}. Они удалены из результатов поиска.",
-                "{count} items no longer exist at their original paths and were removed from the search results."
+                "{count} items no longer exist at their original paths and were removed from the search results.", count = count
             )),
         };
     }
@@ -449,11 +445,16 @@ impl Panel {
                         };
                         ui.label(if snapshot.matching_lines {
                             crate::tr_format!(
-                                "Строк с совпадениями: {count}{limit}",
-                                "Matching lines: {count}{limit}"
+                                "Matching lines: {count}{limit}",
+                                count = crate::i18n::display::integer(count),
+                                limit = limit
                             )
                         } else {
-                            crate::tr_format!("Найдено: {count}{limit}", "Found: {count}{limit}")
+                            crate::tr_format!(
+                                "Found: {count}{limit}",
+                                count = crate::i18n::display::integer(count),
+                                limit = limit
+                            )
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let button = ui.button(text!("Закрыть результаты поиска"));
@@ -518,19 +519,14 @@ impl Panel {
                                     destination,
                                 ));
                             }
-                            let label = crate::tr_format!(
-                                "Папка назначения: {display}",
-                                "Destination: {display}"
-                            );
+                            let label =
+                                crate::tr_format!("Destination: {display}", display = display);
                             ui.add(egui::Label::new(&label).truncate().selectable(false))
                                 .on_hover_text(label);
                         }
                     });
                     let count = snapshot.selected.len();
-                    ui.small(crate::tr_format!(
-                        "Выбрано объектов: {count}",
-                        "Selected items: {count}"
-                    ));
+                    ui.small(crate::tr_format!("Selected items: {count}", count = count));
                     if let Some(error) = &self.error {
                         ui.add(
                             egui::Label::new(

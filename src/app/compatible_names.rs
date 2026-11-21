@@ -40,8 +40,8 @@ impl CompatibleNamesDialog {
                 .on_hover_text(&folder);
             let count = self.selected.len();
             ui.label(crate::tr_format!(
-                "Выбрано объектов: {count}",
-                "Selected items: {count}"
+                "Selected items: {count}",
+                count = crate::i18n::display::integer(count)
             ));
             ui.small(text!(
                 "Имена будут подготовлены для Windows и FAT с учётом ограничений тома назначения.",
@@ -124,8 +124,9 @@ fn show_plan(ui: &mut egui::Ui, plan: &Plan) {
     let entries = plan.entries;
     let changes = plan.changes.len();
     ui.strong(crate::tr_format!(
-        "Проверено объектов: {entries} · исправлений: {changes}",
-        "Items checked: {entries} · name changes: {changes}"
+        "Items checked: {entries} · name changes: {changes}",
+        changes = crate::i18n::display::integer(changes),
+        entries = crate::i18n::display::integer(entries)
     ));
     if plan.direct {
         ui.small(text!(

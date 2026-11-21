@@ -275,9 +275,9 @@ impl NativeDrag {
         let mtm = MainThreadMarker::new().ok_or(crate::i18n::text!(
             "Системное перетаскивание требует главного потока",
         ))?;
-        let handle = frame.window_handle().map_err(|e| {
-            crate::tr_format!("Не удалось получить окно: {e}", "Could not get window: {e}")
-        })?;
+        let handle = frame
+            .window_handle()
+            .map_err(|e| crate::tr_format!("Could not get window: {e}", e = e))?;
         let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
             return Err(crate::i18n::text!("Окно не поддерживает AppKit").into());
         };
@@ -490,7 +490,7 @@ fn local_paths(sources: &[Location]) -> Result<Vec<PathBuf>, String> {
     sources.iter().map(|source| {
         let path = source.local().ok_or(crate::i18n::text!("Для переноса SFTP-файлов во внешнее приложение сначала скопируйте их в локальную папку"))?;
         let path = if path.is_absolute() { path.to_path_buf() } else { std::env::current_dir().map_err(|e| e.to_string())?.join(path) };
-        std::fs::symlink_metadata(&path).map_err(|e| crate::tr_format!("Не удалось передать {}: {e}", "Could not transfer {}: {e}", path.display()))?;
+        std::fs::symlink_metadata(&path).map_err(|e| crate::tr_format!("Could not transfer {}: {e}", path.display(), e = e))?;
         Ok(path)
     }).collect()
 }

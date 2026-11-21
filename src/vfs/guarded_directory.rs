@@ -125,8 +125,9 @@ impl Directory {
         })();
         result.map_err(|error| {
             TransferError::PublicationUnconfirmed(crate::tr_format!(
-                "Созданная папка {location} недоступна для проверки: {error}",
-                "The new folder {location} could not be verified: {error}"
+                "The new folder {location} could not be verified: {error}",
+                error = error,
+                location = location
             ))
         })
     }
@@ -177,8 +178,9 @@ fn held_metadata(descriptor: &OwnedFd) -> Result<EntryMetadata, TransferError> {
 
 pub(super) fn retained(error: TransferError, staging: &Location) -> TransferError {
     TransferError::PublicationUnconfirmed(crate::tr_format!(
-        "{error}. Временная папка сохранена для проверки: {staging}.",
-        "{error}. Temporary folder retained for inspection: {staging}."
+        "{error}. Temporary folder retained for inspection: {staging}.",
+        error = error,
+        staging = staging
     ))
 }
 
@@ -192,8 +194,8 @@ pub(super) fn open_staging(location: &Location) -> Result<ReadScope, TransferErr
 
 pub(super) fn stale(location: &Location) -> TransferError {
     crate::tr_format!(
-        "После построения плана объект изменился: {location}. Постройте план заново.",
-        "An item changed after planning: {location}. Build the plan again."
+        "An item changed after planning: {location}. Build the plan again.",
+        location = location
     )
     .into()
 }

@@ -1,50 +1,84 @@
 //! Interface translations. Filesystem paths and user content never pass through this catalog.
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 mod catalog;
+pub(crate) mod display;
+mod formats;
 pub(crate) use catalog::key;
+#[cfg(target_os = "macos")]
+pub(crate) use formats::czech_format;
+pub(crate) use formats::russian_format;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
 pub enum Language {
     Russian,
     #[default]
     English,
+    #[cfg(target_os = "macos")]
+    Czech,
 }
 
-static ENGLISH: AtomicBool = AtomicBool::new(true);
+static LANGUAGE: AtomicU8 = AtomicU8::new(Language::English as u8);
 
 pub fn set_language(language: Language) {
-    ENGLISH.store(language == Language::English, Ordering::Relaxed);
+    LANGUAGE.store(language as u8, Ordering::Relaxed);
 }
 
-pub fn is_english() -> bool {
-    ENGLISH.load(Ordering::Relaxed)
+pub(crate) fn language() -> Language {
+    match LANGUAGE.load(Ordering::Relaxed) {
+        value if value == Language::Russian as u8 => Language::Russian,
+        #[cfg(target_os = "macos")]
+        value if value == Language::Czech as u8 => Language::Czech,
+        _ => Language::English,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct MessageKey {
     russian: &'static str,
     english: &'static str,
+    #[cfg(target_os = "macos")]
+    czech: &'static str,
 }
 
 impl MessageKey {
     #[doc(hidden)]
-    pub(crate) const fn from_catalog(russian: &'static str, english: &'static str) -> Self {
-        Self { russian, english }
+    pub(crate) const fn from_catalog(
+        russian: &'static str,
+        english: &'static str,
+        czech: &'static str,
+    ) -> Self {
+        #[cfg(not(target_os = "macos"))]
+        let _ = czech;
+        Self {
+            russian,
+            english,
+            #[cfg(target_os = "macos")]
+            czech,
+        }
     }
 
-    fn translate(self, english: bool) -> &'static str {
-        if english {
-            self.english
-        } else {
-            self.russian
+    fn translated(self, language: Language) -> &'static str {
+        match language {
+            Language::English => self.english,
+            Language::Russian => self.russian,
+            #[cfg(target_os = "macos")]
+            Language::Czech => self.czech,
         }
+    }
+
+    pub(crate) fn matches(self, value: &str) -> bool {
+        let matches = self.russian == value || self.english == value;
+        #[cfg(target_os = "macos")]
+        let matches = matches || self.czech == value;
+        matches
     }
 }
 
 pub(crate) fn text(key: MessageKey) -> &'static str {
-    key.translate(is_english())
+    key.translated(language())
 }
 
 macro_rules! translate_literal {
@@ -56,43 +90,12 @@ pub(crate) use translate_literal as text;
 
 #[cfg(target_os = "macos")]
 pub(crate) fn cli_help() -> &'static str {
-    if is_english() {
-        "PawCommander\n\n\
-        Usage\n  \
-        pawcommander [FOLDER]\n  \
-        pawcommander open FOLDER\n  \
-        pawcommander workspace NAME\n  \
-        pawcommander search QUERY [FOLDER]\n  \
-        pawcommander --help\n\n\
-        With no arguments, restore the saved session.\n\
-        Open a folder, restore a named workspace, or search for file names and masks.\n\
-        Search uses the current directory when FOLDER is omitted.\n\
-        The open, workspace and search commands use separate windows with temporary settings.\n\
-        Use -- before operands that start with a dash.\n\n\
-        Exit codes\n  \
-        0  Help displayed or window closed normally\n  \
-        1  Settings or application startup error\n  \
-        2  Invalid arguments\n  \
-        3  Folder or workspace unavailable"
-    } else {
-        "PawCommander\n\n\
-        Использование\n  \
-        pawcommander [ПАПКА]\n  \
-        pawcommander open ПАПКА\n  \
-        pawcommander workspace ИМЯ\n  \
-        pawcommander search ЗАПРОС [ПАПКА]\n  \
-        pawcommander --help\n\n\
-        При запуске без аргументов восстанавливается сохранённый сеанс.\n\
-        Откройте папку, сохранённое рабочее пространство или поиск имён и масок.\n\
-        Если папка поиска не указана, используется текущая директория.\n\
-        Команды open, workspace и search открывают отдельные окна с временными настройками.\n\
-        Укажите -- перед аргументами, начинающимися с дефиса.\n\n\
-        Коды завершения\n  \
-        0  Справка выведена или окно закрыто штатно\n  \
-        1  Ошибка настроек или запуска приложения\n  \
-        2  Недопустимые аргументы\n  \
-        3  Папка или рабочее пространство недоступны"
+    match language() {
+        Language::English => include_str!("i18n/help/en.txt"),
+        Language::Russian => include_str!("i18n/help/ru.txt"),
+        Language::Czech => include_str!("i18n/help/cs.txt"),
     }
+    .trim_end_matches('\n')
 }
 
 pub(crate) fn transfer_finished(
@@ -104,7 +107,7 @@ pub(crate) fn transfer_finished(
     destination: &str,
 ) -> String {
     format_transfer_finished(
-        is_english(),
+        language(),
         (completed, skipped),
         remaining,
         preparing,
@@ -114,7 +117,7 @@ pub(crate) fn transfer_finished(
 }
 
 fn format_transfer_finished(
-    english: bool,
+    language: Language,
     counts: (usize, usize),
     remaining: &[String],
     preparing: bool,
@@ -122,30 +125,51 @@ fn format_transfer_finished(
     destination: &str,
 ) -> String {
     let (completed, skipped) = counts;
-    let mut message = match (english, preparing, cancelled) {
-        (true, true, _) => "Cancelled while preparing; selected paths left unchanged.".to_owned(),
-        (false, true, _) => "Отменено при подготовке; выбранные пути не изменены.".to_owned(),
-        (true, false, true) => format!(
+    let mut message = match (language, preparing, cancelled) {
+        #[cfg(target_os = "macos")]
+        (Language::Czech, true, _) => {
+            "Příprava byla zrušena. Vybrané cesty zůstaly beze změny.".into()
+        }
+        #[cfg(target_os = "macos")]
+        (Language::Czech, false, true) => format!(
+            "Zastaveno. Hotovo: {completed}. Přeskočeno: {skipped}. Zbývá: {}.",
+            remaining.len()
+        ),
+        #[cfg(target_os = "macos")]
+        (Language::Czech, false, false) => {
+            format!("Hotovo: {completed}. Přeskočeno: {skipped}. {destination}")
+        }
+        (Language::English, true, _) => {
+            "Cancelled while preparing; selected paths left unchanged.".to_owned()
+        }
+        (Language::Russian, true, _) => {
+            "Отменено при подготовке; выбранные пути не изменены.".to_owned()
+        }
+        (Language::English, false, true) => format!(
             "Stopped. Completed: {completed}. Skipped: {skipped}. Remaining: {}.",
             remaining.len()
         ),
-        (false, false, true) => format!(
+        (Language::Russian, false, true) => format!(
             "Остановлено. Готово: {completed}. Пропущено: {skipped}. Осталось: {}.",
             remaining.len()
         ),
-        (true, false, false) => {
+        (Language::English, false, false) => {
             format!("Completed: {completed}. Skipped: {skipped}. {destination}")
         }
-        (false, false, false) => {
+        (Language::Russian, false, false) => {
             format!("Готово: {completed}. Пропущено: {skipped}. {destination}")
         }
     };
     if !remaining.is_empty() {
-        message.push_str(match (english, preparing) {
-            (true, true) => "\nSelected paths:",
-            (false, true) => "\nВыбранные пути:",
-            (true, false) => "\nRemaining paths:",
-            (false, false) => "\nОставшиеся пути:",
+        message.push_str(match (language, preparing) {
+            #[cfg(target_os = "macos")]
+            (Language::Czech, true) => "\nVybrané cesty:",
+            #[cfg(target_os = "macos")]
+            (Language::Czech, false) => "\nZbývající cesty:",
+            (Language::English, true) => "\nSelected paths:",
+            (Language::Russian, true) => "\nВыбранные пути:",
+            (Language::English, false) => "\nRemaining paths:",
+            (Language::Russian, false) => "\nОставшиеся пути:",
         });
         for path in remaining {
             message.push('\n');
@@ -156,14 +180,15 @@ fn format_transfer_finished(
 }
 
 pub(crate) fn source_changed_during_copy(source: impl std::fmt::Display) -> String {
-    format_source_changed(is_english(), source)
+    format_source_changed(language(), source)
 }
 
-fn format_source_changed(english: bool, source: impl std::fmt::Display) -> String {
-    if english {
-        format!("Source “{source}” changed during copying; the copy was not published. Try again after writing to the source has finished")
-    } else {
-        format!("Источник «{source}» изменился во время копирования; копия не опубликована. Повторите попытку после завершения записи в источник")
+fn format_source_changed(language: Language, source: impl std::fmt::Display) -> String {
+    match language {
+        #[cfg(target_os = "macos")]
+        Language::Czech => format!("Zdroj „{source}“ se během kopírování změnil. Kopie nebyla umístěna do cíle. Zkuste to znovu po dokončení zápisu do zdroje"),
+        Language::English => format!("Source “{source}” changed during copying; the copy was not published. Try again after writing to the source has finished"),
+        Language::Russian => format!("Источник «{source}» изменился во время копирования; копия не опубликована. Повторите попытку после завершения записи в источник"),
     }
 }
 
@@ -173,25 +198,29 @@ pub(crate) fn initial_backup_rename_failed(
     backup: impl std::fmt::Display,
     remote: bool,
 ) -> String {
-    format_initial_backup_rename_failed(is_english(), error, target, backup, remote)
+    format_initial_backup_rename_failed(language(), error, target, backup, remote)
 }
 
 fn format_initial_backup_rename_failed(
-    english: bool,
+    language: Language,
     error: &str,
     target: impl std::fmt::Display,
     backup: impl std::fmt::Display,
     remote: bool,
 ) -> String {
-    match (english, remote) {
-        (true, false) => format!("{error}. The existing destination remains at {target}"),
-        (false, false) => {
+    match (language, remote) {
+        #[cfg(target_os = "macos")]
+        (Language::Czech, false) => format!("{error}. Původní cíl zůstal na {target}"),
+        #[cfg(target_os = "macos")]
+        (Language::Czech, true) => format!("{error}. Před opakováním zkontrolujte původní cíl {target} a možnou zálohu {backup}"),
+        (Language::English, false) => format!("{error}. The existing destination remains at {target}"),
+        (Language::Russian, false) => {
             format!("{error}. Прежний файл сохранён по исходному пути {target}")
         }
-        (true, true) => format!(
+        (Language::English, true) => format!(
             "{error}. Check the original destination {target} and the possible backup {backup} before retrying"
         ),
-        (false, true) => format!(
+        (Language::Russian, true) => format!(
             "{error}. Перед повтором проверьте исходное назначение {target} и возможную резервную копию {backup}"
         ),
     }
@@ -204,42 +233,50 @@ pub(crate) fn replacement_rollback_failed(
     backup: impl std::fmt::Display,
     remote: bool,
 ) -> String {
-    format_replacement_rollback_failed(is_english(), error, rollback, target, backup, remote)
+    format_replacement_rollback_failed(language(), error, rollback, target, backup, remote)
 }
 
 fn format_replacement_rollback_failed(
-    english: bool,
+    language: Language,
     error: &str,
     rollback: &str,
     target: impl std::fmt::Display,
     backup: impl std::fmt::Display,
     remote: bool,
 ) -> String {
-    match (english, remote) {
-        (true, false) => format!(
+    match (language, remote) {
+        #[cfg(target_os = "macos")]
+        (Language::Czech, false) => format!("{error}. Předchozí soubor se nepodařilo obnovit: {rollback}. Před opakováním zkontrolujte uloženou verzi v {backup}"),
+        #[cfg(target_os = "macos")]
+        (Language::Czech, true) => format!("{error}. Obnovení předchozího souboru se nepodařilo potvrdit: {rollback}. Před opakováním zkontrolujte původní cíl {target} a možnou zálohu {backup}"),
+        (Language::English, false) => format!(
             "{error}. Could not restore the previous file: {rollback}. Check the saved version at {backup} before retrying"
         ),
-        (false, false) => format!(
+        (Language::Russian, false) => format!(
             "{error}. Не удалось восстановить прежний файл: {rollback}. Перед повтором проверьте сохранённую версию в {backup}"
         ),
-        (true, true) => format!(
+        (Language::English, true) => format!(
             "{error}. Could not confirm restoration of the previous file: {rollback}. Check the original destination {target} and the possible backup {backup} before retrying"
         ),
-        (false, true) => format!(
+        (Language::Russian, true) => format!(
             "{error}. Не удалось подтвердить восстановление прежнего файла: {rollback}. Перед повтором проверьте исходное назначение {target} и возможную резервную копию {backup}"
         ),
     }
 }
 
-// Both format strings are supplied at the call site, preserving named captures
-// and compile-time validation of the placeholders in both languages.
+// Pass named values explicitly so Rust checks the arguments of every template.
 #[macro_export]
 macro_rules! tr_format {
-    ($ru:literal, $en:literal $(, $arg:expr)* $(,)?) => {
-        if $crate::i18n::is_english() {
-            format!($en $(, $arg)*)
-        } else {
-            format!($ru $(, $arg)*)
+    ($message:tt $($args:tt)*) => {
+        match $crate::i18n::language() {
+            $crate::i18n::Language::English => format!($message $($args)*),
+            $crate::i18n::Language::Russian => {
+                format!($crate::i18n::russian_format!($message) $($args)*)
+            }
+            #[cfg(target_os = "macos")]
+            $crate::i18n::Language::Czech => {
+                format!($crate::i18n::czech_format!($message) $($args)*)
+            }
         }
     };
 }
@@ -248,6 +285,14 @@ macro_rules! tr_format {
 mod tests {
     use super::*;
 
+    fn original_language(english: bool) -> Language {
+        if english {
+            Language::English
+        } else {
+            Language::Russian
+        }
+    }
+
     #[test]
     fn transfer_outcomes_preserve_counts_and_full_paths_in_both_languages() {
         let paths = vec![
@@ -255,8 +300,14 @@ mod tests {
             "/tmp/third/file.txt".into(),
         ];
         for english in [true, false] {
-            let stopped =
-                format_transfer_finished(english, (1, 2), &paths, false, true, "/destination");
+            let stopped = format_transfer_finished(
+                original_language(english),
+                (1, 2),
+                &paths,
+                false,
+                true,
+                "/destination",
+            );
             assert!(stopped.contains(if english {
                 "Stopped. Completed: 1. Skipped: 2. Remaining: 2."
             } else {
@@ -265,8 +316,14 @@ mod tests {
             for path in &paths {
                 assert!(stopped.contains(path));
             }
-            let preparing =
-                format_transfer_finished(english, (0, 0), &paths, true, true, "/destination");
+            let preparing = format_transfer_finished(
+                original_language(english),
+                (0, 0),
+                &paths,
+                true,
+                true,
+                "/destination",
+            );
             assert!(preparing.contains(if english {
                 "selected paths left unchanged"
             } else {
@@ -280,8 +337,14 @@ mod tests {
             for path in &paths {
                 assert!(preparing.contains(path));
             }
-            let success =
-                format_transfer_finished(english, (3, 2), &[], false, false, "/destination");
+            let success = format_transfer_finished(
+                original_language(english),
+                (3, 2),
+                &[],
+                false,
+                false,
+                "/destination",
+            );
             assert_eq!(
                 success,
                 if english {
@@ -310,10 +373,10 @@ mod tests {
             ),
         ] {
             let local = format_replacement_rollback_failed(
-                english, "publish error", "rollback error", target, backup, false,
+                original_language(english), "publish error", "rollback error", target, backup, false,
             );
             let remote = format_replacement_rollback_failed(
-                english, "publish error", "rollback error", target, backup, true,
+                original_language(english), "publish error", "rollback error", target, backup, true,
             );
             assert_eq!(local, local_guidance);
             assert_eq!(remote, remote_guidance);
@@ -339,9 +402,9 @@ mod tests {
             ),
         ] {
             let local =
-                format_initial_backup_rename_failed(english, "denied", target, backup, false);
+                format_initial_backup_rename_failed(original_language(english), "denied", target, backup, false);
             let remote =
-                format_initial_backup_rename_failed(english, "denied", target, backup, true);
+                format_initial_backup_rename_failed(original_language(english), "denied", target, backup, true);
             assert_eq!(local, local_guidance);
             assert_eq!(remote, remote_guidance);
             assert!(!local.contains(backup));
@@ -353,11 +416,11 @@ mod tests {
     fn source_change_error_explains_safe_retry_in_both_languages() {
         let source = "/tmp/Документы {name}.txt";
         assert_eq!(
-            format_source_changed(true, source),
+            format_source_changed(Language::English, source),
             format!("Source “{source}” changed during copying; the copy was not published. Try again after writing to the source has finished")
         );
         assert_eq!(
-            format_source_changed(false, source),
+            format_source_changed(Language::Russian, source),
             format!("Источник «{source}» изменился во время копирования; копия не опубликована. Повторите попытку после завершения записи в источник")
         );
     }
@@ -368,6 +431,8 @@ mod tests {
         for message in catalog::MESSAGES {
             assert!(!message.russian.trim().is_empty());
             assert!(!message.english.trim().is_empty(), "{}", message.russian);
+            #[cfg(target_os = "macos")]
+            assert!(!message.czech.trim().is_empty(), "{}", message.russian);
             assert!(seen.insert(message.russian), "{}", message.russian);
         }
     }
@@ -388,8 +453,8 @@ mod tests {
                 "System clipboard changed. Paste again.",
             ),
         ] {
-            assert_eq!(key.translate(true), en);
-            assert_eq!(key.translate(false), ru);
+            assert_eq!(key.translated(Language::English), en);
+            assert_eq!(key.translated(Language::Russian), ru);
         }
     }
 }

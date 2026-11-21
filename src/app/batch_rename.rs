@@ -160,8 +160,9 @@ fn show_preview(ui: &mut egui::Ui, preview: &BatchRenamePreview) {
     let changes = preview.changes;
     let conflicts = preview.conflicts;
     ui.label(crate::tr_format!(
-        "Новых имён {changes} · Конфликтов {conflicts}",
-        "{changes} changed names · {conflicts} conflicts"
+        "{changes} changed names · {conflicts} conflicts",
+        changes = changes,
+        conflicts = conflicts
     ));
     ui.columns(2, |columns| {
         columns[0].strong(text!("Текущее имя"));

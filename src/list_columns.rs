@@ -80,7 +80,7 @@ fn format_date(time: Option<SystemTime>) -> Option<Cow<'static, str>> {
     let local = chrono::DateTime::UNIX_EPOCH
         .checked_add_signed(elapsed)?
         .with_timezone(&chrono::Local);
-    Some(local.format("%d.%m.%y %H:%M").to_string().into())
+    Some(crate::i18n::display::date(local, crate::i18n::display::DateStyle::Column).into())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

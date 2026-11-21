@@ -32,7 +32,7 @@ fn favorites_menu_blocks_alt_digit_and_releases_after_escape() {
         })
     };
     let output = run(&mut app, vec![]);
-    let menu_label = crate::tr_format!("Действия для «target»", "Actions for target");
+    let menu_label = crate::tr_format!("Actions for target");
     assert!(output
         .platform_output
         .accesskit_update

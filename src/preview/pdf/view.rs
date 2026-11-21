@@ -97,7 +97,7 @@ impl Document {
     pub(in crate::preview) fn thumbnail(&mut self, ui: &mut egui::Ui) {
         self.update(ui.ctx());
         self.draw_page(ui, egui::vec2(ui.available_width(), 220.0), true);
-        ui.label(crate::tr_format!("Страниц: {}", "Pages: {}", self.pages));
+        ui.label(crate::tr_format!("Pages: {}", self.pages));
     }
 
     pub(in crate::preview) fn show(&mut self, ui: &mut egui::Ui) {
@@ -145,7 +145,7 @@ impl Document {
             if page_field.changed() {
                 self.go(number.saturating_sub(1).min(self.pages - 1));
             }
-            ui.label(crate::tr_format!("из {}", "of {}", self.pages));
+            ui.label(crate::tr_format!("of {}", self.pages));
             if ui
                 .add_enabled(
                     self.page + 1 < self.pages,
@@ -228,11 +228,7 @@ impl Document {
             if pages.is_empty() {
                 ui.label(text!("Совпадений нет"));
             } else {
-                ui.label(crate::tr_format!(
-                    "Страниц с совпадениями: {}",
-                    "Matching pages: {}",
-                    pages.len()
-                ));
+                ui.label(crate::tr_format!("Matching pages: {}", pages.len()));
             }
         }
     }
@@ -331,11 +327,8 @@ impl Document {
             let rect = egui::Rect::from_min_size(space.min + egui::vec2(margin, 0.0), size);
             ui.put(
                 rect,
-                egui::Image::new((frame.texture.id(), size)).alt_text(crate::tr_format!(
-                    "Страница PDF {}",
-                    "PDF page {}",
-                    self.page + 1
-                )),
+                egui::Image::new((frame.texture.id(), size))
+                    .alt_text(crate::tr_format!("PDF page {}", self.page + 1)),
             );
         } else {
             super::super::draw_loading(ui);

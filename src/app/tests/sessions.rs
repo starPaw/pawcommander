@@ -7,12 +7,18 @@ fn language_settings_preserve_legacy_preferences_and_round_trip() {
     assert_eq!(settings.language, crate::i18n::Language::English);
     assert!(settings.hidden);
     assert!(!settings.split);
-    settings.language = crate::i18n::Language::Russian;
-    let restored: super::Settings =
-        serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
-    assert_eq!(restored.language, crate::i18n::Language::Russian);
-    assert!(restored.hidden);
-    assert!(!restored.split);
+    for language in [
+        crate::i18n::Language::Russian,
+        #[cfg(target_os = "macos")]
+        crate::i18n::Language::Czech,
+    ] {
+        settings.language = language;
+        let restored: super::Settings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(restored.language, language);
+        assert!(restored.hidden);
+        assert!(!restored.split);
+    }
 }
 
 #[test]

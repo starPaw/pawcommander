@@ -157,10 +157,7 @@ impl BatchRenamePreview {
             })
             .transpose()
             .map_err(|error| {
-                crate::tr_format!(
-                    "Недопустимое регулярное выражение: {error}",
-                    "Invalid regular expression: {error}"
-                )
+                crate::tr_format!("Invalid regular expression: {error}", error = error)
             })?;
         let parent = Parent::capture(&directory)?;
         let mut rows = Vec::with_capacity(sources.len());
@@ -304,10 +301,7 @@ impl BatchRenamePreview {
                 .record(&row.source, None, Outcome::Completed, None);
         }
         let count = changes.len();
-        Ok(crate::tr_format!(
-            "Переименовано элементов: {count}",
-            "Items renamed: {count}"
-        ))
+        Ok(crate::tr_format!("Items renamed: {count}", count = count))
     }
 
     fn check_row(
@@ -352,16 +346,16 @@ impl BatchRenamePreview {
 
 fn changed_since_preview(source: &Location) -> String {
     crate::tr_format!(
-        "Элемент изменился или исчез после выбора: {source}",
-        "An item changed or disappeared after selection: {source}"
+        "An item changed or disappeared after selection: {source}",
+        source = source
     )
 }
 
 fn ensure_vacant(target: &Location) -> Result<(), String> {
     if entry_metadata(target)?.is_some() {
         return Err(crate::tr_format!(
-            "Имя уже занято: {target}",
-            "Name already exists: {target}"
+            "Name already exists: {target}",
+            target = target
         ));
     }
     Ok(())
@@ -424,13 +418,16 @@ fn finish_failure(
     if outcome == Outcome::Cancelled {
         progress.results.cancelled = true;
         Ok(crate::tr_format!(
-            "Переименование остановлено. Переименовано: {completed}. Осталось: {remaining}.",
-            "Rename stopped. Renamed: {completed}. Remaining: {remaining}."
+            "Rename stopped. Renamed: {completed}. Remaining: {remaining}.",
+            completed = completed,
+            remaining = remaining
         ))
     } else {
         Err(crate::tr_format!(
-            "Переименовано: {completed} из {total}. {error}",
-            "Renamed: {completed} of {total}. {error}"
+            "Renamed: {completed} of {total}. {error}",
+            completed = completed,
+            error = error,
+            total = total
         ))
     }
 }

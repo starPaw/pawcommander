@@ -66,8 +66,8 @@ pub(crate) fn create_archive(
     }
     match result {
         Ok(()) => Ok(crate::tr_format!(
-            "Архив создан: {target}",
-            "Archive created: {target}"
+            "Archive created: {target}",
+            target = target
         )),
         Err(TransferError::Cancelled) => {
             progress.results.cancelled = true;
@@ -125,8 +125,9 @@ fn write_archive(
         rename_for_publication(&payload, &target).map_err(|error| match error {
             TransferError::PublicationUnconfirmed(error) => {
                 TransferError::PublicationUnconfirmed(crate::tr_format!(
-                    "Сервер не подтвердил сохранение архива {target}: {error}",
-                    "The server did not confirm publication of {target}: {error}"
+                    "The server did not confirm publication of {target}: {error}",
+                    error = error,
+                    target = target
                 ))
             }
             error => error,
@@ -142,11 +143,9 @@ fn invalid_name() -> &'static str {
 
 fn ensure_absent(target: &Location) -> Result<(), TransferError> {
     if entry_metadata(target)?.is_some() {
-        return Err(crate::tr_format!(
-            "Файл или папка уже существует: {target}",
-            "File or folder already exists: {target}"
-        )
-        .into());
+        return Err(
+            crate::tr_format!("File or folder already exists: {target}", target = target).into(),
+        );
     }
     Ok(())
 }
@@ -312,8 +311,8 @@ impl ArchiveSource {
 fn attributes(source: &Location, metadata: &EntryMetadata) -> Result<Attributes, TransferError> {
     let unsupported = || {
         crate::tr_format!(
-            "Архив поддерживает только обычные файлы и папки: {source}",
-            "Only regular files and folders can be added to an archive: {source}"
+            "Only regular files and folders can be added to an archive: {source}",
+            source = source
         )
     };
     match metadata {
@@ -338,8 +337,8 @@ fn attributes(source: &Location, metadata: &EntryMetadata) -> Result<Attributes,
             size: if stat.is_file() {
                 stat.size.ok_or_else(|| {
                     crate::tr_format!(
-                        "Сервер не сообщил размер исходного файла: {source}",
-                        "The server did not report the source file size: {source}"
+                        "The server did not report the source file size: {source}",
+                        source = source
                     )
                 })?
             } else {

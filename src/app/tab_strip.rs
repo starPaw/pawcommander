@@ -94,7 +94,7 @@ pub(super) fn tab_strip(
                             );
                             response.widget_info(|| {
                                 let label = if tab.pinned {
-                                    crate::tr_format!("{name} (закреплена)", "{name} (pinned)")
+                                    crate::tr_format!("{name} (pinned)", name = name)
                                 } else {
                                     name.clone()
                                 };
@@ -240,10 +240,7 @@ pub(super) fn tab_strip(
                                     egui::WidgetInfo::labeled(
                                         egui::Role::Button,
                                         true,
-                                        crate::tr_format!(
-                                            "Закрыть вкладку {name}",
-                                            "Close tab {name}"
-                                        ),
+                                        crate::tr_format!("Close tab {name}", name = name),
                                     )
                                 });
                                 if close.hovered() {

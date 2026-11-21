@@ -158,9 +158,7 @@ impl Invocation {
         match child {
             Ok(child) => report_startup(child, |result| {
                 let name = self.name;
-                report(result.map(|()| {
-                    crate::tr_format!("Запущено действие «{name}»", "Started action “{name}”")
-                }));
+                report(result.map(|()| crate::tr_format!("Started action “{name}”", name = name)));
             }),
             Err(error) => report(Err(start_error(error))),
         }

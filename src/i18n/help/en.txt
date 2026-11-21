@@ -1,0 +1,20 @@
+PawCommander
+
+Usage
+  pawcommander [FOLDER]
+  pawcommander open FOLDER
+  pawcommander workspace NAME
+  pawcommander search QUERY [FOLDER]
+  pawcommander --help
+
+With no arguments, restore the saved session.
+Open a folder, restore a named workspace, or search for file names and masks.
+Search uses the current directory when FOLDER is omitted.
+The open, workspace and search commands use separate windows with temporary settings.
+Use -- before operands that start with a dash.
+
+Exit codes
+  0  Help displayed or window closed normally
+  1  Settings or application startup error
+  2  Invalid arguments
+  3  Folder or workspace unavailable

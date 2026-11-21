@@ -12,12 +12,8 @@ pub fn open(location: &Location, text_only: bool) -> Result<String, String> {
     let argument = argument(location)?;
     let cli = crate::tools::zed_cli().ok_or(crate::i18n::text!("Zed не найден. Установите Zed; при нестандартной установке выполните в Zed команду «cli: install cli binary» и обновите проверку в настройках PawCommander."))?;
     if text_only && location.remote() {
-        let (stat, bytes) = vfs::preview_data(location, TEXT_SAMPLE).map_err(|e| {
-            crate::tr_format!(
-                "Не удалось проверить текстовый SFTP-файл: {e}",
-                "Could not check the SFTP text file: {e}"
-            )
-        })?;
+        let (stat, bytes) = vfs::preview_data(location, TEXT_SAMPLE)
+            .map_err(|e| crate::tr_format!("Could not check the SFTP text file: {e}", e = e))?;
         if stat.is_dir()
             || !is_text(
                 &bytes[..bytes.len().min(TEXT_SAMPLE)],
@@ -116,11 +112,11 @@ fn argument(location: &Location) -> Result<std::ffi::OsString, String> {
 
 fn launch(cli: &Path, argument: &std::ffi::OsStr) -> Result<(), String> {
     // No shell: quotes, spaces, metacharacters and leading '-' stay data.
-    let status = command(cli, argument).status().map_err(|e| {
-        crate::tr_format!("Не удалось запустить Zed: {e}", "Could not start Zed: {e}")
-    })?;
+    let status = command(cli, argument)
+        .status()
+        .map_err(|e| crate::tr_format!("Could not start Zed: {e}", e = e))?;
     if !status.success() {
-        return Err(crate::tr_format!("Zed не принял запрос открытия ({status}). Проверьте установку Zed и SSH-подключение в Zed.", "Zed rejected the open request ({status}). Check the Zed installation and its SSH connection."));
+        return Err(crate::tr_format!("Zed rejected the open request ({status}). Check the Zed installation and its SSH connection.", status = status));
     }
     Ok(())
 }

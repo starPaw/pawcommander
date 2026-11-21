@@ -73,7 +73,6 @@ impl PermissionsDialog {
         }
         if let Some(preview) = &self.preview {
             ui.label(crate::tr_format!(
-                "Изменения для {} из {} объектов",
                 "Changes for {} of {} items",
                 preview.changes,
                 preview.rows.len()
@@ -144,7 +143,6 @@ impl PermissionsDialog {
             Ok(_) => self.pending = Some(Pending { cancel, receive }),
             Err(error) => {
                 self.error = Some(crate::tr_format!(
-                    "Не удалось запустить предпросмотр прав. {}",
                     "Could not start the permissions preview. {}",
                     error
                 ))

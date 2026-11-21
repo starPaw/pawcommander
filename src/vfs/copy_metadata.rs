@@ -108,8 +108,8 @@ impl Attributes {
             return Ok(());
         }
         Err(crate::tr_format!(
-            "Объект {target} изменился во время сохранения метаданных.",
-            "Item {target} changed while preserving metadata."
+            "Item {target} changed while preserving metadata.",
+            target = target
         )
         .into())
     }
@@ -140,8 +140,8 @@ impl Attributes {
         }
         let fields = fields.join(", ");
         Some(crate::tr_format!(
-            "Не удалось полностью сохранить {fields}.",
-            "Could not fully preserve {fields}."
+            "Could not fully preserve {fields}.",
+            fields = fields
         ))
     }
 }

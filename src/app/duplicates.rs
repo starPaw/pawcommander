@@ -95,8 +95,8 @@ impl DuplicateSearch {
             if was_reviewing {
                 let count = self.selected.len();
                 ui.label(crate::tr_format!(
-                    "Переместить отмеченные файлы в системную корзину? Выбрано: {count}.",
-                    "Move the marked files to the system Trash? Selected: {count}."
+                    "Move the marked files to the system Trash? Selected: {count}.",
+                    count = count
                 ));
                 ui.horizontal(|ui| {
                     if ui.button(text!("Назад")).clicked() {
@@ -121,10 +121,7 @@ impl DuplicateSearch {
                         }
                         start = scan.clicked();
                         let count = self.selected.len();
-                        let label = crate::tr_format!(
-                            "Проверить выбранные ({count})",
-                            "Review selected ({count})"
-                        );
+                        let label = crate::tr_format!("Review selected ({count})", count = count);
                         if ui
                             .add_enabled(count > 0, egui::Button::new(label))
                             .clicked()
@@ -176,8 +173,8 @@ fn show_results(
     if result.skipped > 0 {
         let skipped = result.skipped;
         ui.label(crate::tr_format!(
-            "Пропущено недоступных или изменившихся объектов: {skipped}",
-            "Skipped unavailable or changed entries: {skipped}"
+            "Skipped unavailable or changed entries: {skipped}",
+            skipped = skipped
         ))
         .on_hover_text(result.examples.join("\n"));
     }
@@ -204,7 +201,6 @@ fn show_results(
                 ui.push_id((group, member), |ui| {
                     let Some(member) = member else {
                         ui.strong(crate::tr_format!(
-                            "{} файлов · {} байт",
                             "{} files · {} bytes",
                             data.members.len(),
                             data.size

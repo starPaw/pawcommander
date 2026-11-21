@@ -88,8 +88,7 @@ pub(super) fn run(
     let skipped = coverage.unreadable + missing_metadata;
     if skipped > 0 {
         warnings.push(crate::tr_format!(
-            "Обход SFTP неполный. Ошибка чтения или недостающие данные для {skipped} объектов.",
-            "SFTP coverage is incomplete. Read errors or missing metadata affected {skipped} items."
+            "SFTP coverage is incomplete. Read errors or missing metadata affected {skipped} items.", skipped = skipped
         ));
     }
     Ok(Results {

@@ -261,7 +261,6 @@ pub(crate) fn plan_transfer(
         })?;
         if current.is_dir() && destination.starts_with(&source) {
             return Err(crate::tr_format!(
-                "Нельзя скопировать или переместить «{}» в себя или во вложенную папку",
                 "Cannot copy or move “{}” into itself or a subfolder",
                 source.display()
             )
@@ -272,7 +271,6 @@ pub(crate) fn plan_transfer(
         ))?;
         if !names.insert(name.to_os_string()) {
             return Err(crate::tr_format!(
-                "Несколько выбранных элементов называются «{}»; перенесите их по отдельности",
                 "Multiple selected items are named “{}”; transfer them separately",
                 name.to_string_lossy()
             )
@@ -332,9 +330,11 @@ pub fn trash_entries(paths: &[PathBuf], progress: &mut Progress) -> Result<usize
         // Use the operating system's trash. There is deliberately no permanent
         // deletion fallback when trash is unavailable for a volume.
         if let Err(error) = trash::delete(path) {
-            return Err(format!(
-                "Не удалось переместить «{}» в корзину: {error}. Уже перемещено в корзину: {completed}.",
-                path.display()
+            return Err(crate::tr_format!(
+                "Could not move item “{}” to Trash: {error}. Already moved: {completed}.",
+                path.display(),
+                completed = completed,
+                error = error
             ));
         }
         if captured_ok {
@@ -357,15 +357,16 @@ pub(crate) fn validate_name(name: &str) -> Result<(), String> {
         || !matches!(components.next(), Some(Component::Normal(_)))
         || components.next().is_some()
     {
-        return Err("Введите имя файла или папки без / и \\".to_owned());
+        return Err(crate::i18n::text!("Введите имя файла или папки без / и \\").to_owned());
     }
     Ok(())
 }
 
 fn directory_path(path: &Path) -> Result<PathBuf, String> {
-    let path = fs::canonicalize(path).map_err(|e| at("Не удалось открыть папку", path, e))?;
+    let path = fs::canonicalize(path)
+        .map_err(|e| at(crate::i18n::text!("Не удалось открыть папку"), path, e))?;
     if !path.is_dir() {
-        return Err(format!("«{}» не является папкой", path.display()));
+        return Err(crate::tr_format!("“{}” is not a folder", path.display()));
     }
     Ok(path)
 }
@@ -377,26 +378,42 @@ fn entry_path(path: &Path) -> Result<PathBuf, String> {
         path.to_owned()
     } else {
         std::env::current_dir()
-            .map_err(|e| format!("Не удалось определить текущую папку: {e}"))?
+            .map_err(|e| crate::tr_format!("Could not determine the current folder: {e}", e = e))?
             .join(path)
     };
-    let name = absolute
-        .file_name()
-        .ok_or("Нельзя изменять корень файловой системы")?;
-    let parent = absolute
-        .parent()
-        .ok_or("Нельзя изменять корень файловой системы")?;
-    let parent = fs::canonicalize(parent)
-        .map_err(|e| at("Не удалось определить путь к папке", parent, e))?;
+    let name = absolute.file_name().ok_or(crate::i18n::text!(
+        "Нельзя изменять корень файловой системы"
+    ))?;
+    let parent = absolute.parent().ok_or(crate::i18n::text!(
+        "Нельзя изменять корень файловой системы"
+    ))?;
+    let parent = fs::canonicalize(parent).map_err(|e| {
+        at(
+            crate::i18n::text!("Не удалось определить путь к папке"),
+            parent,
+            e,
+        )
+    })?;
     let entry = parent.join(name);
-    let metadata = fs::symlink_metadata(&entry)
-        .map_err(|e| at("Не удалось получить сведения об элементе", &entry, e))?;
+    let metadata = fs::symlink_metadata(&entry).map_err(|e| {
+        at(
+            crate::i18n::text!("Не удалось получить сведения об элементе"),
+            &entry,
+            e,
+        )
+    })?;
     if metadata.file_type().is_symlink() {
         Ok(entry)
     } else {
         // Resolve the actual spelling on case-insensitive volumes as well as
         // parent aliases, so descendant protection compares canonical paths.
-        fs::canonicalize(&entry).map_err(|e| at("Не удалось определить путь к элементу", &entry, e))
+        fs::canonicalize(&entry).map_err(|e| {
+            at(
+                crate::i18n::text!("Не удалось определить путь к элементу"),
+                &entry,
+                e,
+            )
+        })
     }
 }
 
@@ -416,8 +433,13 @@ fn normalize_selection(
         progress.checkpoint()?;
         progress.item(original);
         let path = entry_path(original)?;
-        let metadata = fs::symlink_metadata(&path)
-            .map_err(|e| at("Не удалось получить сведения об элементе", &path, e))?;
+        let metadata = fs::symlink_metadata(&path).map_err(|e| {
+            at(
+                crate::i18n::text!("Не удалось получить сведения об элементе"),
+                &path,
+                e,
+            )
+        })?;
         entries.push((path, metadata));
     }
     let mut first = HashMap::with_capacity(entries.len());
@@ -459,12 +481,16 @@ fn normalize_selection(
 
 fn ensure_absent(path: &Path) -> Result<(), String> {
     match fs::symlink_metadata(path) {
-        Ok(_) => Err(format!(
-            "«{}» уже существует. Выберите другое имя или папку; существующие элементы не перезаписываются",
+        Ok(_) => Err(crate::tr_format!(
+            "“{}” already exists. Choose another name or folder. Existing items are preserved",
             path.display()
         )),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(at("Не удалось проверить место назначения", path, e)),
+        Err(e) => Err(at(
+            crate::i18n::text!("Не удалось проверить место назначения"),
+            path,
+            e,
+        )),
     }
 }
 
@@ -482,14 +508,13 @@ impl StagingDirectory {
     fn new(path: PathBuf) -> Result<Self, String> {
         let original = fs::symlink_metadata(&path).map_err(|error| {
             crate::tr_format!(
-                "Не удалось проверить временную папку «{}»: {error}",
                 "Could not inspect temporary folder “{}”: {error}",
-                path.display()
+                path.display(),
+                error = error
             )
         })?;
         if !original.is_dir() || original.file_type().is_symlink() {
             return Err(crate::tr_format!(
-                "Временная папка «{}» изменилась до копирования; данные сохранены",
                 "Temporary folder “{}” changed before copying; data was preserved",
                 path.display()
             ));
@@ -532,7 +557,6 @@ impl StagingDirectory {
             Ok(())
         } else {
             Err(io::Error::other(crate::tr_format!(
-                "Временная папка изменилась; её содержимое сохранено",
                 "Staging directory identity changed; its contents were preserved"
             )))
         }
@@ -553,9 +577,9 @@ fn create_staging_directory(parent: &Path) -> Result<StagingDirectory, String> {
         let location = crate::vfs::Location::Local(path.clone());
         crate::recovery::plan_staging(&location).map_err(|error| {
             crate::tr_format!(
-                "Не удалось записать план временной копии «{}»: {error}",
                 "Could not record temporary copy plan “{}”: {error}",
-                path.display()
+                path.display(),
+                error = error
             )
         })?;
         let builder = fs::DirBuilder::new();
@@ -574,12 +598,19 @@ fn create_staging_directory(parent: &Path) -> Result<StagingDirectory, String> {
             }
             Err(e) => {
                 return Err(copy_space_error(parent, &e).unwrap_or_else(|| {
-                    at("Не удалось подготовить копирование в папку", parent, e)
+                    at(
+                        crate::i18n::text!("Не удалось подготовить копирование в папку"),
+                        parent,
+                        e,
+                    )
                 }));
             }
         }
     }
-    Err("Не удалось создать временную папку для копирования; повторите попытку".to_owned())
+    Err(
+        crate::i18n::text!("Не удалось создать временную папку для копирования; повторите попытку")
+            .to_owned(),
+    )
 }
 
 #[cfg(test)]
@@ -590,10 +621,11 @@ fn copy_atomically(source: &Path, destination: &Path) -> Result<(), String> {
         &mut Progress::default(),
         |payload, destination| {
             rename_no_replace(payload, destination).map_err(|e| {
-                format!(
-                    "Не удалось завершить копирование «{}» в «{}»: {e}",
+                crate::tr_format!(
+                    "Could not finish copying “{}” to “{}”: {e}",
                     source.display(),
-                    destination.display()
+                    destination.display(),
+                    e = e
                 )
             })
         },
@@ -661,7 +693,7 @@ pub(crate) fn copy_atomically_cancellable(
     progress.results.captured();
     let parent = destination
         .parent()
-        .ok_or("Недопустимое место назначения копии")?;
+        .ok_or(crate::i18n::text!("Недопустимое место назначения копии"))?;
     ensure_copy_space(
         manifest.bytes,
         available_copy_space(parent)?,
@@ -676,18 +708,19 @@ pub(crate) fn copy_atomically_cancellable(
         return Err(match cleanup {
             Ok(()) => TransferError::Failed(error.to_string()),
             Err(cleanup) => TransferError::Failed(crate::tr_format!(
-                "Не удалось зарегистрировать временную копию «{}»: {error}; очистка не удалась: {cleanup}",
                 "Could not register temporary copy “{}”: {error}; cleanup failed: {cleanup}",
-                staging.path.display()
+                staging.path.display(),
+                cleanup = cleanup,
+                error = error
             )),
         });
     }
     let check_staging = || {
         staging.ensure_owned().map_err(|error| {
             TransferError::Failed(crate::tr_format!(
-                "Временная копия «{}» изменилась: {error}",
                 "Temporary copy “{}” changed: {error}",
-                staging.path.display()
+                staging.path.display(),
+                error = error
             ))
         })
     };
@@ -719,14 +752,12 @@ pub(crate) fn copy_atomically_cancellable(
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), Ok(())) => Err(error),
         (Err(error), Err(cleanup)) => Err(crate::tr_format!(
-            "{error}. Осталась временная копия «{}»: {cleanup}",
             "{error}. Temporary copy remains at “{}”: {cleanup}",
-            staging.path.display()
+            staging.path.display(), cleanup = cleanup, error = error
         ).into()),
         (Ok(()), Err(cleanup)) => Err(crate::tr_format!(
-            "Копия «{}» готова, но не удалось удалить её пустую временную папку «{}»: {cleanup}",
             "Copy “{}” is ready, but its empty temporary folder “{}” could not be removed: {cleanup}",
-            destination.display(), staging.path.display()
+            destination.display(), staging.path.display(), cleanup = cleanup
         ).into()),
     }
 }
@@ -760,7 +791,7 @@ pub(crate) fn available_copy_space(parent: &Path) -> Result<u128, String> {
     }
     let mut path: Vec<u16> = parent.as_os_str().encode_wide().collect();
     if path.contains(&0) {
-        return Err("Недопустимый путь проверки свободного места".into());
+        return Err(crate::i18n::text!("Недопустимый путь проверки свободного места").into());
     }
     // Also handles a UNC share root, for which Win32 requires a trailing slash.
     if !matches!(path.last(), Some(47 | 92)) {
@@ -785,15 +816,16 @@ pub(crate) fn available_copy_space(parent: &Path) -> Result<u128, String> {
 
 #[cfg(not(any(unix, windows)))]
 pub(crate) fn available_copy_space(_parent: &Path) -> Result<u128, String> {
-    Err("Проверка свободного места на этой платформе недоступна".into())
+    Err(crate::i18n::text!("Проверка свободного места на этой платформе недоступна").into())
 }
 
 #[cfg(any(unix, windows))]
 fn space_query_error(parent: &Path, error: io::Error) -> String {
     let parent = parent.display();
     crate::tr_format!(
-        "Не удалось проверить свободное место в папке «{parent}»: {error}",
-        "Could not check available space in “{parent}”: {error}"
+        "Could not check available space in “{parent}”: {error}",
+        error = error,
+        parent = parent
     )
 }
 
@@ -802,8 +834,9 @@ pub(crate) fn copy_space_error(parent: &Path, error: &io::Error) -> Option<Strin
         io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded => {
             let parent = parent.display();
             Some(crate::tr_format!(
-                "Недостаточно свободного места при копировании в папку «{parent}»: {error}",
-                "Not enough free space while copying into “{parent}”: {error}"
+                "Not enough free space while copying into “{parent}”: {error}",
+                error = error,
+                parent = parent
             ))
         }
         _ => None,
@@ -817,8 +850,7 @@ pub(crate) fn ensure_copy_space(
 ) -> Result<(), String> {
     if u128::from(required) > available {
         Err(crate::tr_format!(
-            "Недостаточно свободного места в папке «{parent}»: требуется примерно {required} байт, доступно {available} байт",
-            "Not enough free space in “{parent}”: about {required} bytes needed, {available} bytes available"
+            "Not enough free space in “{parent}”: about {required} bytes needed, {available} bytes available", available = available, parent = parent, required = required
         ))
     } else {
         Ok(())
@@ -952,7 +984,9 @@ impl SourceManifest {
     ) -> io::Result<()> {
         cancel.check()?;
         if depth > 128 {
-            return Err(io::Error::other("слишком большая глубина папок"));
+            return Err(io::Error::other(crate::i18n::text!(
+                "слишком большая глубина папок"
+            )));
         }
         let metadata = fs::symlink_metadata(path)?;
         // Do not silently claim a metadata check when the filesystem cannot
@@ -972,11 +1006,11 @@ impl SourceManifest {
             self.bytes = self
                 .bytes
                 .checked_add(metadata.len())
-                .ok_or_else(|| io::Error::other("слишком большой размер"))?;
+                .ok_or_else(|| io::Error::other(crate::i18n::text!("слишком большой размер")))?;
         } else if !metadata.is_dir() && !metadata.is_symlink() {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "специальный файл",
+                crate::i18n::text!("специальный файл"),
             ));
         }
         if let Some(names) = &children {
@@ -1095,8 +1129,8 @@ fn copy_tree_entry(
     } else {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            format!(
-                "«{}» — специальный файл (сокет, устройство или канал). Можно копировать обычные файлы, папки и символические ссылки",
+            crate::tr_format!(
+                "“{}” is a special file (socket, device, or pipe). You can copy regular files, folders and symbolic links",
                 source.display()
             ),
         ));
@@ -1183,7 +1217,7 @@ fn copy_symlink(source: &Path, destination: &Path, metadata: &fs::Metadata) -> i
 fn copy_symlink(_: &Path, _: &Path, _: &fs::Metadata) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "Копирование символических ссылок на этой платформе не поддерживается",
+        crate::i18n::text!("Копирование символических ссылок на этой платформе не поддерживается"),
     ))
 }
 
@@ -1236,14 +1270,15 @@ pub(crate) fn rename_error(source: &Path, destination: &Path, error: io::Error) 
     #[cfg(not(any(unix, windows)))]
     let cross_volume = false;
     if cross_volume {
-        return format!(
-            "Перемещение между дисками пока не поддерживается: {error}. Скопируйте элемент, проверьте копию, затем переместите оригинал в корзину"
+        return crate::tr_format!(
+            "Cross-volume move is unavailable: {error}. Copy the item, check the copy, and move the original to Trash", error = error
         );
     }
-    format!(
-        "Не удалось переместить «{}» в «{}» без замены существующих элементов: {error}",
+    crate::tr_format!(
+        "Could not move “{}” to “{}” without replacing existing items: {error}",
         source.display(),
-        destination.display()
+        destination.display(),
+        error = error
     )
 }
 
@@ -1254,10 +1289,18 @@ pub(crate) fn rename_no_replace(source: &Path, destination: &Path) -> io::Result
     use std::ffi::CString;
     use std::os::raw::{c_char, c_int, c_uint};
     use std::os::unix::ffi::OsStrExt;
-    let source = CString::new(source.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Путь содержит нулевой символ"))?;
-    let destination = CString::new(destination.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Путь содержит нулевой символ"))?;
+    let source = CString::new(source.as_os_str().as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            crate::i18n::text!("Путь содержит нулевой символ"),
+        )
+    })?;
+    let destination = CString::new(destination.as_os_str().as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            crate::i18n::text!("Путь содержит нулевой символ"),
+        )
+    })?;
     #[cfg(target_os = "macos")]
     unsafe extern "C" {
         fn renamex_np(source: *const c_char, destination: *const c_char, flags: c_uint) -> c_int;
@@ -1297,7 +1340,7 @@ pub(crate) fn rename_no_replace(source: &Path, destination: &Path) -> io::Result
     if source.contains(&0) || destination.contains(&0) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "Путь содержит нулевой символ",
+            crate::i18n::text!("Путь содержит нулевой символ"),
         ));
     }
     source.push(0);
@@ -1316,7 +1359,9 @@ pub(crate) fn rename_no_replace(source: &Path, destination: &Path) -> io::Result
 pub(crate) fn rename_no_replace(_: &Path, _: &Path) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "Безопасное переименование без перезаписи на этой платформе пока не реализовано",
+        crate::i18n::text!(
+            "Безопасное переименование без перезаписи на этой платформе пока не реализовано"
+        ),
     ))
 }
 

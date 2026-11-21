@@ -44,11 +44,8 @@ pub(super) struct IndexInfo {
 impl IndexInfo {
     pub(super) fn unknown() -> Self {
         Self {
-            source: crate::tr_format!("Источник индекса неизвестен", "Index source unknown"),
-            freshness: crate::tr_format!(
-                "Дата актуальности индекса неизвестна",
-                "Index freshness date unknown"
-            ),
+            source: crate::tr_format!("Index source unknown"),
+            freshness: crate::tr_format!("Index freshness date unknown"),
         }
     }
 }
@@ -316,7 +313,7 @@ fn info_for_paths(paths: Vec<PathBuf>, can_check_date: impl Fn() -> bool) -> Ind
         .iter()
         .map(|path| {
             if path.as_os_str().is_empty() {
-                crate::tr_format!("база не определена", "database unknown")
+                crate::tr_format!("database unknown")
             } else {
                 path.display().to_string()
             }
@@ -324,25 +321,19 @@ fn info_for_paths(paths: Vec<PathBuf>, can_check_date: impl Fn() -> bool) -> Ind
         .collect::<Vec<_>>()
         .join(", ");
     IndexInfo {
-        source: crate::tr_format!("База индекса: {source}", "Index database: {source}"),
+        source: crate::tr_format!("Index database: {source}", source = source),
         freshness: freshness_for_paths(&paths, can_check_date),
     }
 }
 
 fn freshness_for_paths(paths: &[PathBuf], can_check_date: impl Fn() -> bool) -> String {
     if paths.is_empty() {
-        return crate::tr_format!(
-            "Дата актуальности индекса неизвестна",
-            "Index freshness date unknown"
-        );
+        return crate::tr_format!("Index freshness date unknown");
     }
     let mut pieces = Vec::with_capacity(paths.len());
     for path in paths {
         if path.as_os_str().is_empty() {
-            pieces.push(crate::tr_format!(
-                "база данных не определена",
-                "database path unknown"
-            ));
+            pieces.push(crate::tr_format!("database path unknown"));
             continue;
         }
         let metadata = can_check_date()
@@ -350,20 +341,17 @@ fn freshness_for_paths(paths: &[PathBuf], can_check_date: impl Fn() -> bool) -> 
             .flatten();
         let description = match metadata.and_then(|metadata| metadata.modified().ok()) {
             Some(modified) => {
-                let date = chrono::DateTime::<chrono::Local>::from(modified)
-                    .format("%Y-%m-%d %H:%M:%S %Z")
-                    .to_string();
+                let date = crate::i18n::display::date(
+                    chrono::DateTime::<chrono::Local>::from(modified),
+                    crate::i18n::display::DateStyle::ZoneName,
+                );
                 crate::tr_format!(
-                    "{} — файл базы изменён {date} (оценка актуальности)",
                     "{} — database file modified {date} (freshness estimate)",
-                    path.display()
+                    path.display(),
+                    date = date
                 )
             }
-            None => crate::tr_format!(
-                "{} — дата изменения неизвестна",
-                "{} — modification date unknown",
-                path.display()
-            ),
+            None => crate::tr_format!("{} — modification date unknown", path.display()),
         };
         pieces.push(description);
     }
@@ -518,9 +506,10 @@ mod tests {
         let new_mtime = new.metadata().unwrap().modified().unwrap();
         assert!(old_mtime < new_mtime);
         for modified in [old_mtime, new_mtime] {
-            let date = chrono::DateTime::<chrono::Local>::from(modified)
-                .format("%Y-%m-%d %H:%M:%S %Z")
-                .to_string();
+            let date = crate::i18n::display::date(
+                chrono::DateTime::<chrono::Local>::from(modified),
+                crate::i18n::display::DateStyle::ZoneName,
+            );
             assert!(freshness.contains(&date));
         }
         assert!(freshness.contains("old.db"));

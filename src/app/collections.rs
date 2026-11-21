@@ -207,8 +207,8 @@ impl CollectionsDialog {
             ui.horizontal_wrapped(|ui| {
                 let name = &catalog.collections[index].name;
                 ui.label(crate::tr_format!(
-                    "Удалить коллекцию «{name}»?",
-                    "Remove collection “{name}”?"
+                    "Remove collection “{name}”?",
+                    name = name
                 ));
                 if ui.button(text!("Удалить коллекцию")).clicked() {
                     catalog.collections.remove(index);
@@ -241,10 +241,7 @@ impl CollectionsDialog {
                 )
                 .widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, label));
                 if ui
-                    .button(crate::tr_format!(
-                        "Добавить выделенное ({count})",
-                        "Add selection ({count})"
-                    ))
+                    .button(crate::tr_format!("Add selection ({count})", count = count))
                     .clicked()
                 {
                     match collections::parse_tags(&self.add_tags) {
@@ -536,10 +533,7 @@ impl CollectionsDialog {
             Phase::Finished(ResultView::Exported(path)) => {
                 let path = path.display().escape_debug().to_string();
                 self.notice = Some((
-                    crate::tr_format!(
-                        "Коллекция экспортирована: {path}",
-                        "Collection exported: {path}"
-                    ),
+                    crate::tr_format!("Collection exported: {path}", path = path),
                     false,
                 ));
             }

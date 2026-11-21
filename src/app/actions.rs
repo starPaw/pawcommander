@@ -219,10 +219,7 @@ impl PawCommander {
             }
             Err(error) => {
                 self.notice = Some((
-                    crate::tr_format!(
-                        "Не удалось запустить приложение. {error}",
-                        "Could not start the application. {error}"
-                    ),
+                    crate::tr_format!("Could not start the application. {error}", error = error),
                     true,
                 ));
             }
@@ -478,8 +475,8 @@ impl PawCommander {
                         Err(error) => {
                             self.notice = Some((
                                 crate::tr_format!(
-                                    "Не удалось открыть встроенный терминал. {error}",
-                                    "Could not open the embedded terminal. {error}"
+                                    "Could not open the embedded terminal. {error}",
+                                    error = error
                                 ),
                                 true,
                             ))
@@ -524,13 +521,8 @@ impl PawCommander {
                 } else if let Some(path) = p.local()
                     && let Err(e) = open::that_detached(path)
                 {
-                    self.notice = Some((
-                        crate::tr_format!(
-                            "Не удалось открыть файл: {e}",
-                            "Could not open file: {e}"
-                        ),
-                        true,
-                    ));
+                    self.notice =
+                        Some((crate::tr_format!("Could not open file: {e}", e = e), true));
                 }
             }
             Action::History(index, delta) => {
@@ -830,13 +822,8 @@ impl PawCommander {
                 #[cfg(not(target_os = "macos"))]
                 let result = open::that_detached(path.parent().unwrap_or(path));
                 if let Err(e) = result {
-                    self.notice = Some((
-                        crate::tr_format!(
-                            "Не удалось показать файл: {e}",
-                            "Could not reveal file: {e}"
-                        ),
-                        true,
-                    ));
+                    self.notice =
+                        Some((crate::tr_format!("Could not reveal file: {e}", e = e), true));
                 }
             }
             Action::CopyPath => {

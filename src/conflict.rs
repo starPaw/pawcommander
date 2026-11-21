@@ -73,7 +73,6 @@ impl ConflictDialog {
             ui.set_width((ctx.content_rect().width() - 32.0).clamp(1.0, 520.0));
             ui.heading(crate::i18n::text!("Совпадение имён"));
             ui.label(crate::tr_format!(
-                "Совпадение {} из {}",
                 "Conflict {} of {}",
                 conflict.index,
                 conflict.count
@@ -147,20 +146,22 @@ fn entry(ui: &mut egui::Ui, title: &str, entry: &EntryDetails) {
         .on_hover_text(entry.location.display());
     let size = entry.size.map_or_else(
         || "—".to_owned(),
-        |bytes| crate::tr_format!("{bytes} Б", "{bytes} B"),
+        |bytes| crate::tr_format!("{bytes} B", bytes = crate::i18n::display::integer(bytes)),
     );
     let date = entry.modified.map_or_else(
         || "—".to_owned(),
         |modified| {
-            chrono::DateTime::<chrono::Local>::from(modified)
-                .format("%d.%m.%Y %H:%M:%S")
-                .to_string()
+            crate::i18n::display::date(
+                chrono::DateTime::<chrono::Local>::from(modified),
+                crate::i18n::display::DateStyle::Seconds,
+            )
         },
     );
     ui.label(crate::tr_format!(
-        "{} · Размер {size} · Изменён {date}",
         "{} · Size {size} · Modified {date}",
-        crate::i18n::text(entry.kind)
+        crate::i18n::text(entry.kind),
+        date = date,
+        size = size
     ));
 }
 

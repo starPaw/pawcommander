@@ -103,7 +103,6 @@ impl RetryTransfer {
             self.verify_target()?;
             if plan.len() != self.sources.len() {
                 return Err(crate::tr_format!(
-                    "Состав источников изменился. Выберите файлы заново.",
                     "The source selection changed. Select the files again."
                 )
                 .into());
@@ -154,9 +153,10 @@ impl RetryTransfer {
             if !attempt.ready_to_retry()? {
                 let target = &attempt.target;
                 return Err(crate::tr_format!(
-                    "Повтор остановлен. Состояние назначения {target} или его резервной копии изменилось.",
-                    "Retry stopped. The state of {target} or its backup has changed."
-                ).into());
+                    "Retry stopped. The state of {target} or its backup has changed.",
+                    target = target
+                )
+                .into());
             }
             if let Some(manifest) = &attempt.source_entries {
                 manifest.verify(cancel, |_, _| {})?;
@@ -180,7 +180,6 @@ impl RetryTransfer {
             Ok(())
         } else {
             Err(crate::tr_format!(
-                "Повтор не начат: источник {} изменился или недоступен. Проверьте его и выберите файлы заново.",
                 "Retry not started: source {} changed or is unavailable. Inspect it and select the files again.", item.original
             ).into())
         }
@@ -268,7 +267,6 @@ impl RetryTransfer {
             Ok(())
         } else {
             Err(crate::tr_format!(
-                "Папка назначения изменилась или недоступна. Выберите её заново.",
                 "The destination folder changed or is unavailable. Select it again."
             )
             .into())

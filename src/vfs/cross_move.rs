@@ -51,8 +51,8 @@ pub(super) enum Phase {
 
 fn changed(path: &Location) -> String {
     crate::tr_format!(
-        "Перенос остановлен: объект {path} изменился или недоступен",
-        "Move stopped: item {path} changed or is inaccessible"
+        "Move stopped: item {path} changed or is inaccessible",
+        path = path
     )
 }
 
@@ -283,8 +283,8 @@ impl MoveSource {
                     links.insert(path.clone(), fs::read_link(local).map_err(err)?);
                 } else {
                     return Err(crate::tr_format!(
-                        "Безопасный перенос этого типа объекта между дисками недоступен: {path}",
-                        "Safe cross-volume move is unavailable for this object type: {path}"
+                        "Safe cross-volume move is unavailable for this object type: {path}",
+                        path = path
                     )
                     .into());
                 }
@@ -410,9 +410,10 @@ pub(super) fn remove_verified_at(
             // even on panic or an unacknowledged remote rename.
             if let Err(error) = rename_for_publication(&item.source, &held) {
                 return Err(crate::tr_format!(
-                    "{error}. Проверьте источник {} и сохранённую папку {held}",
                     "{error}. Inspect source {} and retained folder {held}",
-                    item.source
+                    item.source,
+                    error = error,
+                    held = held
                 )
                 .into());
             }
@@ -532,8 +533,7 @@ pub(super) fn remove_verified_at(
                         .map_or_else(|| changed(&held), |e| e.to_string());
                     let source = &item.source;
                     Err(crate::tr_format!(
-                        "{reason}. Остаток источника сохранён в {held}; возврат в {source} не выполнен: {restore}",
-                        "{reason}. Remaining source retained at {held}; restoration to {source} failed: {restore}"
+                        "{reason}. Remaining source retained at {held}; restoration to {source} failed: {restore}", held = held, reason = reason, restore = restore, source = source
                     ).into())
                 }
             }
@@ -559,7 +559,6 @@ pub(super) fn incomplete(
         progress.results.cancelled = true;
     }
     crate::tr_format!(
-        "Копия создана в {target}. Перенос не завершён. Проверьте исходные данные и журнал. {error}",
-        "A copy was created at {target}. The move is incomplete. Check the source and result history. {error}"
+        "A copy was created at {target}. The move is incomplete. Check the source and result history. {error}", error = error, target = target
     ).into()
 }

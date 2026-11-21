@@ -13,8 +13,8 @@ pub(super) fn report_startup(mut child: Child, report: impl FnOnce(Result<(), St
                     Ok(())
                 } else {
                     Err(crate::tr_format!(
-                        "Внешний инструмент завершился с ошибкой ({status})",
-                        "The external tool exited with an error ({status})"
+                        "The external tool exited with an error ({status})",
+                        status = status
                     ))
                 });
                 return;
@@ -36,8 +36,5 @@ pub(super) fn report_startup(mut child: Child, report: impl FnOnce(Result<(), St
 }
 
 pub(super) fn start_error(error: std::io::Error) -> String {
-    crate::tr_format!(
-        "Не удалось запустить внешний инструмент: {error}",
-        "Could not launch the external tool: {error}"
-    )
+    crate::tr_format!("Could not launch the external tool: {error}", error = error)
 }

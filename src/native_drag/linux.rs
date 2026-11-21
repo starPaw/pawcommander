@@ -90,8 +90,8 @@ impl Platform {
 
 fn native_error(error: &str) -> String {
     crate::tr_format!(
-        "Не удалось передать файлы системному приложению: {error}",
-        "Could not hand files to the receiving application: {error}"
+        "Could not hand files to the receiving application: {error}",
+        error = error
     )
 }
 
@@ -103,10 +103,7 @@ fn uri_list(paths: &[PathBuf]) -> Result<Vec<u8>, String> {
         data.extend_from_slice(url.as_str().as_bytes());
         data.extend_from_slice(b"\r\n");
         if data.len() > 4 * 1024 * 1024 {
-            return Err(crate::tr_format!(
-                "Список файлов для перетаскивания слишком велик",
-                "The file list is too large to drag"
-            ));
+            return Err(crate::tr_format!("The file list is too large to drag"));
         }
     }
     Ok(data)

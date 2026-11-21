@@ -65,8 +65,8 @@ pub(crate) fn edit_archive(
     progress.results.record(&source, None, outcome, reason);
     match result {
         Ok(()) => Ok(crate::tr_format!(
-            "Архив обновлён: {source}",
-            "Archive updated: {source}"
+            "Archive updated: {source}",
+            source = source
         )),
         Err(TransferError::Cancelled) => {
             progress.results.cancelled = true;

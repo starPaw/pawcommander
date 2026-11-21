@@ -124,9 +124,7 @@ impl Document {
                 Some(separator) => separator.label().into(),
                 None => self.page.start.as_ref().map_or_else(
                     || text!("Авто").into(),
-                    |start| {
-                        crate::tr_format!("Авто ({})", "Auto ({})", start.layout.separator.label())
-                    },
+                    |start| crate::tr_format!("Auto ({})", start.layout.separator.label()),
                 ),
             };
             egui::ComboBox::from_id_salt("table-separator")
@@ -170,7 +168,6 @@ impl Document {
                 }
                 if self.page.scanned != 0 {
                     ui.label(crate::tr_format!(
-                        "Строк на странице: {} · прочитано записей: {}",
                         "Rows on page: {} · records read: {}",
                         self.page.rows.len(),
                         self.page.scanned,
@@ -286,7 +283,7 @@ fn show_table(ui: &mut egui::Ui, page: &Page, headers: &[String], reset_scroll: 
                             {
                                 cell(ui, label, true);
                             } else {
-                                ui.strong(crate::tr_format!("Столбец {}", "Column {}", column + 1));
+                                ui.strong(crate::tr_format!("Column {}", column + 1));
                             }
                         });
                     }

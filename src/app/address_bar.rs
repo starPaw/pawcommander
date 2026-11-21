@@ -142,7 +142,6 @@ pub(super) fn address_bar(
                                             });
                                         }
                                         response.on_hover_text(crate::tr_format!(
-                                            "Перейти в {}",
                                             "Go to {}",
                                             path.display()
                                         ));

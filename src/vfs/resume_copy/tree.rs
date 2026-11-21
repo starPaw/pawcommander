@@ -79,8 +79,8 @@ impl Snapshot {
                 Content::Link(fs::read_link(source.path())?)
             } else {
                 return Err(crate::tr_format!(
-                    "Копирование этого типа объекта недоступно: {source}",
-                    "Copying this object type is unavailable: {source}"
+                    "Copying this object type is unavailable: {source}",
+                    source = source
                 )
                 .into());
             };
@@ -377,7 +377,10 @@ pub(super) fn start(
     let snapshot = Snapshot::capture(&source, local_names, progress)?;
     let original_access_times = if intent == Intent::Move {
         if snapshot.entries.len() > MAX_MOVE_JOURNAL_ENTRIES {
-            return Err("Пофайловый журнал переноса превысил лимит 100000 элементов".into());
+            return Err(crate::i18n::text!(
+                "Пофайловый журнал переноса превысил лимит 100000 элементов"
+            )
+            .into());
         }
         Some(
             snapshot

@@ -268,25 +268,30 @@ pub(super) fn transfer_plan(
             .path()
             .file_name()
             .and_then(|s| s.to_str())
-            .ok_or("Нельзя переносить корень или имя не UTF-8")?;
+            .ok_or(crate::i18n::text!(
+                "Нельзя переносить корень или имя не UTF-8"
+            ))?;
         validate_name(name)?;
         if !names.insert(name.to_owned()) {
-            return Err("Выбраны элементы с одинаковыми именами".into());
+            return Err(crate::i18n::text!("Выбраны элементы с одинаковыми именами").into());
         }
         if source.might_share_filesystem(destination) {
             // Resolve aliases for the destination and the source subtree.
             let actual_source = canonical(source)?;
             let actual_dest = canonical(destination)?;
             if kind == TransferKind::Move {
-                let parent = source.parent().ok_or("Недопустимый источник")?;
+                let parent = source
+                    .parent()
+                    .ok_or(crate::i18n::text!("Недопустимый источник"))?;
                 if canonical(&parent)? == actual_dest {
                     return Err(crate::i18n::text!("Элементы уже находятся в этой папке").into());
                 }
             }
             if actual_dest.starts_with(&actual_source) {
-                return Err(
-                    "Нельзя копировать или перемещать элемент в себя или вложенную папку".into(),
-                );
+                return Err(crate::i18n::text!(
+                    "Нельзя копировать или перемещать элемент в себя или вложенную папку"
+                )
+                .into());
             }
         }
         plan.push(TransferItem::new(
@@ -303,8 +308,13 @@ pub(super) fn keep_both_name(
     reserved: &HashSet<Location>,
     cancel: &Cancellation,
 ) -> Result<Location, TransferError> {
-    let parent = target.parent().ok_or("Недопустимое назначение")?;
-    let stem = target.path().file_stem().ok_or("Нет имени объекта")?;
+    let parent = target
+        .parent()
+        .ok_or(crate::i18n::text!("Недопустимое назначение"))?;
+    let stem = target
+        .path()
+        .file_stem()
+        .ok_or(crate::i18n::text!("Нет имени объекта"))?;
     for index in 2..=10_000 {
         cancel.check()?;
         let mut name = stem.to_os_string();
@@ -318,7 +328,11 @@ pub(super) fn keep_both_name(
             return Ok(candidate);
         }
     }
-    Err(format!("Не удалось подобрать свободное имя для {target}").into())
+    Err(crate::tr_format!(
+        "Could not choose an unused name for {target}",
+        target = target
+    )
+    .into())
 }
 
 pub fn transfer_with_conflicts(
@@ -360,8 +374,7 @@ pub fn transfer_with_conflicts(
             let (completed, skipped, remaining) =
                 (summary.completed, summary.skipped, summary.remaining.len());
             Err(crate::tr_format!(
-                "{error}. Исход публикации на сервере не подтверждён. Завершено: {completed}. Пропущено: {skipped}. Осталось: {remaining}. Проверьте источник и назначение перед повтором.",
-                "{error}. Server publication is unconfirmed. Completed: {completed}. Skipped: {skipped}. Remaining: {remaining}. Inspect the source and destination before retrying."
+                "{error}. Server publication is unconfirmed. Completed: {completed}. Skipped: {skipped}. Remaining: {remaining}. Inspect the source and destination before retrying.", completed = completed, error = error, remaining = remaining, skipped = skipped
             ))
         }
         Err(TransferError::Failed(error)) if summary.preparing => Err(error),
@@ -375,8 +388,7 @@ pub fn transfer_with_conflicts(
                 .collect::<Vec<_>>()
                 .join("; ");
             Err(crate::tr_format!(
-                "{error}. Завершено: {completed}. Пропущено: {skipped}. Осталось: {remaining}: {paths}. Обновите обе папки перед повтором; проверьте сообщения о восстановлении.",
-                "{error}. Completed: {completed}. Skipped: {skipped}. Remaining: {remaining}: {paths}. Refresh both folders before retrying; check any recovery instructions."
+                "{error}. Completed: {completed}. Skipped: {skipped}. Remaining: {remaining}: {paths}. Refresh both folders before retrying; check any recovery instructions.", completed = completed, error = error, paths = paths, remaining = remaining, skipped = skipped
             ))
         }
     }
@@ -432,7 +444,7 @@ pub(super) fn transfer_run(
             progress.item(item.original.path());
             index += 1;
             let source_meta = entry_metadata(&item.source)?
-                .ok_or_else(|| format!("Исходный объект {} исчез", item.source))?;
+                .ok_or_else(|| crate::tr_format!("Source item {} disappeared", item.source))?;
             let can_replace = source_meta.is_file()
                 && target_meta.is_file()
                 && !source_meta.same_object(&target_meta)
@@ -491,7 +503,10 @@ pub(super) fn transfer_run(
                     if mounted_smb(&item.target) {
                         return Err(crate::i18n::text(crate::smb::REPLACE_UNAVAILABLE).into());
                     }
-                    return Err("Замена доступна только для двух разных обычных файлов".into());
+                    return Err(crate::i18n::text!(
+                        "Замена доступна только для двух разных обычных файлов"
+                    )
+                    .into());
                 }
             }
         }
@@ -518,8 +533,8 @@ pub(super) fn transfer_run(
             && !entry_metadata(&item.source)?
                 .is_some_and(|meta| expected_source.matches_file(&meta))
         {
-            return Err(format!(
-                "Исходный файл {} изменился после показа диалога",
+            return Err(crate::tr_format!(
+                "Source file {} changed after the dialog was shown",
                 item.source
             )
             .into());
@@ -646,16 +661,16 @@ pub(super) fn transfer_run(
                     (!verified).then(|| match check {
                         Err(error) => error,
                         _ => crate::tr_format!(
-                            "Не удалось подтвердить перемещение {source} в {target}",
-                            "Could not confirm the move of {source} to {target}"
+                            "Could not confirm the move of {source} to {target}",
+                            source = source,
+                            target = target
                         ),
                     }),
                 );
             }
             if failed != 0 && result.is_ok() {
                 result = Err(crate::tr_format!(
-                    "Перемещение корня опубликовано, но результат {failed} вложенных элементов не подтверждён",
-                    "The root move was published, but {failed} descendant results could not be confirmed"
+                    "The root move was published, but {failed} descendant results could not be confirmed", failed = failed
                 ).into());
             }
         }
@@ -688,8 +703,8 @@ pub(super) fn transfer_run(
         let mut reason = result.as_ref().err().map(ToString::to_string).or_else(|| {
             history_warning.map(|error| {
                 crate::tr_format!(
-                    "Перенос завершён, но пофайловый журнал неполон: {error}",
-                    "Move completed, but per-item history is incomplete: {error}"
+                    "Move completed, but per-item history is incomplete: {error}",
+                    error = error
                 )
             })
         });
@@ -752,8 +767,8 @@ pub fn transfer(
         kind,
         &mut Progress::default(),
         |conflict| {
-            Err(format!(
-                "«{}» уже существует; перезапись запрещена",
+            Err(crate::tr_format!(
+                "“{}” already exists. Overwriting is disabled.",
                 conflict.target.location
             ))
         },
@@ -811,8 +826,8 @@ pub(crate) fn copy_sftp_for_drop(
         }
         if entry_metadata(&target)?.is_some() {
             return Err(crate::tr_format!(
-                "Путь назначения уже занят: {target}",
-                "The destination path is already occupied: {target}"
+                "The destination path is already occupied: {target}",
+                target = target
             )
             .into());
         }
@@ -950,8 +965,7 @@ fn copy_to_smb(
     progress.checkpoint()?;
     let unconfirmed = |error: &dyn std::fmt::Display| {
         TransferError::PublicationUnconfirmed(crate::tr_format!(
-            "Копирование на SMB не подтверждено. Проверьте возможную неполную копию {target} перед повтором ({error})",
-            "SMB copy is unconfirmed. Check {target} for an incomplete copy before retrying ({error})",
+            "SMB copy is unconfirmed. Check {target} for an incomplete copy before retrying ({error})", error = error, target = target,
         ))
     };
     let mut file = crate::smb::open_upload(target_path).map_err(|error| match error.kind() {
@@ -1011,8 +1025,8 @@ pub(super) fn move_item(
     {
         let source = &item.original;
         return Err(crate::tr_format!(
-            "Исходный объект {source} изменился во время ожидания решения о конфликте",
-            "Source item {source} changed while waiting for a conflict decision"
+            "Source item {source} changed while waiting for a conflict decision",
+            source = source
         )
         .into());
     }
@@ -1155,8 +1169,9 @@ fn copy_transfer(
             Err(TransferError::PublicationUnconfirmed(error)) => {
                 *preserve = true;
                 return Err(TransferError::PublicationUnconfirmed(crate::tr_format!(
-                    "{error}. Для проверки сохранена временная папка {staging}.",
-                    "{error}. Temporary folder retained for inspection at {staging}."
+                    "{error}. Temporary folder retained for inspection at {staging}.",
+                    error = error,
+                    staging = staging
                 )));
             }
             Err(error) => {
@@ -1187,7 +1202,9 @@ pub(super) fn check_copy_space(
     target: &Location,
     staging: &Location,
 ) -> Result<(), String> {
-    let parent = target.parent().ok_or("Недопустимое назначение")?;
+    let parent = target
+        .parent()
+        .ok_or(crate::i18n::text!("Недопустимое назначение"))?;
     let available = if let Some(path) = parent.local() {
         fs_ops::available_copy_space(path)?
     } else {
@@ -1208,8 +1225,7 @@ pub(super) fn check_copy_space(
         handle.close().map_err(err)?;
         sftp.unlink(probe.path()).map_err(err)?;
         let stat = stat.map_err(|e| crate::tr_format!(
-            "Не удалось проверить свободное место SFTP для {parent}: {e}. Сервер должен поддерживать fstatvfs@openssh.com; данные текущего объекта не записаны",
-            "Could not check available SFTP space in {parent}: {e}. The server must support fstatvfs@openssh.com; no data for this item was written"
+            "Could not check available SFTP space in {parent}: {e}. The server must support fstatvfs@openssh.com; no data for this item was written", e = e, parent = parent
         ))?;
         u128::from(stat.f_bavail) * u128::from(stat.f_frsize)
     };
@@ -1340,8 +1356,8 @@ pub(super) fn publish_replacement_with_backup_rename(
                 Ok(())
             } else {
                 Err(crate::tr_format!(
-                    "Назначение {target} изменилось после показа диалога",
-                    "Destination {target} changed after the conflict dialog was shown"
+                    "Destination {target} changed after the conflict dialog was shown",
+                    target = target
                 ))
             }
         },
@@ -1371,8 +1387,8 @@ pub(super) fn publish_checked_replacement(
         check(&backup)?;
         if !entry_metadata(payload)?.is_some_and(|meta| meta.is_file()) {
             return Err(crate::tr_format!(
-                "Исходный объект {payload} больше не является обычным файлом",
-                "Source item {payload} is no longer a regular file"
+                "Source item {payload} is no longer a regular file",
+                payload = payload
             ));
         }
         *attempted = true;
@@ -1469,7 +1485,7 @@ impl LocalStaging {
                 }
             }
         }
-        Err("Не удалось создать временную папку для копирования".into())
+        Err(crate::i18n::text!("Не удалось создать временную папку для копирования").into())
     }
 
     fn path(&self) -> &Path {
@@ -1571,7 +1587,9 @@ fn staging_typed(
     if let Some(cancel) = cancel {
         cancel.check()?;
     }
-    let parent = target.parent().ok_or("Недопустимое назначение")?;
+    let parent = target
+        .parent()
+        .ok_or(crate::i18n::text!("Недопустимое назначение"))?;
     // A tracked job keeps one current location in its own durable record.
     // The generic append-only recovery record is bounded independently.
     let use_operation_marker = notice.is_none();
@@ -1624,8 +1642,7 @@ fn staging_typed(
         Err(e) if sftp.lstat(staging.path()).is_err() => return Err(err(e).into()),
         Err(e) => {
             return Err(TransferError::PublicationUnconfirmed(crate::tr_format!(
-                "Создание временной папки {staging} не подтверждено: {e}. Проверьте зарегистрированный адрес перед повтором.",
-                "Temporary folder creation at {staging} is unconfirmed: {e}. Inspect the registered location before retrying."
+                "Temporary folder creation at {staging} is unconfirmed: {e}. Inspect the registered location before retrying.", e = e, staging = staging
             )));
         }
     }
@@ -1669,11 +1686,13 @@ pub(super) fn staging_result_typed(
                 .err()
                 .map(|error| error.to_string())
                 .unwrap_or_else(|| {
-                    crate::tr_format!("Объект {target} опубликован", "Item {target} was published")
+                    crate::tr_format!("Item {target} was published", target = target)
                 });
             let message = crate::tr_format!(
-                "{outcome}. Осталась временная папка {staging}: {e}",
-                "{outcome}. Temporary folder remains at {staging}: {e}"
+                "{outcome}. Temporary folder remains at {staging}: {e}",
+                e = e,
+                outcome = outcome,
+                staging = staging
             );
             Err(if unconfirmed {
                 TransferError::PublicationUnconfirmed(message)
@@ -1779,11 +1798,19 @@ impl TransferSourceEntry {
 }
 
 pub(super) fn validate_source_child_name(source: &Location, name: &OsStr) -> Result<(), String> {
-    let name = name
-        .to_str()
-        .ok_or_else(|| format!("SFTP-передача не поддерживает имя не UTF-8 в {source}"))?;
-    validate_name(name)
-        .map_err(|error| format!("Неподдерживаемое имя для передачи SFTP в {source}: {error}"))
+    let name = name.to_str().ok_or_else(|| {
+        crate::tr_format!(
+            "SFTP transfer does not support a name outside UTF-8 in {source}",
+            source = source
+        )
+    })?;
+    validate_name(name).map_err(|error| {
+        crate::tr_format!(
+            "Unsupported SFTP transfer name in {source}: {error}",
+            error = error,
+            source = source
+        )
+    })
 }
 
 pub(super) fn source_children(
@@ -1805,7 +1832,11 @@ pub(super) fn source_children(
             let mut parts = name.components();
             match (parts.next(), parts.next()) {
                 (Some(Component::Normal(name)), None) => names.push(name.to_os_string()),
-                _ => return Err(format!("Недопустимое имя SFTP: {}", path.display()).into()),
+                _ => {
+                    return Err(
+                        crate::tr_format!("Invalid name for SFTP: {}", path.display()).into(),
+                    )
+                }
             }
         }
     }
@@ -1819,7 +1850,9 @@ pub(super) fn source_children(
     names.sort();
     cancel.check()?;
     if names.windows(2).any(|pair| pair[0] == pair[1]) {
-        return Err(format!("Повторяющиеся имена в источнике {source}").into());
+        return Err(
+            crate::tr_format!("Duplicate names in source {source}", source = source).into(),
+        );
     }
     Ok(names)
 }
@@ -1923,10 +1956,13 @@ impl TransferSourceManifest {
     ) -> Result<(), TransferError> {
         cancel.check()?;
         if self.mode == ManifestMode::Move && self.entries.len() >= MAX_MOVE_JOURNAL_ENTRIES {
-            return Err("Пофайловый журнал переноса превысил лимит 100000 элементов".into());
+            return Err(crate::i18n::text!(
+                "Пофайловый журнал переноса превысил лимит 100000 элементов"
+            )
+            .into());
         }
         if depth > MAX_TREE_DEPTH {
-            return Err("Слишком большая глубина папок (более 128)".into());
+            return Err(crate::i18n::text!("Слишком большая глубина папок (более 128)").into());
         }
         let metadata = entry_metadata(source)?.ok_or_else(|| changed_source(source))?;
         let (is_dir, is_file) = match &metadata {
@@ -1938,15 +1974,16 @@ impl TransferSourceManifest {
                 if stat.perm.is_none()
                     || (stat.is_file() && (stat.size.is_none() || stat.mtime.is_none()))
                 {
-                    return Err(format!("Сервер не сообщил тип, размер или время изменения {source}; безопасная проверка источника недоступна").into());
+                    return Err(crate::tr_format!("The server did not report the type, size, or modification time of {source}. The source cannot be checked safely", source = source).into());
                 }
                 (stat.is_dir(), stat.is_file())
             }
         };
         let native_names = self.mode != ManifestMode::Copy;
         if !native_names && !is_dir && !is_file {
-            return Err(format!(
-                "SFTP-копирование ссылок и специальных файлов пока недоступно: {source}"
+            return Err(crate::tr_format!(
+                "SFTP copying of links and special files is unavailable: {source}",
+                source = source
             )
             .into());
         }
@@ -1960,7 +1997,9 @@ impl TransferSourceManifest {
             self.bytes = self
                 .bytes
                 .checked_add(entry.size())
-                .ok_or("Слишком большой размер копируемого дерева")?;
+                .ok_or(crate::i18n::text!(
+                    "Слишком большой размер копируемого дерева"
+                ))?;
         }
         if let Some(children) = &entry.children {
             for name in children {
@@ -2016,7 +2055,10 @@ impl SourceReader {
                 })
                 .map_err(err),
             Self::Remote(input) => input.stat().map(EntryMetadata::Remote).map_err(|e| {
-                format!("Не удалось проверить открытый исходный файл SFTP (fstat): {e}")
+                crate::tr_format!(
+                    "Could not verify the open SFTP source file (fstat): {e}",
+                    e = e
+                )
             }),
         }
     }
@@ -2174,9 +2216,10 @@ pub(super) fn copy_tree_entry(
         };
         if !copied.metadata()?.is_file() {
             return Err(crate::tr_format!(
-                "Не удалось проверить копию {source}: временный объект больше не является обычным файлом",
-                "Could not verify copy of {source}: staged item is no longer a regular file"
-            ).into());
+                "Could not verify copy of {source}: staged item is no longer a regular file",
+                source = source
+            )
+            .into());
         }
         observe(source, CopyPhase::Verifying)?;
         progress

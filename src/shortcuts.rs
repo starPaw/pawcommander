@@ -529,8 +529,9 @@ impl ShortcutEditor {
                                 let keys = ctx.format_shortcut(&chord);
                                 let other = other.label();
                                 crate::tr_format!(
-                                    "{keys} уже используется для действия «{other}».",
-                                    "{keys} is already assigned to “{other}”."
+                                    "{keys} is already assigned to “{other}”.",
+                                    keys = keys,
+                                    other = other
                                 )
                             }
                         })

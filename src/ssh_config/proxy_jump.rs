@@ -33,8 +33,8 @@ pub(super) fn resolve(
     .ok_or_else(|| invalid_value("ProxyJump", line))?;
     let chain_error = || {
         crate::tr_format!(
-            "ProxyJump в строке {line}: поддерживается один промежуточный сервер с прямым подключением к нему.",
-            "ProxyJump on line {line}: one directly reachable jump host is supported."
+            "ProxyJump on line {line}: one directly reachable jump host is supported.",
+            line = line
         )
     };
     if value.contains(',') {

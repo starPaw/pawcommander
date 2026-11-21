@@ -126,11 +126,7 @@ impl PawCommander {
                 Ok(()) => {
                     self.clipboard = None;
                     self.notice = Some((
-                        crate::tr_format!(
-                            "{} объектов в системном файловом буфере",
-                            "{} items in the system file clipboard",
-                            count
-                        ),
+                        crate::tr_format!("{} items in the system file clipboard", count),
                         false,
                     ));
                     return;
@@ -145,17 +141,13 @@ impl PawCommander {
         self.notice = Some(match write_error {
             Some(error) => (
                 crate::tr_format!(
-                    "Системный буфер недоступен: {error}. Используется буфер PawCommander.",
-                    "System clipboard unavailable: {error}. Using the PawCommander clipboard."
+                    "System clipboard unavailable: {error}. Using the PawCommander clipboard.",
+                    error = error
                 ),
                 true,
             ),
             None => (
-                crate::tr_format!(
-                    "{} объектов в буфере PawCommander (SFTP)",
-                    "{} items in the PawCommander clipboard (SFTP)",
-                    count
-                ),
+                crate::tr_format!("{} items in the PawCommander clipboard (SFTP)", count),
                 false,
             ),
         });
@@ -174,8 +166,8 @@ impl PawCommander {
             Err(error) => {
                 self.notice = Some((
                     crate::tr_format!(
-                        "Не удалось прочитать системный файловый буфер: {error}",
-                        "Could not read system file clipboard: {error}"
+                        "Could not read system file clipboard: {error}",
+                        error = error
                     ),
                     true,
                 ));

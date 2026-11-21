@@ -185,8 +185,8 @@ impl<T: Send + 'static> Phase<T> {
         match started {
             Ok(_) => Self::Running(Worker { result, progress }),
             Err(error) => Self::Failed(crate::tr_format!(
-                "Не удалось запустить сравнение: {error}",
-                "Could not start comparison: {error}"
+                "Could not start comparison: {error}",
+                error = error
             )),
         }
     }

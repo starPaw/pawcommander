@@ -320,9 +320,8 @@ pub fn resolve(address: &str, current: &Location) -> Result<Location, String> {
         });
     }
     if address.starts_with("sftp:") {
-        let url = url::Url::parse(address).map_err(|e| {
-            crate::tr_format!("Некорректный адрес SFTP: {e}", "Invalid SFTP address: {e}")
-        })?;
+        let url = url::Url::parse(address)
+            .map_err(|e| crate::tr_format!("Invalid SFTP address: {e}", e = e))?;
         if url.scheme() != "sftp"
             || url.password().is_some()
             || url.query().is_some()
@@ -442,7 +441,7 @@ pub(super) fn validate_name(name: &str) -> Result<(), String> {
         || !matches!(components.next(), Some(Component::Normal(_)))
         || components.next().is_some()
     {
-        return Err("Введите имя без /, \\, NUL, . и ..".into());
+        return Err(crate::i18n::text!("Введите имя без /, \\, NUL, . и ..").into());
     }
     Ok(())
 }

@@ -415,8 +415,8 @@ fn conflict_replace_preserves_changed_destination_and_restores_on_publish_error(
     )
     .unwrap_err();
     assert!(failure.contains(&crate::tr_format!(
-        "Назначение {target} изменилось после показа диалога",
-        "Destination {target} changed after the conflict dialog was shown"
+        "Destination {target} changed after the conflict dialog was shown",
+        target = target
     )));
     assert_eq!(fs::read(target.path()).unwrap(), b"changed elsewhere");
 

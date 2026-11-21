@@ -49,7 +49,6 @@ impl Parent {
 
 fn unavailable() -> String {
     crate::tr_format!(
-        "Отмена изменений недоступна: файл или папка изменились либо недоступны. Проверьте оба пути.",
         "Undo unavailable: a file or folder changed or is inaccessible. Inspect both paths."
     )
 }
@@ -143,7 +142,6 @@ impl UndoEntry {
         }
         if entry_metadata(&self.capture.original)?.is_some() {
             return Err(crate::tr_format!(
-                "Отмена изменений не начата: прежнее имя {} занято. Существующий элемент сохранён.",
                 "Undo not started: original name {} is occupied. The existing item was preserved.",
                 self.capture.original
             )

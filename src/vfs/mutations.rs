@@ -22,7 +22,7 @@ pub fn rename_entry(source: &Location, name: &str) -> Result<Location, String> {
     }
     let target = source
         .parent()
-        .ok_or("Нельзя переименовать корень")?
+        .ok_or(crate::i18n::text!("Нельзя переименовать корень"))?
         .join(name);
     if &target != source {
         remote(source)?
@@ -50,11 +50,11 @@ pub(super) fn remove_remote_tree(
             for (child, _) in sftp.readdir(path).map_err(err)? {
                 let child_depth = remaining_depth
                     .checked_sub(1)
-                    .ok_or("Слишком большая глубина папок")?;
+                    .ok_or(crate::i18n::text!("Слишком большая глубина папок"))?;
                 let name = child
                     .file_name()
                     .and_then(|n| n.to_str())
-                    .ok_or("Некорректное имя SFTP")?;
+                    .ok_or(crate::i18n::text!("Некорректное имя SFTP"))?;
                 validate_name(name)?;
                 remove_remote_tree(sftp, &location.join(name), child_depth, progress, journal)?;
             }
@@ -91,12 +91,12 @@ pub fn trash_entries_with_progress(
                 || p.parent().is_none()
                 || p.path() != normalize_remote(p.path()).unwrap_or_default()
         }) {
-            return Err("Недопустимый путь удаления SFTP".into());
+            return Err(crate::i18n::text!("Недопустимый путь удаления SFTP").into());
         }
         for (completed, path) in paths.iter().enumerate() {
             progress.results.begin(path);
             progress.item(path.path());
-            remove_remote_tree(&remote(path)?, path, MAX_TREE_DEPTH, progress, true).map_err(|e| format!("{e}. Удалено целых элементов: {completed}; текущая папка могла быть удалена частично."))?;
+            remove_remote_tree(&remote(path)?, path, MAX_TREE_DEPTH, progress, true).map_err(|e| crate::tr_format!("{e}. Items fully deleted: {completed}. The current folder may have been partly deleted.", completed = completed, e = e))?;
             progress
                 .results
                 .record(path, None, crate::result_history::Outcome::Completed, None);

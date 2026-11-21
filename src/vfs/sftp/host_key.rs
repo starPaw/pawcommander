@@ -137,8 +137,9 @@ impl TrustFiles {
         let known = check_known_hosts(session, &self.known_hosts, names, key).map_err(|error| {
             let path = self.known_hosts.display();
             crate::tr_format!(
-                "Не удалось проверить ключ SSH по {path} ({error})",
-                "Could not verify the SSH host key using {path} ({error})"
+                "Could not verify the SSH host key using {path} ({error})",
+                error = error,
+                path = path
             )
         })?;
         if known == Lookup::Mismatch {
@@ -146,8 +147,7 @@ impl TrustFiles {
             let fingerprint = &pin.fingerprint;
             let path = self.known_hosts.display();
             return Err(crate::tr_format!(
-                "{changed} Сервер предоставил {fingerprint}. Сверьте отпечаток у администратора и проверьте запись в {path}.",
-                "{changed} The server presented {fingerprint}. Verify the fingerprint with the administrator and review the entry in {path}."
+                "{changed} The server presented {fingerprint}. Verify the fingerprint with the administrator and review the entry in {path}.", changed = changed, fingerprint = fingerprint, path = path
             ));
         }
         let saved = match path {
@@ -301,8 +301,9 @@ fn pin_path(directory: &Path, address: &str) -> PathBuf {
 fn pin_io_error(path: &Path, error: impl std::fmt::Display) -> String {
     let path = path.display();
     crate::tr_format!(
-        "Не удалось прочитать или сохранить доверенный ключ SSH в {path} ({error})",
-        "Could not read or save the trusted SSH key in {path} ({error})"
+        "Could not read or save the trusted SSH key in {path} ({error})",
+        error = error,
+        path = path
     )
 }
 
@@ -329,8 +330,7 @@ fn check_pin(path: &Path, expected: &Pin) -> Result<bool, String> {
         let received = &expected.fingerprint;
         let saved = &saved.fingerprint;
         return Err(crate::tr_format!(
-            "{changed} Сохранён {saved}, получен {received}. Сверьте отпечаток у администратора и проверьте запись в {path}.",
-            "{changed} Saved fingerprint {saved}, received {received}. Verify the fingerprint with the administrator and review the record in {path}."
+            "{changed} Saved fingerprint {saved}, received {received}. Verify the fingerprint with the administrator and review the record in {path}.", changed = changed, path = path, received = received, saved = saved
         ));
     }
     Ok(true)

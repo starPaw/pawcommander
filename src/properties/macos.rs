@@ -112,7 +112,7 @@ fn display(value: io::Result<Option<String>>) -> String {
         {
             text!("Не поддерживается на этом томе").into()
         }
-        Err(error) => crate::tr_format!("Недоступно ({error})", "Unavailable ({error})"),
+        Err(error) => crate::tr_format!("Unavailable ({error})", error = error),
     }
 }
 

@@ -143,7 +143,6 @@ impl Codec {
 
     pub(super) fn error(self) -> String {
         crate::tr_format!(
-            "Не удалось показать текст в {}. Выберите кодировку.",
             "Could not show text in {}. Choose an encoding.",
             self.name()
         )

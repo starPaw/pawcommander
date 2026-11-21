@@ -78,10 +78,7 @@ pub(crate) fn load_config(home: &Path, alias: &str, user: &str) -> Result<Resolv
 }
 
 fn config_read_error(error: io::Error) -> String {
-    crate::tr_format!(
-        "Не удалось прочитать ~/.ssh/config ({error})",
-        "Could not read ~/.ssh/config ({error})"
-    )
+    crate::tr_format!("Could not read ~/.ssh/config ({error})", error = error)
 }
 
 #[derive(Default)]
@@ -415,7 +412,8 @@ fn identity_path(value: &str, home: &Path) -> Option<PathBuf> {
 
 fn invalid_value(keyword: &str, line: usize) -> String {
     crate::tr_format!(
-        "Неверное или неподдерживаемое значение {keyword} в строке {line}",
-        "Invalid or unsupported value for {keyword} on line {line}"
+        "Invalid or unsupported value for {keyword} on line {line}",
+        keyword = keyword,
+        line = line
     )
 }

@@ -50,11 +50,7 @@ fn spawn(tool: &Path, files: &[PathBuf; 2]) -> Result<Child, String> {
             );
         }
         crate::fs_ops::open_regular_source(path).map_err(|error| {
-            crate::tr_format!(
-                "Не удалось открыть {}: {error}",
-                "Could not open {}: {error}",
-                path.display()
-            )
+            crate::tr_format!("Could not open {}: {error}", path.display(), error = error)
         })?;
     }
     Command::new(tool)

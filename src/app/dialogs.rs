@@ -621,7 +621,7 @@ impl PawCommander {
                 #[cfg(target_os = "macos")]
                 Dialog::ConnectSmb(form) => form.show(ui, self.dialog_focus),
                 Dialog::CreateChecksumManifest { sources, directory, name } => {
-                    ui.label(crate::tr_format!("Выбрано файлов: {}", "Selected files: {}", sources.len()));
+                    ui.label(crate::tr_format!("Selected files: {}", sources.len()));
                     let label = ui.label(crate::i18n::text!("Имя манифеста"));
                     let edit = ui.add(egui::TextEdit::singleline(name).desired_width(f32::INFINITY));
                     if self.dialog_focus {
@@ -634,7 +634,7 @@ impl PawCommander {
                     }
                 }
                 Dialog::CreateArchive { sources, directory, name, format, password } => {
-                    ui.label(crate::tr_format!("Выбрано объектов: {}", "Selected items: {}", sources.len()));
+                    ui.label(crate::tr_format!("Selected items: {}", sources.len()));
                     let label = ui.label(crate::i18n::text!("Имя архива"));
                     let edit = ui.add(egui::TextEdit::singleline(name).desired_width(f32::INFINITY));
                     edit.clone().labelled_by(label.id);
@@ -657,7 +657,7 @@ impl PawCommander {
                     }
                 }
                 Dialog::ExtractArchive { sources, archive_directory, other, address, password } => {
-                    ui.label(crate::tr_format!("Выбрано объектов: {}", "Selected items: {}", sources.len()));
+                    ui.label(crate::tr_format!("Selected items: {}", sources.len()));
                     let label = ui.label(crate::i18n::text!("Папка для распаковки"));
                     let response = ui.add(egui::TextEdit::singleline(address).desired_width(f32::INFINITY)).labelled_by(label.id);
                     if self.dialog_focus {
@@ -692,17 +692,17 @@ impl PawCommander {
                         ArchiveEdit::Add { folder, sources } => {
                             if !folder.as_os_str().is_empty() {
                                 ui.label(crate::tr_format!(
-                                    "Папка в архиве: {}", "Folder in archive: {}", folder.display()
+                                    "Folder in archive: {}", folder.display()
                                 ));
                             }
                             ui.label(crate::tr_format!(
-                                "Выбрано объектов: {}", "Selected items: {}", sources.len()
+                                "Selected items: {}", sources.len()
                             ));
                             for source in sources.iter().take(6) {
                                 ui.label(file_name(source));
                             }
                             if sources.len() > 6 {
-                                ui.label(crate::tr_format!("…и ещё {}", "…and {} more", sources.len() - 6));
+                                ui.label(crate::tr_format!("…and {} more", sources.len() - 6));
                             }
                             if Format::from_path(archive) == Some(Format::Zip) {
                                 archive_password_field(ui, password, crate::i18n::key!("Пароль добавляемых файлов ZIP"));
@@ -723,7 +723,7 @@ impl PawCommander {
                                 ui.label(path.to_string_lossy());
                             }
                             if paths.len() > 6 {
-                                ui.label(crate::tr_format!("…и ещё {}", "…and {} more", paths.len() - 6));
+                                ui.label(crate::tr_format!("…and {} more", paths.len() - 6));
                             }
                         }
                     }
@@ -736,8 +736,7 @@ impl PawCommander {
                         ] {
                             ui.label(crate::tr_format!(
                                 "{label}: {}",
-                                "{label}: {}",
-                                pane.tab().path.display()
+                                pane.tab().path.display(), label = label
                             ));
                         }
                     }
@@ -756,12 +755,12 @@ impl PawCommander {
                     }
                 }
                 Dialog::Trash { paths } => {
-                    ui.label(crate::tr_format!("Выбрано объектов: {}", "Selected items: {}", paths.len()));
+                    ui.label(crate::tr_format!("Selected items: {}", paths.len()));
                     for p in paths.iter().take(6) {
                         ui.label(file_name(p));
                     }
                     if paths.len() > 6 {
-                        ui.label(crate::tr_format!("…и ещё {}", "…and {} more", paths.len() - 6));
+                        ui.label(crate::tr_format!("…and {} more", paths.len() - 6));
                     }
                     ui.add_space(8.0);
                     ui.label(if paths.iter().any(Location::remote) { crate::i18n::text!("Файлы и содержимое папок будут удалены с сервера без возможности восстановления из корзины.") } else { crate::i18n::text!("Их можно будет восстановить из системной корзины.") });
@@ -969,11 +968,7 @@ impl PawCommander {
                         progress.item(&parent.path().join(&name));
                         fs_ops::create_directory(&parent, &name).map(|p| {
                             progress.results.target(&parent, p.display());
-                            crate::tr_format!(
-                                "Папка создана: {}",
-                                "Folder created: {}",
-                                p.display()
-                            )
+                            crate::tr_format!("Folder created: {}", p.display())
                         })
                     },
                 ),
@@ -987,9 +982,8 @@ impl PawCommander {
                         name
                     ),
                     move |progress| {
-                        fs_ops::rename_with_undo(&source, &name, progress).map(|p| {
-                            crate::tr_format!("Переименовано: {}", "Renamed: {}", p.display())
-                        })
+                        fs_ops::rename_with_undo(&source, &name, progress)
+                            .map(|p| crate::tr_format!("Renamed: {}", p.display()))
                     },
                 ),
                 Dialog::BatchRename(editor) => {
@@ -1101,9 +1095,8 @@ impl PawCommander {
                         paths.first().map(Location::display).unwrap_or_default()
                     ),
                     move |progress| {
-                        fs_ops::trash_entries_with_progress(&paths, progress).map(|n| {
-                            crate::tr_format!("Обработано объектов: {n}", "Items processed: {n}")
-                        })
+                        fs_ops::trash_entries_with_progress(&paths, progress)
+                            .map(|n| crate::tr_format!("Items processed: {n}", n = n))
                     },
                 ),
             }

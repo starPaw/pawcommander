@@ -187,7 +187,6 @@ impl PermissionsPreview {
             }
         }
         let summary = crate::tr_format!(
-            "Изменено {}. С предупреждениями {}. Пропущено {}. Ошибок {}.",
             "Changed {}. With warnings {}. Skipped {}. Failed {}.",
             completed,
             warned,
@@ -251,7 +250,6 @@ impl PermissionChange {
         Ok(match Stamp::read(channel, path) {
             Ok(actual) if actual.perm & MODE_BITS == self.after => None,
             Ok(actual) => Some(crate::tr_format!(
-                "Сервер установил {:04o} вместо {:04o}.",
                 "The server set {:04o} instead of {:04o}.",
                 actual.perm & MODE_BITS,
                 self.after
@@ -260,7 +258,6 @@ impl PermissionChange {
                 return Err(ChangeError::Interrupted(unconfirmed_change()));
             }
             Err(error) => Some(crate::tr_format!(
-                "Не удалось подтвердить новые права. {}",
                 "Could not verify the new permissions. {}",
                 error.into_message()
             )),

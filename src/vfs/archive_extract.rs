@@ -39,8 +39,8 @@ pub(crate) fn extract_archive(
             progress.results.cancelled = true;
             let summary = totals.text();
             Ok(crate::tr_format!(
-                "Распаковка остановлена. {summary}",
-                "Extraction stopped. {summary}"
+                "Extraction stopped. {summary}",
+                summary = summary
             ))
         }
         Err(error) if totals.completed + totals.skipped != 0 => {
@@ -66,8 +66,10 @@ impl Totals {
         } = *self;
         let remaining = selected - completed - skipped;
         crate::tr_format!(
-            "Распаковано: {completed}. Пропущено: {skipped}. Осталось: {remaining}.",
-            "Extracted: {completed}. Skipped: {skipped}. Remaining: {remaining}."
+            "Extracted: {completed}. Skipped: {skipped}. Remaining: {remaining}.",
+            completed = completed,
+            remaining = remaining,
+            skipped = skipped
         )
     }
 }
@@ -229,8 +231,8 @@ fn extract(
 fn verify_destination(parent: &Parent, directory: &Location) -> Result<(), TransferError> {
     if parent.verify().is_err() || canonical(directory)? != parent.location.path() {
         return Err(crate::tr_format!(
-            "Папка назначения изменилась: {directory}",
-            "The destination folder changed: {directory}"
+            "The destination folder changed: {directory}",
+            directory = directory
         )
         .into());
     }

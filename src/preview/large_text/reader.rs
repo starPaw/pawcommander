@@ -380,10 +380,7 @@ pub(super) fn changed() -> String {
 }
 
 pub(super) fn read_error(error: io::Error) -> String {
-    crate::tr_format!(
-        "Не удалось прочитать текст: {error}",
-        "Could not read text: {error}"
-    )
+    crate::tr_format!("Could not read text: {error}", error = error)
 }
 
 #[cfg(test)]

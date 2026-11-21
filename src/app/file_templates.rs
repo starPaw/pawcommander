@@ -246,7 +246,7 @@ impl FileTemplatesDialog {
                         ui.selectable_value(
                             &mut choice,
                             Choice::Selected,
-                            crate::tr_format!("Выделенный файл · {name}", "Selected file · {name}"),
+                            crate::tr_format!("Selected file · {name}", name = name),
                         );
                     }
                     if !library.templates.is_empty() {

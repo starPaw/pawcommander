@@ -86,7 +86,7 @@ fn sftp_name_validation_rejects_non_utf8_without_lossy_conversion() {
     let raw = OsString::from_vec(b"bad-\xff-name".to_vec());
     assert!(validate_source_child_name(&source, &raw)
         .unwrap_err()
-        .contains("не UTF-8"));
+        .contains("UTF-8"));
     // A literal replacement character is valid Unicode, but must never
     // substitute for the invalid byte and select a different source file.
     assert!(validate_source_child_name(&source, OsStr::new("bad-�-name")).is_ok());

@@ -220,8 +220,8 @@ impl Tab {
             })
         {
             self.finish_load(Err(crate::tr_format!(
-                "Не удалось запустить чтение папки: {error}",
-                "Could not start reading folder: {error}"
+                "Could not start reading folder: {error}",
+                error = error
             )));
         }
     }
@@ -305,12 +305,12 @@ impl Tab {
                 self.column_reveal = None;
                 if !self.has_complete_listing && !self.entries.is_empty() {
                     self.error = Some(crate::tr_format!(
-                        "Показана часть содержимого папки. {error}",
-                        "Showing an incomplete folder listing. {error}"
+                        "Showing an incomplete folder listing. {error}",
+                        error = error
                     ));
                 } else if mode == DirectoryLoadMode::Automatic {
                     self.error = Some(if self.has_complete_listing {
-                        crate::tr_format!("Автообновление: {error}. Показан последний прочитанный список; повторим попытку автоматически.", "Auto refresh: {error}. Showing the last successful listing; will retry automatically.")
+                        crate::tr_format!("Auto refresh: {error}. Showing the last successful listing; will retry automatically.", error = error)
                     } else {
                         error
                     });
