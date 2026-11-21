@@ -6,7 +6,7 @@ use super::{
     Location, MAX_TREE_DEPTH,
 };
 use crate::{
-    i18n::text,
+    file_error::{AccessAction, AccessError, Failure, MutationError, ScanError},
     operations::{Cancellation, Progress, TransferError},
 };
 use rustix::fs::{fstat, FileType, Stat};
@@ -23,6 +23,13 @@ pub(crate) enum Kind {
     Other,
 }
 
+pub(crate) enum Issue {
+    Failure(Box<TransferError>),
+    AlreadyCounted,
+    Partial,
+    Pending,
+}
+
 pub(crate) struct Node {
     pub(crate) path: PathBuf,
     pub(crate) kind: Kind,
@@ -32,7 +39,7 @@ pub(crate) struct Node {
     pub(crate) own_blocks: u64,
     pub(crate) logical: u64,
     pub(crate) hard_link: bool,
-    pub(crate) issue: Option<String>,
+    pub(crate) issue: Option<Issue>,
 }
 
 impl Node {
@@ -75,7 +82,6 @@ struct Scan {
     visited_folders: HashSet<Identity>,
     files: Vec<(NodeId, Identity)>,
     path_bytes: usize,
-    limit: bool,
 }
 
 pub(crate) fn analyze(
@@ -83,17 +89,24 @@ pub(crate) fn analyze(
     progress: &mut Progress,
 ) -> Result<Analysis, TransferError> {
     if folder.local().is_none() {
-        return Err(text!("Анализ места доступен в локальных папках").into());
+        return Err(ScanError::DiskUsageRequiresLocalFolder.into());
     }
-    let scope = ReadScope::open(folder)?;
-    Directory::from_scope(&scope)?;
+    let scope = ReadScope::open(folder).map_err(|error| folder_error(folder, error))?;
+    let location = &scope.parent.location;
+    Directory::from_scope(&scope).map_err(|error| folder_error(location, error))?;
     let root = scope
         .descriptor
-        .ok_or_else(|| text!("Не удалось открыть папку анализа"))?;
-    let stat = fstat(&root).map_err(io::Error::from)?;
+        .ok_or_else(|| ScanError::DiskUsageFolderUnavailable(location.clone()))?;
+    let stat = fstat(&root).map_err(|error| {
+        AccessError::new(
+            location,
+            AccessAction::ReadOpenMetadata,
+            io::Error::from(error),
+        )
+    })?;
     let mut scan = Scan {
         result: Analysis {
-            folder: scope.parent.location.clone(),
+            folder: location.clone(),
             nodes: vec![Node::new(PathBuf::new(), Kind::Folder, None)],
             files: Vec::new(),
             finish: Finish::Complete,
@@ -106,7 +119,6 @@ pub(crate) fn analyze(
         visited_folders: HashSet::new(),
         files: Vec::new(),
         path_bytes: 0,
-        limit: false,
     };
     let cancel = progress.cancellation();
     while let Some((node, expected)) = scan.folders.pop() {
@@ -123,19 +135,21 @@ pub(crate) fn analyze(
                 scan.incomplete(node, Finish::Stopped);
                 break;
             }
-            Err(_) if scan.limit => {
+            Err(TransferError::Failed(Failure::Scan(error)))
+                if matches!(*error, ScanError::DiskUsageLimit) =>
+            {
                 scan.incomplete(node, Finish::Limit);
                 break;
             }
             Err(error) => {
                 scan.result.issues += 1;
-                scan.result.nodes[node].issue = Some(crate::i18n::file_error(&error));
+                scan.result.nodes[node].issue = Some(Issue::Failure(Box::new(error)));
             }
         }
     }
     if let Err(error) = scope.parent.verify() {
         scan.result.issues += 1;
-        scan.result.nodes[0].issue = Some(crate::i18n::file_error(&error));
+        scan.result.nodes[0].issue = Some(Issue::Failure(Box::new(folder_error(location, error))));
     }
     Ok(scan.finish())
 }
@@ -149,68 +163,88 @@ impl Scan {
     ) -> Result<(), TransferError> {
         cancel.check()?;
         let path = self.result.nodes[node].path.clone();
-        let nested = local_subdirectory(&self.root, &path, cancel)?;
+        let location = self.result.folder.join(&path);
+        let unavailable = || ScanError::DiskUsageFolderUnavailable(location.clone());
+        let read_children = |error| AccessError::new(&location, AccessAction::ReadChildren, error);
+        let nested = local_subdirectory(&self.root, &path, cancel).map_err(read_children)?;
         // Own this descriptor so the visitor can accumulate rows without borrowing self.root.
-        let descriptor =
-            nested.map_or_else(|| rustix::io::dup(&self.root).map_err(io::Error::from), Ok)?;
-        let stat = fstat(&descriptor).map_err(io::Error::from)?;
+        let descriptor = nested
+            .map_or_else(|| rustix::io::dup(&self.root).map_err(io::Error::from), Ok)
+            .map_err(read_children)?;
+        let stat = fstat(&descriptor).map_err(|error| {
+            AccessError::new(
+                &location,
+                AccessAction::ReadOpenMetadata,
+                io::Error::from(error),
+            )
+        })?;
         if identity(&stat) != expected {
-            return Err(text!("Папка изменилась или недоступна").into());
+            return Err(unavailable().into());
         }
         if !self.visited_folders.insert(expected) {
-            self.result.nodes[node].issue = Some(text!("Эта папка уже учтена").into());
+            self.result.nodes[node].issue = Some(Issue::AlreadyCounted);
             return Ok(());
         }
         let allocated = allocated_bytes(&stat);
         self.result.nodes[node].allocated = allocated;
         self.result.nodes[node].own_blocks = allocated;
 
-        visit_local_entries(&descriptor, cancel, |name, stat| {
-            let relative = path.join(name);
-            self.path_bytes += relative.as_os_str().len();
-            if self.result.nodes.len() >= MAX_ENTRIES
-                || self.path_bytes > MAX_PATH_BYTES
-                || relative.components().count() > MAX_TREE_DEPTH
-            {
-                self.limit = true;
-                return Err(text!("Достигнут предел анализа места").into());
-            }
-            let mut child = Node::new(relative, Kind::Other, Some(node));
-            let id = self.result.nodes.len();
-            match stat {
-                Ok(stat) => match FileType::from_raw_mode(stat.st_mode) {
-                    FileType::Directory => {
-                        child.kind = Kind::Folder;
-                        self.folders.push((id, identity(&stat)));
-                    }
-                    FileType::RegularFile => {
-                        child.kind = Kind::File;
-                        child.allocated = allocated_bytes(&stat);
-                        child.logical = u64::try_from(stat.st_size).unwrap_or_default();
-                        self.files.push((id, identity(&stat)));
-                    }
-                    FileType::Symlink => {
-                        child.kind = Kind::Symlink;
-                        self.result.symlinks += 1;
-                    }
-                    _ => {}
-                },
-                Err(error) => {
-                    self.result.issues += 1;
-                    child.issue = Some(io::Error::from(error).to_string());
+        visit_local_entries(
+            &descriptor,
+            cancel,
+            || unavailable().into(),
+            |name, stat| {
+                let relative = path.join(name);
+                self.path_bytes += relative.as_os_str().len();
+                if self.result.nodes.len() >= MAX_ENTRIES
+                    || self.path_bytes > MAX_PATH_BYTES
+                    || relative.components().count() > MAX_TREE_DEPTH
+                {
+                    return Err(ScanError::DiskUsageLimit.into());
                 }
-            }
-            self.result.nodes[node].children.push(id);
-            self.result.nodes.push(child);
-            Ok(())
-        })
+                let mut child = Node::new(relative, Kind::Other, Some(node));
+                let id = self.result.nodes.len();
+                match stat {
+                    Ok(stat) => match FileType::from_raw_mode(stat.st_mode) {
+                        FileType::Directory => {
+                            child.kind = Kind::Folder;
+                            self.folders.push((id, identity(&stat)));
+                        }
+                        FileType::RegularFile => {
+                            child.kind = Kind::File;
+                            child.allocated = allocated_bytes(&stat);
+                            child.logical = u64::try_from(stat.st_size).unwrap_or_default();
+                            self.files.push((id, identity(&stat)));
+                        }
+                        FileType::Symlink => {
+                            child.kind = Kind::Symlink;
+                            self.result.symlinks += 1;
+                        }
+                        _ => {}
+                    },
+                    Err(error) => {
+                        self.result.issues += 1;
+                        let error = AccessError::new(
+                            &location.join(name),
+                            AccessAction::ReadMetadata,
+                            io::Error::from(error),
+                        );
+                        child.issue = Some(Issue::Failure(Box::new(error.into())));
+                    }
+                }
+                self.result.nodes[node].children.push(id);
+                self.result.nodes.push(child);
+                Ok(())
+            },
+        )
+        .map_err(|error| folder_error(&location, error))
     }
 
     fn incomplete(&mut self, node: NodeId, finish: Finish) {
         self.result.finish = finish;
-        self.result.nodes[node].issue = Some(text!("Папка проверена частично").into());
+        self.result.nodes[node].issue = Some(Issue::Partial);
         for (pending, _) in self.folders.drain(..) {
-            self.result.nodes[pending].issue = Some(text!("Папка ещё не проверена").into());
+            self.result.nodes[pending].issue = Some(Issue::Pending);
         }
     }
 
@@ -245,6 +279,20 @@ impl Scan {
     }
 }
 
+fn folder_error(location: &Location, error: TransferError) -> TransferError {
+    match error {
+        TransferError::Failed(Failure::Io { source, .. }) => {
+            AccessError::new(location, AccessAction::ReadChildren, source).into()
+        }
+        TransferError::Failed(Failure::Mutation(error))
+            if matches!(*error, MutationError::UndoUnavailable(_)) =>
+        {
+            ScanError::DiskUsageFolderUnavailable(location.clone()).into()
+        }
+        error => error,
+    }
+}
+
 fn by_allocation(nodes: &[Node], left: NodeId, right: NodeId) -> std::cmp::Ordering {
     nodes[right]
         .allocated
@@ -268,7 +316,10 @@ mod tests {
     use std::{
         fs,
         io::Write,
-        os::{macos::fs::MetadataExt, unix::fs::symlink},
+        os::{
+            macos::fs::MetadataExt,
+            unix::fs::{symlink, PermissionsExt},
+        },
         path::Path,
     };
 
@@ -341,7 +392,7 @@ mod tests {
         assert_eq!(data.finish, Finish::Stopped);
         assert!(!data.files.is_empty() && data.files.len() < 40);
         let root = &data.nodes[0];
-        assert!(root.issue.is_some());
+        assert!(matches!(root.issue, Some(Issue::Partial)));
         assert_eq!(
             root.allocated,
             root.own_blocks
@@ -352,5 +403,54 @@ mod tests {
                     .sum::<u64>()
         );
         assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 40);
+    }
+
+    #[test]
+    fn keeps_allocated_blocks_and_the_cause_of_a_denied_folder() {
+        // A privileged process can read the permission fixture.
+        // SAFETY: geteuid has no inputs and reads the process identity.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let denied = temp.path().join("denied");
+        let visible = temp.path().join("visible");
+        fs::create_dir(&denied).unwrap();
+        fs::write(denied.join("unread"), [0x76; 4096]).unwrap();
+        fs::write(&visible, [0x23; 8192]).unwrap();
+        let permissions = fs::metadata(&denied).unwrap().permissions();
+        fs::set_permissions(&denied, fs::Permissions::from_mode(0o000)).unwrap();
+        let location = Location::Local(temp.path().into());
+        let result = analyze(&location, &mut Progress::default());
+        fs::set_permissions(&denied, permissions).unwrap();
+
+        let data = result.unwrap();
+        assert_eq!(
+            (data.finish, data.issues, data.files.len()),
+            (Finish::Complete, 1, 1)
+        );
+        let visible_blocks = visible.metadata().unwrap().st_blocks() * 512;
+        assert!(visible_blocks > 0);
+        assert_eq!(
+            data.nodes[0].allocated,
+            data.nodes[0].own_blocks + visible_blocks
+        );
+        let node = data
+            .nodes
+            .iter()
+            .find(|node| node.path == Path::new("denied"))
+            .unwrap();
+        assert_eq!(node.allocated, 0);
+        let Some(Issue::Failure(error)) = &node.issue else {
+            panic!("expected a read error for the denied folder");
+        };
+        assert!(matches!(
+            error.as_ref(),
+            TransferError::Failed(Failure::Access(error))
+                if error.location == data.folder.join("denied") && error.action == AccessAction::ReadChildren
+                    && matches!(&error.cause, crate::file_error::AccessCause::Local(cause)
+                        if cause.raw_os_error() == Some(libc::EACCES))
+        ));
+        assert_eq!(fs::read(denied.join("unread")).unwrap(), [0x76; 4096]);
     }
 }

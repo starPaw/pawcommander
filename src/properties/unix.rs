@@ -1,4 +1,9 @@
 use super::Summary;
+use crate::{
+    file_error::{AccessAction, AccessError, ListingError, ListingErrorKind, ScanError},
+    operations::TransferError,
+    vfs::Location,
+};
 use std::ffi::{CStr, CString, OsStr};
 use std::fs::{File, Metadata};
 use std::io;
@@ -25,13 +30,23 @@ pub(super) fn scan_root(
         return;
     }
 
+    let location = Location::Local(path.clone());
     let root = CString::new(path.as_os_str().as_bytes())
-        .map_err(io::Error::from)
-        .and_then(|name| Directory::open(libc::AT_FDCWD, &name, (metadata.dev(), metadata.ino())));
+        .map_err(|error| {
+            ListingError::new(location.clone(), ListingErrorKind::OpenLocal(error.into())).into()
+        })
+        .and_then(|name| {
+            Directory::open(
+                &location,
+                libc::AT_FDCWD,
+                &name,
+                (metadata.dev(), metadata.ino()),
+            )
+        });
     let root = match root {
         Ok(root) => root,
         Err(error) => {
-            summary.error(&path, error);
+            summary.read_error(error);
             progress(summary);
             return;
         }
@@ -49,7 +64,10 @@ pub(super) fn scan_root(
             Ok(Some(entry)) => entry,
             result => {
                 if let Err(error) = result {
-                    summary.error(&path, error);
+                    summary.read_error(ListingError::new(
+                        path.clone(),
+                        ListingErrorKind::ReadLocalEntry(error),
+                    ));
                     progress(summary);
                 }
                 directories.pop();
@@ -65,19 +83,23 @@ pub(super) fn scan_root(
                     break;
                 }
                 path.push(name);
-                match entry.descend(&observed, summary) {
+                match entry.descend(&Location::Local(path.clone()), &observed, summary) {
                     Ok(Some(child)) => directories.push(child),
                     Ok(None) => {
                         path.pop();
                     }
                     Err(error) => {
-                        summary.error(&path, error);
+                        summary.read_error(error);
                         path.pop();
                     }
                 }
             }
             Ok(stat) => count_entry(summary, &stat),
-            Err(error) => summary.error(&path.join(name), error),
+            Err(error) => summary.read_error(AccessError::new(
+                &Location::Local(path.join(name)),
+                AccessAction::ReadMetadata,
+                error,
+            )),
         }
         progress(summary);
     }
@@ -86,7 +108,14 @@ pub(super) fn scan_root(
 struct Directory(NonNull<libc::DIR>);
 
 impl Directory {
-    fn open(parent: RawFd, name: &CStr, expected: (u64, u64)) -> io::Result<Self> {
+    fn open(
+        location: &Location,
+        parent: RawFd,
+        name: &CStr,
+        expected: (u64, u64),
+    ) -> Result<Self, TransferError> {
+        let open_error =
+            |error| ListingError::new(location.clone(), ListingErrorKind::OpenLocal(error));
         // SAFETY: name is NUL terminated and parent is AT_FDCWD or a live directory fd.
         let fd = unsafe {
             libc::openat(
@@ -96,18 +125,20 @@ impl Directory {
             )
         };
         if fd == -1 {
-            return Err(io::Error::last_os_error());
+            return Err(open_error(io::Error::last_os_error()).into());
         }
         // SAFETY: the successful open returned a fresh fd owned by this function.
         let file = File::from(unsafe { OwnedFd::from_raw_fd(fd) });
-        let actual = file.metadata()?;
+        let actual = file
+            .metadata()
+            .map_err(|error| AccessError::new(location, AccessAction::ReadOpenMetadata, error))?;
         if (actual.dev(), actual.ino()) != expected {
-            return Err(changed_directory());
+            return Err(ScanError::DirectoryChanged(location.clone()).into());
         }
         // SAFETY: file is a live directory opened for reading. fdopendir takes
         // ownership on success only.
         let stream = unsafe { libc::fdopendir(file.as_raw_fd()) };
-        let stream = NonNull::new(stream).ok_or_else(io::Error::last_os_error)?;
+        let stream = NonNull::new(stream).ok_or_else(|| open_error(io::Error::last_os_error()))?;
         let _ = file.into_raw_fd();
         Ok(Self(stream))
     }
@@ -185,23 +216,26 @@ impl DirectoryEntry<'_> {
 
     fn descend(
         &self,
+        location: &Location,
         observed: &libc::stat,
         summary: &mut Summary,
-    ) -> io::Result<Option<Directory>> {
-        let current = self.metadata()?;
+    ) -> Result<Option<Directory>, TransferError> {
+        let current = self
+            .metadata()
+            .map_err(|error| AccessError::new(location, AccessAction::ReadMetadata, error))?;
         if entry_type(&current) != libc::S_IFDIR {
             count_entry(summary, &current);
             return Ok(None);
         }
         if (current.st_dev, current.st_ino) != (observed.st_dev, observed.st_ino) {
-            return Err(changed_directory());
+            return Err(ScanError::DirectoryChanged(location.clone()).into());
         }
         count_entry(summary, &current);
         // stat field widths vary by OS and target architecture (including
         // 32-bit Linux); normalize both fields to MetadataExt identity widths.
         #[allow(clippy::unnecessary_cast)]
         let identity = (current.st_dev as u64, current.st_ino as u64);
-        Directory::open(self.parent.fd(), self.name, identity).map(Some)
+        Directory::open(location, self.parent.fd(), self.name, identity).map(Some)
     }
 }
 
@@ -219,8 +253,4 @@ fn count_entry(summary: &mut Summary, stat: &libc::stat) {
         libc::S_IFDIR => summary.directories += 1,
         _ => summary.other += 1,
     }
-}
-
-fn changed_directory() -> io::Error {
-    io::Error::other(crate::i18n::text!("Папка изменилась во время подсчёта"))
 }

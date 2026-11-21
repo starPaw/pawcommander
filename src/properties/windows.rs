@@ -572,7 +572,8 @@ mod tests {
         );
         assert_eq!((result.files, result.directories, result.bytes), (0, 1, 0));
         assert_eq!(result.errors, 1);
-        assert!(result.error_examples[0].contains(&child.display().to_string()));
+        assert!(crate::i18n::file_error(&result.error_examples[0])
+            .contains(&child.display().to_string()));
         assert!(result.done && !result.cancelled);
     }
 
@@ -593,7 +594,8 @@ mod tests {
         });
         assert_eq!((result.files, result.directories, result.bytes), (0, 1, 0));
         assert_eq!(result.errors, 1);
-        assert!(result.error_examples[0].contains(&child.display().to_string()));
+        assert!(crate::i18n::file_error(&result.error_examples[0])
+            .contains(&child.display().to_string()));
     }
 
     #[test]

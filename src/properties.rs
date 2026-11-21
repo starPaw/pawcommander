@@ -1,7 +1,10 @@
 //! Read-only file properties. Cancellation is cooperative between requests.
+#[cfg(not(windows))]
+use crate::file_error::{AccessAction, AccessError};
 #[cfg(test)]
 use crate::test_ui::ContextExt as _;
 use crate::vfs::Location;
+use crate::{file_error::ScanError, operations::TransferError};
 use chrono::{DateTime, Local};
 use eframe::egui;
 use std::cell::Cell;
@@ -9,7 +12,7 @@ use std::collections::HashSet;
 #[cfg(any(not(windows), test))]
 use std::fs;
 use std::fs::Metadata;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
@@ -39,7 +42,7 @@ struct Summary {
     other: u64,
     bytes: u64,
     errors: u64,
-    error_examples: Vec<String>,
+    error_examples: Vec<Arc<TransferError>>,
     details: Vec<(Location, String)>,
     done: bool,
     cancelled: bool,
@@ -59,14 +62,17 @@ impl Summary {
         }
     }
 
-    fn error(&mut self, path: &Path, error: impl std::fmt::Display) {
-        self.read_error(path.display(), error);
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    fn error(&mut self, path: &std::path::Path, error: std::io::Error) {
+        self.read_error(TransferError::io(error, |error| {
+            format!("{}: {error}", path.display())
+        }));
     }
 
-    fn read_error(&mut self, path: impl std::fmt::Display, error: impl std::fmt::Display) {
+    fn read_error(&mut self, error: impl Into<TransferError>) {
         self.errors += 1;
         if self.error_examples.len() < 5 {
-            self.error_examples.push(format!("{path}: {error}"));
+            self.error_examples.push(Arc::new(error.into()));
         }
     }
 }
@@ -123,7 +129,7 @@ impl Properties {
             });
         if let Err(error) = result {
             let mut summary = state.lock().unwrap();
-            summary.error(Path::new(crate::i18n::text!("Подсчёт не запущен")), error);
+            summary.read_error(ScanError::PropertiesStart(error));
             summary.done = true;
         }
         Self {
@@ -187,7 +193,7 @@ impl Properties {
                         ui.separator();
                         ui.label(crate::tr_format!("Read errors: {}", crate::i18n::display::integer(summary.errors)));
                         for error in &summary.error_examples {
-                            ui.label(error);
+                            ui.label(crate::i18n::file_error(error));
                         }
                     }
                 });
@@ -279,7 +285,12 @@ fn scan(paths: &[PathBuf], cancel: &AtomicBool, mut progress: impl FnMut(&Summar
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
             Err(error) => {
-                summary.error(&path, error);
+                let location = Location::Local(path);
+                summary.read_error(AccessError::new(
+                    &location,
+                    AccessAction::ReadMetadata,
+                    error,
+                ));
                 progress(&summary);
                 continue;
             }
@@ -435,6 +446,14 @@ mod tests {
         assert_eq!(result.errors, 12);
         assert_eq!(result.error_examples.len(), 5);
         assert!(result.done);
+        #[cfg(not(windows))]
+        assert!(matches!(
+            result.error_examples[0].as_ref(),
+            TransferError::Failed(crate::file_error::Failure::Access(error))
+                if error.location.path() == paths[0] && error.action == AccessAction::ReadMetadata
+                    && matches!(&error.cause, crate::file_error::AccessCause::Local(cause)
+                        if cause.kind() == std::io::ErrorKind::NotFound)
+        ));
     }
 
     #[cfg(unix)]
@@ -545,7 +564,12 @@ mod tests {
         assert!(result.done && !result.cancelled);
         assert_eq!((result.files, result.directories, result.bytes), (0, 1, 0));
         assert_eq!(result.errors, 1);
-        assert!(result.error_examples[0].contains(&child.display().to_string()));
+        assert!(matches!(
+            result.error_examples[0].as_ref(),
+            TransferError::Failed(crate::file_error::Failure::Scan(error))
+                if matches!(error.as_ref(), ScanError::DirectoryChanged(location)
+                    if location.path() == child)
+        ));
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]

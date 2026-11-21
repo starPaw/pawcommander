@@ -18,6 +18,7 @@ pub(crate) enum Failure {
     Access(Box<AccessError>),
     Preview(Box<PreviewError>),
     Search(Box<SearchError>),
+    Scan(Box<ScanError>),
     ComparisonPane {
         right: bool,
         cause: Box<TransferError>,
@@ -51,6 +52,7 @@ impl Failure {
             Self::Access(error) => Some(error.as_ref()),
             Self::Preview(error) => Some(error.as_ref()),
             Self::Search(error) => Some(error.as_ref()),
+            Self::Scan(error) => Some(error.as_ref()),
             Self::ComparisonPane { cause, .. } => Some(cause.as_ref()),
             Self::Listing(error) => Some(error.as_ref()),
             Self::Mutation(error) => Some(error.as_ref()),
@@ -69,6 +71,7 @@ impl fmt::Display for Failure {
             Self::Access(error) => fmt::Display::fmt(error, f),
             Self::Preview(error) => fmt::Display::fmt(error, f),
             Self::Search(error) => fmt::Display::fmt(error, f),
+            Self::Scan(error) => fmt::Display::fmt(error, f),
             Self::ComparisonPane { right, cause } => {
                 let pane = if *right { "Right pane" } else { "Left pane" };
                 write!(f, "{pane} · {cause}")
@@ -202,6 +205,8 @@ pub(crate) enum AccessCause {
     Local(io::Error),
     Sftp(ssh2::Error),
     SftpStream(io::Error),
+    #[cfg(target_os = "macos")]
+    Path(PathError),
     Connection(Box<TransferError>),
 }
 
@@ -217,6 +222,13 @@ impl From<ssh2::Error> for AccessCause {
     }
 }
 
+#[cfg(target_os = "macos")]
+impl From<PathError> for AccessCause {
+    fn from(error: PathError) -> Self {
+        Self::Path(error)
+    }
+}
+
 impl From<TransferError> for AccessCause {
     fn from(error: TransferError) -> Self {
         Self::Connection(Box::new(error))
@@ -228,6 +240,8 @@ impl fmt::Display for AccessCause {
         match self {
             Self::Local(error) | Self::SftpStream(error) => fmt::Display::fmt(error, f),
             Self::Sftp(error) => fmt::Display::fmt(error, f),
+            #[cfg(target_os = "macos")]
+            Self::Path(error) => fmt::Display::fmt(error, f),
             Self::Connection(error) => fmt::Display::fmt(error, f),
         }
     }
@@ -240,6 +254,8 @@ impl AccessCause {
             Self::Sftp(error) => {
                 error.code() == ssh2::ErrorCode::SFTP(libssh2_sys::LIBSSH2_FX_NO_SUCH_FILE)
             }
+            #[cfg(target_os = "macos")]
+            Self::Path(_) => false,
             Self::Connection(_) => false,
         }
     }
@@ -286,6 +302,8 @@ impl Error for AccessError {
         match &self.cause {
             AccessCause::Local(error) | AccessCause::SftpStream(error) => Some(error),
             AccessCause::Sftp(error) => Some(error),
+            #[cfg(target_os = "macos")]
+            AccessCause::Path(error) => Some(error),
             AccessCause::Connection(error) => Some(error.as_ref()),
         }
     }
@@ -333,7 +351,6 @@ pub(crate) enum SearchError {
         location: Location,
         resolved: PathBuf,
     },
-    MissingFileType(Location),
 }
 
 impl fmt::Display for SearchError {
@@ -351,12 +368,78 @@ impl fmt::Display for SearchError {
                 "Folder {location} now resolves to {}",
                 resolved.display()
             ),
-            Self::MissingFileType(location) => write!(f, "Missing SFTP file type for {location}"),
         }
     }
 }
 
 impl Error for SearchError {}
+
+#[derive(Debug)]
+pub(crate) enum ScanError {
+    PropertiesStart(io::Error),
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    DirectoryChanged(Location),
+    #[cfg(target_os = "macos")]
+    InvalidSftpEntry {
+        directory: Location,
+        name: PathBuf,
+    },
+    #[cfg(target_os = "macos")]
+    DepthLimit(Location),
+    #[cfg(target_os = "macos")]
+    MissingSftpFileSize(Location),
+    MissingSftpFileType(Location),
+    #[cfg(target_os = "macos")]
+    DiskUsageRequiresLocalFolder,
+    #[cfg(target_os = "macos")]
+    DiskUsageFolderUnavailable(Location),
+    #[cfg(target_os = "macos")]
+    DiskUsageLimit,
+}
+
+impl fmt::Display for ScanError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PropertiesStart(source) => write!(f, "Calculation not started: {source}"),
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            Self::DirectoryChanged(location) => {
+                write!(f, "Folder {location} changed during calculation")
+            }
+            #[cfg(target_os = "macos")]
+            Self::InvalidSftpEntry { directory, name } => {
+                write!(f, "Invalid entry {name:?} in {directory}")
+            }
+            #[cfg(target_os = "macos")]
+            Self::DepthLimit(location) => write!(f, "Folder nesting limit reached at {location}"),
+            #[cfg(target_os = "macos")]
+            Self::MissingSftpFileSize(location) => {
+                write!(f, "Missing SFTP file size for {location}")
+            }
+            Self::MissingSftpFileType(location) => {
+                write!(f, "Missing SFTP file type for {location}")
+            }
+            #[cfg(target_os = "macos")]
+            Self::DiskUsageRequiresLocalFolder => {
+                f.write_str("Disk usage analysis needs a local folder")
+            }
+            #[cfg(target_os = "macos")]
+            Self::DiskUsageFolderUnavailable(location) => {
+                write!(f, "Folder {location} changed or is unavailable")
+            }
+            #[cfg(target_os = "macos")]
+            Self::DiskUsageLimit => f.write_str("Disk usage analysis reached its scan limit"),
+        }
+    }
+}
+
+impl Error for ScanError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::PropertiesStart(source) => Some(source),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub(crate) enum RecoveryNotice {

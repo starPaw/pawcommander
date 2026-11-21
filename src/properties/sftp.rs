@@ -1,5 +1,6 @@
 use super::{date, Summary};
 use crate::{
+    file_error::ScanError,
     i18n::text,
     vfs::{visit_properties, Location, PropertyEvent},
 };
@@ -30,12 +31,11 @@ pub(super) fn scan(
                         if let Some(size) = stat.size {
                             summary.bytes = summary.bytes.saturating_add(size);
                         } else {
-                            summary
-                                .read_error(location, text!("Сервер SFTP не сообщил размер файла"));
+                            summary.read_error(ScanError::MissingSftpFileSize(location.clone()));
                         }
                     }
                     FileType::Other(0) => {
-                        summary.read_error(location, text!("Сервер SFTP не сообщил тип объекта"));
+                        summary.read_error(ScanError::MissingSftpFileType(location.clone()));
                     }
                     _ => summary.other += 1,
                 }
@@ -43,9 +43,7 @@ pub(super) fn scan(
                     summary.details.push((location.clone(), details(stat)));
                 }
             }
-            PropertyEvent::Error(location, error) => {
-                summary.read_error(location, crate::i18n::file_error(&error));
-            }
+            PropertyEvent::Error(error) => summary.read_error(error),
         }
         progress(&summary);
     });
@@ -76,10 +74,14 @@ fn details(stat: &FileStat) -> String {
 
 #[cfg(test)]
 pub(crate) fn check_sftp_properties(remote: &Location) {
+    use crate::{
+        file_error::{AccessAction, AccessCause, Failure, ListingErrorKind},
+        operations::TransferError,
+    };
     use std::{fs, os::unix::fs::PermissionsExt, slice::from_ref};
 
     let fixture = tempfile::tempdir_in(remote.path()).unwrap();
-    let root = remote.with_path(fixture.path().to_owned());
+    let root = remote.with_path(fixture.path().canonicalize().unwrap());
     let tree = root.join("tree");
     let sub = tree.join("sub");
     let outside = root.join("outside");
@@ -143,6 +145,34 @@ pub(crate) fn check_sftp_properties(remote: &Location) {
     assert!(details.contains(&date(Some(accessed))));
     assert!(details.contains(text!("недоступно")));
 
+    let denied = tree.join("denied");
+    let missing = root.join("missing");
+    fs::create_dir(denied.path()).unwrap();
+    fs::write(denied.join("unread").path(), b"unread").unwrap();
+    fs::set_permissions(denied.path(), fs::Permissions::from_mode(0o111)).unwrap();
+    let result = scan(&[missing.clone(), tree, peer.clone()], &cancel, |_| {});
+    fs::set_permissions(denied.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(result.done && !result.cancelled);
+    assert_eq!((result.files, result.bytes, result.errors), (4, 24, 2));
+    let [metadata, listing] = result.error_examples.as_slice() else {
+        panic!("expected two read failures: {result:?}");
+    };
+    assert!(matches!(
+        listing.as_ref(),
+        TransferError::Failed(Failure::Listing(error))
+            if error.location == denied
+                && matches!(&error.kind, ListingErrorKind::OpenSftp(cause)
+                    if cause.code() == ssh2::ErrorCode::SFTP(libssh2_sys::LIBSSH2_FX_PERMISSION_DENIED))
+    ));
+    assert!(matches!(
+        metadata.as_ref(),
+        TransferError::Failed(Failure::Access(error))
+            if error.location == missing && error.action == AccessAction::ReadMetadata
+                && matches!(&error.cause, AccessCause::Sftp(cause)
+                    if cause.code() == ssh2::ErrorCode::SFTP(libssh2_sys::LIBSSH2_FX_NO_SUCH_FILE))
+    ));
+    assert_eq!(fs::read(denied.join("unread").path()).unwrap(), b"unread");
+
     let cancel_root = root.join("cancellation");
     let queued = cancel_root.join("child");
     fs::create_dir_all(queued.path()).unwrap();
@@ -178,5 +208,9 @@ pub(crate) fn check_sftp_properties(remote: &Location) {
     });
     assert!(replaced && result.done && !result.cancelled);
     assert_eq!((result.files, result.bytes, result.errors), (1, 4, 1));
-    assert!(result.error_examples[0].contains(&branch.name()));
+    assert!(matches!(
+        result.error_examples[0].as_ref(),
+        TransferError::Failed(Failure::Scan(error))
+            if matches!(error.as_ref(), ScanError::DirectoryChanged(location) if location == &branch)
+    ));
 }
