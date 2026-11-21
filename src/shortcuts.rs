@@ -50,6 +50,8 @@ pub enum Command {
     AddToArchive,
     RemoveFromArchive,
     NewFolder,
+    #[cfg(target_os = "macos")]
+    CreateLink,
     Trash,
     CopyToPane,
     MoveToPane,
@@ -60,7 +62,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Self; 43 + 4 * cfg!(target_os = "macos") as usize] = [
+    pub const ALL: [Self; 43 + 5 * cfg!(target_os = "macos") as usize] = [
         Self::EditPath,
         Self::Filter,
         Self::Search,
@@ -106,6 +108,8 @@ impl Command {
         Self::AddToArchive,
         Self::RemoveFromArchive,
         Self::NewFolder,
+        #[cfg(target_os = "macos")]
+        Self::CreateLink,
         Self::Trash,
         Self::CopyToPane,
         Self::MoveToPane,
@@ -159,6 +163,8 @@ impl Command {
             Self::AddToArchive => "Добавить в архив",
             Self::RemoveFromArchive => "Удалить из архива",
             Self::NewFolder => "Создать папку",
+            #[cfg(target_os = "macos")]
+            Self::CreateLink => "Создать ссылку",
             Self::Trash => "В корзину с подтверждением",
             Self::CopyToPane => "Копировать в соседнюю панель",
             Self::MoveToPane => "Переместить в соседнюю панель",
@@ -236,7 +242,7 @@ impl Profile {
             Palette => (CMD_SHIFT, Key::P),
             FolderJump => (CMD_SHIFT, Key::J),
             #[cfg(target_os = "macos")]
-            CustomActions | SyncFolders => return None,
+            CustomActions | SyncFolders | CreateLink => return None,
             Preview
             | EditInZed
             | OpenTerminal

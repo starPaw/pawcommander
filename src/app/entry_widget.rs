@@ -157,6 +157,11 @@ pub(super) fn entry_widget(
         let icon = icons::file_icon(&entry.name, entry.is_dir);
         icons::paint(ui, icon_rect, icon, icons::tint(icon, colors));
     }
+    #[cfg(target_os = "macos")]
+    let link_problem = entry
+        .metadata
+        .link_status
+        .and_then(crate::fs_ops::links::LinkStatus::problem);
     if entry.is_symlink {
         ui.painter().text(
             icon_rect.right_bottom(),
@@ -164,6 +169,14 @@ pub(super) fn entry_widget(
             "↗",
             FontId::proportional(12.0),
             colors.ink,
+        );
+    }
+    #[cfg(target_os = "macos")]
+    if link_problem.is_some() {
+        ui.painter().circle_filled(
+            icon_rect.right_top() + Vec2::new(-2.0, 2.0),
+            3.0,
+            colors.error,
         );
     }
     #[cfg(target_os = "macos")]
@@ -363,6 +376,11 @@ pub(super) fn entry_widget(
             label.push_str(", ");
             label.push_str(status);
         }
+        #[cfg(target_os = "macos")]
+        if let Some(problem) = link_problem {
+            label.push_str(", ");
+            label.push_str(problem);
+        }
         egui::WidgetInfo::selected(
             egui::Role::CheckBox,
             ui.is_enabled(),
@@ -374,6 +392,11 @@ pub(super) fn entry_widget(
         format!("{}\n{status}", path.display())
     } else {
         path.display()
+    };
+    #[cfg(target_os = "macos")]
+    let tooltip = match link_problem {
+        Some(problem) => format!("{tooltip}\n{problem}"),
+        None => tooltip,
     };
     response
         .on_hover_text(tooltip)
@@ -464,6 +487,14 @@ pub(super) fn entry_widget(
                     }
                 }
             });
+            }
+            #[cfg(target_os = "macos")]
+            if path.local().is_some()
+                && ui.add_enabled(idle, egui::Button::new(crate::i18n::text("Создать ссылку…"))).clicked()
+            {
+                actions.push(Action::Focus(pane));
+                actions.push(Action::CreateLink);
+                ui.close();
             }
             for (label, action, enabled) in [
                 (crate::i18n::text("Копировать"), Action::Copy(false), true),

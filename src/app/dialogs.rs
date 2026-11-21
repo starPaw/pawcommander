@@ -67,6 +67,8 @@ pub(super) enum Dialog {
         parent: Location,
         name: String,
     },
+    #[cfg(target_os = "macos")]
+    CreateLink(super::link_dialog::LinkDialog),
     Rename {
         source: Location,
         name: String,
@@ -500,6 +502,8 @@ impl PawCommander {
             Dialog::TransferLimits { .. } => crate::i18n::text("Скорость передачи"),
             Dialog::SelectionRule { command, .. } => command.label(),
             Dialog::NewFolder { .. } => crate::i18n::text("Новая папка"),
+            #[cfg(target_os = "macos")]
+            Dialog::CreateLink(_) => Command::CreateLink.label(),
             Dialog::Rename { .. } => crate::i18n::text("Переименовать"),
             Dialog::BatchRename(_) => crate::i18n::text("Массовое переименование"),
             Dialog::ChangePermissions(_) => Command::ChangePermissions.label(),
@@ -600,6 +604,8 @@ impl PawCommander {
                         response.request_focus();
                     }
                 }
+                #[cfg(target_os = "macos")]
+                Dialog::CreateLink(form) => form.show(ui, self.dialog_focus),
                 Dialog::BatchRename(editor) => editor.show(ui, self.dialog_focus),
                 Dialog::ChangePermissions(editor) => editor.show(ui, self.dialog_focus),
                 #[cfg(target_os = "macos")]
@@ -765,6 +771,8 @@ impl PawCommander {
                 Dialog::NewFolder { name, .. } | Dialog::Rename { name, .. } => {
                     !name.trim().is_empty()
                 }
+                #[cfg(target_os = "macos")]
+                Dialog::CreateLink(form) => form.valid(),
                 Dialog::BatchRename(editor) => editor.can_apply(),
                 Dialog::ChangePermissions(editor) => editor.can_apply(),
                 #[cfg(target_os = "macos")]
@@ -822,6 +830,8 @@ impl PawCommander {
                         Dialog::RunCustomAction(_) => "Запустить",
                         #[cfg(target_os = "macos")]
                         Dialog::ConnectSmb(_) => "Подключиться",
+                        #[cfg(target_os = "macos")]
+                        Dialog::CreateLink(_) => "Создать",
                         _ => "Сохранить",
                     })
                 };
@@ -936,6 +946,8 @@ impl PawCommander {
                 }
                 #[cfg(target_os = "macos")]
                 Dialog::ConnectSmb(form) => self.connect_smb(*form, ctx),
+                #[cfg(target_os = "macos")]
+                Dialog::CreateLink(form) => form.submit(self, ctx),
                 Dialog::NewFolder { parent, name } => self.start_described_job(
                     ctx,
                     crate::i18n::text("Создание папки"),

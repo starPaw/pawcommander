@@ -51,6 +51,9 @@ pub(super) fn describe(path: &Path, metadata: &Metadata, cancel: &AtomicBool) ->
         return None;
     }
     let tags = finder_tags(&path_bytes);
+    let link = metadata
+        .is_symlink()
+        .then(|| crate::fs_ops::links::describe_target(path));
     if !active() {
         return None;
     }
@@ -67,7 +70,7 @@ pub(super) fn describe(path: &Path, metadata: &Metadata, cancel: &AtomicBool) ->
     } else {
         Ok(Some(metadata.nlink().to_string()))
     };
-    Some(format!(
+    let mut description = format!(
         "{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}",
         text("Файловая система"),
         volume
@@ -82,7 +85,12 @@ pub(super) fn describe(path: &Path, metadata: &Metadata, cancel: &AtomicBool) ->
         display(attributes),
         "ACL",
         display(acl),
-    ))
+    );
+    if let Some(link) = link {
+        description.push('\n');
+        description.push_str(&link);
+    }
+    Some(description)
 }
 
 fn same_item(before: &Metadata, after: &Metadata) -> bool {

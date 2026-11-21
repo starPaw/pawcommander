@@ -273,6 +273,12 @@ On macOS, local Properties also show each selected item's file system, the hard-
 
 While counting, **Stop calculation** receives initial keyboard focus. Press `Space` or `Enter` to stop and keep the partial result. Close the window or press `Esc` to dismiss it and request cancellation. Cancellation takes effect between filesystem or SFTP requests. When an entry disappears or cannot be read, the window identifies the result as partial.
 
+### Create and inspect links on macOS
+
+Choose **Create link** from the command palette or a local file's context menu. Enter a new name in the active folder, select **Symbolic link** or **Hard link**, and set the target path. A single selection fills in the target. Relative paths start in the folder where the link will appear. The name must be unused. Hard links require a regular file on the same volume. A symbolic link may point to a folder or a path that does not exist yet.
+
+An error mark and tooltip identify a symbolic link with a missing, unavailable or looping target. **Properties** shows the stored target path and its current status. Recursive listings and counts skip symbolic-link branches. You can open a working folder link directly.
+
 ## Compare folders
 
 Open the folders in the two panes and choose **Compare folders** from the command palette or the Settings menu. The comparison looks at exact relative names throughout both folder trees, including hidden files. Results show items present on one side, different files and type conflicts. **Show matches** includes the matching files and links. Unreadable folders appear as one error row for the affected branch.

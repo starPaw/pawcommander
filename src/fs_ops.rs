@@ -10,6 +10,9 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(target_os = "macos")]
+pub(crate) mod links;
+
 #[derive(Clone, Debug)]
 pub struct FileEntry {
     pub path: PathBuf,
@@ -28,6 +31,8 @@ pub struct ListingMetadata {
     pub created: Option<SystemTime>,
     pub accessed: Option<SystemTime>,
     pub(crate) local_file: Option<LocalFileIdentity>,
+    #[cfg(target_os = "macos")]
+    pub(crate) link_status: Option<links::LinkStatus>,
 }
 
 impl ListingMetadata {
@@ -48,6 +53,8 @@ impl ListingMetadata {
             created: metadata.created().ok(),
             accessed: metadata.accessed().ok(),
             local_file: LocalFileIdentity::from_metadata(metadata),
+            #[cfg(target_os = "macos")]
+            link_status: None,
         }
     }
 }
@@ -155,19 +162,25 @@ pub fn visit_directory(
             break;
         }
         let is_symlink = metadata.file_type().is_symlink();
-        let target = if is_symlink {
-            fs::metadata(&path).ok()
-        } else {
-            None
+        let target = is_symlink.then(|| fs::metadata(&path));
+        let listing = ListingMetadata::from_local(&metadata);
+        #[cfg(target_os = "macos")]
+        let listing = ListingMetadata {
+            link_status: target.as_ref().map(links::LinkStatus::from_stat),
+            ..listing
         };
         visit(FileEntry {
             name: item.file_name().to_string_lossy().into_owned(),
             path,
-            is_dir: target.as_ref().unwrap_or(&metadata).is_dir(),
+            is_dir: target
+                .as_ref()
+                .and_then(|result| result.as_ref().ok())
+                .unwrap_or(&metadata)
+                .is_dir(),
             is_symlink,
             size: metadata.len(),
             modified: metadata.modified().ok(),
-            metadata: ListingMetadata::from_local(&metadata),
+            metadata: listing,
         });
     }
     Ok(())
@@ -337,7 +350,7 @@ pub fn trash_entries(paths: &[PathBuf], progress: &mut Progress) -> Result<usize
     Ok(paths.len())
 }
 
-fn validate_name(name: &str) -> Result<(), String> {
+pub(crate) fn validate_name(name: &str) -> Result<(), String> {
     let mut components = Path::new(name).components();
     if name.trim().is_empty()
         || name.contains(['/', '\\', '\0'])

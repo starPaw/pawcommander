@@ -75,6 +75,8 @@ pub(super) enum Action {
     Copy(bool),
     Paste(bool),
     NewFolder,
+    #[cfg(target_os = "macos")]
+    CreateLink,
     Rename,
     CreateArchive,
     ExtractArchive,
@@ -477,11 +479,20 @@ impl PawCommander {
             }
             Action::Open(i, p) => {
                 self.active = i;
-                let directory = self.panes[i]
+                let entry = self.panes[i]
                     .tab()
                     .entries
                     .iter()
-                    .any(|e| e.path == p && e.is_dir);
+                    .find(|entry| entry.path == p);
+                #[cfg(target_os = "macos")]
+                if let Some(problem) = entry
+                    .and_then(|entry| entry.metadata.link_status)
+                    .and_then(crate::fs_ops::links::LinkStatus::problem)
+                {
+                    self.notice = Some((problem.into(), true));
+                    return;
+                }
+                let directory = entry.is_some_and(|entry| entry.is_dir);
                 let browse = if directory {
                     Some(p.clone())
                 } else {
@@ -582,6 +593,25 @@ impl PawCommander {
                     parent: self.tab().path.clone(),
                     name: String::new(),
                 });
+                self.dialog_focus = true;
+            }
+            #[cfg(target_os = "macos")]
+            Action::CreateLink if !self.conflict_open() => {
+                let Some(directory) = self.tab().path.local().map(Path::to_owned) else {
+                    self.notice = Some((
+                        crate::i18n::text("Создание ссылок доступно в локальных папках").into(),
+                        true,
+                    ));
+                    return;
+                };
+                let target = match self.selected().as_slice() {
+                    [selected] => selected.path().to_str().unwrap_or_default().to_owned(),
+                    _ => String::new(),
+                };
+                self.remember_dialog_file_focus(ctx);
+                self.dialog = Some(Dialog::CreateLink(super::link_dialog::LinkDialog::new(
+                    directory, target,
+                )));
                 self.dialog_focus = true;
             }
             Action::Rename if !self.conflict_open() => {

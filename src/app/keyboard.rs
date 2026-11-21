@@ -163,6 +163,8 @@ impl PawCommander {
             Command::AddToArchive => Action::AddToArchive,
             Command::RemoveFromArchive => Action::RemoveFromArchive,
             Command::NewFolder => Action::NewFolder,
+            #[cfg(target_os = "macos")]
+            Command::CreateLink => Action::CreateLink,
             Command::Trash => Action::Trash,
             Command::CopyToPane => Action::Transfer(TransferKind::Copy),
             Command::MoveToPane => Action::Transfer(TransferKind::Move),

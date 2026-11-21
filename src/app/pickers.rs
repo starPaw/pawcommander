@@ -89,6 +89,8 @@ impl PawCommander {
                 Command::QuickLook => can_quick_look,
                 Command::RestoreSelection => tab.previous_selection.is_some(),
                 Command::NewFolder => idle && writable,
+                #[cfg(target_os = "macos")]
+                Command::CreateLink => idle && tab.path.local().is_some(),
                 Command::Rename => idle && has_selection && selected.len() == 1,
                 Command::Trash | Command::CreateArchive => idle && writable && has_selection,
                 Command::ExtractArchive => idle && !writable && has_selection,
