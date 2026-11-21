@@ -8,6 +8,7 @@ fn favorites_menu_blocks_alt_digit_and_releases_after_escape() {
     let target = root.path().join("target");
     std::fs::create_dir(&target).unwrap();
     let ctx = egui::Context::default();
+    ctx.enable_accesskit();
     let cc = eframe::CreationContext::_new_kittest(ctx.clone());
     let mut frame = eframe::Frame::_new_kittest();
     let mut app = PawCommander::new(&cc, Some(root.path().into()));
@@ -31,11 +32,20 @@ fn favorites_menu_blocks_alt_digit_and_releases_after_escape() {
         })
     };
     let output = run(&mut app, vec![]);
+    let menu_label = crate::tr_format!("Действия для «target»", "Actions for target");
+    assert!(output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .unwrap()
+        .nodes
+        .iter()
+        .any(|(_, node)| node.label() == Some(menu_label.as_str())));
     let menu_position = output
         .shapes
         .iter()
         .find_map(|clipped| match &clipped.shape {
-            egui::Shape::Text(text) if text.galley.text() == "⋯" => {
+            egui::Shape::Text(text) if text.galley.text() == "…" => {
                 Some(text.pos + text.galley.size() * 0.5)
             }
             _ => None,

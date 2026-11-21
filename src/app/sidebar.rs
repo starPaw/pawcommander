@@ -242,17 +242,22 @@ impl PawCommander {
                                                 bookmark.shortcut,
                                             )
                                         };
-                                        let label = shortcut.map_or_else(
-                                            || name.clone(),
-                                            |slot| format!("{}  ·  Alt+{slot}", name),
-                                        );
                                         ui.horizontal(|ui| {
+                                            let menu_size = Vec2::new(34.0, 29.0);
+                                            let name_width = (ui.available_width()
+                                                - menu_size.x
+                                                - ui.spacing().item_spacing.x)
+                                                .max(0.0);
+                                            let mut button =
+                                                egui::Button::new(format!("      {name}"))
+                                                    .selected(current == location)
+                                                    .truncate();
+                                            if let Some(slot) = shortcut {
+                                                button =
+                                                    button.shortcut_text(format!("Alt+{slot}"));
+                                            }
                                             let response = ui
-                                                .add_sized(
-                                                    [ui.available_width() - 32.0, 29.0],
-                                                    egui::Button::new(format!("      {label}"))
-                                                        .selected(current == location),
-                                                )
+                                                .add_sized([name_width, menu_size.y], button)
                                                 .on_hover_text(location.display().to_string());
                                             icons::paint(
                                                 ui,
@@ -270,7 +275,13 @@ impl PawCommander {
                                                     location.clone(),
                                                 ));
                                             }
-                                            ui.menu_button("⋯", |ui| {
+                                            let menu_button =
+                                                egui::containers::menu::MenuButton::from_button(
+                                                    egui::Button::new("…")
+                                                        .min_size(menu_size)
+                                                        .truncate(),
+                                                );
+                                            let (menu, _) = menu_button.ui(ui, |ui| {
                                                 self.bookmark_menu_open = Some(id);
                                                 if ui
                                                     .button(crate::i18n::text("Изменить избранное"))
@@ -383,6 +394,14 @@ impl PawCommander {
                                                     ui.close();
                                                 }
                                             });
+                                            let menu_label = crate::tr_format!(
+                                                "Действия для «{name}»",
+                                                "Actions for {name}"
+                                            );
+                                            ui.ctx().accesskit_node_builder(menu.id, |node| {
+                                                node.set_label(menu_label.clone());
+                                            });
+                                            paint_focus(ui, &menu.on_hover_text(menu_label), 5);
                                         });
                                     }
                                 }
