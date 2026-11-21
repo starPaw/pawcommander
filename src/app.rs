@@ -25,6 +25,8 @@ mod footer;
 mod git_status;
 mod jobs;
 mod keyboard;
+#[cfg(target_os = "macos")]
+mod link_dialog;
 mod pane_view;
 mod permissions;
 mod persistence;

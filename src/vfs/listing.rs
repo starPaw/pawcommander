@@ -225,6 +225,8 @@ pub(super) fn visit_sftp_directory(
                     .atime
                     .and_then(|s| UNIX_EPOCH.checked_add(Duration::from_secs(s))),
                 local_file: None,
+                #[cfg(target_os = "macos")]
+                link_status: None,
             },
         });
     }
