@@ -1,7 +1,7 @@
 #[cfg(test)]
 use crate::test_ui::ContextExt as _;
 mod code;
-mod encoding;
+pub(crate) mod encoding;
 #[cfg(target_os = "macos")]
 mod helper;
 mod hex;

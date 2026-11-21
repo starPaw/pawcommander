@@ -17,6 +17,8 @@ pub(crate) mod duplicates;
 mod external_editor;
 mod file_compare;
 #[cfg(target_os = "macos")]
+pub(crate) mod file_templates;
+#[cfg(target_os = "macos")]
 mod guarded_directory;
 mod listing;
 mod location;

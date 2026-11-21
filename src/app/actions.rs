@@ -76,6 +76,8 @@ pub(super) enum Action {
     Paste(bool),
     NewFolder,
     #[cfg(target_os = "macos")]
+    NewFile(Option<egui::Id>),
+    #[cfg(target_os = "macos")]
     CreateLink,
     Rename,
     CreateArchive,
@@ -593,6 +595,8 @@ impl PawCommander {
                     false,
                 );
             }
+            #[cfg(target_os = "macos")]
+            Action::NewFile(return_focus) => self.open_new_file(return_focus, ctx),
             Action::NewFolder if !self.conflict_open() => {
                 self.remember_dialog_file_focus(ctx);
                 self.dialog = Some(Dialog::NewFolder {

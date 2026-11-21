@@ -72,6 +72,9 @@ impl PawCommander {
     #[cfg(target_os = "macos")]
     pub(super) const COLLECTIONS_KEY: &str = "pawcommander.collections";
 
+    #[cfg(target_os = "macos")]
+    pub(super) const FILE_TEMPLATES_KEY: &str = "pawcommander.file_templates";
+
     pub(super) const BOOKMARKS_KEY: &str = "pawcommander.bookmarks";
 
     pub(super) const FOLDER_VIEWS_KEY: &str = "pawcommander.folder_views";
@@ -99,6 +102,11 @@ impl PawCommander {
         let collections = cc
             .storage
             .and_then(|storage| eframe::get_value(storage, Self::COLLECTIONS_KEY))
+            .unwrap_or_default();
+        #[cfg(target_os = "macos")]
+        let file_templates = cc
+            .storage
+            .and_then(|storage| eframe::get_value(storage, Self::FILE_TEMPLATES_KEY))
             .unwrap_or_default();
         let folder_views = cc
             .storage
@@ -194,6 +202,8 @@ impl PawCommander {
             sync_profiles,
             #[cfg(target_os = "macos")]
             collections,
+            #[cfg(target_os = "macos")]
+            file_templates,
             preview: Preview::new(),
             thumbnails: Thumbnails::new(&cc.egui_ctx),
             quick_look: None,

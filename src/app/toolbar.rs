@@ -114,6 +114,8 @@ impl PawCommander {
                                 ui.close();
                             }
                             for (command, action, enabled) in [
+                                #[cfg(target_os = "macos")]
+                                (Command::NewFile, Action::NewFile(Some(button.id)), self.can_create_file()),
                                 (
                                     Command::CompareFolders,
                                     Action::CompareFolders(cfg!(target_os = "macos").then_some(button.id)),

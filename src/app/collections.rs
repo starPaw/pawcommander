@@ -79,7 +79,7 @@ impl CollectionsDialog {
         catalog: &mut Catalog,
     ) -> ComparisonResponse {
         if let Some(path) = self.accept_result(catalog) {
-            return ComparisonResponse::RevealCollectionItem(path);
+            return ComparisonResponse::RevealItem(path);
         }
         let running = matches!(self.work, Phase::Running(_));
         let mut close = false;

@@ -57,6 +57,8 @@ pub enum Command {
     RemoveFromArchive,
     NewFolder,
     #[cfg(target_os = "macos")]
+    NewFile,
+    #[cfg(target_os = "macos")]
     CreateLink,
     Trash,
     CopyToPane,
@@ -68,7 +70,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Self; 43 + 8 * cfg!(target_os = "macos") as usize] = [
+    pub const ALL: [Self; 43 + 9 * cfg!(target_os = "macos") as usize] = [
         Self::EditPath,
         Self::Filter,
         Self::Search,
@@ -120,6 +122,8 @@ impl Command {
         Self::AddToArchive,
         Self::RemoveFromArchive,
         Self::NewFolder,
+        #[cfg(target_os = "macos")]
+        Self::NewFile,
         #[cfg(target_os = "macos")]
         Self::CreateLink,
         Self::Trash,
@@ -181,6 +185,8 @@ impl Command {
             Self::AddToArchive => "Добавить в архив",
             Self::RemoveFromArchive => "Удалить из архива",
             Self::NewFolder => "Создать папку",
+            #[cfg(target_os = "macos")]
+            Self::NewFile => "Новый файл",
             #[cfg(target_os = "macos")]
             Self::CreateLink => "Создать ссылку",
             Self::Trash => "В корзину с подтверждением",
@@ -260,9 +266,8 @@ impl Profile {
             Palette => (CMD_SHIFT, Key::P),
             FolderJump => (CMD_SHIFT, Key::J),
             #[cfg(target_os = "macos")]
-            CustomActions | SyncFolders | CreateLink | FindDuplicates | DiskUsage | Collections => {
-                return None
-            }
+            CustomActions | SyncFolders | CreateLink | FindDuplicates | DiskUsage | Collections
+            | NewFile => return None,
             Preview
             | EditInZed
             | OpenTerminal
