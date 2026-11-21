@@ -131,7 +131,7 @@ fn unreadable_recovery_records_report_their_path_and_cause() {
     assert_eq!(errors.len(), 3);
     for error in errors {
         match error.problem {
-            ResumeRecordProblem::Json {
+            RecoveryRecordProblem::Json {
                 section: ResumeRecordSection::Header,
                 source,
             } => {
@@ -139,8 +139,8 @@ fn unreadable_recovery_records_report_their_path_and_cause() {
                 assert_eq!(source.line(), 1);
                 assert!(source.column() > 0);
             }
-            ResumeRecordProblem::UnsupportedVersion(99) => assert_eq!(error.path, future),
-            ResumeRecordProblem::Read(source) => {
+            RecoveryRecordProblem::UnsupportedVersion(99) => assert_eq!(error.path, future),
+            RecoveryRecordProblem::Read(source) => {
                 assert_eq!(error.path, symlink);
                 assert_eq!(source.raw_os_error(), Some(libc::ELOOP));
             }
@@ -152,8 +152,8 @@ fn unreadable_recovery_records_report_their_path_and_cause() {
     let error = resume(recovery, "copy-future.json", &mut progress).unwrap_err();
     assert!(matches!(
         error,
-        TransferError::Failed(Failure::ResumeRecord(error))
-            if error.path == future && matches!(error.problem, ResumeRecordProblem::UnsupportedVersion(99))
+        TransferError::Failed(Failure::RecoveryRecord(error))
+            if error.path == future && matches!(error.problem, RecoveryRecordProblem::UnsupportedVersion(99))
     ));
     let [row] = progress.results.items.as_slice() else {
         panic!("Expected one history row for the failing record");
@@ -392,7 +392,7 @@ fn a_replaced_receipt_does_not_make_a_confirmed_move_uncertain() {
     assert!(matches!(
         *error,
         PublicationError::RecoveryFinalization { target: location, moving: true, cause }
-            if location == target && cause.path == replaced && matches!(cause.problem, ResumeRecordProblem::IdentityChanged)
+            if location == target && cause.path == replaced && matches!(cause.problem, RecoveryRecordProblem::IdentityChanged)
     ));
     assert!(published && removed && !progress.partial_copy_retained);
     assert!(!original.path().exists());
@@ -452,8 +452,8 @@ fn stopping_a_resumed_copy_reports_receipt_failure_after_draft_cleanup() {
     let error = resume(&recovery, &offers[0].id, &mut progress).unwrap_err();
     assert!(matches!(
         error,
-        TransferError::Failed(Failure::ResumeRecord(error))
-            if error.path == record && matches!(error.problem, ResumeRecordProblem::IdentityChanged)
+        TransferError::Failed(Failure::RecoveryRecord(error))
+            if error.path == record && matches!(error.problem, RecoveryRecordProblem::IdentityChanged)
     ));
     assert_eq!(progress.results.items[0].outcome, Outcome::Failed);
     assert!(!progress.partial_copy_retained && staged_payload(&output).is_none());
@@ -597,8 +597,8 @@ fn older_folder_moves_warn_and_a_damaged_access_time_section_preserves_the_sourc
             assert_eq!(saved_target, target);
             assert!(matches!(
                 cause,
-                TransferError::Failed(Failure::ResumeRecord(error))
-                    if error.path == path && matches!(error.problem, ResumeRecordProblem::InvalidAccessTimes)
+                TransferError::Failed(Failure::RecoveryRecord(error))
+                    if error.path == path && matches!(error.problem, RecoveryRecordProblem::InvalidAccessTimes)
             ));
             assert_eq!(
                 fs::read(source.path().join("child")).unwrap(),

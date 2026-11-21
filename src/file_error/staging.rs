@@ -2,7 +2,7 @@ use crate::vfs::Location;
 use std::{error::Error, fmt, io};
 
 #[cfg(target_os = "macos")]
-use {super::ResumeRecordError, crate::operations::TransferError};
+use {super::RecoveryRecordError, crate::operations::TransferError};
 
 #[derive(Debug)]
 pub(crate) enum StagingRecordAction {
@@ -26,12 +26,12 @@ pub(crate) enum StagingError {
     #[cfg(target_os = "macos")]
     ResumeReceipt {
         staging: Location,
-        source: ResumeRecordError,
+        source: RecoveryRecordError,
     },
     #[cfg(target_os = "macos")]
     ResumeReceiptCleanup {
         cause: TransferError,
-        source: ResumeRecordError,
+        source: RecoveryRecordError,
     },
 }
 

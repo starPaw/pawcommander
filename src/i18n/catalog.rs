@@ -1344,6 +1344,8 @@ catalog! {
     "Не удалось сохранить начальные данные восстановления на диск" => ("Could not save the initial recovery data to disk for", "Nepodařilo se uložit počáteční údaje obnovení na disk pro"),
     "Не удалось разместить запись восстановления" => ("Could not publish recovery record", "Nepodařilo se zpřístupnit záznam obnovení"),
     "Не удалось подтвердить сохранение записи восстановления на диске" => ("Could not confirm that recovery record was saved to disk", "Nepodařilo se potvrdit uložení záznamu obnovení na disk"),
+    "Не удалось активировать запись восстановления" => ("Could not activate recovery record", "Nepodařilo se aktivovat záznam obnovení"),
+    "Журнал результатов недоступен." => ("Result history is unavailable.", "Historie výsledků není dostupná."),
     "Не удалось проверить подлинность записи восстановления" => ("Could not verify the identity of recovery record", "Nepodařilo se ověřit identitu záznamu obnovení"),
     "Не удалось найти позицию для добавления события в запись восстановления" => ("Could not locate the end of recovery record", "Nepodařilo se najít konec záznamu obnovení"),
     "Не удалось удалить запись восстановления" => ("Could not remove recovery record", "Nepodařilo se odstranit záznam obnovení"),

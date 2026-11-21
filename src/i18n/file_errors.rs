@@ -7,12 +7,14 @@ use crate::file_error::{
     ProbeAction, PublicationError, RecoveryNotice, ScanError, SearchError, SpaceError, SshStage,
     StagingCleanupError, StagingError, StagingRecordAction,
 };
+use crate::file_error::{RecoveryRecordAction, RecoveryRecordError, RecoveryRecordProblem};
 #[cfg(target_os = "macos")]
 use crate::file_error::{
-    ResumeCheckError, ResumeCheckProblem, ResumeRecordAction, ResumeRecordError, ResumeRecordEvent,
-    ResumeRecordProblem, ResumeRecordSection, ResumeRole, SyncError,
+    ResumeCheckError, ResumeCheckProblem, ResumeRecordEvent, ResumeRecordSection, ResumeRole,
+    SyncError,
 };
 use crate::operations::TransferError;
+use crate::result_history::HistoryError;
 use crate::vfs::{DeletionFailure, TransferFailure};
 
 pub(crate) fn file_error(error: &TransferError) -> String {
@@ -53,8 +55,7 @@ pub(crate) fn file_error(error: &TransferError) -> String {
                 Failure::Staging(error) => staging_error(error),
                 #[cfg(target_os = "macos")]
                 Failure::ResumeCheck(error) => resume_check_error(error),
-                #[cfg(target_os = "macos")]
-                Failure::ResumeRecord(error) => resume_record_error(error),
+                Failure::RecoveryRecord(error) => recovery_record_error(error),
                 Failure::StagingCleanup(error) => staging_cleanup_error(error),
                 _ => error.to_string(),
             }
@@ -95,15 +96,16 @@ fn resume_check_error(error: &ResumeCheckError) -> String {
     format!("{role} «{}». {detail}", error.location)
 }
 
-#[cfg(target_os = "macos")]
-fn resume_record_error(error: &ResumeRecordError) -> String {
-    use ResumeRecordProblem::*;
+pub(crate) fn recovery_record_error(error: &RecoveryRecordError) -> String {
+    use RecoveryRecordProblem::*;
 
     let path = error.path.display();
     match &error.problem {
+        #[cfg(target_os = "macos")]
         Read(error) => crate::tr_format!(
             "Could not read recovery record {path}: {error}", path = path, error = error
         ),
+        #[cfg(target_os = "macos")]
         ReadDirectory(error) => crate::tr_format!(
             "Could not read recovery folder {path}: {error}", path = path, error = error
         ),
@@ -111,18 +113,25 @@ fn resume_record_error(error: &ResumeRecordError) -> String {
             "Could not lock recovery record {path}: {error}", path = path, error = error
         ),
         Write { action, source } => {
-            let action = resume_record_action(*action);
+            let action = recovery_record_action(*action);
             format!("{action} «{path}» ({source})")
         }
-        Encode { event, source } => {
-            let data = event.map_or(text!("исходные данные записи"), resume_record_event);
+        Encode {
+            #[cfg(target_os = "macos")]
+            event,
+            source,
+        } => {
+            let data = text!("исходные данные записи");
+            #[cfg(target_os = "macos")]
+            let data = event.map_or(data, resume_record_event);
             crate::tr_format!(
                 "Could not encode {data} for recovery record {path} ({error})",
                 data = data, path = path, error = source
             )
         }
+        #[cfg(target_os = "macos")]
         AppendRollback { event, source, restore } => {
-            let action = resume_record_action(ResumeRecordAction::Append(*event));
+            let action = recovery_record_action(RecoveryRecordAction::Append(*event));
             let followup = crate::tr_format!(
                 "Could not restore the previous length of the recovery record ({error}).",
                 error = restore
@@ -130,36 +139,53 @@ fn resume_record_error(error: &ResumeRecordError) -> String {
             format!("{action} «{path}» ({source})\n{followup}")
         }
         InUse => format!("{} · {path}", text!("Эта копия уже обрабатывается другим заданием.")),
+        AlreadyActive => crate::tr_format!(
+            "The worker already has an active recovery record. Could not activate {path}.", path = path
+        ),
+        MissingParent => crate::tr_format!(
+            "Recovery record {path} has no containing directory.", path = path
+        ),
         IdentityChanged => crate::tr_format!(
             "Recovery record {path} was replaced or is no longer a regular file", path = path
         ),
         SizeLimit(limit) => crate::tr_format!(
             "Recovery record {path} exceeds the {limit}-byte limit", path = path, limit = limit
         ),
+        #[cfg(target_os = "macos")]
         Json { section: ResumeRecordSection::Header, source } => crate::tr_format!(
             "Could not decode the header of recovery record {path}: {error}", path = path, error = source
         ),
+        #[cfg(target_os = "macos")]
         Json { section: ResumeRecordSection::Event(number), source } => crate::tr_format!(
             "Could not decode event {number} in recovery record {path}: {error}",
             number = number, path = path, error = source
         ),
+        #[cfg(target_os = "macos")]
         Json { section: ResumeRecordSection::AccessTimes, source } => format!(
             "{} · {path} ({source})", text!("Некорректная запись времени доступа для переноса")
         ),
+        #[cfg(target_os = "macos")]
         UnsupportedVersion(version) => crate::tr_format!(
             "Unsupported version {version} of recovery record {path}", version = version, path = path
         ),
+        #[cfg(target_os = "macos")]
         VersionMismatch { stored, expected } => crate::tr_format!(
             "Recovery record {path} has version {stored} but its contents require version {expected}",
             path = path, stored = stored, expected = expected
         ),
+        #[cfg(target_os = "macos")]
         EventOrder(number) => crate::tr_format!(
             "Event {number} is out of order in recovery record {path}", path = path, number = number
         ),
+        #[cfg(target_os = "macos")]
         InvalidAccessTimes => format!("{} · {path}", text!("Некорректная запись времени доступа для переноса")),
+        #[cfg(target_os = "macos")]
         InvalidPaths => crate::tr_format!("Invalid paths in recovery record {path}", path = path),
+        #[cfg(target_os = "macos")]
         InvalidProof => crate::tr_format!("Invalid transfer proof in recovery record {path}", path = path),
+        #[cfg(target_os = "macos")]
         InvalidName => crate::tr_format!("Invalid recovery record name in {path}", path = path),
+        #[cfg(target_os = "macos")]
         ScanLimit(limit) => crate::tr_format!(
             "Stopped reading recovery folder {path} after {limit} entries", path = path, limit = limit
         ),
@@ -175,9 +201,8 @@ fn resume_record_event(event: ResumeRecordEvent) -> &'static str {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn resume_record_action(action: ResumeRecordAction) -> String {
-    use ResumeRecordAction::*;
+fn recovery_record_action(action: RecoveryRecordAction) -> String {
+    use RecoveryRecordAction::*;
     match action {
         CreateDirectory => text!("Не удалось создать папку записей восстановления"),
         CreateFile => text!("Не удалось создать временную запись восстановления в папке"),
@@ -187,16 +212,20 @@ fn resume_record_action(action: ResumeRecordAction) -> String {
         SyncPublication => {
             text!("Не удалось подтвердить сохранение записи восстановления на диске")
         }
+        Activate => text!("Не удалось активировать запись восстановления"),
         CheckIdentity => text!("Не удалось проверить подлинность записи восстановления"),
+        #[cfg(target_os = "macos")]
         SeekEnd => text!("Не удалось найти позицию для добавления события в запись восстановления"),
         Remove => text!("Не удалось удалить запись восстановления"),
         SyncRemoval => text!("Не удалось подтвердить удаление записи восстановления на диске"),
+        #[cfg(target_os = "macos")]
         Append(event) => {
             return crate::tr_format!(
                 "Could not append {event} to recovery record",
                 event = resume_record_event(event)
             )
         }
+        #[cfg(target_os = "macos")]
         SyncEvent(event) => {
             return crate::tr_format!(
                 "Could not save {event} to disk for recovery record",
@@ -205,6 +234,31 @@ fn resume_record_action(action: ResumeRecordAction) -> String {
         }
     }
     .into()
+}
+
+pub(crate) fn history_error(error: &HistoryError) -> String {
+    match error {
+        HistoryError::Unavailable => text!("Журнал результатов недоступен.").into(),
+        HistoryError::Disconnected(path) => crate::tr_format!(
+            "Lost contact with the result history worker for {path}.",
+            path = path.display()
+        ),
+        HistoryError::Spawn { path, source } => crate::tr_format!(
+            "Could not start the result history worker for {path} ({error}).",
+            path = path.display(),
+            error = source
+        ),
+        HistoryError::Open { path, source } => crate::tr_format!(
+            "Could not open result history {path} ({error}).",
+            path = path.display(),
+            error = source
+        ),
+        HistoryError::Save { path, source } => crate::tr_format!(
+            "Could not save result history {path} ({error}).",
+            path = path.display(),
+            error = source
+        ),
+    }
 }
 
 fn metadata_error(error: &MetadataError) -> String {
@@ -1083,7 +1137,7 @@ fn publication_error(error: &PublicationError) -> String {
         ),
         #[cfg(target_os = "macos")]
         PublicationError::RecoveryFinalization { target, moving, cause } => {
-            let reason = resume_record_error(cause);
+            let reason = recovery_record_error(cause);
             if *moving {
                 crate::tr_format!("Move completed at {target}. {error}", target = target, error = reason)
             } else {
@@ -1184,11 +1238,11 @@ fn staging_error(error: &StagingError) -> String {
         StagingError::ResumeReceipt { staging, source } => crate::tr_format!(
             "Could not save the resume record for {staging}. {error}",
             staging = staging,
-            error = resume_record_error(source)
+            error = recovery_record_error(source)
         ),
         #[cfg(target_os = "macos")]
         StagingError::ResumeReceiptCleanup { cause, source } => {
-            format!("{}\n{}", file_error(cause), resume_record_error(source))
+            format!("{}\n{}", file_error(cause), recovery_record_error(source))
         }
     }
 }

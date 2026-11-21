@@ -1,0 +1,222 @@
+use std::{
+    error::Error,
+    fmt, io,
+    path::{Path, PathBuf},
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(target_os = "macos")]
+pub(crate) enum ResumeRecordSection {
+    Header,
+    Event(usize),
+    AccessTimes,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(target_os = "macos")]
+pub(crate) enum ResumeRecordEvent {
+    Publication,
+    HoldingSource,
+    SourceRemoved,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RecoveryRecordAction {
+    CreateDirectory,
+    CreateFile,
+    WriteInitial,
+    SyncInitial,
+    Publish,
+    SyncPublication,
+    Activate,
+    CheckIdentity,
+    #[cfg(target_os = "macos")]
+    SeekEnd,
+    #[cfg(target_os = "macos")]
+    Append(ResumeRecordEvent),
+    #[cfg(target_os = "macos")]
+    SyncEvent(ResumeRecordEvent),
+    Remove,
+    SyncRemoval,
+}
+
+#[derive(Debug)]
+pub(crate) enum RecoveryRecordProblem {
+    #[cfg(target_os = "macos")]
+    Read(io::Error),
+    #[cfg(target_os = "macos")]
+    ReadDirectory(io::Error),
+    Lock(io::Error),
+    Write {
+        action: RecoveryRecordAction,
+        source: io::Error,
+    },
+    Encode {
+        #[cfg(target_os = "macos")]
+        event: Option<ResumeRecordEvent>,
+        source: serde_json::Error,
+    },
+    #[cfg(target_os = "macos")]
+    AppendRollback {
+        event: ResumeRecordEvent,
+        source: io::Error,
+        restore: io::Error,
+    },
+    InUse,
+    AlreadyActive,
+    IdentityChanged,
+    MissingParent,
+    SizeLimit(u64),
+    #[cfg(target_os = "macos")]
+    Json {
+        section: ResumeRecordSection,
+        source: serde_json::Error,
+    },
+    #[cfg(target_os = "macos")]
+    UnsupportedVersion(u32),
+    #[cfg(target_os = "macos")]
+    VersionMismatch {
+        stored: u32,
+        expected: u32,
+    },
+    #[cfg(target_os = "macos")]
+    EventOrder(usize),
+    #[cfg(target_os = "macos")]
+    InvalidAccessTimes,
+    #[cfg(target_os = "macos")]
+    InvalidPaths,
+    #[cfg(target_os = "macos")]
+    InvalidProof,
+    #[cfg(target_os = "macos")]
+    InvalidName,
+    #[cfg(target_os = "macos")]
+    ScanLimit(usize),
+}
+
+#[derive(Debug)]
+pub(crate) struct RecoveryRecordError {
+    pub(crate) path: PathBuf,
+    pub(crate) problem: RecoveryRecordProblem,
+}
+
+impl RecoveryRecordError {
+    pub(crate) fn new(path: &Path, problem: RecoveryRecordProblem) -> Self {
+        Self {
+            path: path.to_owned(),
+            problem,
+        }
+    }
+
+    pub(crate) fn io(path: &Path, action: RecoveryRecordAction, source: io::Error) -> Self {
+        Self::new(path, RecoveryRecordProblem::Write { action, source })
+    }
+
+    pub(crate) fn encoding(path: &Path, source: serde_json::Error) -> Self {
+        Self::new(
+            path,
+            RecoveryRecordProblem::Encode {
+                #[cfg(target_os = "macos")]
+                event: None,
+                source,
+            },
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn is_missing(&self) -> bool {
+        matches!(&self.problem, RecoveryRecordProblem::Read(error) if error.kind() == io::ErrorKind::NotFound)
+    }
+}
+
+impl fmt::Display for RecoveryRecordError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let path = self.path.display();
+        match &self.problem {
+            #[cfg(target_os = "macos")]
+            RecoveryRecordProblem::Read(error) => {
+                write!(f, "Could not read recovery record {path}: {error}")
+            }
+            #[cfg(target_os = "macos")]
+            RecoveryRecordProblem::ReadDirectory(error) => {
+                write!(f, "Could not read recovery folder {path}: {error}")
+            }
+            RecoveryRecordProblem::Lock(error) => {
+                write!(f, "Could not lock recovery record {path}: {error}")
+            }
+            RecoveryRecordProblem::Write { action, source } => {
+                write!(f, "Recovery record {action:?} at {path}: {source}")
+            }
+            RecoveryRecordProblem::Encode { source, .. } => {
+                write!(f, "Could not encode recovery record data at {path}: {source}")
+            }
+            #[cfg(target_os = "macos")]
+            RecoveryRecordProblem::AppendRollback { event, source, restore } => write!(
+                f,
+                "Could not append {event:?} to recovery record {path}: {source}. Could not restore the previous length: {restore}"
+            ),
+            RecoveryRecordProblem::InUse => write!(f, "Recovery record {path} is in use"),
+            RecoveryRecordProblem::AlreadyActive => write!(f, "The worker already has an active recovery record. Could not activate {path}"),
+            RecoveryRecordProblem::IdentityChanged => {
+                write!(f, "Recovery record {path} changed identity")
+            }
+            RecoveryRecordProblem::MissingParent => write!(f, "Recovery record {path} has no parent directory"),
+            RecoveryRecordProblem::SizeLimit(limit) => {
+                write!(f, "Recovery record {path} exceeds {limit} bytes")
+            }
+            #[cfg(target_os = "macos")]
+            RecoveryRecordProblem::Json { section, source } => {
+                write!(f, "Invalid {section:?} in recovery record {path}: {source}")
+            }
+            #[cfg(target_os = "macos")]
+            RecoveryRecordProblem::UnsupportedVersion(version) => {
+                write!(f, "Unsupported version {version} of recovery record {path}")
+            }
+            #[cfg(target_os = "macos")]
+            RecoveryRecordProblem::VersionMismatch { stored, expected } => write!(
+                f,
+                "Recovery record {path} has version {stored}, expected {expected}"
+            ),
+            #[cfg(target_os = "macos")]
+            RecoveryRecordProblem::EventOrder(event) => write!(
+                f,
+                "Invalid order at event {event} in recovery record {path}"
+            ),
+            #[cfg(target_os = "macos")]
+            RecoveryRecordProblem::InvalidAccessTimes => {
+                write!(f, "Invalid saved access times in recovery record {path}")
+            }
+            #[cfg(target_os = "macos")]
+            RecoveryRecordProblem::InvalidPaths => {
+                write!(f, "Invalid paths in recovery record {path}")
+            }
+            #[cfg(target_os = "macos")]
+            RecoveryRecordProblem::InvalidProof => {
+                write!(f, "Invalid transfer proof in recovery record {path}")
+            }
+            #[cfg(target_os = "macos")]
+            RecoveryRecordProblem::InvalidName => write!(f, "Invalid recovery record name in {path}"),
+            #[cfg(target_os = "macos")]
+            RecoveryRecordProblem::ScanLimit(limit) => write!(
+                f,
+                "Stopped reading recovery folder {path} after {limit} entries"
+            ),
+        }
+    }
+}
+
+impl Error for RecoveryRecordError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match &self.problem {
+            RecoveryRecordProblem::Lock(error)
+            | RecoveryRecordProblem::Write { source: error, .. } => Some(error),
+            #[cfg(target_os = "macos")]
+            RecoveryRecordProblem::Read(error)
+            | RecoveryRecordProblem::ReadDirectory(error)
+            | RecoveryRecordProblem::AppendRollback { source: error, .. } => Some(error),
+            RecoveryRecordProblem::Encode { source, .. } => Some(source),
+            #[cfg(target_os = "macos")]
+            RecoveryRecordProblem::Json { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}

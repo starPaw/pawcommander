@@ -515,59 +515,76 @@ impl PawCommander {
                     Ok(pending) => pending,
                     Err(error) => {
                         fail_to_start(crate::tr_format!(
-                            "Operation not started: could not save recovery record: {error}",
-                            error = error
+                            "Operation did not start. {error}",
+                            error = crate::i18n::recovery_record_error(&error)
                         ));
                         return;
                     }
                 };
-                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    if let Some(pending) = pending.as_ref() {
-                        pending.run(|| work(&mut reporter)).map_err(|error| crate::tr_format!(
-                            "Operation not started: could not activate recovery record: {error}", error = error
-                        ))?
-                    } else {
-                        work(&mut reporter)
-                    }
-                }));
+                let outcome =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        match pending.as_ref() {
+                            Some(pending) => pending.run(|| work(&mut reporter)),
+                            None => Ok(work(&mut reporter)),
+                        }
+                    }));
                 let panicked = outcome.is_err();
-                let mut result = outcome.unwrap_or_else(|_| {
-                    Err(crate::i18n::text!(
+                let result = match outcome {
+                    Ok(Ok(result)) => result,
+                    Ok(Err(error)) => {
+                        let mut message = crate::tr_format!(
+                            "Operation did not start. {error}",
+                            error = crate::i18n::recovery_record_error(&error)
+                        );
+                        if let Some(pending) = pending
+                            && let Err(cleanup) = pending.complete()
+                        {
+                            message.push('\n');
+                            message.push_str(&crate::i18n::recovery_record_error(&cleanup));
+                        }
+                        fail_to_start(message);
+                        return;
+                    }
+                    Err(_) => Err(crate::i18n::text!(
                         "Фоновая операция неожиданно завершилась. Проверьте файлы в обеих папках.",
                     )
-                    .into())
-                });
+                    .into()),
+                };
+                // The native file promise acknowledges the file operation. History
+                // persistence and recovery record cleanup remain worker follow-up.
                 #[cfg(target_os = "macos")]
                 report_to_receiver(&result);
                 let undo_id = undo_id.unwrap_or_else(|| reporter.results.id.clone());
-                let persisted = if let Some(record) = std::mem::take(&mut reporter.results).finish(
-                    history_label,
-                    history_started,
-                    &result,
-                ) {
-                    history.append(record)
-                } else {
-                    true
+                let persisted = std::mem::take(&mut reporter.results)
+                    .finish(history_label, history_started, &result)
+                    .map_or(Ok(()), |record| history.append(record));
+                let warning = match &persisted {
+                    Err(error) => pending.as_ref().map(|pending| {
+                        let reason = crate::i18n::history_error(error);
+                        let retained = crate::tr_format!(
+                            "Recovery record kept at {path}.",
+                            path = pending.path().display()
+                        );
+                        format!("{reason}\n{retained}")
+                    }),
+                    Ok(()) if !panicked => pending
+                        .and_then(|pending| pending.complete().err())
+                        .map(|error| crate::i18n::recovery_record_error(&error)),
+                    Ok(()) => None,
                 };
-                if !panicked && persisted {
-                    if let Some(pending) = pending
-                        && let Err(error) = pending.complete()
-                    {
-                        result = Err(crate::tr_format!(
-                                "Operation finished, but recovery record cleanup could not be confirmed: {error}. Check result history.", error = error
-                            ));
-                    }
-                } else if !persisted && recovery_directory.is_some() {
-                    result = Err(crate::tr_format!(
-                        "Operation finished, but result history was not saved. Check files in both folders; the recovery record was retained if created."
-                    ));
-                }
-                if !panicked && persisted && reporter.undo.len() != 0 {
+                if !panicked && persisted.is_ok() && reporter.undo.len() != 0 {
                     let _ = undo_send.send(UndoJob {
                         id: undo_id,
                         batch: reporter.undo,
                     });
                 }
+                let result = match warning {
+                    Some(warning) => Err(format!(
+                        "{}\n{warning}",
+                        result.unwrap_or_else(|error| error)
+                    )),
+                    None => result,
+                };
                 let _ = tx.send(result);
                 worker_ctx.request_repaint();
             };

@@ -11,6 +11,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const VERSION: u32 = 1;
@@ -771,28 +772,53 @@ impl Saved {
 
 struct Update {
     records: Vec<Record>,
-    error: Option<String>,
+    error: Option<Arc<HistoryError>>,
+}
+
+#[derive(Debug)]
+pub(crate) enum HistoryError {
+    Unavailable,
+    Disconnected(PathBuf),
+    Spawn { path: PathBuf, source: io::Error },
+    Open { path: PathBuf, source: io::Error },
+    Save { path: PathBuf, source: io::Error },
 }
 
 struct Append {
     record: Record,
-    saved: Sender<bool>,
+    saved: Sender<Result<(), Arc<HistoryError>>>,
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct HistorySender(Option<Sender<Append>>);
+enum HistoryDelivery {
+    #[default]
+    Unavailable,
+    Failed(Arc<HistoryError>),
+    Connected {
+        path: PathBuf,
+        requests: Sender<Append>,
+    },
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct HistorySender(HistoryDelivery);
 
 impl HistorySender {
     /// Wait for the save attempt and report whether the record reached disk.
     /// Recovery markers must remain available when persistence fails.
-    pub fn append(&self, record: Record) -> bool {
-        if let Some(sender) = &self.0 {
-            let (saved, wait) = mpsc::channel();
-            if sender.send(Append { record, saved }).is_ok() {
-                return wait.recv().unwrap_or(false);
+    pub fn append(&self, record: Record) -> Result<(), Arc<HistoryError>> {
+        match &self.0 {
+            HistoryDelivery::Unavailable => Err(Arc::new(HistoryError::Unavailable)),
+            HistoryDelivery::Failed(error) => Err(error.clone()),
+            HistoryDelivery::Connected { path, requests } => {
+                let disconnected = || Arc::new(HistoryError::Disconnected(path.clone()));
+                let (saved, wait) = mpsc::channel();
+                requests
+                    .send(Append { record, saved })
+                    .map_err(|_| disconnected())?;
+                wait.recv().map_err(|_| disconnected())?
             }
         }
-        false
     }
 }
 
@@ -837,7 +863,7 @@ impl History {
                 ctx,
             ),
             None => Self {
-                error: Some("No local application-data directory".into()),
+                error: Some(crate::i18n::history_error(&HistoryError::Unavailable)),
                 ..Self::default()
             },
         }
@@ -854,13 +880,16 @@ impl History {
                 let opened = open_store(&worker_path);
                 let (mut saved, lock, mut error) = match opened {
                     Ok((saved, lock)) => (saved, Some(lock), None),
-                    Err(error) => (
+                    Err(source) => (
                         Saved {
                             version: VERSION,
                             ..Saved::default()
                         },
                         None,
-                        Some(error.to_string()),
+                        Some(Arc::new(HistoryError::Open {
+                            path: worker_path.clone(),
+                            source,
+                        })),
                     ),
                 };
                 let _ = updates.send(Update {
@@ -871,30 +900,45 @@ impl History {
                 for request in requests {
                     saved.push(request.record);
                     if lock.is_some() {
-                        error = save(&worker_path, &saved)
-                            .err()
-                            .map(|error| error.to_string());
+                        error = save(&worker_path, &saved).err().map(|source| {
+                            Arc::new(HistoryError::Save {
+                                path: worker_path.clone(),
+                                source,
+                            })
+                        });
                     }
                     let _ = updates.send(Update {
                         records: saved.records.clone(),
                         error: error.clone(),
                     });
                     ctx.request_repaint();
-                    let _ = request.saved.send(lock.is_some() && error.is_none());
+                    let _ = request
+                        .saved
+                        .send(error.as_ref().map_or(Ok(()), |error| Err(error.clone())));
                 }
             });
         match worker {
             Ok(_) => Self {
-                sender: HistorySender(Some(send)),
+                sender: HistorySender(HistoryDelivery::Connected {
+                    path: path.clone(),
+                    requests: send,
+                }),
                 updates: Some(receive),
                 path: Some(path),
                 ..Self::default()
             },
-            Err(error) => Self {
-                error: Some(error.to_string()),
-                path: Some(path),
-                ..Self::default()
-            },
+            Err(source) => {
+                let error = Arc::new(HistoryError::Spawn {
+                    path: path.clone(),
+                    source,
+                });
+                Self {
+                    error: Some(crate::i18n::history_error(&error)),
+                    sender: HistorySender(HistoryDelivery::Failed(error)),
+                    path: Some(path),
+                    ..Self::default()
+                }
+            }
         }
     }
 
@@ -908,12 +952,14 @@ impl History {
                 match updates.try_recv() {
                     Ok(update) => {
                         self.records = update.records;
-                        self.error = update.error;
+                        self.error = update.error.as_deref().map(crate::i18n::history_error);
                         self.loaded = true;
                     }
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
-                        self.error = Some("History worker disconnected".into());
+                        self.error = self.path.as_ref().map(|path| {
+                            crate::i18n::history_error(&HistoryError::Disconnected(path.clone()))
+                        });
                         break;
                     }
                 }
@@ -1509,7 +1555,7 @@ mod tests {
         let path = dir.path().join("history.json");
         let ctx = egui::Context::default();
         let mut history = History::open(path.clone(), &ctx);
-        assert!(history.sender().append(record()));
+        assert!(history.sender().append(record()).is_ok());
         let saved: Saved = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(
             saved.records.len(),
@@ -1523,7 +1569,7 @@ mod tests {
         let corrupt = dir.path().join("corrupt.json");
         fs::write(&corrupt, b"{incomplete history").unwrap();
         let mut history = History::open(corrupt.clone(), &ctx);
-        assert!(!history.sender().append(record()));
+        assert!(history.sender().append(record()).is_err());
         history.poll();
         assert!(history.error.is_some());
         assert_eq!(
@@ -1544,7 +1590,7 @@ mod tests {
         assert!(open_store(&path).is_err());
         let ctx = egui::Context::default();
         let mut history = History::open(path.clone(), &ctx);
-        assert!(!history.sender().append(record()));
+        assert!(history.sender().append(record()).is_err());
         history.poll();
         assert!(history.error.is_some());
         assert_eq!(fs::read(&path).unwrap(), baseline);
@@ -1885,15 +1931,19 @@ mod tests {
 
     #[test]
     fn history_acknowledgment_reports_save_failure_and_subsequent_recovery() {
-        assert!(!HistorySender::default().append(record()));
+        assert!(HistorySender::default().append(record()).is_err());
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("history.json");
         let ctx = egui::Context::default();
         let mut history = History::open(path.clone(), &ctx);
-        assert!(history.sender().append(record()));
+        assert!(history.sender().append(record()).is_ok());
         fs::remove_file(&path).unwrap();
         fs::create_dir(&path).unwrap();
-        assert!(!history.sender().append(record()));
+        let error = history.sender().append(record()).unwrap_err();
+        assert!(
+            matches!(&*error, HistoryError::Save { path: failed, source }
+            if failed == &path && source.raw_os_error().is_some())
+        );
         history.poll();
         assert!(history.error.is_some());
         assert_eq!(
@@ -1902,7 +1952,7 @@ mod tests {
             "failed save stays reviewable in memory"
         );
         fs::remove_dir(&path).unwrap();
-        assert!(history.sender().append(record()));
+        assert!(history.sender().append(record()).is_ok());
         history.poll();
         assert!(history.error.is_none());
         let saved: Saved = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
