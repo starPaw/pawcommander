@@ -65,7 +65,7 @@ Edits rebuild and check a temporary archive before replacing the original. **Sto
 
 Click a row or tile to select it, use `Cmd/Ctrl` for individual additions and `Shift` for a range, or use the selection checkboxes. File commands apply to the active pane.
 
-Use the command palette to select by mask or extension, invert the selection, or restore the previous selection. A mask matches the whole name and supports `*` for any number of characters and `?` for one character. Extension matching uses the final extension. Matching ignores case. These commands work on visible entries in the active tab. You can restore the previous selection once after applying a rule, inverting, selecting all, or clearing with Esc. Restore uses available metadata to keep matching entries in the current folder.
+Use the command palette to select by mask or extension, invert the selection, or restore the previous selection. A mask matches the whole name and supports `*` for any number of characters and `?` for one character. Extension matching uses the final extension. Matching ignores case. These commands work on visible entries in the active tab. You can restore the previous selection once after applying a rule, inverting, selecting all, or clearing with Esc. Restore uses available metadata to keep matching entries in the current folder. On macOS it also checks the filesystem identifier of regular local files.
 
 Copy and cut local files to the system clipboard with `Cmd/Ctrl+C` / `X`; paste with `Cmd/Ctrl+V`. If the OS clipboard is unavailable, PawCommander reports it and falls back to its internal clipboard. SFTP sources use the internal clipboard.
 
