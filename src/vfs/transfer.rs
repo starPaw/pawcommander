@@ -9,7 +9,9 @@ use crate::file_error::{
     RecoveryNotice, SftpSpaceFailure, SpaceError, StagingCleanupError,
 };
 use crate::fs_ops::TransferKind;
-use crate::operations::{Cancellation, CopyReader, Progress, TransferError};
+use crate::operations::{
+    access_io, AccessStream, Cancellation, CopyReader, Progress, TransferError,
+};
 use crate::{archive, fs_ops};
 use ssh2::{FileStat, OpenFlags, OpenType, RenameFlags};
 use std::collections::{BTreeMap, HashSet};
@@ -1132,6 +1134,7 @@ fn copy_transfer(
         copy_tree(
             &item.source,
             &payload,
+            &item.target,
             staging.local().and_then(Path::parent),
             progress,
             &manifest,
@@ -2040,13 +2043,22 @@ impl Read for SourceReader {
 
 pub(super) fn copy_tree(
     source: &Location,
+    staged: &Location,
     target: &Location,
     local_parent: Option<&Path>,
     progress: &mut Progress,
     manifest: &TransferSourceManifest,
     observe: &mut impl FnMut(&Location, CopyPhase) -> Result<(), String>,
 ) -> Result<(), TransferError> {
-    let result = copy_tree_entry(source, target, local_parent, progress, manifest, observe);
+    let result = copy_tree_entry(
+        source,
+        staged,
+        target,
+        local_parent,
+        progress,
+        manifest,
+        observe,
+    );
     progress.results.staged(
         source,
         result.as_ref().err().map(crate::i18n::file_error),
@@ -2057,6 +2069,7 @@ pub(super) fn copy_tree(
 
 pub(super) fn copy_tree_entry(
     source: &Location,
+    staged: &Location,
     target: &Location,
     local_parent: Option<&Path>,
     progress: &mut Progress,
@@ -2074,7 +2087,7 @@ pub(super) fn copy_tree_entry(
     let local_write_error =
         |error| fs_ops::local_copy_error(local_parent, error, ToString::to_string);
     if let Some(children) = &entry.children {
-        if let Some(path) = target.local() {
+        if let Some(path) = staged.local() {
             let mut directory = fs::DirBuilder::new();
             #[cfg(unix)]
             {
@@ -2083,11 +2096,17 @@ pub(super) fn copy_tree_entry(
             }
             directory.create(path).map_err(local_write_error)?;
         } else {
-            remote(target)?.mkdir(target.path(), 0o700).map_err(err)?;
+            remote(staged)?
+                .mkdir(staged.path(), 0o700)
+                .map_err(|source| MutationError::CreateSftp {
+                    destination: target.clone(),
+                    source,
+                })?;
         }
         for name in children {
             copy_tree(
                 &source.join(name),
+                &staged.join(name),
                 &target.join(name),
                 local_parent,
                 progress,
@@ -2116,11 +2135,11 @@ pub(super) fn copy_tree_entry(
     // turn a copy into an unbounded stream. Handle/path checks detect growth.
     let expected_size = entry.size();
     let mut bounded = CopyReader::new(
-        (&mut input).take(expected_size),
+        AccessStream::new(&mut input, source).take(expected_size),
         progress.copy_verification(),
     );
     cancel.check()?;
-    let written = if let Some(path) = target.local() {
+    let written = if let Some(path) = staged.local() {
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -2128,38 +2147,47 @@ pub(super) fn copy_tree_entry(
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let mut output = options.open(path).map_err(local_write_error)?;
+        let mut output = options.open(path).map_err(|error| {
+            local_write_error(access_io(target, AccessAction::CreateFile, error))
+        })?;
         let written = progress
             .copy(
                 source.path(),
                 Some(expected_size),
                 &mut bounded,
-                &mut output,
+                &mut AccessStream::new(&mut output, target),
             )
             .map_err(local_write_error)?;
         cancel.check()?;
-        output.sync_all().map_err(local_write_error)?;
+        output
+            .sync_all()
+            .map_err(|error| local_write_error(access_io(target, AccessAction::SyncFile, error)))?;
         written
     } else {
-        let mut output = remote(target)?
+        let mut output = remote(staged)
+            .map_err(|error| AccessError::new(target, AccessAction::CreateFile, error))?
             .open_mode(
-                target.path(),
+                staged.path(),
                 OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCLUSIVE,
                 0o600,
                 OpenType::File,
             )
-            .map_err(err)?;
+            .map_err(|error| AccessError::new(target, AccessAction::CreateFile, error))?;
         let written = progress
             .copy(
                 source.path(),
                 Some(expected_size),
                 &mut bounded,
-                &mut output,
+                &mut AccessStream::new(&mut output, target),
             )
             .map_err(TransferError::from)?;
         cancel.check()?;
-        output.flush().map_err(err)?;
-        output.close().map_err(err)?;
+        output
+            .flush()
+            .map_err(|error| AccessError::stream(target, AccessAction::FlushFile, error))?;
+        output
+            .close()
+            .map_err(|error| AccessError::new(target, AccessAction::CloseFile, error))?;
         written
     };
     let source_hash = bounded.finish();
@@ -2171,8 +2199,8 @@ pub(super) fn copy_tree_entry(
     entry.verify(source, &cancel, false)?;
     cancel.check()?;
     if let Some(source_hash) = source_hash {
-        let mut copied = SourceReader::open(target)?;
-        if !copied.metadata(target)?.is_file() {
+        let mut copied = SourceReader::open(staged)?;
+        if !copied.metadata(staged)?.is_file() {
             return Err(crate::tr_format!(
                 "Could not verify copy of {source}: staged item is no longer a regular file",
                 source = source
@@ -2181,7 +2209,12 @@ pub(super) fn copy_tree_entry(
         }
         observe(source, CopyPhase::Verifying)?;
         progress
-            .verify_copy(source.path(), expected_size, source_hash, &mut copied)
+            .verify_copy(
+                source.path(),
+                expected_size,
+                source_hash,
+                &mut AccessStream::new(&mut copied, target),
+            )
             .map_err(TransferError::from)?;
     }
     observe(source, CopyPhase::EntryCopied).map_err(Into::into)

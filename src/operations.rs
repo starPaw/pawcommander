@@ -1,7 +1,9 @@
 //! A worker publishes only the latest progress snapshot. The UI never waits
 //! for I/O or drains a queue of progress messages.
 
+mod access_stream;
 mod bandwidth;
+pub(crate) use access_stream::{access_io, AccessStream};
 
 use crate::file_error::{
     AccessCause, AccessError, ArchiveError, ChecksumError, ConnectionError, Failure, HostKeyError,
@@ -12,7 +14,6 @@ use crate::vfs::{Endpoint, Location};
 use bandwidth::Pacer;
 pub(crate) use bandwidth::TransferLimits;
 use sha2::{Digest, Sha256};
-use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -246,12 +247,14 @@ impl TransferError {
 
     pub fn io(error: io::Error, context: impl FnOnce(&io::Error) -> String) -> Self {
         if Self::is_cancelled_io(&error) {
-            Self::Cancelled
-        } else {
-            Self::Failed(Failure::Io {
+            return Self::Cancelled;
+        }
+        match error.downcast::<AccessError>() {
+            Ok(error) => error.into(),
+            Err(error) => Self::Failed(Failure::Io {
                 message: context(&error),
                 source: error,
-            })
+            }),
         }
     }
 }
@@ -738,12 +741,12 @@ impl Progress {
         })
     }
 
-    pub fn copy_local(
+    pub fn copy_local<R: Read, W: Write>(
         &mut self,
         path: &Path,
         expected: u64,
-        input: &mut File,
-        output: &mut File,
+        input: &mut R,
+        output: &mut W,
     ) -> io::Result<u64> {
         // Keep std's file-to-file fast path available (e.g. copy_file_range on
         // Linux), while still publishing progress during large local copies.

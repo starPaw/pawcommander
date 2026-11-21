@@ -7,6 +7,7 @@ use super::{
     FileProof, Intent, Location, Original, Paths, Progress, Receipt, RenamedIdentity, SavedTime,
     Ticket, TransferError,
 };
+use crate::operations::AccessStream;
 use crate::vfs::{
     sftp::remote,
     transfer::{
@@ -273,14 +274,15 @@ impl Snapshot {
                     if partial.is_some_and(|(file, _)| file.stamp.size() == original.stamp.size()) {
                         Ok(())
                     } else {
-                        copy_suffix(&source, &copy, original, partial, progress)
+                        let target = at(&paths.target, relative);
+                        copy_suffix(&source, &copy, &target, original, partial, progress)
                     }
                 }
                 _ => Ok(()),
             };
             progress.results.staged(
                 &source,
-                result.as_ref().err().map(ToString::to_string),
+                result.as_ref().err().map(crate::i18n::file_error),
                 matches!(&result, Err(TransferError::Cancelled)),
             );
             result?;
@@ -623,7 +625,7 @@ fn check_prefix(
             verify_stamp(path, original.stamp)?;
             let size = partial.stamp.size();
             progress.set_copy_endpoints(path, path);
-            let mut input = input.take(size);
+            let mut input = AccessStream::new(input, path).take(size);
             Ok(progress.hash_copy_check(path.path(), size, &mut input)? == Some(partial.digest))
         })?
         .ok_or_else(changed_source)

@@ -29,13 +29,21 @@ impl Write for OutputFile {
 }
 
 pub(super) struct StagedFile {
-    path: Location,
+    report_at: Location,
     file: BufWriter<OutputFile>,
     cancel: Cancellation,
 }
 
 impl StagedFile {
     pub(super) fn open(path: &Location, cancel: Cancellation) -> Result<Self, TransferError> {
+        Self::open_for(path, path, cancel)
+    }
+
+    pub(super) fn open_for(
+        path: &Location,
+        report_at: &Location,
+        cancel: Cancellation,
+    ) -> Result<Self, TransferError> {
         cancel.check()?;
         let action = AccessAction::OpenFile;
         let file = if let Some(local) = path.local() {
@@ -46,19 +54,19 @@ impl StagedFile {
             OutputFile::Local(
                 options
                     .open(local)
-                    .map_err(|error| AccessError::new(path, action, error))?,
+                    .map_err(|error| AccessError::new(report_at, action, error))?,
             )
         } else {
             let flags = OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCLUSIVE;
             OutputFile::Remote(
                 remote(path)
-                    .map_err(|error| AccessError::new(path, action, error))?
+                    .map_err(|error| AccessError::new(report_at, action, error))?
                     .open_mode(path.path(), flags, 0o600, OpenType::File)
-                    .map_err(|error| AccessError::new(path, action, error))?,
+                    .map_err(|error| AccessError::new(report_at, action, error))?,
             )
         };
         Ok(Self {
-            path: path.clone(),
+            report_at: report_at.clone(),
             file: BufWriter::with_capacity(64 * 1024, file),
             cancel,
         })
@@ -67,62 +75,74 @@ impl StagedFile {
     #[cfg(target_os = "macos")]
     pub(super) fn open_at(
         path: &Location,
+        report_at: &Location,
         offset: u64,
         expected: &super::transfer::EntryMetadata,
         cancel: Cancellation,
     ) -> Result<Self, TransferError> {
-        use super::err;
         use super::transfer::{EntryMetadata, LocalEntryMetadata};
         use std::io::{Seek, SeekFrom};
         use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
         cancel.check()?;
+        let open = AccessAction::OpenFile;
+        let metadata = AccessAction::ReadOpenMetadata;
+        let seek_error = |error| AccessError::stream(report_at, AccessAction::SeekFile, error);
         let file = if let Some(path) = path.local() {
             let mut file = fs::OpenOptions::new()
                 .write(true)
                 .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-                .open(path)?;
-            let metadata = file.metadata()?;
-            if metadata.nlink() != 1
+                .open(path)
+                .map_err(|error| AccessError::new(report_at, open, error))?;
+            let actual = file
+                .metadata()
+                .map_err(|error| AccessError::new(report_at, metadata, error))?;
+            if actual.nlink() != 1
                 || !expected.matches_file(&EntryMetadata::Local(LocalEntryMetadata::from_file(
-                    &file, metadata,
+                    &file, actual,
                 )))
             {
                 return Err(super::resume_copy::changed_copy());
             }
-            file.seek(SeekFrom::Start(offset))?;
+            file.seek(SeekFrom::Start(offset)).map_err(seek_error)?;
             OutputFile::Local(file)
         } else {
-            let mut file = remote(path)?
+            let mut file = remote(path)
+                .map_err(|error| AccessError::new(report_at, open, error))?
                 .open_mode(path.path(), OpenFlags::WRITE, 0, OpenType::File)
-                .map_err(err)?;
-            if !expected.matches_file(&EntryMetadata::Remote(file.stat().map_err(err)?)) {
+                .map_err(|error| AccessError::new(report_at, open, error))?;
+            let actual = file
+                .stat()
+                .map_err(|error| AccessError::new(report_at, metadata, error))?;
+            if !expected.matches_file(&EntryMetadata::Remote(actual)) {
                 return Err(super::resume_copy::changed_copy());
             }
-            file.seek(SeekFrom::Start(offset))?;
+            file.seek(SeekFrom::Start(offset)).map_err(seek_error)?;
             OutputFile::Remote(file)
         };
         Ok(Self {
-            path: path.clone(),
+            report_at: report_at.clone(),
             file: BufWriter::with_capacity(64 * 1024, file),
             cancel,
         })
     }
 
-    pub(super) fn close(mut self) -> Result<(), TransferError> {
-        self.flush()
-            .map_err(|error| AccessError::write(&self.path, error))?;
-        let output = self
+    pub(super) fn close(self) -> Result<(), TransferError> {
+        self.cancel.check()?;
+        let mut output = self
             .file
             .into_inner()
-            .map_err(|error| AccessError::write(&self.path, error.into_error()))?;
+            .map_err(|error| AccessError::write(&self.report_at, error.into_error()))?;
+        output.flush().map_err(|error| {
+            AccessError::stream(&self.report_at, AccessAction::FlushFile, error)
+        })?;
         match output {
-            OutputFile::Local(file) => file
-                .sync_all()
-                .map_err(|error| AccessError::write(&self.path, error))?,
-            OutputFile::Remote(mut file) => file
-                .close()
-                .map_err(|error| AccessError::new(&self.path, AccessAction::WriteFile, error))?,
+            OutputFile::Local(file) => file.sync_all().map_err(|error| {
+                AccessError::new(&self.report_at, AccessAction::SyncFile, error)
+            })?,
+            OutputFile::Remote(mut file) => file.close().map_err(|error| {
+                AccessError::new(&self.report_at, AccessAction::CloseFile, error)
+            })?,
         }
         Ok(())
     }

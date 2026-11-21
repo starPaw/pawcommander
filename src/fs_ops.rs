@@ -2,10 +2,12 @@
 //! volume before publication. This does not snapshot a changing filesystem.
 
 use crate::file_error::{
-    ListingError, ListingErrorKind, LocalPathAction, MutationError, PathError, SpaceError,
-    StagingCleanupError,
+    AccessAction, AccessCause, AccessError, ListingError, ListingErrorKind, LocalPathAction,
+    MutationError, PathError, SpaceError, StagingCleanupError,
 };
-use crate::operations::{Cancellation, CopyReader, Progress, TransferError};
+use crate::operations::{
+    access_io, AccessStream, Cancellation, CopyReader, Progress, TransferError,
+};
 use crate::vfs::{DeletionFailure, Location};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
@@ -682,27 +684,34 @@ pub(crate) fn copy_atomically_cancellable(
     };
     check_staging()?;
     let payload = staging.path.join("payload");
-    let result = copy_tree(source, &payload, progress, &manifest, after_entry)
-        .and_then(|()| progress.checkpoint())
-        // Revisit every entry, including early files after later files copied.
-        .and_then(|()| {
-            manifest.verify(&cancel, |source, error| {
-                progress.results.staged(
-                    &crate::vfs::Location::Local(source.to_path_buf()),
-                    Some(error.to_string()),
-                    TransferError::is_cancelled_io(error),
-                );
-            })
+    let result = copy_tree(
+        source,
+        &payload,
+        destination,
+        progress,
+        &manifest,
+        after_entry,
+    )
+    .and_then(|()| progress.checkpoint())
+    // Revisit every entry, including early files after later files copied.
+    .and_then(|()| {
+        manifest.verify(&cancel, |source, error| {
+            progress.results.staged(
+                &crate::vfs::Location::Local(source.to_path_buf()),
+                Some(error.to_string()),
+                TransferError::is_cancelled_io(error),
+            );
         })
-        .and_then(|()| cancel.check())
-        .map_err(|e| {
-            local_copy_error(Some(parent), e, |e| {
-                at(crate::i18n::text!("Не удалось скопировать"), source, e)
-            })
+    })
+    .and_then(|()| cancel.check())
+    .map_err(|e| {
+        local_copy_error(Some(parent), e, |e| {
+            at(crate::i18n::text!("Не удалось скопировать"), source, e)
         })
-        .and_then(|()| check_staging())
-        // No cancellation inside publication, rollback, or staging cleanup.
-        .and_then(|()| publish(&payload, destination));
+    })
+    .and_then(|()| check_staging())
+    // No cancellation inside publication, rollback, or staging cleanup.
+    .and_then(|()| publish(&payload, destination));
     StagingCleanupError::combine(
         result,
         remove_staging(&staging).map_err(Into::into),
@@ -788,6 +797,20 @@ pub(crate) fn local_copy_error(
             io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded
         )
     {
+        let error = match error.downcast::<AccessError>() {
+            Ok(AccessError {
+                action:
+                    AccessAction::CreateFile
+                    | AccessAction::WriteFile
+                    | AccessAction::FlushFile
+                    | AccessAction::SyncFile
+                    | AccessAction::WriteMetadata,
+                cause: AccessCause::Local(source),
+                ..
+            }) => source,
+            Ok(error) => return error.into(),
+            Err(error) => error,
+        };
         SpaceError::LocalWrite {
             directory: parent.to_owned(),
             source: error,
@@ -1003,15 +1026,16 @@ impl SourceManifest {
 
 fn copy_tree(
     source: &Path,
-    destination: &Path,
+    staged: &Path,
+    target: &Path,
     progress: &mut Progress,
     manifest: &SourceManifest,
     after_entry: &mut impl FnMut(&Path) -> io::Result<()>,
 ) -> io::Result<()> {
-    let result = copy_tree_entry(source, destination, progress, manifest, after_entry);
+    let result = copy_tree_entry(source, staged, target, progress, manifest, after_entry);
     progress.results.staged(
         &crate::vfs::Location::Local(source.to_path_buf()),
-        result.as_ref().err().map(ToString::to_string),
+        result.as_ref().err().map(crate::i18n::access_io_message),
         result.as_ref().is_err_and(TransferError::is_cancelled_io),
     );
     result
@@ -1019,7 +1043,8 @@ fn copy_tree(
 
 fn copy_tree_entry(
     source: &Path,
-    destination: &Path,
+    staged: &Path,
+    target: &Path,
     progress: &mut Progress,
     manifest: &SourceManifest,
     after_entry: &mut impl FnMut(&Path) -> io::Result<()>,
@@ -1034,55 +1059,91 @@ fn copy_tree_entry(
     entry.verify(source, &cancel)?;
     let metadata = &entry.metadata;
     if metadata.file_type().is_symlink() {
-        copy_symlink(source, destination, metadata)?;
+        copy_symlink(source, staged, metadata)?;
     } else if metadata.is_dir() {
-        fs::create_dir(destination)?;
+        fs::create_dir(staged)?;
         for name in entry.children.as_ref().expect("directory manifest") {
             copy_tree(
                 &source.join(name),
-                &destination.join(name),
+                &staged.join(name),
+                &target.join(name),
                 progress,
                 manifest,
                 after_entry,
             )?;
         }
         cancel.check()?;
-        fs::set_permissions(destination, metadata.permissions())?;
+        fs::set_permissions(staged, metadata.permissions())?;
     } else if metadata.is_file() {
-        let mut input = open_regular_source(source)?;
-        entry.verify_metadata(source, &input.metadata()?)?;
+        let input_path = Location::Local(source.to_owned());
+        let output_path = Location::Local(target.to_owned());
+        let input_error = |action, error| access_io(&input_path, action, error);
+        let output_error = |action, error| access_io(&output_path, action, error);
+        let mut input = open_regular_source(source)
+            .map_err(|error| input_error(AccessAction::OpenFile, error))?;
+        let current = input
+            .metadata()
+            .map_err(|error| input_error(AccessAction::ReadOpenMetadata, error))?;
+        entry.verify_metadata(source, &current)?;
         cancel.check()?;
         let mut output = OpenOptions::new()
             .read(progress.copy_verification())
             .write(true)
             .create_new(true)
-            .open(destination)?;
+            .open(staged)
+            .map_err(|error| output_error(AccessAction::CreateFile, error))?;
         let (written, source_hash) = if progress.copy_verification() {
-            let mut reader = CopyReader::new((&mut input).take(metadata.len()), true);
-            let written = progress.copy(source, Some(metadata.len()), &mut reader, &mut output)?;
+            let mut reader = CopyReader::new(
+                AccessStream::new(&mut input, &input_path).take(metadata.len()),
+                true,
+            );
+            let mut writer = AccessStream::new(&mut output, &output_path);
+            let written = progress.copy(source, Some(metadata.len()), &mut reader, &mut writer)?;
             (written, reader.finish())
         } else {
-            (
-                progress.copy_local(source, metadata.len(), &mut input, &mut output)?,
-                None,
-            )
+            #[cfg(target_os = "macos")]
+            let written = progress.copy_local(
+                source,
+                metadata.len(),
+                &mut AccessStream::new(&mut input, &input_path),
+                &mut AccessStream::new(&mut output, &output_path),
+            )?;
+            #[cfg(not(target_os = "macos"))]
+            let written = progress.copy_local(source, metadata.len(), &mut input, &mut output)?;
+            (written, None)
         };
         if written != metadata.len() {
             return Err(source_changed(source));
         }
-        entry.verify_metadata(source, &input.metadata()?)?;
+        let current = input
+            .metadata()
+            .map_err(|error| input_error(AccessAction::ReadOpenMetadata, error))?;
+        entry.verify_metadata(source, &current)?;
         entry.verify(source, &cancel)?;
         cancel.check()?;
-        output.sync_all()?;
+        output
+            .sync_all()
+            .map_err(|error| output_error(AccessAction::SyncFile, error))?;
         after_entry(source)?;
         if let Some(source_hash) = source_hash {
-            output.rewind()?;
-            progress.verify_copy(source, metadata.len(), source_hash, &mut output)?;
+            output
+                .rewind()
+                .map_err(|error| output_error(AccessAction::SeekFile, error))?;
+            progress.verify_copy(
+                source,
+                metadata.len(),
+                source_hash,
+                &mut AccessStream::new(&mut output, &output_path),
+            )?;
         }
         if let Ok(modified) = metadata.modified() {
-            output.set_times(fs::FileTimes::new().set_modified(modified))?;
+            output
+                .set_times(fs::FileTimes::new().set_modified(modified))
+                .map_err(|error| output_error(AccessAction::WriteMetadata, error))?;
         }
-        output.set_permissions(metadata.permissions())?;
+        output
+            .set_permissions(metadata.permissions())
+            .map_err(|error| output_error(AccessAction::WriteMetadata, error))?;
         return Ok(());
     } else {
         return Err(io::Error::new(
@@ -1910,6 +1971,18 @@ mod tests {
                     if directory == folder && source.kind() == kind && source.raw_os_error() == Some(errno)
             ));
         }
+        let source = Location::Local("/space-test/source".into());
+        let error = access_io(
+            &source,
+            AccessAction::ReadFile,
+            io::Error::from_raw_os_error(libc::EDQUOT),
+        );
+        let error = local_copy_error(Some(folder), error, ToString::to_string);
+        let TransferError::Failed(Failure::Access(error)) = error else {
+            panic!("a source failure must keep its read context");
+        };
+        assert_eq!(error.location, source);
+        assert_eq!(error.action, AccessAction::ReadFile);
     }
 
     use tempfile::tempdir;

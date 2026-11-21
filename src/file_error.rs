@@ -210,11 +210,17 @@ pub(crate) enum AccessAction {
     ResolvePath,
     ReadMetadata,
     OpenFile,
+    CreateFile,
     ReadOpenMetadata,
     ReadChildren,
     ReadFile,
     ReadLink,
     WriteFile,
+    FlushFile,
+    SyncFile,
+    CloseFile,
+    SeekFile,
+    WriteMetadata,
     CheckSearchResult,
     #[cfg(target_os = "macos")]
     WritePreviewCache,
@@ -309,7 +315,7 @@ impl AccessError {
         Self::stream(location, AccessAction::WriteFile, source)
     }
 
-    fn stream(location: &Location, action: AccessAction, source: io::Error) -> Self {
+    pub(crate) fn stream(location: &Location, action: AccessAction, source: io::Error) -> Self {
         let cause = if location.remote() {
             AccessCause::SftpStream(source)
         } else {

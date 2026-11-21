@@ -329,10 +329,16 @@ fn access_error(error: &AccessError) -> String {
         AccessAction::OpenFile => {
             return crate::tr_format!("Could not open {}: {error}", error.location, error = cause);
         }
+        AccessAction::CreateFile => text!("Не удалось создать файл"),
         AccessAction::ReadChildren => text!("Не удалось прочитать папку"),
         AccessAction::ReadFile => text!("Не удалось прочитать файл"),
         AccessAction::ReadLink => text!("Не удалось прочитать символическую ссылку"),
         AccessAction::WriteFile => text!("Не удалось записать файл"),
+        AccessAction::FlushFile => text!("Не удалось записать буфер файла"),
+        AccessAction::SyncFile => text!("Не удалось сохранить данные файла"),
+        AccessAction::CloseFile => text!("Не удалось закрыть файл"),
+        AccessAction::SeekFile => text!("Не удалось перейти к нужной позиции в файле"),
+        AccessAction::WriteMetadata => text!("Не удалось сохранить сведения о файле"),
         AccessAction::CheckSearchResult => {
             return crate::tr_format!(
                 "Could not check search result {path}: {error}",
@@ -346,6 +352,13 @@ fn access_error(error: &AccessError) -> String {
         }
     };
     format!("{action} «{}»: {cause}", error.location)
+}
+
+pub(crate) fn access_io_message(error: &std::io::Error) -> String {
+    error
+        .get_ref()
+        .and_then(|cause| cause.downcast_ref::<AccessError>())
+        .map_or_else(|| error.to_string(), access_error)
 }
 
 fn search_error(error: &SearchError) -> String {
