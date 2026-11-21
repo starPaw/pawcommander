@@ -116,7 +116,11 @@ fn directory_comparison_dialog_runs_both_modes_and_displays_differences() {
 #[cfg(target_os = "macos")]
 #[test]
 fn comparison_from_settings_returns_focus_to_the_settings_button() {
+    use std::time::Instant;
+
     let folder = tempfile::tempdir().unwrap();
+    let file = folder.path().join("selection.txt");
+    fs::write(&file, b"selection").unwrap();
     let ctx = egui::Context::default();
     let cc = eframe::CreationContext::_new_kittest(ctx.clone());
     let mut app = PawCommander::new(&cc, Some(folder.path().to_owned()));
@@ -124,8 +128,16 @@ fn comparison_from_settings_returns_focus_to_the_settings_button() {
         .tab_mut()
         .navigate(folder.path().to_owned().into(), &ctx);
     app.settings.split = true;
+    for pane in &mut app.panes {
+        let tab = pane.tab_mut();
+        super::super::tests::wait_for_directory(tab);
+        tab.select_revealed(file.clone().into());
+    }
     app.focus_toolbar = true;
     let draw = |app: &mut PawCommander, events| {
+        if let Some(comparison) = &mut app.comparison {
+            comparison.poll();
+        }
         ctx.run_test_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -147,9 +159,8 @@ fn comparison_from_settings_returns_focus_to_the_settings_button() {
     };
     draw(&mut app, vec![]);
     let settings = ctx.memory(|memory| memory.focused()).unwrap();
-    let click = |app: &mut PawCommander, label: &str| {
-        draw(app, vec![]);
-        let pos = draw(app, vec![])
+    let position = |frame: egui::FullOutput, label: &str| {
+        frame
             .shapes
             .into_iter()
             .find_map(|clipped| match clipped.shape {
@@ -158,7 +169,11 @@ fn comparison_from_settings_returns_focus_to_the_settings_button() {
                 }
                 _ => None,
             })
-            .unwrap_or_else(|| panic!("Missing control {label}"));
+    };
+    let click = |app: &mut PawCommander, label: &str| {
+        draw(app, vec![]);
+        let pos =
+            position(draw(app, vec![]), label).unwrap_or_else(|| panic!("Missing control {label}"));
         draw(app, vec![egui::Event::PointerMoved(pos)]);
         for pressed in [true, false] {
             draw(
@@ -172,10 +187,17 @@ fn comparison_from_settings_returns_focus_to_the_settings_button() {
             );
         }
     };
-    click(&mut app, text("Настройки"));
-    click(&mut app, Command::CompareFolders.label());
-    assert!(app.comparison.is_some());
-    click(&mut app, text("Закрыть"));
-    assert!(app.comparison.is_none());
-    assert_eq!(app.palette_focus_to_restore, Some(settings));
+    for command in [Command::CompareFolders, Command::CompareFiles] {
+        click(&mut app, text("Настройки"));
+        click(&mut app, command.label());
+        assert!(app.comparison.is_some());
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while position(draw(&mut app, vec![]), text("Закрыть")).is_none() {
+            assert!(Instant::now() < deadline, "{command:?} did not finish");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        click(&mut app, text("Закрыть"));
+        assert!(app.comparison.is_none());
+        assert_eq!(app.palette_focus_to_restore, Some(settings), "{command:?}");
+    }
 }

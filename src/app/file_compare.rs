@@ -299,14 +299,18 @@ impl PawCommander {
         Some([selected(0)?, selected(1)?])
     }
 
-    pub(super) fn open_file_comparison(&mut self, ctx: &egui::Context) {
+    pub(super) fn open_file_comparison(
+        &mut self,
+        return_focus: Option<egui::Id>,
+        ctx: &egui::Context,
+    ) {
         if self.comparison.is_none()
             && let Some(files) = self.files_to_compare()
         {
             let tool = self.tools.diff_tool(&self.settings.diff_tool);
             self.comparison = Some(ComparisonDialog::new(
                 ComparisonBody::Files(FileComparisonDialog::new(files, tool, ctx)),
-                None,
+                return_focus,
                 ctx,
             ));
         }

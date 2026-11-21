@@ -119,7 +119,11 @@ impl PawCommander {
                                     Action::CompareFolders(cfg!(target_os = "macos").then_some(button.id)),
                                     self.can_compare_folders(),
                                 ),
-                                (Command::CompareFiles, Action::CompareFiles, self.files_to_compare().is_some()),
+                                (
+                                    Command::CompareFiles,
+                                    Action::CompareFiles(cfg!(target_os = "macos").then_some(button.id)),
+                                    self.files_to_compare().is_some(),
+                                ),
                                 #[cfg(target_os = "macos")]
                                 (Command::SyncFolders, Action::SyncFolders(Some(button.id)), self.can_open_folder_sync()),
                             ] {
