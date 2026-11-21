@@ -95,6 +95,18 @@ impl PawCommander {
                                 self.accessibility_focus = true;
                                 ui.close();
                             }
+                            #[cfg(target_os = "macos")]
+                            {
+                                let transfer = ui.add_enabled(
+                                    !self.conflict_open(),
+                                    egui::Button::new(crate::i18n::text!("Перенос настроек…")),
+                                );
+                                paint_focus(ui, &transfer, 5);
+                                if transfer.clicked() {
+                                    self.open_settings_transfer(button.id, ctx);
+                                    ui.close();
+                                }
+                            }
                             let shortcuts = ui.button(crate::i18n::text!("Горячие клавиши"));
                             paint_focus(ui, &shortcuts, 5);
                             if shortcuts.clicked() {

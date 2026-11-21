@@ -24,6 +24,8 @@ pub(super) enum ComparisonBody {
     #[cfg(target_os = "macos")]
     Volumes,
     #[cfg(target_os = "macos")]
+    SettingsTransfer(Box<super::settings_transfer::SettingsTransfer>),
+    #[cfg(target_os = "macos")]
     Collections(Box<super::collections::CollectionsDialog>),
     #[cfg(target_os = "macos")]
     NewFile(Box<super::file_templates::FileTemplatesDialog>),
@@ -48,6 +50,13 @@ pub(super) enum ComparisonResponse {
     OpenVolume(std::path::PathBuf),
     #[cfg(target_os = "macos")]
     EjectVolume(crate::volumes::EjectTarget),
+    #[cfg(target_os = "macos")]
+    ExportSettings(
+        std::path::PathBuf,
+        Box<super::settings_transfer::Preferences>,
+    ),
+    #[cfg(target_os = "macos")]
+    ImportSettings(Box<super::settings_transfer::Preferences>),
     #[cfg(target_os = "macos")]
     CreateFile(
         crate::vfs::file_templates::NewFile,
@@ -78,6 +87,8 @@ impl ComparisonDialog {
             #[cfg(target_os = "macos")]
             ComparisonBody::Volumes => {}
             #[cfg(target_os = "macos")]
+            ComparisonBody::SettingsTransfer(view) => view.poll(),
+            #[cfg(target_os = "macos")]
             ComparisonBody::Collections(view) => view.poll(),
             #[cfg(target_os = "macos")]
             ComparisonBody::NewFile(view) => view.poll(),
@@ -106,6 +117,8 @@ impl ComparisonDialog {
             ComparisonBody::Usage(view) => view.show(ctx),
             #[cfg(target_os = "macos")]
             ComparisonBody::Volumes => return volumes.show(ctx, file_work),
+            #[cfg(target_os = "macos")]
+            ComparisonBody::SettingsTransfer(view) => return view.show(ctx),
             #[cfg(target_os = "macos")]
             ComparisonBody::Collections(view) => return view.show(ctx, catalog),
             #[cfg(target_os = "macos")]
@@ -166,6 +179,12 @@ impl PawCommander {
             ComparisonResponse::RevealItem(path) => self.reveal_search_result(path, ctx),
             ComparisonResponse::OpenVolume(path) => {
                 self.action(super::Action::Navigate(self.active, path.into()), ctx)
+            }
+            ComparisonResponse::ExportSettings(path, preferences) => {
+                self.export_settings(path, *preferences, ctx)
+            }
+            ComparisonResponse::ImportSettings(preferences) => {
+                self.import_settings(*preferences, ctx)
             }
             _ => {}
         }

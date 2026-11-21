@@ -16,6 +16,11 @@ macro_rules! formats {
 }
 
 formats! {
+    "From {before} to {after}" => ("Было «{before}», станет «{after}»", "Z „{before}“ na „{after}“"),
+    "Unsupported settings version {version}." => ("Версия настроек {version} не поддерживается.", "Verze nastavení {version} není podporována."),
+    "Could not read the settings file ({error})." => ("Не удалось прочитать файл настроек ({error}).", "Nepodařilo se přečíst soubor nastavení ({error})."),
+    "Could not save the settings file ({error})." => ("Не удалось сохранить файл настроек ({error}).", "Nepodařilo se uložit soubor nastavení ({error})."),
+    "{label} (hidden, {width})" => ("{label} (скрыт, {width})", "{label} (skrytý, {width})"),
     "{available} available of {capacity}" => ("Доступно {available} из {capacity}", "Dostupných {available} z {capacity}"),
     "Eject the disk containing “{name}”?" => ("Извлечь диск с томом «{name}»?", "Vysunout disk se svazkem „{name}“?"),
     "Could not start the volume task ({error})." => ("Не удалось запустить задачу для томов ({error}).", "Nepodařilo se spustit úlohu pro práci se svazky ({error})."),

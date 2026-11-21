@@ -101,6 +101,7 @@ impl ColumnSetting {
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(target_os = "macos", derive(Clone))]
 #[serde(default)]
 pub(crate) struct ListColumns {
     custom: bool,
@@ -127,6 +128,32 @@ impl ListColumns {
 
     pub(crate) fn is_custom(&self) -> bool {
         self.custom
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn settings_summary(&self) -> String {
+        let mode = if self.custom {
+            text!("Пользовательские ширины")
+        } else {
+            text!("Автоматическая ширина")
+        };
+        let mut parts = vec![
+            mode.to_owned(),
+            format!("{} ({})", Column::Name.label(), self.name_width),
+        ];
+        parts.extend(self.columns.iter().map(|entry| {
+            let label = entry.column.label();
+            if entry.visible {
+                format!("{label} ({})", entry.width)
+            } else {
+                crate::tr_format!(
+                    "{label} (hidden, {width})",
+                    label = label,
+                    width = entry.width
+                )
+            }
+        }));
+        parts.join(" · ")
     }
 
     pub(crate) fn validate(&mut self) {

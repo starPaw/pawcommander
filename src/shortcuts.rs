@@ -329,6 +329,11 @@ enum BindingError {
 }
 
 impl Shortcuts {
+    #[cfg(target_os = "macos")]
+    pub(crate) fn profile_label(&self) -> &'static str {
+        self.profile.label()
+    }
+
     fn chord(&self, command: Command) -> Option<Chord> {
         self.overrides
             .get(&command)
