@@ -219,7 +219,7 @@ Remote deletion recursively removes directories without a trash. Symlinks are re
 
 Select files or folders in an SFTP pane and choose **Change permissions** from the context menu or command palette. Enter an octal mode such as `0644` or a symbolic rule such as `u+rw,go-w`. A symbolic clause without a class applies to all classes (`a`). Choose **Preview** to see each item's current and proposed modes before choosing **Apply**.
 
-The change applies to the selected regular files and folders. An unavailable item or a symbolic link is marked in the preview. If an item changes after the preview or the server denies access, the result history shows the reason for that item. Check any unconfirmed change before trying again after a disconnect.
+The change applies to the selected regular files and folders. A selected folder's children keep their current modes. An unavailable item or a symbolic link is marked in the preview. If an item changes after the preview or the server denies access, the result history shows the reason for that item. Check any unconfirmed change before trying again after a disconnect.
 
 ## SMB connections on macOS
 
