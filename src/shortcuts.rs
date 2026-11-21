@@ -50,6 +50,8 @@ pub enum Command {
     #[cfg(target_os = "macos")]
     DiskUsage,
     #[cfg(target_os = "macos")]
+    MountedVolumes,
+    #[cfg(target_os = "macos")]
     Collections,
     #[cfg(target_os = "macos")]
     SyncFolders,
@@ -72,7 +74,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Self; 43 + 10 * cfg!(target_os = "macos") as usize] = [
+    pub const ALL: [Self; 43 + 11 * cfg!(target_os = "macos") as usize] = [
         Self::EditPath,
         Self::Filter,
         Self::Search,
@@ -117,6 +119,8 @@ impl Command {
         Self::FindDuplicates,
         #[cfg(target_os = "macos")]
         Self::DiskUsage,
+        #[cfg(target_os = "macos")]
+        Self::MountedVolumes,
         #[cfg(target_os = "macos")]
         Self::Collections,
         #[cfg(target_os = "macos")]
@@ -182,6 +186,8 @@ impl Command {
             Self::FindDuplicates => text!("Найти дубликаты"),
             #[cfg(target_os = "macos")]
             Self::DiskUsage => text!("Анализ занятого места"),
+            #[cfg(target_os = "macos")]
+            Self::MountedVolumes => text!("Подключённые тома…"),
             #[cfg(target_os = "macos")]
             Self::Collections => text!("Теги и коллекции"),
             #[cfg(target_os = "macos")]
@@ -273,7 +279,7 @@ impl Profile {
             FolderJump => (CMD_SHIFT, Key::J),
             #[cfg(target_os = "macos")]
             CustomActions | SyncFolders | CreateLink | FindDuplicates | DiskUsage | Collections
-            | NewFile | CompatibleNames => return None,
+            | NewFile | CompatibleNames | MountedVolumes => return None,
             Preview
             | EditInZed
             | OpenTerminal

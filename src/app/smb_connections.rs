@@ -227,6 +227,10 @@ impl PawCommander {
         notice: &str,
         work: impl FnOnce() -> Result<Change, String> + Send + 'static,
     ) {
+        if self.volumes.ejecting() {
+            self.notice = Some((super::volumes::wait_for_eject().into(), true));
+            return;
+        }
         match spawn(ctx, work) {
             Ok(result) => {
                 self.smb.pending = Some(result);

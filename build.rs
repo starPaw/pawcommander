@@ -36,6 +36,14 @@ fn main() {
             .compile("paw_smb");
         println!("cargo:rustc-link-lib=framework=NetFS");
         println!("cargo:rustc-link-lib=framework=Foundation");
+        let volumes = "src/volumes/macos.m";
+        println!("cargo:rerun-if-changed={volumes}");
+        cc::Build::new()
+            .file(volumes)
+            .flag("-fobjc-arc")
+            .compile("paw_volumes");
+        println!("cargo:rustc-link-lib=framework=DiskArbitration");
+        println!("cargo:rustc-link-lib=framework=IOKit");
         for framework in ["AVFoundation", "CoreMedia", "CoreVideo", "QuartzCore"] {
             println!("cargo:rustc-link-lib=framework={framework}");
         }

@@ -22,6 +22,8 @@ pub(super) enum ComparisonBody {
     #[cfg(target_os = "macos")]
     Usage(super::disk_usage::DiskUsage),
     #[cfg(target_os = "macos")]
+    Volumes,
+    #[cfg(target_os = "macos")]
     Collections(Box<super::collections::CollectionsDialog>),
     #[cfg(target_os = "macos")]
     NewFile(Box<super::file_templates::FileTemplatesDialog>),
@@ -42,6 +44,10 @@ pub(super) enum ComparisonResponse {
     TrashDuplicates(Box<crate::vfs::duplicates::TrashPlan>),
     #[cfg(target_os = "macos")]
     RevealItem(Location),
+    #[cfg(target_os = "macos")]
+    OpenVolume(std::path::PathBuf),
+    #[cfg(target_os = "macos")]
+    EjectVolume(crate::volumes::EjectTarget),
     #[cfg(target_os = "macos")]
     CreateFile(
         crate::vfs::file_templates::NewFile,
@@ -70,6 +76,8 @@ impl ComparisonDialog {
             #[cfg(target_os = "macos")]
             ComparisonBody::Usage(view) => view.poll(),
             #[cfg(target_os = "macos")]
+            ComparisonBody::Volumes => {}
+            #[cfg(target_os = "macos")]
             ComparisonBody::Collections(view) => view.poll(),
             #[cfg(target_os = "macos")]
             ComparisonBody::NewFile(view) => view.poll(),
@@ -86,6 +94,8 @@ impl ComparisonDialog {
         #[cfg(target_os = "macos")] profiles: &mut Vec<super::sync_profiles::SyncProfile>,
         #[cfg(target_os = "macos")] catalog: &mut crate::vfs::collections::Catalog,
         #[cfg(target_os = "macos")] templates: &mut crate::vfs::file_templates::Library,
+        #[cfg(target_os = "macos")] volumes: &mut super::volumes::VolumeBrowser,
+        #[cfg(target_os = "macos")] file_work: bool,
     ) -> ComparisonResponse {
         let open = match &mut self.body {
             ComparisonBody::Folders(view) => view.show(ctx),
@@ -94,6 +104,8 @@ impl ComparisonDialog {
             ComparisonBody::Duplicates(view) => return view.show(ctx),
             #[cfg(target_os = "macos")]
             ComparisonBody::Usage(view) => view.show(ctx),
+            #[cfg(target_os = "macos")]
+            ComparisonBody::Volumes => return volumes.show(ctx, file_work),
             #[cfg(target_os = "macos")]
             ComparisonBody::Collections(view) => return view.show(ctx, catalog),
             #[cfg(target_os = "macos")]
@@ -113,6 +125,8 @@ impl ComparisonDialog {
 
 impl PawCommander {
     pub(super) fn show_comparison(&mut self, ctx: &egui::Context) {
+        #[cfg(target_os = "macos")]
+        let file_work = self.volume_file_work_active();
         let Some(comparison) = &mut self.comparison else {
             return;
         };
@@ -122,12 +136,19 @@ impl PawCommander {
             &mut self.sync_profiles,
             &mut self.collections,
             &mut self.file_templates,
+            &mut self.volumes,
+            file_work,
         );
         #[cfg(not(target_os = "macos"))]
         let response = comparison.show(ctx);
         #[cfg(target_os = "macos")]
         if let ComparisonResponse::CreateFile(job, completion) = response {
             self.enqueue_new_file(job, completion, ctx);
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        if let ComparisonResponse::EjectVolume(target) = response {
+            self.eject_volume(target, ctx);
             return;
         }
         if matches!(response, ComparisonResponse::Open) {
@@ -143,6 +164,9 @@ impl PawCommander {
             }
             ComparisonResponse::TrashDuplicates(plan) => self.enqueue_duplicate_trash(*plan, ctx),
             ComparisonResponse::RevealItem(path) => self.reveal_search_result(path, ctx),
+            ComparisonResponse::OpenVolume(path) => {
+                self.action(super::Action::Navigate(self.active, path.into()), ctx)
+            }
             _ => {}
         }
         ctx.request_repaint();

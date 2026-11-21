@@ -92,6 +92,8 @@ pub(super) enum Action {
     #[cfg(target_os = "macos")]
     DiskUsage(Option<egui::Id>),
     #[cfg(target_os = "macos")]
+    MountedVolumes,
+    #[cfg(target_os = "macos")]
     Collections(Option<egui::Id>),
     #[cfg(target_os = "macos")]
     SyncFolders(Option<egui::Id>),
@@ -574,6 +576,8 @@ impl PawCommander {
             Action::Copy(cut) => self.copy_files(cut),
             #[cfg(target_os = "macos")]
             Action::CompatibleNames(return_focus) => self.open_compatible_names(return_focus, ctx),
+            #[cfg(target_os = "macos")]
+            Action::MountedVolumes => self.open_volumes(ctx),
             Action::Paste(move_here) if self.drop_enabled() => self.paste_files(move_here, ctx),
             Action::Transfer(kind) if !self.conflict_open() && self.settings.split => {
                 let sources = self.selected();
