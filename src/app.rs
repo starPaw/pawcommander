@@ -12,6 +12,8 @@ mod custom_actions;
 mod dialogs;
 mod directory;
 mod directory_compare;
+#[cfg(target_os = "macos")]
+mod disk_usage;
 #[cfg(any(target_os = "windows", test))]
 mod drives;
 #[cfg(target_os = "macos")]

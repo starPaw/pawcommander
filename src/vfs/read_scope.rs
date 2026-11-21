@@ -229,6 +229,41 @@ pub(super) fn local_subdirectory(
 }
 
 #[cfg(unix)]
+pub(super) fn visit_local_entries(
+    descriptor: &OwnedFd,
+    cancel: &Cancellation,
+    mut visit: impl FnMut(
+        &std::ffi::OsStr,
+        rustix::io::Result<rustix::fs::Stat>,
+    ) -> Result<(), TransferError>,
+) -> Result<(), TransferError> {
+    use rustix::fs::{fstat, statat, AtFlags, Dir};
+    use std::os::unix::ffi::OsStrExt;
+
+    let before = fstat(descriptor).map_err(io::Error::from)?;
+    let entries = Dir::read_from(descriptor).map_err(io::Error::from)?;
+    for item in entries {
+        cancel.check()?;
+        let item = item.map_err(io::Error::from)?;
+        let name = std::ffi::OsStr::from_bytes(item.file_name().to_bytes());
+        if name == "." || name == ".." {
+            continue;
+        }
+        visit(name, statat(descriptor, name, AtFlags::SYMLINK_NOFOLLOW))?;
+    }
+    cancel.check()?;
+    let after = fstat(descriptor).map_err(io::Error::from)?;
+    if before.st_mtime != after.st_mtime
+        || before.st_mtime_nsec != after.st_mtime_nsec
+        || before.st_ctime != after.st_ctime
+        || before.st_ctime_nsec != after.st_ctime_nsec
+    {
+        return Err(text("Папка изменилась или недоступна").into());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn local_input(root: &OwnedFd, path: &Path, cancel: &Cancellation) -> io::Result<std::fs::File> {
     use rustix::fs::{openat, statat, AtFlags, FileType, Mode, OFlags};
     let relative = path.parent().ok_or(io::ErrorKind::InvalidInput)?;

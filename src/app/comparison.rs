@@ -20,6 +20,8 @@ pub(super) enum ComparisonBody {
     #[cfg(target_os = "macos")]
     Duplicates(super::duplicates::DuplicateSearch),
     #[cfg(target_os = "macos")]
+    Usage(super::disk_usage::DiskUsage),
+    #[cfg(target_os = "macos")]
     Sync(Box<super::folder_sync::FolderSyncDialog>),
 }
 
@@ -51,6 +53,8 @@ impl ComparisonDialog {
             #[cfg(target_os = "macos")]
             ComparisonBody::Duplicates(view) => view.poll(),
             #[cfg(target_os = "macos")]
+            ComparisonBody::Usage(view) => view.poll(),
+            #[cfg(target_os = "macos")]
             ComparisonBody::Sync(view) => view.poll(),
         }
     }
@@ -65,6 +69,8 @@ impl ComparisonDialog {
             ComparisonBody::Files(view) => view.show(ctx),
             #[cfg(target_os = "macos")]
             ComparisonBody::Duplicates(view) => return view.show(ctx),
+            #[cfg(target_os = "macos")]
+            ComparisonBody::Usage(view) => view.show(ctx),
             #[cfg(target_os = "macos")]
             ComparisonBody::Sync(view) => return view.show(ctx, profiles),
         };
@@ -169,14 +175,23 @@ pub(super) fn show_pair(ui: &mut egui::Ui, pair: &[Location; 2], titles: [&'stat
 }
 
 pub(super) fn show_progress<T>(ui: &mut egui::Ui, worker: &mut Worker<T>, message: &'static str) {
-    let stopping = worker.progress.cancel.is_requested();
+    show_progress_with_stop(ui, worker, message, "Останавливаем сравнение…");
+}
+
+pub(super) fn show_progress_with_stop<T>(
+    ui: &mut egui::Ui,
+    worker: &mut Worker<T>,
+    running: &'static str,
+    stopping: &'static str,
+) {
+    let message = if worker.progress.cancel.is_requested() {
+        stopping
+    } else {
+        running
+    };
     ui.horizontal(|ui| {
         ui.spinner();
-        ui.label(text(if stopping {
-            "Останавливаем сравнение…"
-        } else {
-            message
-        }));
+        ui.label(text(message));
     });
     super::footer::operation_details(ui, worker.progress.snapshot(), false);
     ui.ctx().request_repaint_after(Duration::from_millis(100));
