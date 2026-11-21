@@ -392,16 +392,24 @@ impl FileTemplatesDialog {
 
     fn accept_creation(&mut self) -> Option<Location> {
         let pending = self.creating.as_ref()?;
-        let error = match pending.result.try_recv() {
+        let notice = match pending.result.try_recv() {
             Ok(Ok(())) => return Some(self.creating.take().unwrap().target),
-            Ok(Err(TransferError::Cancelled)) | Err(TryRecvError::Disconnected) => {
-                text!("Создание файла снято с очереди").into()
-            }
-            Ok(Err(error)) => crate::i18n::file_error(&error),
+            Ok(Err(TransferError::Cancelled)) => (crate::tr_format!("Operation cancelled"), false),
+            Ok(Err(error)) => (crate::i18n::file_error(&error), true),
             Err(TryRecvError::Empty) => return None,
+            Err(TryRecvError::Disconnected) => {
+                let path = pending.target.display().escape_debug().to_string();
+                (
+                    crate::tr_format!(
+                        "Could not confirm file creation at {path}. Check the destination folder.",
+                        path = path
+                    ),
+                    true,
+                )
+            }
         };
         self.creating = None;
-        self.notice = Some((error, true));
+        self.notice = Some(notice);
         self.focus_name = true;
         None
     }

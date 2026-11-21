@@ -8,6 +8,8 @@ mod checksum;
 mod conflict;
 #[cfg(target_os = "macos")]
 mod file_promise;
+#[cfg(target_os = "macos")]
+mod file_template;
 mod host_key;
 mod metadata;
 mod recovery_record;
@@ -24,6 +26,8 @@ pub(crate) use checksum::{ChecksumError, ManifestLineError};
 pub(crate) use conflict::{ConflictError, ReplacementRefusal};
 #[cfg(target_os = "macos")]
 pub(crate) use file_promise::FilePromiseError;
+#[cfg(target_os = "macos")]
+pub(crate) use file_template::FileTemplateError;
 pub(crate) use host_key::{HostKeyError, KnownHostEntryError, KnownHostsError, PinError};
 pub(crate) use metadata::{MetadataError, MetadataField, MetadataWarning};
 #[cfg(target_os = "macos")]
@@ -69,6 +73,8 @@ pub(crate) enum Failure {
     Conflict(Box<ConflictError>),
     #[cfg(target_os = "macos")]
     FilePromise(Box<FilePromiseError>),
+    #[cfg(target_os = "macos")]
+    FileTemplate(Box<FileTemplateError>),
     Mutation(Box<MutationError>),
     Publication(Box<PublicationError>),
     Staging(Box<StagingError>),
@@ -115,6 +121,8 @@ impl Failure {
             Self::Conflict(error) => Some(error.as_ref()),
             #[cfg(target_os = "macos")]
             Self::FilePromise(error) => Some(error.as_ref()),
+            #[cfg(target_os = "macos")]
+            Self::FileTemplate(error) => Some(error.as_ref()),
             Self::Mutation(error) => Some(error.as_ref()),
             Self::Publication(error) => Some(error.as_ref()),
             Self::Staging(error) => Some(error.as_ref()),
@@ -154,6 +162,8 @@ impl fmt::Display for Failure {
             Self::Conflict(error) => fmt::Display::fmt(error, f),
             #[cfg(target_os = "macos")]
             Self::FilePromise(error) => fmt::Display::fmt(error, f),
+            #[cfg(target_os = "macos")]
+            Self::FileTemplate(error) => fmt::Display::fmt(error, f),
             Self::Mutation(error) => fmt::Display::fmt(error, f),
             Self::Publication(error) => fmt::Display::fmt(error, f),
             Self::Staging(error) => fmt::Display::fmt(error, f),

@@ -10,8 +10,8 @@ use crate::file_error::{
 };
 #[cfg(target_os = "macos")]
 use crate::file_error::{
-    FilePromiseError, ResumeCheckError, ResumeCheckProblem, ResumeRecordEvent, ResumeRole,
-    SyncError,
+    FilePromiseError, FileTemplateError, ResumeCheckError, ResumeCheckProblem, ResumeRecordEvent,
+    ResumeRole, SyncError,
 };
 use crate::file_error::{
     RecoveryRecordAction, RecoveryRecordError, RecoveryRecordProblem, RecoveryRecordSection,
@@ -53,6 +53,8 @@ pub(crate) fn file_error(error: &TransferError) -> String {
                 Failure::Conflict(error) => conflict_error(error),
                 #[cfg(target_os = "macos")]
                 Failure::FilePromise(error) => file_promise_error(error),
+                #[cfg(target_os = "macos")]
+                Failure::FileTemplate(error) => file_template_error(error),
                 Failure::Mutation(reason) => mutation_error(
                     reason,
                     matches!(error, TransferError::PublicationUnconfirmed(_)),
@@ -69,6 +71,27 @@ pub(crate) fn file_error(error: &TransferError) -> String {
             }
         }
         TransferError::Cancelled => crate::tr_format!("Operation cancelled"),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn file_template_error(error: &FileTemplateError) -> String {
+    use FileTemplateError::*;
+
+    match error {
+        UnrepresentableCharacters(encoding) => crate::tr_format!(
+            "Some characters cannot be represented in {encoding}. Choose a different encoding.",
+            encoding = encoding.label()
+        ),
+        InvalidSavedPayload(_) => text!("Не удалось прочитать сохранённый шаблон").into(),
+        SourceMissing(path) => {
+            crate::tr_format!("The template source file {path} is missing.", path = path)
+        }
+        TooLarge(Some(path)) => crate::tr_format!(
+            "The template source file {path} exceeds 4 MiB.",
+            path = path
+        ),
+        TooLarge(None) => text!("Шаблон файла превышает 4 МиБ").into(),
     }
 }
 
