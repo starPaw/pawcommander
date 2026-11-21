@@ -3,7 +3,7 @@ use super::directory::{FolderVisit, AUTO_REFRESH_INTERVAL};
 use super::state::FolderMode;
 use super::PawCommander;
 use crate::conflict::{Answer, Conflict, ConflictDialog, Decision};
-use crate::file_error::Failure;
+use crate::file_error::{Failure, MutationError};
 use crate::fs_ops::TransferKind;
 use crate::operations::{Cancellation, Progress, ProgressView, TransferError};
 use crate::vfs as fs_ops;
@@ -795,8 +795,12 @@ impl PawCommander {
         if sources.is_empty() {
             return;
         }
-        if destination.is_archive() || sources.iter().any(Location::is_archive) {
-            self.notice = Some((crate::archive::readonly().into(), true));
+        if let Some(archive) = std::iter::once(&destination)
+            .chain(&sources)
+            .find(|location| location.is_archive())
+        {
+            let error = MutationError::ReadOnlyArchive(archive.clone()).into();
+            self.notice = Some((crate::i18n::file_error(&error), true));
             return;
         }
         let cut = cut_generation.map(|generation| (generation, sources.clone()));

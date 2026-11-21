@@ -1344,11 +1344,38 @@ fn openssh_round_trip_and_host_verification() {
             |_, _| panic!("same-folder moves must preserve the original entry"),
         )
         .unwrap_err();
-        assert_eq!(
-            crate::i18n::transfer_failure(&error),
-            crate::i18n::text!("Элементы уже находятся в этой папке")
+        use crate::file_error::{Failure, TransferPlanError};
+        assert!(error.summary.preparing);
+        assert!(
+            matches!(error.error, TransferError::Failed(Failure::TransferPlan(reason))
+            if matches!(reason.as_ref(), TransferPlanError::SameFolder { source, destination }
+                if source == &refresh_file && destination == &alias))
         );
         assert_eq!(fs::read(refresh_file.path()).unwrap(), b"external edit");
+
+        let local_same_name = local_root.join("external.txt");
+        fs::write(local_same_name.path(), b"local source with the same name").unwrap();
+        let error = transfer_with_conflicts(
+            &[local_same_name.clone(), refresh_file.clone()],
+            &remote_root,
+            TransferKind::Copy,
+            &mut Progress::default(),
+            |_| panic!("duplicate destination must fail before conflicts"),
+            |_, _| panic!("duplicate destination must fail before publication"),
+        )
+        .unwrap_err();
+        assert!(error.summary.preparing && error.summary.completed == 0);
+        assert!(
+            matches!(error.error, TransferError::Failed(Failure::TransferPlan(reason))
+            if matches!(reason.as_ref(), TransferPlanError::DuplicateTarget { first, second, target }
+                if first == &local_same_name && second == &refresh_file && target == &refresh_file))
+        );
+        assert_eq!(fs::read(refresh_file.path()).unwrap(), b"external edit");
+        assert_eq!(
+            fs::read(local_same_name.path()).unwrap(),
+            b"local source with the same name"
+        );
+        fs::remove_file(local_same_name.path()).unwrap();
     }
     fs::remove_file(refresh_file.path()).unwrap();
     assert!(read_automatic_directory(&remote_root, &|| false)
