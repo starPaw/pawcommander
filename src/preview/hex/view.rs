@@ -4,8 +4,9 @@ use super::{
     BYTES_PER_ROW, PAGE_BYTES, PATTERN_LIMIT,
 };
 use crate::{
-    i18n::text,
+    i18n::{file_error, text},
     icons::{self, Icon},
+    operations::TransferError,
     preview::source::Version,
     theme::Palette,
     vfs::Location,
@@ -23,7 +24,7 @@ pub(in crate::preview) struct Document {
     query: String,
     pattern: Option<Vec<u8>>,
     notice: Option<crate::i18n::MessageKey>,
-    error: Option<String>,
+    error: Option<TransferError>,
     reset_scroll: bool,
     focus: Option<(egui::ViewportId, [egui::Id; 2], bool)>,
 }
@@ -32,7 +33,7 @@ impl Document {
     pub(in crate::preview) fn start(
         location: Location,
         ctx: &egui::Context,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, TransferError> {
         let worker = worker::start(location, ctx)?;
         let pending = worker.load((Work::Page(0), None))?;
         Ok(Self {
@@ -63,7 +64,7 @@ impl Document {
         let query = self.search(ui);
         self.update();
         if let Some(error) = &self.error {
-            ui.colored_label(ui.visuals().error_fg_color, error);
+            ui.colored_label(ui.visuals().error_fg_color, file_error(error));
         } else if let Some(notice) = self.notice {
             ui.label(text(notice));
         }

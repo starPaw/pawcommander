@@ -1,44 +1,56 @@
-use super::err;
 use super::location::Location;
 use super::sftp::remote;
-use std::io::Read;
+use crate::file_error::{AccessAction, AccessError, PreviewError};
+use crate::operations::{Cancellation, TransferError};
+#[cfg(target_os = "macos")]
+use std::io::{ErrorKind, Read};
 
-pub fn preview_data(
+pub(crate) fn preview_data(
     location: &Location,
     limit: usize,
-) -> Result<(ssh2::FileStat, Vec<u8>), String> {
+    cancel: &Cancellation,
+) -> Result<(ssh2::FileStat, Vec<u8>), TransferError> {
+    cancel.check()?;
     let (stat, input) = preview_input(location)?;
-    let mut bytes = Vec::new();
-    if let Some(input) = input {
-        input
-            .take(limit as u64 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(err)?;
-    }
+    cancel.check()?;
+    let bytes = if let Some(mut input) = input {
+        cancel
+            .read_up_to(&mut input, limit.saturating_add(1))
+            .map_err(|error| AccessError::read(location, error))?
+    } else {
+        Vec::new()
+    };
     Ok((stat, bytes))
 }
 
-pub(crate) fn open_preview_stream(location: &Location) -> Result<ssh2::File, String> {
+pub(crate) fn open_preview_stream(location: &Location) -> Result<ssh2::File, TransferError> {
     preview_input(location)?
         .1
-        .ok_or_else(|| crate::i18n::text!("Файл изменился перед чтением").into())
+        .ok_or_else(|| PreviewError::ChangedBeforeRead(location.clone()).into())
 }
 
-fn preview_input(location: &Location) -> Result<(ssh2::FileStat, Option<ssh2::File>), String> {
-    let sftp = remote(location).map_err(|error| crate::i18n::file_error(&error))?;
-    let stat = sftp.lstat(location.path()).map_err(err)?;
+fn preview_input(
+    location: &Location,
+) -> Result<(ssh2::FileStat, Option<ssh2::File>), TransferError> {
+    let sftp = remote(location)
+        .map_err(|error| AccessError::new(location, AccessAction::OpenFile, error))?;
+    let stat = sftp
+        .lstat(location.path())
+        .map_err(|error| AccessError::new(location, AccessAction::ReadMetadata, error))?;
     if stat.is_dir() {
         return Ok((stat, None));
     }
     if !stat.is_file() {
-        return Err(
-            crate::i18n::text!("Предпросмотр ссылок и специальных файлов SFTP недоступен").into(),
-        );
+        return Err(PreviewError::UnsupportedFile(location.clone()).into());
     }
-    let mut input = sftp.open(location.path()).map_err(err)?;
-    let opened = input.stat().map_err(err)?;
+    let mut input = sftp
+        .open(location.path())
+        .map_err(|error| AccessError::new(location, AccessAction::OpenFile, error))?;
+    let opened = input
+        .stat()
+        .map_err(|error| AccessError::new(location, AccessAction::ReadOpenMetadata, error))?;
     if !opened.is_file() {
-        return Err(crate::i18n::text!("Файл изменился перед чтением").into());
+        return Err(PreviewError::ChangedBeforeRead(location.clone()).into());
     }
     Ok((opened, Some(input)))
 }
@@ -48,41 +60,50 @@ pub(crate) fn cache_media_preview(
     location: &Location,
     target: &mut impl std::io::Write,
     limit: u64,
-    cancel: &crate::operations::Cancellation,
-) -> Result<(), String> {
-    let too_large = || {
-        crate::i18n::text!("Медиафайл SFTP больше 128 МиБ. Откройте локальную копию.").to_owned()
+    cancel: &Cancellation,
+) -> Result<(), TransferError> {
+    let too_large = || PreviewError::MediaLimit {
+        location: location.clone(),
+        limit,
     };
-    cancel.check().map_err(err)?;
+    let changed = || PreviewError::ChangedWhileReading(location.clone());
+    let cache_error = |error| AccessError::new(location, AccessAction::WritePreviewCache, error);
+    cancel.check()?;
     let (stat, input) = preview_input(location)?;
     if stat.size.is_some_and(|size| size > limit) {
-        return Err(too_large());
+        return Err(too_large().into());
     }
     let mut input = input
-        .ok_or_else(|| crate::i18n::text!("Файл изменился перед чтением").to_owned())?
-        .take(limit + 1);
+        .ok_or_else(|| PreviewError::ChangedBeforeRead(location.clone()))?
+        .take(limit.saturating_add(1));
     let mut copied = 0;
     let mut buffer = [0; 64 * 1024];
     loop {
-        cancel.check().map_err(err)?;
-        let count = input.read(&mut buffer).map_err(err)?;
-        if count == 0 {
-            break;
-        }
+        cancel.check()?;
+        let count = match input.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => count,
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            Err(error) => return Err(AccessError::read(location, error).into()),
+        };
         copied += count as u64;
         if copied > limit {
-            return Err(too_large());
+            return Err(too_large().into());
         }
-        cancel.check().map_err(err)?;
-        target.write_all(&buffer[..count]).map_err(err)?;
+        cancel.check()?;
+        target.write_all(&buffer[..count]).map_err(cache_error)?;
     }
     if stat.size.is_some_and(|size| size != copied) {
-        return Err(crate::i18n::text!("Файл изменился перед чтением").into());
+        return Err(changed().into());
     }
-    cancel.check().map_err(err)?;
-    let current = input.get_mut().stat().map_err(err)?;
+    cancel.check()?;
+    let current = input
+        .get_mut()
+        .stat()
+        .map_err(|error| AccessError::new(location, AccessAction::ReadOpenMetadata, error))?;
     if current.size != stat.size || current.mtime != stat.mtime || !current.is_file() {
-        return Err(crate::i18n::text!("Файл изменился перед чтением").into());
+        return Err(changed().into());
     }
-    target.flush().map_err(err)
+    cancel.check()?;
+    target.flush().map_err(|error| cache_error(error).into())
 }

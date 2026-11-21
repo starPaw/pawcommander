@@ -1,5 +1,6 @@
 use crate::{
-    operations::Cancellation,
+    file_error::{AccessAction, AccessError, PreviewError},
+    operations::{Cancellation, TransferError},
     vfs::{self, Location},
 };
 use memchr::memmem;
@@ -19,23 +20,36 @@ pub(super) struct Version {
     identity: Option<(u64, u64)>,
 }
 
-pub(super) enum Source {
+pub(super) struct Source {
+    location: Location,
+    file: PreviewFile,
+}
+
+enum PreviewFile {
     Local(File),
     Sftp(ssh2::File),
 }
 
 impl Source {
-    pub(super) fn open(location: &Location) -> Result<Self, String> {
-        if let Some(path) = location.local() {
-            return super::open_regular(path).map(Self::Local);
-        }
-        vfs::open_preview_stream(location).map(Self::Sftp)
+    pub(super) fn open(location: &Location) -> Result<Self, TransferError> {
+        let file = if let Some(path) = location.local() {
+            PreviewFile::Local(super::open_regular(path)?)
+        } else {
+            PreviewFile::Sftp(vfs::open_preview_stream(location)?)
+        };
+        Ok(Self {
+            location: location.clone(),
+            file,
+        })
     }
 
-    pub(super) fn version(&mut self) -> io::Result<Version> {
-        match self {
-            Self::Local(file) => {
-                let metadata = file.metadata()?;
+    pub(super) fn version(&mut self) -> Result<Version, TransferError> {
+        let action = AccessAction::ReadOpenMetadata;
+        match &mut self.file {
+            PreviewFile::Local(file) => {
+                let metadata = file
+                    .metadata()
+                    .map_err(|error| AccessError::new(&self.location, action, error))?;
                 #[cfg(unix)]
                 let identity = {
                     use std::os::unix::fs::MetadataExt;
@@ -49,8 +63,10 @@ impl Source {
                     identity,
                 })
             }
-            Self::Sftp(file) => {
-                let stat = file.stat().map_err(io::Error::other)?;
+            PreviewFile::Sftp(file) => {
+                let stat = file
+                    .stat()
+                    .map_err(|error| AccessError::new(&self.location, action, error))?;
                 Ok(Version {
                     size: stat.size,
                     changed: stat.mtime.and_then(|time| {
@@ -62,19 +78,20 @@ impl Source {
         }
     }
 
-    pub(super) fn seek_to(&mut self, byte: u64) -> io::Result<u64> {
-        match self {
-            Self::Local(file) => file.seek(SeekFrom::Start(byte)),
-            Self::Sftp(file) => file.seek(SeekFrom::Start(byte)),
+    pub(super) fn seek_to(&mut self, byte: u64) -> Result<u64, TransferError> {
+        match &mut self.file {
+            PreviewFile::Local(file) => file.seek(SeekFrom::Start(byte)),
+            PreviewFile::Sftp(file) => file.seek(SeekFrom::Start(byte)),
         }
+        .map_err(|error| AccessError::read(&self.location, error).into())
     }
 }
 
 impl Read for Source {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
-        match self {
-            Self::Local(file) => file.read(bytes),
-            Self::Sftp(file) => file.read(bytes),
+        match &mut self.file {
+            PreviewFile::Local(file) => file.read(bytes),
+            PreviewFile::Sftp(file) => file.read(bytes),
         }
     }
 }
@@ -101,7 +118,7 @@ impl<'a> Window<'a> {
         self.offset
     }
 
-    pub(super) fn read_at(&mut self, byte: u64, buffer: &mut [u8]) -> io::Result<usize> {
+    pub(super) fn read_at(&mut self, byte: u64, buffer: &mut [u8]) -> Result<usize, TransferError> {
         self.cancel.check()?;
         let limit = self
             .size
@@ -125,7 +142,7 @@ impl<'a> Window<'a> {
                     self.offset += count as u64;
                 }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                Err(error) => return Err(error),
+                Err(error) => return Err(AccessError::read(&self.source.location, error).into()),
             }
         }
         Ok(used)
@@ -135,9 +152,9 @@ impl<'a> Window<'a> {
         &mut self,
         byte: u64,
         buffer: &'b mut [u8],
-    ) -> io::Result<&'b [u8]> {
+    ) -> Result<&'b [u8], TransferError> {
         if self.read_at(byte, buffer)? != buffer.len() {
-            return Err(io::ErrorKind::UnexpectedEof.into());
+            return Err(PreviewError::ChangedWhileReading(self.source.location.clone()).into());
         }
         Ok(buffer)
     }
@@ -150,7 +167,7 @@ impl<'a> Window<'a> {
         finder: &memmem::Finder<'_>,
         alignment: usize,
         mut passed: impl FnMut(&[u8]),
-    ) -> io::Result<Option<u64>> {
+    ) -> Result<Option<u64>, TransferError> {
         let overlap = finder.needle().len() - alignment;
         let mut buffer = vec![0; READ_BLOCK + overlap];
         let mut byte = range.start;
@@ -182,7 +199,7 @@ impl<'a> Window<'a> {
         finder: &memmem::FinderRev<'_>,
         alignment: usize,
         mut passed: impl FnMut(&[u8]),
-    ) -> io::Result<Option<u64>> {
+    ) -> Result<Option<u64>, TransferError> {
         let overlap = (finder.needle().len() - alignment) as u64;
         let mut buffer = vec![0; READ_BLOCK + overlap as usize];
         let mut end = range.end;

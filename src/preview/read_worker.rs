@@ -1,24 +1,29 @@
-use crate::operations::Cancellation;
+use crate::{
+    file_error::PreviewError,
+    operations::{Cancellation, TransferError},
+};
 use eframe::egui;
-use std::{io, sync::mpsc, thread};
+use std::{sync::mpsc, thread};
 
 struct Job<W, R> {
     work: W,
-    reply: mpsc::Sender<Result<R, String>>,
+    reply: mpsc::Sender<Result<R, TransferError>>,
     cancel: Cancellation,
 }
 
 pub(super) struct Pending<R> {
-    replies: mpsc::Receiver<Result<R, String>>,
+    replies: mpsc::Receiver<Result<R, TransferError>>,
     cancel: Cancellation,
 }
 
 impl<R> Pending<R> {
-    pub(super) fn poll(&self) -> Option<Result<R, String>> {
+    pub(super) fn poll(&self) -> Option<Result<R, TransferError>> {
         match self.replies.try_recv() {
             Ok(reply) => Some(reply),
             Err(mpsc::TryRecvError::Empty) => None,
-            Err(mpsc::TryRecvError::Disconnected) => Some(Err(unavailable())),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Some(Err(PreviewError::WorkerUnavailable.into()))
+            }
         }
     }
 }
@@ -35,8 +40,8 @@ impl<W: Send + 'static, R: Send + 'static> Worker<W, R> {
     pub(super) fn start(
         name: &str,
         ctx: &egui::Context,
-        run: impl Fn(&W, &Cancellation) -> Result<R, String> + Send + 'static,
-    ) -> io::Result<Self> {
+        run: impl Fn(&W, &Cancellation) -> Result<R, TransferError> + Send + 'static,
+    ) -> Result<Self, TransferError> {
         let (requests, jobs) = mpsc::channel::<Job<W, R>>();
         let ctx = ctx.clone();
         let viewport = ctx.viewport_id();
@@ -57,7 +62,7 @@ impl<W: Send + 'static, R: Send + 'static> Worker<W, R> {
         Ok(Self(requests))
     }
 
-    pub(super) fn load(&self, work: W) -> Result<Pending<R>, String> {
+    pub(super) fn load(&self, work: W) -> Result<Pending<R>, TransferError> {
         let (reply, replies) = mpsc::channel();
         let cancel = Cancellation::default();
         self.0
@@ -66,11 +71,7 @@ impl<W: Send + 'static, R: Send + 'static> Worker<W, R> {
                 reply,
                 cancel: cancel.clone(),
             })
-            .map_err(|_| unavailable())?;
+            .map_err(|_| PreviewError::WorkerUnavailable)?;
         Ok(Pending { replies, cancel })
     }
-}
-
-fn unavailable() -> String {
-    crate::i18n::text!("Служба предпросмотра недоступна").into()
 }

@@ -1,10 +1,10 @@
 use super::{Codec, Direction, Hit, Position, QUERY_CHARS};
 use crate::{
-    operations::Cancellation,
+    operations::{Cancellation, TransferError},
     preview::source::{Source, Window, READ_BLOCK as BLOCK},
 };
 use memchr::memmem;
-use std::{io, ops::Range};
+use std::ops::Range;
 
 const PAGE_BYTES: u64 = 32 * 1024;
 const LINE_LOOKAHEAD: usize = 512;
@@ -43,7 +43,7 @@ impl<'a> Reader<'a> {
         index: u64,
         near: Position,
         show_through: Option<u64>,
-    ) -> Result<PageText, String> {
+    ) -> Result<PageText, TransferError> {
         let first = self.boundary(index)?;
         let start = self.relocate(near, first)?;
         let nominal_end = (index + 1) * PAGE_BYTES - first;
@@ -76,7 +76,7 @@ impl<'a> Reader<'a> {
             (text, Some((self.encoding, data)))
         };
         if !super::super::preview_text_chars(&text) {
-            return Err(self.encoding.error());
+            return Err(self.encoding.error().into());
         }
         Ok(PageText {
             index,
@@ -92,7 +92,7 @@ impl<'a> Reader<'a> {
         &mut self,
         at: Position,
         through: Option<u64>,
-    ) -> Result<PageText, String> {
+    ) -> Result<PageText, TransferError> {
         let nominal = at.byte / PAGE_BYTES;
         let start = self.boundary(nominal)?;
         let index = if start > at.byte || (nominal > 0 && self.size == Some(start)) {
@@ -115,7 +115,7 @@ impl<'a> Reader<'a> {
         from: Position,
         query: &str,
         direction: Direction,
-    ) -> Result<Option<Hit>, String> {
+    ) -> Result<Option<Hit>, TransferError> {
         let mut prefix = [0; 3];
         let used = self.read_at(0, &mut prefix)?;
         let bom = self.encoding.bom(&prefix[..used]);
@@ -157,7 +157,7 @@ impl<'a> Reader<'a> {
                 }
                 let end = self.end_position(from)?;
                 if !end.byte.is_multiple_of(self.encoding.width() as u64) {
-                    return Err(self.encoding.error());
+                    return Err(self.encoding.error().into());
                 }
                 self.backward(from.byte, end, &finder)
             }
@@ -168,7 +168,7 @@ impl<'a> Reader<'a> {
         &mut self,
         wanted: u64,
         mut at: Position,
-    ) -> Result<Option<Position>, String> {
+    ) -> Result<Option<Position>, TransferError> {
         if wanted == 1 {
             return Ok(Some(Position::START));
         }
@@ -218,14 +218,13 @@ impl<'a> Reader<'a> {
         mut at: Position,
         end: u64,
         finder: &memmem::Finder<'_>,
-    ) -> Result<Option<Hit>, String> {
+    ) -> Result<Option<Hit>, TransferError> {
         let encoding = self.encoding;
         let found = self
             .source
             .find_forward(at.byte..end, finder, encoding.width(), |bytes| {
                 at = at.after(bytes, encoding);
-            })
-            .map_err(read_error)?;
+            })?;
         Ok(found.map(|_| Hit {
             start: at,
             end: at.after(finder.needle(), encoding),
@@ -237,21 +236,20 @@ impl<'a> Reader<'a> {
         lower: u64,
         mut at: Position,
         finder: &memmem::FinderRev<'_>,
-    ) -> Result<Option<Hit>, String> {
+    ) -> Result<Option<Hit>, TransferError> {
         let encoding = self.encoding;
-        let found = self
-            .source
-            .find_backward(lower..at.byte, finder, encoding.width(), |bytes| {
-                at = at.before(bytes, encoding);
-            })
-            .map_err(exact_read_error)?;
+        let found =
+            self.source
+                .find_backward(lower..at.byte, finder, encoding.width(), |bytes| {
+                    at = at.before(bytes, encoding);
+                })?;
         Ok(found.map(|_| Hit {
             start: at,
             end: at.after(finder.needle(), encoding),
         }))
     }
 
-    fn boundary(&mut self, index: u64) -> Result<u64, String> {
+    fn boundary(&mut self, index: u64) -> Result<u64, TransferError> {
         if index == 0 {
             return Ok(0);
         }
@@ -268,7 +266,7 @@ impl<'a> Reader<'a> {
         Ok(base + split_at(&edge[..count], width, self.encoding) as u64)
     }
 
-    fn relocate(&mut self, from: Position, to: u64) -> Result<Position, String> {
+    fn relocate(&mut self, from: Position, to: u64) -> Result<Position, TransferError> {
         let mut byte = from.byte.min(to);
         let end = from.byte.max(to);
         let mut lines = 0;
@@ -289,7 +287,7 @@ impl<'a> Reader<'a> {
         })
     }
 
-    fn end_position(&mut self, mut from: Position) -> Result<Position, String> {
+    fn end_position(&mut self, mut from: Position) -> Result<Position, TransferError> {
         if let Some(size) = self.size {
             return self.relocate(from, size);
         }
@@ -303,22 +301,16 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn read_exact_at<'b>(&mut self, byte: u64, buffer: &'b mut [u8]) -> Result<&'b [u8], String> {
-        self.source
-            .read_exact_at(byte, buffer)
-            .map_err(exact_read_error)
+    fn read_exact_at<'b>(
+        &mut self,
+        byte: u64,
+        buffer: &'b mut [u8],
+    ) -> Result<&'b [u8], TransferError> {
+        self.source.read_exact_at(byte, buffer)
     }
 
-    fn read_at(&mut self, byte: u64, buffer: &mut [u8]) -> Result<usize, String> {
-        self.source.read_at(byte, buffer).map_err(read_error)
-    }
-}
-
-fn exact_read_error(error: io::Error) -> String {
-    if error.kind() == io::ErrorKind::UnexpectedEof {
-        changed()
-    } else {
-        read_error(error)
+    fn read_at(&mut self, byte: u64, buffer: &mut [u8]) -> Result<usize, TransferError> {
+        self.source.read_at(byte, buffer)
     }
 }
 
@@ -375,14 +367,6 @@ impl PageText {
     }
 }
 
-pub(super) fn changed() -> String {
-    crate::i18n::text!("Текстовый файл изменился. Откройте быстрый просмотр заново.").into()
-}
-
-pub(super) fn read_error(error: io::Error) -> String {
-    crate::tr_format!("Could not read text: {error}", error = error)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,7 +375,7 @@ mod tests {
     fn fixture(bytes: &[u8]) -> (tempfile::NamedTempFile, Source) {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         file.write_all(bytes).unwrap();
-        let source = Source::Local(file.reopen().unwrap());
+        let source = Source::open(&crate::vfs::Location::Local(file.path().into())).unwrap();
         (file, source)
     }
 

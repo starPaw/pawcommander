@@ -1,8 +1,8 @@
 use super::{Codec, Position, Separator};
-use crate::operations::Cancellation;
+use crate::operations::{Cancellation, TransferError};
 use csv_core::{ReadRecordResult, Reader, ReaderBuilder};
 use encoding_rs::{Decoder, DecoderResult};
-use std::io::{self, BufRead, Cursor};
+use std::io::{BufRead, Cursor};
 
 pub(super) const SAMPLE_BYTES: usize = 32 * 1024;
 const RECORD_BYTES: usize = 256 * 1024;
@@ -40,14 +40,14 @@ impl<R: BufRead> TextInput<R> {
         }
     }
 
-    fn fill(&mut self, cancel: &Cancellation) -> Result<&[u8], String> {
-        cancel.check().map_err(read_error)?;
+    fn fill(&mut self, cancel: &Cancellation) -> Result<&[u8], TransferError> {
+        cancel.check()?;
         let Some(decoder) = self.decoder.as_mut() else {
-            return self.raw.fill_buf().map_err(read_error);
+            return self.raw.fill_buf().map_err(Into::into);
         };
         while self.consumed == self.text.len() && !self.eof && !self.malformed {
-            cancel.check().map_err(read_error)?;
-            let bytes = self.raw.fill_buf().map_err(read_error)?;
+            cancel.check()?;
+            let bytes = self.raw.fill_buf()?;
             let last = bytes.is_empty();
             self.consumed = 0;
             self.text.clear();
@@ -63,13 +63,13 @@ impl<R: BufRead> TextInput<R> {
                 DecoderResult::Malformed(..) => self.malformed = true,
                 DecoderResult::InputEmpty => self.eof = last,
                 DecoderResult::OutputFull if self.text.is_empty() => {
-                    return Err(self.encoding.error())
+                    return Err(self.encoding.error().into())
                 }
                 DecoderResult::OutputFull => {}
             }
         }
         if self.consumed == self.text.len() && self.malformed {
-            return Err(self.encoding.error());
+            return Err(self.encoding.error().into());
         }
         Ok(&self.text.as_bytes()[self.consumed..])
     }
@@ -133,7 +133,10 @@ impl<R: BufRead> Records<R> {
         self.position
     }
 
-    pub(super) fn next(&mut self, cancel: &Cancellation) -> Result<Option<Record<'_>>, String> {
+    pub(super) fn next(
+        &mut self,
+        cancel: &Cancellation,
+    ) -> Result<Option<Record<'_>>, TransferError> {
         let number = self.position.records + 1;
         let mut written = 0;
         let mut fields = 0;
@@ -151,16 +154,16 @@ impl<R: BufRead> Records<R> {
             written += bytes;
             fields += columns;
             if written > RECORD_BYTES || status == ReadRecordResult::OutputFull {
-                return Err(crate::tr_format!(
-                    "Record {number} exceeds 256 KiB.",
-                    number = number
-                ));
+                return Err(
+                    crate::tr_format!("Record {number} exceeds 256 KiB.", number = number).into(),
+                );
             }
             if fields > COLUMNS || status == ReadRecordResult::OutputEndsFull {
                 return Err(crate::tr_format!(
                     "Record {number} has more than 256 columns.",
                     number = number
-                ));
+                )
+                .into());
             }
             match status {
                 ReadRecordResult::Record => {
@@ -245,10 +248,6 @@ pub(super) fn detect(
         }
     }
     separator
-}
-
-pub(super) fn read_error(error: io::Error) -> String {
-    crate::tr_format!("Could not read table: {error}", error = error)
 }
 
 #[cfg(test)]

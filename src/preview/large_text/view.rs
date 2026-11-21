@@ -3,8 +3,9 @@ use super::{
     Codec, Direction, Position, QUERY_CHARS,
 };
 use crate::{
-    i18n::text,
+    i18n::{file_error, text},
     icons::{self, Icon},
+    operations::TransferError,
     preview::{code::Highlights, markup, source::Version},
     vfs::Location,
 };
@@ -15,7 +16,7 @@ pub(in crate::preview) struct Document {
     markup: Option<markup::Document>,
     encoding: Codec,
     source: bool,
-    viewer: Option<Result<Viewer, String>>,
+    viewer: Option<Result<Viewer, TransferError>>,
 }
 
 impl Document {
@@ -61,7 +62,7 @@ impl Document {
         match viewer {
             Ok(viewer) => viewer.show(ui),
             Err(error) => {
-                ui.colored_label(ui.visuals().error_fg_color, error.as_str());
+                ui.colored_label(ui.visuals().error_fg_color, file_error(error));
             }
         }
     }
@@ -84,12 +85,16 @@ struct Viewer {
     query: String,
     line: String,
     notice: Option<crate::i18n::MessageKey>,
-    error: Option<String>,
+    error: Option<TransferError>,
     focus: Option<(egui::ViewportId, [egui::Id; 3], bool)>,
 }
 
 impl Viewer {
-    fn new(location: Location, encoding: Codec, ctx: &egui::Context) -> Result<Self, String> {
+    fn new(
+        location: Location,
+        encoding: Codec,
+        ctx: &egui::Context,
+    ) -> Result<Self, TransferError> {
         let worker = worker::start(location, encoding, ctx)?;
         let pending = worker.load((
             Work::Page {
@@ -125,7 +130,7 @@ impl Viewer {
         let query = self.find_controls(ui);
         self.update();
         if let Some(error) = &self.error {
-            ui.colored_label(ui.visuals().error_fg_color, error);
+            ui.colored_label(ui.visuals().error_fg_color, file_error(error));
         } else if let Some(notice) = self.notice {
             ui.label(text(notice));
         }

@@ -137,6 +137,69 @@ fn check_sftp_access_errors(remote_root: &Location) {
     fs::remove_file(source.path()).unwrap();
 }
 
+#[cfg(target_os = "macos")]
+fn check_sftp_preview_errors(remote_root: &Location) {
+    use crate::file_error::{AccessAction, AccessCause, Failure};
+    use std::os::unix::fs::PermissionsExt;
+
+    let missing = remote_root.join("missing preview.txt");
+    let denied = remote_root.join("unreadable preview.txt");
+    let bytes = b"fixture kept after preview failures";
+    fs::write(denied.path(), bytes).unwrap();
+    let mode = fs::metadata(denied.path()).unwrap().permissions();
+    fs::set_permissions(denied.path(), fs::Permissions::from_mode(0o000)).unwrap();
+    let cancel = Cancellation::default();
+    let absent = preview_data(&missing, 32, &cancel);
+    let blocked = crate::vfs::open_preview_stream(&denied);
+    fs::set_permissions(denied.path(), mode).unwrap();
+
+    for (error, path, action, code) in [
+        (
+            absent.err().unwrap(),
+            &missing,
+            AccessAction::ReadMetadata,
+            libssh2_sys::LIBSSH2_FX_NO_SUCH_FILE,
+        ),
+        (
+            blocked.err().unwrap(),
+            &denied,
+            AccessAction::OpenFile,
+            libssh2_sys::LIBSSH2_FX_PERMISSION_DENIED,
+        ),
+    ] {
+        let TransferError::Failed(Failure::Access(details)) = &error else {
+            panic!("lost preview access error: {error:?}");
+        };
+        assert_eq!(&details.location, path);
+        assert_eq!(details.action, action);
+        assert!(
+            matches!(&details.cause, AccessCause::Sftp(source) if source.code() == ssh2::ErrorCode::SFTP(code))
+        );
+        assert!(crate::i18n::file_error(&error).contains(&path.display()));
+    }
+
+    let mut read_only_destination = fs::File::open(denied.path()).unwrap();
+    let failed_cache =
+        cache_media_preview(&denied, &mut read_only_destination, 64, &cancel).unwrap_err();
+    assert!(
+        matches!(failed_cache, TransferError::Failed(Failure::Access(details))
+        if details.location == denied && details.action == AccessAction::WritePreviewCache
+        && matches!(&details.cause, AccessCause::Local(source) if source.raw_os_error() == Some(libc::EBADF)))
+    );
+
+    let mut checks = 0;
+    let cancel = Cancellation::at_checkpoint(move || {
+        checks += 1;
+        checks == 4
+    });
+    assert!(matches!(
+        preview_data(&denied, 4, &cancel),
+        Err(TransferError::Cancelled)
+    ));
+    assert_eq!(fs::read(denied.path()).unwrap(), bytes);
+    fs::remove_file(denied.path()).unwrap();
+}
+
 fn check_sftp_deletion_results(remote_root: &Location) {
     use crate::file_error::{Failure, MutationError, SftpRemovalAction};
     use crate::result_history::Outcome;
@@ -1217,6 +1280,8 @@ fn openssh_round_trip_and_host_verification() {
     #[cfg(target_os = "macos")]
     check_sftp_access_errors(&remote_root);
     #[cfg(target_os = "macos")]
+    check_sftp_preview_errors(&remote_root);
+    #[cfg(target_os = "macos")]
     check_sftp_editor(
         &local_root,
         &remote_root,
@@ -1503,16 +1568,24 @@ fn openssh_round_trip_and_host_verification() {
     )
     .unwrap();
     assert_eq!(
-        preview_data(&uploaded.join("hello world.txt"), 5)
-            .unwrap()
-            .1
-            .len(),
+        preview_data(
+            &uploaded.join("hello world.txt"),
+            5,
+            &Cancellation::default()
+        )
+        .unwrap()
+        .1
+        .len(),
         6
     );
     assert_eq!(
-        preview_data(&uploaded.join("hello world.txt"), 1024)
-            .unwrap()
-            .1,
+        preview_data(
+            &uploaded.join("hello world.txt"),
+            1024,
+            &Cancellation::default()
+        )
+        .unwrap()
+        .1,
         "Привет, SFTP!\n".as_bytes()
     );
     {
@@ -1581,7 +1654,10 @@ fn openssh_round_trip_and_host_verification() {
             checks == 3
         });
         destination.clear();
-        assert!(cache_media_preview(&location, &mut destination, 1024, &cancel).is_err());
+        assert!(matches!(
+            cache_media_preview(&location, &mut destination, 1024, &cancel),
+            Err(TransferError::Cancelled)
+        ));
         assert!(destination.is_empty());
     }
     fs::write(file_source.path(), "replacement").unwrap();

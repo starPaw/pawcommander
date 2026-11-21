@@ -2,7 +2,11 @@ use super::{
     worker::{Bookmark, Scan, Settings, Worker},
     Codec, Position, Row, Separator,
 };
-use crate::{i18n::text, vfs::Location};
+use crate::{
+    i18n::{file_error, text},
+    operations::TransferError,
+    vfs::Location,
+};
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 use std::time::{Duration, Instant};
@@ -28,7 +32,7 @@ struct Page {
     columns: usize,
     scanned: u64,
     next: Option<Position>,
-    error: Option<String>,
+    error: Option<TransferError>,
 }
 
 impl Document {
@@ -99,7 +103,7 @@ impl Document {
         self.update();
         self.navigation(ui);
         if let Some(error) = &self.page.error {
-            ui.colored_label(ui.visuals().error_fg_color, error);
+            ui.colored_label(ui.visuals().error_fg_color, file_error(error));
         } else if self.scan.is_none() && self.filter_due.is_none() && self.page.rows.is_empty() {
             ui.label(if self.settings.query.is_empty() {
                 text!("В таблице нет строк данных.")

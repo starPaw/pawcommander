@@ -2,8 +2,8 @@ use super::text;
 use crate::file_error::{
     AccessAction, AccessCause, AccessError, ArchiveMemberError, ConnectionError, Failure,
     HostKeyError, KnownHostEntryError, KnownHostsError, ListingError, ListingErrorKind,
-    LocalPathAction, MutationError, PathError, PinError, PublicationError, RecoveryNotice,
-    SshStage, StagingCleanupError,
+    LocalPathAction, MutationError, PathError, PinError, PreviewError, PublicationError,
+    RecoveryNotice, SshStage, StagingCleanupError,
 };
 use crate::operations::TransferError;
 use crate::vfs::{DeletionFailure, TransferFailure};
@@ -15,6 +15,7 @@ pub(crate) fn file_error(error: &TransferError) -> String {
                 Failure::Path(error) => path_error(error),
                 Failure::Connection(error) => connection_error(error),
                 Failure::Access(error) => access_error(error),
+                Failure::Preview(error) => preview_error(error),
                 Failure::ComparisonPane { right, cause } => {
                     let pane = if *right {
                         text!("Правая панель")
@@ -177,8 +178,49 @@ fn access_error(error: &AccessError) -> String {
             return crate::tr_format!("Could not open {}: {error}", error.location, error = cause);
         }
         AccessAction::ReadChildren => text!("Не удалось прочитать папку"),
+        AccessAction::ReadFile => text!("Не удалось прочитать файл"),
+        #[cfg(target_os = "macos")]
+        AccessAction::WritePreviewCache => {
+            text!("Не удалось записать временный файл предпросмотра")
+        }
     };
     format!("{action} «{}»: {cause}", error.location)
+}
+
+fn preview_error(error: &PreviewError) -> String {
+    let (message, location) = match error {
+        PreviewError::UnsupportedFile(location) => {
+            let message = if location.remote() {
+                text!("Предпросмотр ссылок и специальных файлов SFTP недоступен")
+            } else {
+                text!("Предпросмотр специальных файлов недоступен.")
+            };
+            (message, location)
+        }
+        PreviewError::ChangedBeforeRead(location) => {
+            (text!("Файл изменился перед чтением"), location)
+        }
+        PreviewError::ChangedWhileReading(location) => (
+            text!("Файл изменился во время чтения. Откройте предпросмотр заново."),
+            location,
+        ),
+        #[cfg(target_os = "macos")]
+        PreviewError::MediaLimit { location, limit } => {
+            let mib = 1024 * 1024;
+            let size = if limit.is_multiple_of(mib) {
+                format!("{} {}", limit / mib, text!("МиБ"))
+            } else {
+                format!("{} {}", limit, text!("Б"))
+            };
+            return crate::tr_format!(
+                "The SFTP media file exceeds {size}. Open a local copy of {location}.",
+                size = size,
+                location = location
+            );
+        }
+        PreviewError::WorkerUnavailable => return text!("Служба предпросмотра недоступна").into(),
+    };
+    format!("{message} · {location}")
 }
 
 pub(crate) fn deletion_failure(failure: &DeletionFailure) -> String {

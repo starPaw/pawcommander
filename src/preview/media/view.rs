@@ -1,5 +1,10 @@
 use super::{media_error, session::Session, Command, Frame, Metadata, Mode, Snapshot, State};
-use crate::{i18n::text, operations::Cancellation, preview::metadata, vfs::Location};
+use crate::{
+    i18n::{file_error, text},
+    operations::{Cancellation, TransferError},
+    preview::metadata,
+    vfs::Location,
+};
 use eframe::egui;
 use std::{
     sync::{mpsc, Arc, Mutex},
@@ -12,7 +17,7 @@ pub(in crate::preview) struct Player {
     controller: Option<Controller>,
     state: State,
     metadata: Metadata,
-    error: Option<String>,
+    error: Option<TransferError>,
     texture: Option<egui::TextureHandle>,
     seek_widget: Option<egui::Id>,
     dragging_to: Option<f64>,
@@ -63,7 +68,7 @@ impl Player {
         let scroll_preview = available_height < 200.0;
         let mut draw = |ui: &mut egui::Ui| {
             if let Some(error) = &self.error {
-                ui.colored_label(ui.visuals().error_fg_color, error);
+                ui.colored_label(ui.visuals().error_fg_color, file_error(error));
                 self.show_metadata(ui, !scroll_preview);
                 return;
             }
@@ -219,7 +224,7 @@ impl Player {
         {
             return Some(self.ticket);
         }
-        self.error = Some(media_error());
+        self.error = Some(media_error().into());
         None
     }
 
@@ -228,7 +233,7 @@ impl Player {
             return;
         };
         let Ok(mut mailbox) = controller.latest.lock() else {
-            self.error = Some(media_error());
+            self.error = Some(media_error().into());
             return;
         };
         let update = std::mem::take(&mut *mailbox);
@@ -275,7 +280,7 @@ struct Update {
     state: Option<(u64, State)>,
     frame: Option<Frame>,
     metadata: Option<Metadata>,
-    error: Option<String>,
+    error: Option<TransferError>,
 }
 
 struct Controller {
@@ -289,7 +294,7 @@ impl Controller {
         location: Location,
         cancel: Cancellation,
         ctx: &egui::Context,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, TransferError> {
         let (commands, incoming) = mpsc::channel();
         let latest = Arc::new(Mutex::new(Update::default()));
         let worker_latest = latest.clone();
@@ -335,7 +340,7 @@ fn run(
     latest: &Mutex<Update>,
     cancel: &Cancellation,
     repaint: &impl Fn(),
-) -> Result<(), String> {
+) -> Result<(), TransferError> {
     let mut session = Session::open(location, cancel)?;
     let began = Instant::now();
     let mut state = State::default();

@@ -1,6 +1,7 @@
 use super::{PAGE_BYTES, PATTERN_LIMIT};
 use crate::{
-    operations::Cancellation,
+    file_error::PreviewError,
+    operations::{Cancellation, TransferError},
     preview::{
         read_worker,
         source::{Source, Version, Window, READ_BLOCK},
@@ -9,7 +10,7 @@ use crate::{
 };
 use eframe::egui;
 use memchr::memmem;
-use std::{io, ops::Range};
+use std::ops::Range;
 
 #[derive(Clone, Copy)]
 pub(super) enum Direction {
@@ -44,11 +45,10 @@ type Output = (Version, ResultPage);
 pub(super) type Worker = read_worker::Worker<(Work, Option<Version>), Output>;
 pub(super) type Pending = read_worker::Pending<Output>;
 
-pub(super) fn start(location: Location, ctx: &egui::Context) -> Result<Worker, String> {
+pub(super) fn start(location: Location, ctx: &egui::Context) -> Result<Worker, TransferError> {
     Worker::start("pawcommander-hex", ctx, move |(work, version), cancel| {
         run(&location, work, *version, cancel)
     })
-    .map_err(read_error)
 }
 
 fn run(
@@ -56,12 +56,12 @@ fn run(
     work: &Work,
     expected: Option<Version>,
     cancel: &Cancellation,
-) -> Result<Output, String> {
-    cancel.check().map_err(read_error)?;
+) -> Result<Output, TransferError> {
+    cancel.check()?;
     let mut source = Source::open(location)?;
-    let version = source.version().map_err(read_error)?;
+    let version = source.version()?;
     if expected.is_some_and(|expected| version != expected) {
-        return Err(changed());
+        return Err(PreviewError::ChangedWhileReading(location.clone()).into());
     }
     let mut window = Window::new(&mut source, version.size, cancel);
     let result = match work {
@@ -79,9 +79,9 @@ fn run(
             }
         }
     };
-    cancel.check().map_err(read_error)?;
-    if source.version().map_err(read_error)? != version {
-        return Err(changed());
+    cancel.check()?;
+    if source.version()? != version {
+        return Err(PreviewError::ChangedWhileReading(location.clone()).into());
     }
     Ok((version, result))
 }
@@ -90,13 +90,13 @@ fn read_page(
     window: &mut Window<'_>,
     offset: u64,
     hit: Option<Range<u64>>,
-) -> Result<ResultPage, String> {
+) -> Result<ResultPage, TransferError> {
     let start = offset / PAGE_BYTES * PAGE_BYTES;
     let through = hit
         .as_ref()
         .map_or(PAGE_BYTES, |hit| (hit.end - start).max(PAGE_BYTES));
     let mut bytes = vec![0; through as usize + 1];
-    let count = window.read_at(start, &mut bytes).map_err(read_error)?;
+    let count = window.read_at(start, &mut bytes)?;
     if offset != 0 && offset - start >= count as u64 {
         return Ok(ResultPage::OutsideFile);
     }
@@ -116,7 +116,7 @@ fn find(
     from: u64,
     pattern: &[u8],
     direction: Direction,
-) -> Result<Option<u64>, String> {
+) -> Result<Option<u64>, TransferError> {
     if pattern.is_empty() || pattern.len() > PATTERN_LIMIT {
         return Ok(None);
     }
@@ -125,18 +125,14 @@ fn find(
     match direction {
         Direction::Forward => {
             let finder = memmem::Finder::new(pattern);
-            let match_after = window
-                .find_forward(from..limit, &finder, 1, |_| {})
-                .map_err(read_error)?;
+            let match_after = window.find_forward(from..limit, &finder, 1, |_| {})?;
             if match_after.is_some() || from == 0 {
                 return Ok(match_after);
             }
             // The wrap range admits sequences that begin before the search
             // origin and cross it. Their starts still precede the origin.
             let end = from.saturating_add(overlap).min(limit);
-            window
-                .find_forward(0..end, &finder, 1, |_| {})
-                .map_err(read_error)
+            window.find_forward(0..end, &finder, 1, |_| {})
         }
         Direction::Backward => {
             let finder = memmem::FinderRev::new(pattern);
@@ -145,11 +141,9 @@ fn find(
                     from.saturating_add(overlap).min(size)
                 } else {
                     let mut tail = vec![0; overlap as usize];
-                    from + window.read_at(from, &mut tail).map_err(read_error)? as u64
+                    from + window.read_at(from, &mut tail)? as u64
                 };
-                let match_before = window
-                    .find_backward(0..end, &finder, 1, |_| {})
-                    .map_err(read_error)?;
+                let match_before = window.find_backward(0..end, &finder, 1, |_| {})?;
                 if match_before.is_some() {
                     return Ok(match_before);
                 }
@@ -159,33 +153,20 @@ fn find(
             } else {
                 find_end(window, from)?
             };
-            window
-                .find_backward(from..end, &finder, 1, |_| {})
-                .map_err(read_error)
+            window.find_backward(from..end, &finder, 1, |_| {})
         }
     }
 }
 
-fn find_end(window: &mut Window<'_>, mut at: u64) -> Result<u64, String> {
+fn find_end(window: &mut Window<'_>, mut at: u64) -> Result<u64, TransferError> {
     let mut buffer = [0; READ_BLOCK];
     loop {
-        let count = window.read_at(at, &mut buffer).map_err(read_error)?;
+        let count = window.read_at(at, &mut buffer)?;
         at += count as u64;
         if count < buffer.len() {
             return Ok(at);
         }
     }
-}
-
-fn changed() -> String {
-    crate::i18n::text!("Файл изменился. Откройте быстрый просмотр заново.").into()
-}
-
-fn read_error(error: io::Error) -> String {
-    if error.kind() == io::ErrorKind::UnexpectedEof {
-        return changed();
-    }
-    crate::tr_format!("Could not read file bytes. {error}", error = error)
 }
 
 #[cfg(test)]
@@ -238,7 +219,7 @@ mod tests {
         bytes[SECOND..SECOND + pattern.len()].copy_from_slice(pattern);
         let mut file = tempfile::NamedTempFile::new().unwrap();
         file.write_all(&bytes).unwrap();
-        let mut source = Source::Local(file.reopen().unwrap());
+        let mut source = Source::open(&Location::Local(file.path().into())).unwrap();
         let size = bytes.len() as u64;
         let cancel = Cancellation::default();
         let mut window = Window::new(&mut source, Some(size), &cancel);
@@ -306,7 +287,7 @@ mod tests {
         assert_eq!(&hit_page.bytes[PAGE_BYTES as usize - 2..], pattern);
         assert!(hit_page.has_next);
 
-        let mut source = Source::Local(file.reopen().unwrap());
+        let mut source = Source::open(&Location::Local(file.path().into())).unwrap();
         let mut unknown_size = Window::new(&mut source, None, &cancel);
         assert_eq!(
             find(

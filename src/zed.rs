@@ -12,8 +12,13 @@ pub fn open(location: &Location, text_only: bool) -> Result<String, String> {
     let argument = argument(location)?;
     let cli = crate::tools::zed_cli().ok_or(crate::i18n::text!("Zed не найден. Установите Zed; при нестандартной установке выполните в Zed команду «cli: install cli binary» и обновите проверку в настройках PawCommander."))?;
     if text_only && location.remote() {
-        let (stat, bytes) = vfs::preview_data(location, TEXT_SAMPLE)
-            .map_err(|e| crate::tr_format!("Could not check the SFTP text file: {e}", e = e))?;
+        let (stat, bytes) =
+            vfs::preview_data(location, TEXT_SAMPLE, &Default::default()).map_err(|error| {
+                crate::tr_format!(
+                    "Could not check the SFTP text file: {e}",
+                    e = crate::i18n::file_error(&error)
+                )
+            })?;
         if stat.is_dir()
             || !is_text(
                 &bytes[..bytes.len().min(TEXT_SAMPLE)],

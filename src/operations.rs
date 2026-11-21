@@ -5,7 +5,7 @@ mod bandwidth;
 
 use crate::file_error::{
     AccessCause, AccessError, ConnectionError, Failure, HostKeyError, ListingError, MutationError,
-    PathError, PublicationError, RecoveryNotice,
+    PathError, PreviewError, PublicationError, RecoveryNotice,
 };
 use crate::vfs::{Endpoint, Location};
 use bandwidth::Pacer;
@@ -145,6 +145,23 @@ impl Cancellation {
         Ok(())
     }
 
+    pub(crate) fn read_up_to(&self, input: &mut impl Read, limit: usize) -> io::Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        let mut block = [0; 64 * 1024];
+        while bytes.len() < limit {
+            self.check()?;
+            let count = (limit - bytes.len()).min(block.len());
+            match input.read(&mut block[..count]) {
+                Ok(0) => break,
+                Ok(count) => bytes.extend_from_slice(&block[..count]),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        self.check()?;
+        Ok(bytes)
+    }
+
     fn check_requested(&self) -> io::Result<()> {
         if self.is_requested() {
             Err(io::Error::other(Cancelled))
@@ -263,12 +280,22 @@ impl From<PathError> for TransferError {
 impl From<AccessError> for TransferError {
     fn from(error: AccessError) -> Self {
         match &error.cause {
-            AccessCause::Local(source) if Self::is_cancelled_io(source) => Self::Cancelled,
+            AccessCause::Local(source) | AccessCause::SftpStream(source)
+                if Self::is_cancelled_io(source) =>
+            {
+                Self::Cancelled
+            }
             AccessCause::Connection(source) if matches!(source.as_ref(), Self::Cancelled) => {
                 Self::Cancelled
             }
             _ => Self::Failed(Failure::Access(Box::new(error))),
         }
+    }
+}
+
+impl From<PreviewError> for TransferError {
+    fn from(error: PreviewError) -> Self {
+        Self::Failed(Failure::Preview(Box::new(error)))
     }
 }
 
