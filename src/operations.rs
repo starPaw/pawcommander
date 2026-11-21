@@ -447,11 +447,11 @@ impl Progress {
         Ok(())
     }
 
-    fn next_block(&mut self, maximum: u64, traffic: CopyTraffic) -> io::Result<u64> {
+    fn next_block(&mut self, maximum: u64, traffic: CopyTraffic) -> io::Result<(u64, bool)> {
         let cancel = self.cancel.clone();
         let Some(transfer) = &cancel.control.transfer else {
             self.check_cancelled()?;
-            return Ok(maximum);
+            return Ok((maximum, false));
         };
         loop {
             self.checkpoint()?;
@@ -465,7 +465,7 @@ impl Progress {
                 CopyTraffic::Readback => state.readback_rate,
             };
             match self.pacer.block(maximum, rate, Instant::now()) {
-                Ok(bytes) => return Ok(bytes),
+                Ok(bytes) => return Ok((bytes, rate != 0)),
                 Err(wait) => {
                     let _state = transfer.changed.wait_timeout(state, wait).unwrap();
                 }
@@ -521,8 +521,8 @@ impl Progress {
                 let full = buffer.len() as u64;
                 let maximum =
                     expected.map_or(full, |size| size.saturating_sub(written).clamp(1, full));
-                let limit = progress.next_block(maximum, CopyTraffic::Payload)? as usize;
-                let read = match input.read(&mut buffer[..limit]) {
+                let (limit, paced) = progress.next_block(maximum, CopyTraffic::Payload)?;
+                let read = match input.read(&mut buffer[..limit as usize]) {
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                     result => result?,
                 };
@@ -545,6 +545,11 @@ impl Progress {
                     written += count as u64;
                     progress.wrote(count as u64);
                     pending = &pending[count..];
+                }
+                // Send the admitted block before a buffered writer can combine
+                // it with data from later pacing intervals.
+                if paced {
+                    output.flush()?;
                 }
                 progress.pacer.spend(read as u64);
             }
@@ -586,7 +591,7 @@ impl Progress {
             let mut written = 0;
             progress.checkpoint()?;
             while written < expected {
-                let limit =
+                let (limit, _) =
                     progress.next_block(CHUNK.min(expected - written), CopyTraffic::Payload)?;
                 let chunk = io::copy(&mut (&mut *input).take(limit), output)?;
                 written += chunk;
@@ -675,7 +680,8 @@ impl Progress {
             let limit = (expected - read).min(buffer.len() as u64) as usize;
             let size = if limit == 0 { 1 } else { limit };
             let size = if staged_copy {
-                self.next_block(size as u64, CopyTraffic::Readback)? as usize
+                let (limit, _) = self.next_block(size as u64, CopyTraffic::Readback)?;
+                limit as usize
             } else {
                 check(self)?;
                 size
@@ -785,6 +791,28 @@ fn verify_hash(path: &Path, expected: [u8; 32], actual: Option<[u8; 32]>) -> io:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transfer_speed_flushes_paced_output_to_the_staged_writer() {
+        let (mut progress, view) = Progress::tracked_transfer();
+        let mut limits = TransferLimits::default();
+        limits.global_kib = 64;
+        view.set_transfer_limits(&limits);
+        let payload = b"paced payload";
+        let mut output = io::BufWriter::new(Vec::new());
+        assert_eq!(
+            progress
+                .copy(
+                    Path::new("source"),
+                    Some(payload.len() as u64),
+                    &mut payload.as_slice(),
+                    &mut output,
+                )
+                .unwrap(),
+            payload.len() as u64
+        );
+        assert_eq!(output.get_ref().as_slice(), payload);
+    }
 
     #[test]
     fn copy_hash_verification_checks_content_length_errors_and_write_accounting() {
