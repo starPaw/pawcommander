@@ -163,6 +163,8 @@ impl PawCommander {
             #[cfg(target_os = "macos")]
             Command::DiskUsage => Action::DiskUsage(None),
             #[cfg(target_os = "macos")]
+            Command::Collections => Action::Collections(None),
+            #[cfg(target_os = "macos")]
             Command::SyncFolders => Action::SyncFolders(None),
             Command::AddToArchive => Action::AddToArchive,
             Command::RemoveFromArchive => Action::RemoveFromArchive,

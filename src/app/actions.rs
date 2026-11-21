@@ -90,6 +90,8 @@ pub(super) enum Action {
     #[cfg(target_os = "macos")]
     DiskUsage(Option<egui::Id>),
     #[cfg(target_os = "macos")]
+    Collections(Option<egui::Id>),
+    #[cfg(target_os = "macos")]
     SyncFolders(Option<egui::Id>),
     AddToArchive,
     RemoveFromArchive,
@@ -744,6 +746,8 @@ impl PawCommander {
             Action::FindDuplicates(return_focus) => self.open_duplicates(return_focus, ctx),
             #[cfg(target_os = "macos")]
             Action::DiskUsage(return_focus) => self.open_disk_usage(return_focus, ctx),
+            #[cfg(target_os = "macos")]
+            Action::Collections(return_focus) => self.open_collections(return_focus, ctx),
             #[cfg(target_os = "macos")]
             Action::SyncFolders(return_focus) => self.open_folder_sync(return_focus, ctx),
             Action::Trash if !self.conflict_open() => {

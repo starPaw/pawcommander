@@ -5,6 +5,8 @@ mod address_bar;
 mod batch_rename;
 mod bookmarks;
 mod clipboard;
+#[cfg(target_os = "macos")]
+mod collections;
 mod column_view;
 mod comparison;
 #[cfg(target_os = "macos")]
@@ -102,6 +104,8 @@ pub struct PawCommander {
     workspaces: Vec<NamedWorkspace>,
     #[cfg(target_os = "macos")]
     sync_profiles: Vec<sync_profiles::SyncProfile>,
+    #[cfg(target_os = "macos")]
+    collections: crate::vfs::collections::Catalog,
     preview: Preview,
     thumbnails: Thumbnails,
     quick_look: Option<QuickLook>,
@@ -705,7 +709,10 @@ impl eframe::App for PawCommander {
         eframe::set_value(storage, Self::SESSION_KEY, &session);
         eframe::set_value(storage, Self::WORKSPACES_KEY, &self.workspaces);
         #[cfg(target_os = "macos")]
-        eframe::set_value(storage, Self::SYNC_PROFILES_KEY, &self.sync_profiles);
+        {
+            eframe::set_value(storage, Self::SYNC_PROFILES_KEY, &self.sync_profiles);
+            eframe::set_value(storage, Self::COLLECTIONS_KEY, &self.collections);
+        }
         eframe::set_value(storage, Self::FOLDER_VIEWS_KEY, &saved_views);
         self.search.save(storage);
     }

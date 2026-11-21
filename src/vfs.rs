@@ -6,6 +6,8 @@ mod archive_edit;
 mod archive_extract;
 mod batch_rename;
 mod checksum;
+#[cfg(target_os = "macos")]
+pub(crate) mod collections;
 mod compare;
 mod copy_metadata;
 mod cross_move;

@@ -297,6 +297,14 @@ Open a local folder and choose **Analyze disk usage** from Settings or the comma
 
 The scan counts allocated blocks reported by macOS for files and folders, skips symbolic-link targets and counts hard links once, under the first path in name order. APFS clones can share blocks, so the values are estimates of space attributed to the scanned entries. **Stop** keeps the sizes already counted. Missing folders, read errors and the scan limit are shown with partial results. The scan supports 100,000 entries, 32 MiB of paths and 128 folder levels.
 
+## Tags and collections on macOS
+
+Select local files or folders and open **Tags and collections** from Settings or the command palette. Create or choose a collection, then click **Add selection**. Enter comma-separated PawCommander tags when adding several objects. Select an existing row to edit its tags, use **Filter by tag** to find tagged items, or choose **Show in pane** to select the item at its current location. Removing an item or a collection removes its saved references. The files and folders stay where they are.
+
+Opening a collection or clicking **Refresh** checks its references. PawCommander finds renamed or moved objects on volumes with stable file identifiers, including APFS. A missing item stays in the collection with its last known path and an explanation. To reconnect it, select the intended file or folder in the pane, open the collection, select the unavailable row, and choose **Relink to selection**.
+
+To transfer a collection, open its common parent folder first. Under **Import and export collections**, enter a filename ending in `.pawcollection.json` and choose **Export to this folder**. The export includes paths relative to that folder and the assigned tags. Copy the exported file together with the referenced directory structure. In the destination folder, select the JSON file, open **Tags and collections** and choose **Import selected file**. All paths must resolve within that folder and have the expected file or folder type. An existing collection with the same name keeps its entries, and the imported collection receives a numbered name.
+
 ## One-way folder synchronization on macOS
 
 Open the two folders and choose **Folder sync preview** from Settings or the command palette. Select the source direction and choose **Build plan**. The preview lists each planned copy, replacement and deletion by relative path. It compares regular files by SHA-256 and symbolic links by their target paths.
