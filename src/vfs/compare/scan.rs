@@ -93,22 +93,14 @@ fn visit_local(
     cancel: &Cancellation,
     visit: Visitor<'_>,
 ) -> Result<(), TransferError> {
-    use crate::vfs::read_scope::local_subdirectory;
-    use rustix::fs::{fstat, readlinkat, statat, AtFlags, Dir, FileType};
-    use std::{io, os::unix::ffi::OsStrExt};
+    use crate::vfs::read_scope::{local_subdirectory, visit_local_entries};
+    use rustix::fs::{readlinkat, FileType};
+    use std::os::unix::ffi::OsStrExt;
 
     let nested = local_subdirectory(root, relative, cancel)?;
     let descriptor = nested.as_ref().unwrap_or(root);
-    let before = fstat(descriptor).map_err(io::Error::from)?;
-    let entries = Dir::read_from(descriptor).map_err(io::Error::from)?;
-    for item in entries {
-        cancel.check()?;
-        let item = item.map_err(io::Error::from)?;
-        let name = OsStr::from_bytes(item.file_name().to_bytes());
-        if name == "." || name == ".." {
-            continue;
-        }
-        let entry = match statat(descriptor, name, AtFlags::SYMLINK_NOFOLLOW) {
+    visit_local_entries(descriptor, cancel, |name, stat| {
+        let entry = match stat {
             Ok(stat) => match FileType::from_raw_mode(stat.st_mode) {
                 FileType::Directory => Entry::Directory,
                 FileType::RegularFile => Entry::File(FileInfo {
@@ -126,18 +118,8 @@ fn visit_local(
             },
             Err(error) => Entry::Unreadable(error.to_string()),
         };
-        visit(name.to_owned(), entry)?;
-    }
-    cancel.check()?;
-    let after = fstat(descriptor).map_err(io::Error::from)?;
-    if before.st_mtime != after.st_mtime
-        || before.st_mtime_nsec != after.st_mtime_nsec
-        || before.st_ctime != after.st_ctime
-        || before.st_ctime_nsec != after.st_ctime_nsec
-    {
-        return Err(folder_changed());
-    }
-    Ok(())
+        visit(name.to_owned(), entry)
+    })
 }
 
 fn visit_remote(

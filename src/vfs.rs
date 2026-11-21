@@ -34,6 +34,8 @@ mod staged_file;
 mod sync;
 mod transfer;
 mod undo;
+#[cfg(target_os = "macos")]
+pub(crate) mod usage;
 
 use std::fmt;
 

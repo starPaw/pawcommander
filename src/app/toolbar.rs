@@ -127,6 +127,8 @@ impl PawCommander {
                                 #[cfg(target_os = "macos")]
                                 (Command::FindDuplicates, Action::FindDuplicates(Some(button.id)), self.can_find_duplicates()),
                                 #[cfg(target_os = "macos")]
+                                (Command::DiskUsage, Action::DiskUsage(Some(button.id)), self.can_analyze_disk_usage()),
+                                #[cfg(target_os = "macos")]
                                 (Command::SyncFolders, Action::SyncFolders(Some(button.id)), self.can_open_folder_sync()),
                             ] {
                                 let compare = ui.add_enabled(enabled, egui::Button::new(
