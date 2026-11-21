@@ -11,7 +11,7 @@ use super::{
 use crate::{
     archive::{Extraction, SelectedTree},
     conflict::{Answer, Conflict, Decision, EntryDetails},
-    file_error::{ArchiveError, LocalPathAction, MutationError},
+    file_error::{ArchiveError, LocalPathAction, MutationError, ReplacementRefusal},
     fs_ops,
     operations::{Progress, TransferError},
     result_history::Outcome,
@@ -116,16 +116,21 @@ fn extract(
         if let Some(existing) = entry_metadata(&target)? {
             index += 1;
             let first = &tree.entries[0];
-            let can_replace = !first.is_dir()
-                && existing.is_file()
-                && match &existing {
+            let replacement_refusal = if first.is_dir() {
+                Some(ReplacementRefusal::SourceNotRegular)
+            } else if !existing.is_file() {
+                Some(ReplacementRefusal::TargetNotRegular)
+            } else {
+                let would_overwrite_archive = match &existing {
                     EntryMetadata::Local(metadata) => {
-                        !archive.is_source_file(target.path(), metadata)
+                        archive.is_source_file(target.path(), metadata)
                     }
-                    EntryMetadata::Remote(_) => tree.source.archive_source() != Some(target.path()),
+                    EntryMetadata::Remote(_) => tree.source.archive_source() == Some(target.path()),
                 };
+                would_overwrite_archive.then_some(ReplacementRefusal::WouldOverwriteArchive)
+            };
             let decision = if let Some(saved) =
-                group.filter(|&saved| saved != Decision::Replace || can_replace)
+                group.filter(|&saved| saved != Decision::Replace || replacement_refusal.is_none())
             {
                 saved
             } else {
@@ -138,7 +143,7 @@ fn extract(
                         modified: first.modified,
                     },
                     target: existing.details(&target),
-                    can_replace,
+                    replacement_refusal,
                     index,
                     count: count.max(index),
                 })?;
@@ -165,7 +170,7 @@ fn extract(
                     target = keep_both_name(&target, &reserved, &cancel)?;
                     reserved.insert(target.clone());
                 }
-                Decision::Replace if can_replace => replace = Some(existing),
+                Decision::Replace if replacement_refusal.is_none() => replace = Some(existing),
                 Decision::Replace => {
                     return Err(ArchiveError::ExtractionReplaceUnavailable(target).into())
                 }
@@ -188,6 +193,7 @@ fn extract(
                 &target,
                 replace.as_ref(),
                 |_| {},
+                || Ok(()),
                 || published = true,
             )
         });

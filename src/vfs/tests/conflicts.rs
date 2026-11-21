@@ -1,5 +1,7 @@
 use super::*;
-use crate::file_error::{Failure, TransferPlanError};
+use crate::file_error::{
+    ConflictError, Failure, PublicationError, ReplacementRefusal, TransferPlanError,
+};
 
 #[test]
 fn conflict_group_replaces_files_and_asks_again_for_a_directory() {
@@ -28,7 +30,7 @@ fn conflict_group_replaces_files_and_asks_again_for_a_directory() {
             prompted.push(conflict.index);
             assert_eq!(conflict.count, 3);
             if conflict.index == 1 {
-                assert!(conflict.can_replace);
+                assert!(conflict.can_replace());
                 assert_eq!(conflict.source.size, Some(9));
                 assert_eq!(conflict.target.size, Some(3));
                 assert!(conflict.source.modified.is_some());
@@ -38,7 +40,11 @@ fn conflict_group_replaces_files_and_asks_again_for_a_directory() {
                     apply_to_group: true,
                 })
             } else {
-                assert!(!conflict.can_replace);
+                assert!(!conflict.can_replace());
+                assert_eq!(
+                    conflict.replacement_refusal,
+                    Some(ReplacementRefusal::SourceNotRegular)
+                );
                 Ok(Answer {
                     decision: Decision::KeepBoth,
                     apply_to_group: false,
@@ -342,7 +348,7 @@ fn same_folder_move_stops_before_conflicts_but_copy_can_keep_both() {
         TransferKind::Copy,
         &mut Progress::default(),
         |conflict| {
-            assert!(!conflict.can_replace);
+            assert!(!conflict.can_replace());
             Ok(Answer {
                 decision: Decision::KeepBoth,
                 apply_to_group: false,
@@ -458,13 +464,38 @@ fn conflict_keeps_hard_link_aliases_and_creates_an_independent_copy() {
     fs::hard_link(source.path(), target.path()).unwrap();
     assert_ne!(canonical(&source).unwrap(), canonical(&target).unwrap());
 
+    let failure = transfer_with_conflicts(
+        std::slice::from_ref(&source),
+        &target_dir,
+        TransferKind::Copy,
+        &mut Progress::default(),
+        |conflict| {
+            assert_eq!(
+                conflict.replacement_refusal,
+                Some(ReplacementRefusal::SameFile)
+            );
+            Ok(Answer {
+                decision: Decision::Replace,
+                apply_to_group: false,
+            })
+        },
+        |_, _| panic!("same-file conflict cannot publish a replacement"),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(failure.error, TransferError::Failed(Failure::Conflict(reason))
+        if matches!(reason.as_ref(), ConflictError::ReplacementUnavailable { source: original, target: existing, reason: ReplacementRefusal::SameFile }
+            if original == &source && existing == &target))
+    );
+    assert_eq!(fs::read_dir(target_dir.path()).unwrap().count(), 1);
+
     let report = transfer_with_conflicts(
         std::slice::from_ref(&source),
         &target_dir,
         TransferKind::Copy,
         &mut Progress::default(),
         |conflict| {
-            assert!(!conflict.can_replace);
+            assert!(!conflict.can_replace());
             Ok(Answer {
                 decision: Decision::KeepBoth,
                 apply_to_group: false,
@@ -505,11 +536,11 @@ fn conflict_replace_preserves_changed_destination_and_restores_on_publish_error(
     )
     .unwrap_err();
     assert!(
-        crate::i18n::transfer_failure(&failure).contains(&crate::tr_format!(
-            "Destination {target} changed after the conflict dialog was shown",
-            target = target
-        ))
+        matches!(failure.error, TransferError::Failed(Failure::Publication(reason))
+        if matches!(reason.as_ref(), PublicationError::DestinationChanged(changed) if changed == &target))
     );
+    assert_eq!(failure.summary.completed, 0);
+    assert_eq!(fs::read(source.path()).unwrap(), b"new");
     assert_eq!(fs::read(target.path()).unwrap(), b"changed elsewhere");
 
     let expected = entry_metadata(&target).unwrap().unwrap();
@@ -518,6 +549,7 @@ fn conflict_replace_preserves_changed_destination_and_restores_on_publish_error(
         &target,
         Some(&expected),
         |_| {},
+        || Ok(()),
         || {
             panic!("missing payload cannot be published");
         }
@@ -525,4 +557,124 @@ fn conflict_replace_preserves_changed_destination_and_restores_on_publish_error(
     .is_err());
     assert_eq!(fs::read(target.path()).unwrap(), b"changed elsewhere");
     assert_eq!(fs::read_dir(target_dir.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn replacement_stops_when_the_approved_source_has_changed() {
+    for kind in [TransferKind::Copy, TransferKind::Move] {
+        let fixture = tempfile::tempdir().unwrap();
+        let root: Location = fixture.path().to_path_buf().into();
+        let destination = create_directory(&root, "destination").unwrap();
+        let source = root.join("report.txt");
+        let target = destination.join("report.txt");
+        let retired = root.join("earlier-source");
+        fs::write(source.path(), b"approved source").unwrap();
+        fs::write(target.path(), b"approved destination").unwrap();
+        let error = transfer_with_conflicts(
+            std::slice::from_ref(&source),
+            &destination,
+            kind,
+            &mut Progress::default(),
+            |conflict| {
+                assert!(conflict.can_replace());
+                fs::rename(source.path(), retired.path()).unwrap();
+                fs::write(source.path(), b"independent new source").unwrap();
+                Ok(Answer {
+                    decision: Decision::Replace,
+                    apply_to_group: false,
+                })
+            },
+            |_, _| panic!("unapproved source must not be published"),
+        )
+        .unwrap_err();
+        assert_eq!(error.summary.completed, 0);
+        assert!(
+            matches!(error.error, TransferError::Failed(Failure::Conflict(reason))
+            if matches!(reason.as_ref(), ConflictError::SourceChanged(path) if path == &source))
+        );
+        assert_eq!(fs::read(source.path()).unwrap(), b"independent new source");
+        assert_eq!(fs::read(retired.path()).unwrap(), b"approved source");
+        assert_eq!(fs::read(target.path()).unwrap(), b"approved destination");
+        assert_eq!(fs::read_dir(destination.path()).unwrap().count(), 1);
+    }
+}
+
+#[test]
+fn replacement_restores_the_destination_if_the_source_changes_after_backup() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root: Location = fixture.path().to_path_buf().into();
+    let source = root.join("source");
+    let target = root.join("target");
+    fs::write(source.path(), b"approved source").unwrap();
+    fs::write(target.path(), b"approved destination").unwrap();
+    let approved_source = entry_metadata(&source).unwrap().unwrap();
+    let approved_target = entry_metadata(&target).unwrap().unwrap();
+    let mut item = TransferItem::new(source.clone(), source.clone(), target.clone());
+    item.replacement = Some((approved_source, approved_target.clone()));
+    let error = publish_item_typed(
+        &source,
+        &target,
+        Some(&approved_target),
+        |_| {},
+        || {
+            if !target.path().exists() {
+                fs::write(source.path(), b"changed after destination backup").unwrap();
+            }
+            item.verify_approved_source(entry_metadata(&source)?.as_ref())
+        },
+        || panic!("the replacement must stop before the final rename"),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, TransferError::Failed(Failure::Conflict(reason))
+        if matches!(reason.as_ref(), ConflictError::SourceChanged(path) if path == &source))
+    );
+    assert_eq!(
+        fs::read(source.path()).unwrap(),
+        b"changed after destination backup"
+    );
+    assert_eq!(fs::read(target.path()).unwrap(), b"approved destination");
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn replacement_copy_keeps_the_approved_source_across_both_local_copy_paths() {
+    use super::super::{copy_metadata::Mode, transfer::copy_item_cancellable};
+
+    for resumable in [false, true] {
+        let fixture = tempfile::tempdir().unwrap();
+        let root: Location = fixture.path().to_path_buf().into();
+        let destination = create_directory(&root, "destination").unwrap();
+        let source = root.join("source");
+        let target = destination.join("target");
+        fs::write(source.path(), b"approved source").unwrap();
+        fs::write(target.path(), b"approved destination").unwrap();
+        let mut item = TransferItem::new(source.clone(), source.clone(), target.clone());
+        let approved_source = entry_metadata(&source).unwrap().unwrap();
+        let approved_target = entry_metadata(&target).unwrap().unwrap();
+        item.replacement = Some((approved_source, approved_target.clone()));
+        fs::write(source.path(), b"changed before the copy snapshot").unwrap();
+        let mut progress = Progress::default();
+        progress.resume_directory = resumable.then(|| root.join("recovery").path().to_owned());
+        let error = copy_item_cancellable(
+            &item,
+            Some(&approved_target),
+            &mut progress,
+            Mode::Final,
+            || panic!("a fresh copy snapshot must retain the earlier approval"),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, TransferError::Failed(Failure::Conflict(reason))
+            if matches!(reason.as_ref(), ConflictError::SourceChanged(path) if path == &source))
+        );
+        assert_eq!(
+            fs::read(source.path()).unwrap(),
+            b"changed before the copy snapshot"
+        );
+        assert_eq!(fs::read(target.path()).unwrap(), b"approved destination");
+        assert_eq!(fs::read_dir(destination.path()).unwrap().count(), 1);
+        assert!(!root.join("recovery").path().exists());
+    }
 }

@@ -226,7 +226,7 @@ fn a_bad_aes_authenticator_blocks_replacement_even_for_an_empty_member() {
 
     let mut saw_conflict = false;
     let result = extract_archive(&[entry], &root, Some(password), &mut progress, |conflict| {
-        assert!(conflict.can_replace);
+        assert!(conflict.can_replace());
         saw_conflict = true;
         Ok(Answer {
             decision: Decision::Replace,
@@ -311,7 +311,7 @@ fn conflicting_files_can_be_replaced_or_kept_with_reserved_names() {
         None,
         &mut progress,
         |conflict| {
-            assert!(conflict.can_replace);
+            assert!(conflict.can_replace());
             assert_eq!(conflict.count, 2);
             Ok(Answer {
                 decision: choices.next().unwrap(),
@@ -364,7 +364,7 @@ fn staged_output_is_withheld_for_crc_or_length_mismatch_and_volume_limit() {
             None,
             &mut progress,
             |conflict| {
-                assert!(conflict.can_replace);
+                assert!(conflict.can_replace());
                 prompts += 1;
                 Ok(Answer {
                     decision: Decision::Replace,
@@ -408,7 +408,7 @@ fn extracting_an_entry_cannot_replace_the_archive_itself() {
     let mut progress = Progress::default();
     assert!(
         extract_archive(&[nested], &directory, None, &mut progress, |conflict| {
-            assert!(!conflict.can_replace);
+            assert!(!conflict.can_replace());
             Ok(Answer {
                 decision: Decision::Replace,
                 apply_to_group: false,
@@ -489,7 +489,7 @@ fn a_symlink_in_the_destination_is_not_used_as_an_output_directory() {
     let tree = archive.browse_archive().unwrap().join("Folder");
     let mut progress = Progress::default();
     extract_archive(&[tree], &destination, None, &mut progress, |conflict| {
-        assert!(!conflict.can_replace);
+        assert!(!conflict.can_replace());
         Ok(Answer {
             decision: Decision::KeepBoth,
             apply_to_group: false,

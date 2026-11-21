@@ -270,6 +270,12 @@ impl MoveSource {
         item: &TransferItem,
         manifest: TransferSourceManifest,
     ) -> Result<Self, TransferError> {
+        item.verify_approved_source(
+            manifest
+                .entries
+                .get(&item.source)
+                .map(|entry| &entry.metadata),
+        )?;
         let mut links = BTreeMap::new();
         for (path, entry) in &manifest.entries {
             if entry.children.is_none() && !entry.metadata.is_file() {

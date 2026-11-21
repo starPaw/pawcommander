@@ -19,8 +19,6 @@ use zeroize::Zeroizing;
 const SERVICE: &str = "dev.pawcommander.smb.v1";
 const RECORD: &str = "connection.json";
 const MOUNT_DIR: &str = "mount";
-pub(crate) const REPLACE_UNAVAILABLE: crate::i18n::MessageKey =
-    crate::i18n::key!("Безопасная замена файла на SMB недоступна. Выберите свободное имя.");
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Endpoint {

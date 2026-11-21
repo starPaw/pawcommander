@@ -322,6 +322,7 @@ fn start_file(
     let source = resolved_file(&item.source, ResumeRole::Source)?;
     let target = resolved_file(&item.target, ResumeRole::Destination)?;
     let (original, source_metadata) = FileProof::read(&source, ResumeRole::Source, progress)?;
+    item.verify_approved_source(Some(&source_metadata))?;
     let previous = match expected {
         Some(expected) => {
             let (proof, metadata) = FileProof::read(&target, ResumeRole::Destination, progress)?;
