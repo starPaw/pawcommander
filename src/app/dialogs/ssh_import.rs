@@ -49,6 +49,9 @@ impl SftpForm {
                 #[cfg(target_os = "macos")]
                 {
                     self.show_identity_choices = false;
+                    self.ssh_config_failed = false;
+                    self.jump.clone_from(&config.jump);
+                    self.jump_passphrase.clear();
                 }
                 if config.matched {
                     self.host.clone_from(&config.host);
@@ -65,7 +68,13 @@ impl SftpForm {
                 }
                 self.ssh_config = Some(config);
             }
-            Err(error) => self.error = Some(error),
+            Err(error) => {
+                self.error = Some(error);
+                #[cfg(target_os = "macos")]
+                {
+                    self.ssh_config_failed = true;
+                }
+            }
         }
     }
 
@@ -94,6 +103,10 @@ impl SftpForm {
         #[cfg(target_os = "macos")]
         {
             self.show_identity_choices = false;
+            if self.ssh_config_failed {
+                self.ssh_config_failed = false;
+                self.error = None;
+            }
         }
     }
 
@@ -112,6 +125,7 @@ impl SftpForm {
             port: self.port,
             user: self.user.trim().into(),
             key,
+            jump: self.jump.clone(),
         }
     }
 
@@ -164,6 +178,15 @@ impl SftpForm {
     }
 
     pub(super) fn show_config_result(&self, ui: &mut egui::Ui) {
+        #[cfg(target_os = "macos")]
+        if let Some(jump) = &self.jump {
+            ui.label(format!("ProxyJump · {}", jump.label()));
+            if let Some(key) = &jump.key {
+                let key = key.to_string_lossy();
+                ui.add(egui::Label::new(key.as_ref()).truncate())
+                    .on_hover_text(key);
+            }
+        }
         let Some(config) = &self.ssh_config else {
             return;
         };

@@ -804,6 +804,7 @@ mod tests {
                 port: 0,
                 user: "fixture".into(),
                 key: None,
+                jump: None,
             },
             path: "/folder/file.txt".into(),
         };

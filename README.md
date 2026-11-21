@@ -163,7 +163,7 @@ See the [user guide](docs/USER_GUIDE.md) for SFTP setup, clipboard behavior, dra
 - **Optional copy verification.** Enable **Settings → Verify copies (SHA-256)** to read back staged regular files before publication. It is off by default and captured per queued copy. Verification failure preserves the source and existing destination. Rename moves do not use this check.
 - **Remote deletion is permanent.** Local deletion uses the system trash; SFTP deletion requires a separate permanent-delete confirmation.
 - **Name search is local.** Folder search reads the filesystem directly. The optional `locate` mode uses an external index whose results can be stale.
-- **SFTP is deliberately explicit.** Verify server keys with OpenSSH first. ProxyJump, interactive MFA, and SSH-config-based connection setup are not supported. Transfers require server free-space reporting.
+- **SFTP verifies server keys before authentication.** Load connection details from SSH config. On macOS, a single `ProxyJump` host can forward the connection to the target. Transfers require server free-space reporting.
 - **Some features are still ahead.** No built-in terminal or network protocols beyond SFTP.
 
 Details about transfer recovery and platform differences live in the [user guide](docs/USER_GUIDE.md).

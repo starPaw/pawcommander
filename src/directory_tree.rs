@@ -484,6 +484,7 @@ mod tests {
                 port: 22,
                 user: "test".into(),
                 key: Some(PathBuf::from("key")),
+                jump: None,
             },
             path: "/".into(),
         }

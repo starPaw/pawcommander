@@ -10,7 +10,7 @@ use ssh2::{ErrorCode, Session, Sftp};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{Shutdown, TcpStream, ToSocketAddrs};
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
@@ -18,6 +18,8 @@ use zeroize::Zeroizing;
 
 mod host_key;
 mod interactive;
+#[cfg(target_os = "macos")]
+mod proxy_jump;
 #[cfg(test)]
 pub(crate) use host_key::HostKey;
 pub(super) use host_key::TrustFiles;
@@ -32,6 +34,8 @@ pub(crate) struct ConnectRequest {
     pub path: String,
     pub password: Zeroizing<String>,
     pub passphrase: Zeroizing<String>,
+    #[cfg(target_os = "macos")]
+    pub jump_passphrase: Zeroizing<String>,
     pub use_saved: bool,
     pub save_key: bool,
 }
@@ -68,7 +72,16 @@ pub(super) fn connect_with_key(
     private_key: Option<&str>,
 ) -> Result<Session, String> {
     let trust = TrustFiles::new(known_hosts.to_owned(), None);
-    let session = open_verified(endpoint, &trust, None)?;
+    let session = open_connection(
+        endpoint,
+        &trust,
+        None,
+        #[cfg(target_os = "macos")]
+        proxy_jump::Login {
+            use_saved: false,
+            passphrase: "",
+        },
+    )?;
     login_primary(
         &session,
         &endpoint.user,
@@ -90,14 +103,8 @@ fn open_verified(
     trust: &TrustFiles,
     interactive: Option<&InteractiveAuth>,
 ) -> Result<Session, String> {
+    validate_endpoint(endpoint)?;
     let host = endpoint.host_name();
-    if host.is_empty()
-        || host.chars().any(|ch| ch.is_control() || ch.is_whitespace())
-        || endpoint.user.trim().is_empty()
-        || endpoint.port == 0
-    {
-        return Err("Укажите сервер, пользователя и порт 1–65535".into());
-    }
     // Bound TCP and SSH I/O waits. DNS resolution uses the OS resolver.
     let control = interactive.map(InteractiveAuth::control);
     let control = control.as_ref();
@@ -116,17 +123,72 @@ fn open_verified(
     }
     let tcp = tcp.ok_or("Не удалось подключиться к серверу SFTP (тайм-аут 10 с на адрес)")?;
     if let Some(control) = control {
-        control.attach(&tcp)?;
+        let socket = tcp.try_clone().map_err(err)?;
+        control.attach(move || {
+            let _ = socket.shutdown(Shutdown::Both);
+        })?;
     }
     let timeout = Some(Duration::from_millis(u64::from(IO_TIMEOUT_MS)));
     tcp.set_read_timeout(timeout).map_err(err)?;
     tcp.set_write_timeout(timeout).map_err(err)?;
     let mut session = Session::new().map_err(err)?;
     session.set_tcp_stream(tcp);
+    verify_session(session, endpoint, trust, interactive)
+}
+
+fn validate_endpoint(endpoint: &Endpoint) -> Result<(), String> {
+    let host = endpoint.host_name();
+    if host.is_empty()
+        || host.chars().any(|ch| ch.is_control() || ch.is_whitespace())
+        || endpoint.user.trim().is_empty()
+        || endpoint.user.chars().any(char::is_control)
+        || endpoint.port == 0
+    {
+        return Err("Укажите сервер, пользователя и порт 1–65535".into());
+    }
+    Ok(())
+}
+
+fn verify_session(
+    mut session: Session,
+    endpoint: &Endpoint,
+    trust: &TrustFiles,
+    interactive: Option<&InteractiveAuth>,
+) -> Result<Session, String> {
     session.set_timeout(IO_TIMEOUT_MS);
     session.handshake().map_err(err)?;
     trust.verify(&session, endpoint, interactive)?;
     Ok(session)
+}
+
+fn open_connection(
+    endpoint: &Endpoint,
+    trust: &TrustFiles,
+    interactive: Option<&mut InteractiveAuth>,
+    #[cfg(target_os = "macos")] login: proxy_jump::Login<'_>,
+) -> Result<Session, String> {
+    if let Some(jump) = &endpoint.jump {
+        #[cfg(target_os = "macos")]
+        return proxy_jump::open(endpoint, jump, trust, interactive, login);
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = jump;
+            return Err(text("Подключения через ProxyJump доступны на macOS").into());
+        }
+    }
+    open_verified(endpoint, trust, interactive.as_deref())
+}
+
+fn at_target(endpoint: &Endpoint, error: String) -> String {
+    if endpoint.jump.is_some() {
+        let address = endpoint.label();
+        crate::tr_format!(
+            "Конечный сервер {address} · {error}",
+            "Target host {address} · {error}"
+        )
+    } else {
+        error
+    }
 }
 
 enum PrimaryAuth<'a> {
@@ -195,10 +257,11 @@ fn offers(methods: &str, method: &str) -> bool {
 
 fn authenticate(
     session: &Session,
-    user: &str,
+    endpoint: &Endpoint,
     primary: &PrimaryAuth<'_>,
     interactive: &mut InteractiveAuth,
 ) -> Result<bool, String> {
+    let user = &endpoint.user;
     let control = interactive.control();
     let mut methods = auth_methods(session, user)?;
     let mut tried_primary = false;
@@ -222,7 +285,7 @@ fn authenticate(
                 && offers(&methods, "keyboard-interactive");
         } else if !tried_interactive && offers(&methods, "keyboard-interactive") {
             tried_interactive = true;
-            interactive.authenticate(session, user);
+            interactive.authenticate(session, endpoint);
             control.check()?;
             if !session.authenticated() {
                 failure = Some(text("Сервер не подтвердил интерактивную аутентификацию").into());
@@ -272,11 +335,22 @@ fn connect_reviewed(
         path,
         password,
         passphrase,
+        #[cfg(target_os = "macos")]
+        jump_passphrase,
         use_saved,
         save_key,
     } = request;
     control.check()?;
-    let session = open_verified(&endpoint, trust, Some(auth))?;
+    let session = open_connection(
+        &endpoint,
+        trust,
+        Some(auth),
+        #[cfg(target_os = "macos")]
+        proxy_jump::Login {
+            use_saved,
+            passphrase: &jump_passphrase,
+        },
+    )?;
     control.check()?;
     let saved = if use_saved && !save_key && password.is_empty() && endpoint.key.is_some() {
         crate::credentials::load(&endpoint)?
@@ -317,11 +391,14 @@ fn connect_reviewed(
     };
     let used_key = authenticate(
         &session,
-        &endpoint.user,
+        &endpoint,
         &PrimaryAuth::new(&endpoint, &password, phrase, key_data),
         auth,
-    )?;
-    let sftp = session.sftp().map_err(err)?;
+    )
+    .map_err(|error| at_target(&endpoint, error))?;
+    let sftp = session
+        .sftp()
+        .map_err(|error| at_target(&endpoint, err(error)))?;
     let path = sftp
         .realpath(Path::new(if path.is_empty() { "." } else { &path }))
         .map_err(err)?;
@@ -431,7 +508,16 @@ pub(super) fn remote(location: &Location) -> Result<Sftp, String> {
     }
     // Reopen a channel before the caller issues a request. Never retry the
     // request itself or move an existing file handle to another SSH session.
-    let session = open_verified(endpoint, &TrustFiles::user()?, None)?;
+    let session = open_connection(
+        endpoint,
+        &TrustFiles::user()?,
+        None,
+        #[cfg(target_os = "macos")]
+        proxy_jump::Login {
+            use_saved: true,
+            passphrase: "",
+        },
+    )?;
     let saved = if endpoint.key.is_some() {
         crate::credentials::load(endpoint)?
     } else {
@@ -447,8 +533,10 @@ pub(super) fn remote(location: &Location) -> Result<Sftp, String> {
             saved.as_ref().map(|s| s.private_key.as_str()),
         ),
     )
-    .map_err(sftp_open_error)?;
-    let channel = session.sftp().map_err(sftp_open_error)?;
+    .map_err(|error| at_target(endpoint, sftp_open_error(error)))?;
+    let channel = session
+        .sftp()
+        .map_err(|error| at_target(endpoint, sftp_open_error(error)))?;
     // The SFTP dialog may have published a manually authenticated session
     // while this worker was opening its own channel.
     let session = Arc::new(session);

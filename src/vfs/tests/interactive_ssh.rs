@@ -30,10 +30,13 @@ impl Fixture {
                 port: self.port,
                 user: user.into(),
                 key: (user == "mfa-fixture").then(|| self.root.join("client")),
+                jump: None,
             },
             path: ".".into(),
             password: Zeroizing::new(String::new()),
             passphrase: Zeroizing::new(String::new()),
+            #[cfg(target_os = "macos")]
+            jump_passphrase: Zeroizing::new(String::new()),
             use_saved: false,
             save_key: false,
         };

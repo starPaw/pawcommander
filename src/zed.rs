@@ -50,6 +50,12 @@ fn argument(location: &Location) -> Result<std::ffi::OsString, String> {
         }
         .into_os_string());
     };
+    if endpoint.jump.is_some() {
+        return Err(crate::i18n::text(
+            "Для этого подключения нужен маршрут ProxyJump. Откройте SSH-алиас в Terminal или Zed.",
+        )
+        .into());
+    }
     let path = path
         .to_str()
         .ok_or(crate::i18n::text("Путь SFTP должен быть UTF-8"))?;
@@ -186,6 +192,7 @@ mod tests {
                 user: "alice".into(),
                 port: 2222,
                 key: Some("/private/key with spaces".into()),
+                jump: None,
             },
             path: path.into(),
         }

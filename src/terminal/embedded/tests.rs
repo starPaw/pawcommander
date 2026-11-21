@@ -219,6 +219,7 @@ fn openssh_terminal_embedded_propagates_pty_size_and_folder() {
         key: Some(PathBuf::from(
             std::env::var_os("PAWCOMMANDER_TEST_TERMINAL_KEY").unwrap(),
         )),
+        jump: None,
     };
     let folder = root.join("Embedded SSH reports ' draft & é");
     std::fs::create_dir(&folder).unwrap();

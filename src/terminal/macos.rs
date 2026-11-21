@@ -66,6 +66,12 @@ fn launch_error(error: io::Error) -> String {
 }
 
 pub(super) fn ssh_command(endpoint: &Endpoint, path: &Path) -> Result<Command, String> {
+    if endpoint.jump.is_some() {
+        return Err(text(
+            "Для этого подключения нужен маршрут ProxyJump. Откройте SSH-алиас в Terminal или Zed.",
+        )
+        .into());
+    }
     let host = endpoint.host_name();
     if host.is_empty()
         || host.starts_with('-')

@@ -46,6 +46,7 @@ Host only-here
     assert_eq!(
         loaded.unsupported,
         [
+            #[cfg(not(target_os = "macos"))]
             Unsupported {
                 keyword: "ProxyJump".into(),
                 line: 11
@@ -88,6 +89,70 @@ Host only-here
             .host,
         "only-here.example"
     );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn proxy_jump_uses_its_own_alias_and_cli_overrides_in_identity_tokens() {
+    let home = Path::new("/fixture/home");
+    let config = "Host private\n HostName private.example\n User target\n Port 1234\n IdentityFile ~/.ssh/target\n ProxyJump ssh://relay@bastion:4200\n ProxyCommand ignored\nHost bastion\n HostName [::1]\n User default\n Port 2201\n IdentityFile ~/.ssh/%n-%r-%p\n";
+    let target = resolve(config, "private", home, "local").unwrap();
+    assert_eq!(target.user, "target");
+    assert_eq!(target.port, 1234);
+    assert_eq!(target.identities, [home.join(".ssh/target")]);
+    assert!(target.unsupported.is_empty());
+    let jump = target.jump.unwrap();
+    assert_eq!(
+        (jump.host.as_str(), jump.user.as_str(), jump.port),
+        ("[::1]", "relay", 4200)
+    );
+    assert_eq!(jump.key, Some(home.join(".ssh/bastion-relay-4200")));
+
+    let target = resolve(
+        "Host private\n ProxyJump relay@[::1]:4200",
+        "private",
+        home,
+        "local",
+    )
+    .unwrap();
+    assert_eq!(target.jump.unwrap().host, "::1");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn proxy_jump_uses_first_effective_directive_and_rejects_invalid_routes() {
+    let home = Path::new("/fixture/home");
+    for option in [
+        "ProxyJump none",
+        "ProxyCommand none",
+        "ProxyCommand external",
+    ] {
+        let config = format!("Host private\n {option}\n ProxyJump bastion\n");
+        assert!(resolve(&config, "private", home, "local")
+            .unwrap()
+            .jump
+            .is_none());
+    }
+    for option in [
+        "ProxyJump bastion,second",
+        "ProxyJump bastion:0",
+        "ProxyJump relay@[::1]:",
+        "ProxyJump ssh://relay:secret@bastion",
+        "ProxyJump bastion\nHost bastion\n ProxyJump second",
+        "ProxyJump bastion\nHost bastion\n ProxyCommand unsupported",
+    ] {
+        let error = resolve(
+            &format!("Host private\n {option}"),
+            "private",
+            home,
+            "local",
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("ProxyJump") && error.contains('2'),
+            "{error}"
+        );
+    }
 }
 
 #[test]

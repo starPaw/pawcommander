@@ -263,6 +263,7 @@ mod tests {
                     port: 2203,
                     user: "sync-user".into(),
                     key: Some("/tmp/test-key".into()),
+                    jump: None,
                 },
                 path: "/backup/shared files".into(),
             },

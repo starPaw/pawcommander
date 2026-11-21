@@ -410,6 +410,7 @@ mod tests {
                 port: 2222,
                 user: "tester".into(),
                 key: None,
+                jump: None,
             },
             path: PathBuf::from("/Café/Документы"),
         };

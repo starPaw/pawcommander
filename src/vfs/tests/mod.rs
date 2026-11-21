@@ -43,6 +43,8 @@ mod metadata;
 mod pause;
 #[cfg(unix)]
 mod permissions;
+#[cfg(target_os = "macos")]
+mod proxy_jump;
 #[cfg(unix)]
 mod reconnect;
 mod retry;

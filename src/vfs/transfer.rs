@@ -273,7 +273,7 @@ pub(super) fn transfer_plan(
         if !names.insert(name.to_owned()) {
             return Err("Выбраны элементы с одинаковыми именами".into());
         }
-        if source.same_backend(destination) {
+        if source.might_share_filesystem(destination) {
             // Resolve aliases for the destination and the source subtree.
             let actual_source = canonical(source)?;
             let actual_dest = canonical(destination)?;

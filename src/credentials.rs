@@ -111,6 +111,7 @@ mod tests {
             port: 2222,
             user: "disposable-test".into(),
             key: Some(root.path().join("generated-test-key")),
+            jump: None,
         };
         let result = (|| -> Result<(), String> {
             let small = SavedKey {
@@ -206,6 +207,7 @@ mod tests {
             port: 2222,
             user: "test".into(),
             key: Some("/test/key".into()),
+            jump: None,
         };
         let entry = store
             .build(SERVICE, &account(&endpoint).unwrap(), None)
@@ -244,6 +246,7 @@ mod tests {
             port: 2222,
             user: "test".into(),
             key: Some("/test/key".into()),
+            jump: None,
         };
         let current = store
             .build(SERVICE, &account(&endpoint).unwrap(), None)

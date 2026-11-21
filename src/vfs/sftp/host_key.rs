@@ -373,6 +373,7 @@ mod tests {
             port: 2222,
             user: "account".into(),
             key: None,
+            jump: None,
         };
         let old = b"fixture-ssh-host-key-one";
         let new = b"fixture-ssh-host-key-two";

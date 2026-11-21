@@ -380,11 +380,21 @@ pub(crate) enum SavedLocation {
         user: String,
         key: Option<SavedPath>,
         path: SavedPath,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        jump: Option<SavedJumpHost>,
     },
     Archive {
         archive: SavedPath,
         path: SavedPath,
     },
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct SavedJumpHost {
+    host: String,
+    port: u16,
+    user: String,
+    key: Option<SavedPath>,
 }
 
 // Preserve native names that PathBuf's serializer cannot handle.
@@ -409,6 +419,12 @@ impl From<&Location> for SavedLocation {
                 user: endpoint.user.clone(),
                 key: endpoint.key.as_deref().map(SavedPath::from),
                 path: path.as_path().into(),
+                jump: endpoint.jump.as_ref().map(|jump| SavedJumpHost {
+                    host: jump.host.clone(),
+                    port: jump.port,
+                    user: jump.user.clone(),
+                    key: jump.key.as_deref().map(SavedPath::from),
+                }),
             },
         }
     }
@@ -428,6 +444,7 @@ impl SavedLocation {
                 user,
                 key,
                 path,
+                jump,
             } => Location::Sftp {
                 endpoint: Endpoint {
                     host,
@@ -435,6 +452,18 @@ impl SavedLocation {
                     user,
                     key: match key {
                         Some(key) => Some(key.into_path()?),
+                        None => None,
+                    },
+                    jump: match jump {
+                        Some(jump) => Some(Box::new(crate::vfs::JumpHost {
+                            host: jump.host,
+                            port: jump.port,
+                            user: jump.user,
+                            key: match jump.key {
+                                Some(key) => Some(key.into_path()?),
+                                None => None,
+                            },
+                        })),
                         None => None,
                     },
                 },

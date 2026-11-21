@@ -34,6 +34,7 @@ impl TransferLimits {
             self.connections.push(ConnectionLimit {
                 endpoint: Endpoint {
                     key: None,
+                    jump: None,
                     ..endpoint.clone()
                 },
                 kib,
@@ -121,6 +122,7 @@ mod tests {
             port: 2202,
             user: user.into(),
             key: Some("/test/ssh-key".into()),
+            jump: None,
         }
     }
 

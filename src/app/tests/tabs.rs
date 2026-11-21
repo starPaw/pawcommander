@@ -348,6 +348,7 @@ fn tab_actions_duplicate_and_reopen_exact_locations_and_persist_pins() {
             port: 2222,
             user: "test".into(),
             key: Some(root.path().join("key with spaces")),
+            jump: None,
         },
         path: "/папка/two words".into(),
     };
@@ -417,6 +418,7 @@ fn remote_tab_history_and_new_tab_keep_backend() {
             port: 0,
             user: "test".into(),
             key: None,
+            jump: None,
         },
         path: "/".into(),
     };

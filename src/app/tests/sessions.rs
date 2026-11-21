@@ -170,6 +170,15 @@ fn session_preserves_native_local_paths_and_remote_coordinates() {
             port: 2022,
             user: "user".into(),
             key: Some(root.path().join(&native)),
+            #[cfg(target_os = "macos")]
+            jump: Some(Box::new(crate::vfs::JumpHost {
+                host: "jump.invalid".into(),
+                port: 22,
+                user: "relay".into(),
+                key: Some(root.path().join(&native)),
+            })),
+            #[cfg(not(target_os = "macos"))]
+            jump: None,
         },
         path: PathBuf::from("/folder").join(native),
     };
@@ -392,6 +401,15 @@ fn named_workspace_persists_sftp_coordinates_without_credentials() {
             port: 2022,
             user: "workspace-test".into(),
             key: Some(key),
+            #[cfg(target_os = "macos")]
+            jump: Some(Box::new(crate::vfs::JumpHost {
+                host: "jump.invalid".into(),
+                port: 22,
+                user: "relay".into(),
+                key: Some(root.path().join("jump-key")),
+            })),
+            #[cfg(not(target_os = "macos"))]
+            jump: None,
         },
         path: PathBuf::from("/folder/папка"),
     };
@@ -404,6 +422,8 @@ fn named_workspace_persists_sftp_coordinates_without_credentials() {
     app.sftp_form = Some(SftpForm {
         password: "synthetic-account-password".into(),
         passphrase: "synthetic-key-passphrase".into(),
+        #[cfg(target_os = "macos")]
+        jump_passphrase: "synthetic-jump-passphrase".into(),
         save_key: true,
         ..Default::default()
     });
@@ -424,6 +444,7 @@ fn named_workspace_persists_sftp_coordinates_without_credentials() {
             "synthetic-private-key-material",
             "synthetic-account-password",
             "synthetic-key-passphrase",
+            "synthetic-jump-passphrase",
         ] {
             assert!(!payload.contains(secret));
         }
@@ -435,6 +456,7 @@ fn named_workspace_persists_sftp_coordinates_without_credentials() {
             port: 0,
             user: "test".into(),
             key: None,
+            jump: None,
         },
         path: PathBuf::from("/workspace"),
     };

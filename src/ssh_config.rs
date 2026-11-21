@@ -8,6 +8,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(target_os = "macos")]
+mod proxy_jump;
 #[cfg(test)]
 mod tests;
 
@@ -23,6 +25,8 @@ pub(crate) struct ResolvedHost {
     pub port: u16,
     pub identities: Vec<PathBuf>,
     pub unsupported: Vec<Unsupported>,
+    #[cfg(target_os = "macos")]
+    pub jump: Option<Box<crate::vfs::JumpHost>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -88,6 +92,8 @@ struct Options {
     identities: Vec<(String, usize)>,
     unsupported: Vec<Unsupported>,
     warned: HashSet<String>,
+    #[cfg(target_os = "macos")]
+    proxy: Option<proxy_jump::Proxy>,
 }
 
 impl Options {
@@ -111,6 +117,20 @@ fn resolve(
     if !host_word(alias) {
         return Err(text("Введите имя сервера или SSH-алиас").into());
     }
+    let (options, matched) = parse_options(config, alias)?;
+    #[cfg(target_os = "macos")]
+    let (options, proxy) = {
+        let mut options = options;
+        let proxy = options.proxy.take();
+        (options, proxy)
+    };
+    let target = resolve_options(options, matched, alias, home, local_user)?;
+    #[cfg(target_os = "macos")]
+    let target = proxy_jump::resolve(config, home, local_user, target, proxy)?;
+    Ok(target)
+}
+
+fn parse_options(config: &str, alias: &str) -> Result<(Options, bool), String> {
     let mut options = Options::default();
     let mut active = true;
     let mut matched = false;
@@ -151,6 +171,28 @@ fn resolve(
                 active = false;
             }
             _ if !active => {}
+            #[cfg(target_os = "macos")]
+            "proxyjump" | "proxycommand" => {
+                if options.proxy.is_some() {
+                    continue;
+                }
+                if key == "proxyjump" {
+                    let [value]: [String; 1] = arguments(rest)
+                        .map_err(|()| invalid())?
+                        .try_into()
+                        .map_err(|_| invalid())?;
+                    options.proxy = Some(proxy_jump::Proxy::Jump(value, line));
+                    matched = true;
+                } else {
+                    let disabled = arguments(rest).is_ok_and(|words| {
+                        words.len() == 1 && words[0].eq_ignore_ascii_case("none")
+                    });
+                    options.proxy = Some(proxy_jump::Proxy::Command { disabled });
+                    if !disabled {
+                        options.warn(&key, keyword, line);
+                    }
+                }
+            }
             "hostname" | "user" | "port" | "identityfile" => {
                 let [value]: [String; 1] = arguments(rest)
                     .map_err(|()| invalid())?
@@ -184,6 +226,16 @@ fn resolve(
             _ => options.warn(&key, keyword, line),
         }
     }
+    Ok((options, matched))
+}
+
+fn resolve_options(
+    options: Options,
+    matched: bool,
+    alias: &str,
+    home: &Path,
+    local_user: &str,
+) -> Result<ResolvedHost, String> {
     let host = match options.hostname {
         Some((value, line)) => expand_tokens(&value, |code| (code == 'h').then_some(alias))
             .filter(|host| host_word(host))
@@ -230,6 +282,8 @@ fn resolve(
         port,
         identities,
         unsupported: options.unsupported,
+        #[cfg(target_os = "macos")]
+        jump: None,
     })
 }
 

@@ -907,6 +907,7 @@ fn openssh_round_trip_and_host_verification() {
             .unwrap(),
         user: std::env::var("PAWCOMMANDER_TEST_SFTP_USER").unwrap(),
         key: Some(root.join("client")),
+        jump: None,
     };
     let home = tempfile::tempdir_in(&root).unwrap();
     let ssh = home.path().join(".ssh");
@@ -928,6 +929,7 @@ fn openssh_round_trip_and_host_verification() {
         port: imported.port,
         user: imported.user,
         key: Some(imported.identities[1].clone()),
+        jump: None,
     };
     assert_eq!(endpoint, expected);
     let known = root.join("known_hosts");

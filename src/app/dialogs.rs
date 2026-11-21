@@ -177,6 +177,11 @@ pub(super) struct SftpForm {
     pub(super) key: String,
     pub(super) password: String,
     pub(super) passphrase: String,
+    pub(super) jump: Option<Box<crate::vfs::JumpHost>>,
+    #[cfg(target_os = "macos")]
+    pub(super) jump_passphrase: String,
+    #[cfg(target_os = "macos")]
+    pub(super) ssh_config_failed: bool,
     pub(super) use_saved: bool,
     pub(super) save_key: bool,
     pub(super) error: Option<String>,
@@ -196,6 +201,11 @@ impl Default for SftpForm {
             key: String::new(),
             password: String::new(),
             passphrase: String::new(),
+            jump: None,
+            #[cfg(target_os = "macos")]
+            jump_passphrase: String::new(),
+            #[cfg(target_os = "macos")]
+            ssh_config_failed: false,
             use_saved: true,
             save_key: false,
             error: None,
@@ -324,13 +334,22 @@ impl PawCommander {
             let fields = |ui: &mut egui::Ui| ui.add_enabled_ui(!busy && !loading_config, |ui| {
                 egui::ComboBox::from_id_salt("saved_sftp_profiles").selected_text(crate::i18n::text("Сохранённые подключения")).show_ui(ui, |ui| {
                     for profile in &self.settings.sftp_profiles {
-                        if ui.selectable_label(false, profile.display()).clicked()
+                        let label = profile.display();
+                        #[cfg(target_os = "macos")]
+                        let label = profile.with_sftp_route_label(label);
+                        if ui.selectable_label(false, label).clicked()
                             && let Location::Sftp { endpoint, path } = profile {
                                 form.host = endpoint.host.clone(); form.port = endpoint.port; form.user = endpoint.user.clone();
                                 form.key = endpoint.key.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
                                 form.path = path.display().to_string(); form.password.clear(); form.passphrase.clear();
                                 form.use_saved = true; form.save_key = false; form.error = None;
                                 form.ssh_config = None;
+                                form.jump.clone_from(&endpoint.jump);
+                                #[cfg(target_os = "macos")]
+                                {
+                                    form.jump_passphrase.clear();
+                                    form.ssh_config_failed = false;
+                                }
                             }
                     }
                 });
@@ -367,6 +386,12 @@ impl PawCommander {
                     let label = ui.label(crate::i18n::text("Пароль ключа"));
                     interactive_ssh::answer_field(ui, &mut form.passphrase, false).labelled_by(label.id);
                     ui.end_row();
+                    #[cfg(target_os = "macos")]
+                    if form.jump.as_ref().is_some_and(|jump| jump.key.is_some()) {
+                        let label = ui.label(crate::i18n::text("Пароль ключа промежуточного сервера"));
+                        interactive_ssh::answer_field(ui, &mut form.jump_passphrase, false).labelled_by(label.id);
+                        ui.end_row();
+                    }
                 });
                 form.show_identity_files(ui);
                 ui.add_space(10.0);
@@ -396,12 +421,17 @@ impl PawCommander {
             }
             ui.horizontal(|ui| {
                 cancel = ui.add_enabled(!busy, egui::Button::new(crate::i18n::text("Отмена"))).clicked();
-                let label = if form.ssh_config.as_ref().is_some_and(|config| config.matched && !config.unsupported.is_empty()) {
+                let label = if form.jump.is_some() {
+                    "Подключиться через ProxyJump"
+                } else if form.ssh_config.as_ref().is_some_and(|config| config.matched && !config.unsupported.is_empty()) {
                     "Подключиться напрямую"
                 } else {
                     "Подключиться"
                 };
-                submit = ui.add_enabled(!busy && !loading_config && !form.host.trim().is_empty() && !form.user.trim().is_empty(), egui::Button::new(crate::i18n::text(label))).clicked();
+                let ready = !busy && !loading_config && !form.host.trim().is_empty() && !form.user.trim().is_empty();
+                #[cfg(target_os = "macos")]
+                let ready = ready && !form.ssh_config_failed;
+                submit = ui.add_enabled(ready, egui::Button::new(crate::i18n::text(label))).clicked();
             });
             if busy { ui.horizontal(|ui| { ui.spinner(); ui.label(crate::i18n::text("Подключение…")); }); }
             if loading_config { ui.horizontal(|ui| { ui.spinner(); ui.label(crate::i18n::text("Читаем SSH config…")); }); }
@@ -414,6 +444,8 @@ impl PawCommander {
                 path: form.path.clone(),
                 password: Zeroizing::new(std::mem::take(&mut form.password)),
                 passphrase: Zeroizing::new(std::mem::take(&mut form.passphrase)),
+                #[cfg(target_os = "macos")]
+                jump_passphrase: Zeroizing::new(std::mem::take(&mut form.jump_passphrase)),
                 use_saved: form.use_saved,
                 save_key: form.save_key,
             };
