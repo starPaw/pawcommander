@@ -2,11 +2,14 @@ use super::*;
 
 #[test]
 fn staging_cleanup_preserves_a_replacement_directory() {
+    use super::super::transfer::with_staging_typed;
+    use crate::file_error::{Failure, StagingError};
+
     let fixture = tempfile::tempdir().unwrap();
     let target: Location = fixture.path().join("target").into();
     let original = fixture.path().join("original-staging");
     let mut replacement = None;
-    let error = with_staging(&target, |staging, _| {
+    let error = with_staging_typed(&target, None, |staging, _| {
         fs::rename(staging.path(), &original).unwrap();
         fs::create_dir(staging.path()).unwrap();
         fs::write(staging.path().join("foreign"), b"preserve").unwrap();
@@ -14,8 +17,17 @@ fn staging_cleanup_preserves_a_replacement_directory() {
         Err("injected failure".into())
     })
     .unwrap_err();
-    assert!(error.contains("injected failure"));
-    assert!(error.contains("identity changed"));
+    let TransferError::Failed(Failure::StagingCleanup(error)) = error else {
+        panic!("expected both operation and staging failures");
+    };
+    assert!(
+        matches!(&error.operation, Some(TransferError::Failed(Failure::Message(message)))
+        if message == "injected failure")
+    );
+    assert!(
+        matches!(&error.cleanup, TransferError::Failed(Failure::Staging(reason))
+        if matches!(reason.as_ref(), StagingError::IdentityChanged(path) if path == &error.staging))
+    );
     assert_eq!(
         fs::read(replacement.unwrap().join("foreign")).unwrap(),
         b"preserve"

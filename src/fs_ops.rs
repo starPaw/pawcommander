@@ -3,7 +3,7 @@
 
 use crate::file_error::{
     AccessAction, AccessCause, AccessError, ListingError, ListingErrorKind, LocalPathAction,
-    MutationError, PathError, SpaceError, StagingCleanupError,
+    MutationError, PathError, SpaceError, StagingCleanupError, StagingError,
 };
 use crate::operations::{
     access_io, AccessStream, Cancellation, CopyReader, Progress, TransferError,
@@ -461,24 +461,17 @@ struct StagingDirectory {
 }
 
 impl StagingDirectory {
-    fn new(path: PathBuf) -> Result<Self, String> {
-        let original = fs::symlink_metadata(&path).map_err(|error| {
-            crate::tr_format!(
-                "Could not inspect temporary folder “{}”: {error}",
-                path.display(),
-                error = error
-            )
-        })?;
+    fn new(path: PathBuf) -> Result<Self, TransferError> {
+        let location = Location::Local(path.clone());
+        let inspect = |error| AccessError::new(&location, AccessAction::ReadMetadata, error);
+        let original = fs::symlink_metadata(&path).map_err(inspect)?;
         if !original.is_dir() || original.file_type().is_symlink() {
-            return Err(crate::tr_format!(
-                "Temporary folder “{}” changed before copying; data was preserved",
-                path.display()
-            ));
+            return Err(StagingError::IdentityChanged(location).into());
         }
         #[cfg(windows)]
         let original_id = crate::windows_file_id::from_path(&path)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| format!("Temporary folder identity unavailable: {}", path.display()))?;
+            .map_err(inspect)?
+            .ok_or_else(|| StagingError::IdentityUnavailable(location))?;
         Ok(Self {
             path,
             #[cfg(unix)]
@@ -508,13 +501,15 @@ impl StagingDirectory {
         }
     }
 
-    fn ensure_owned(&self) -> io::Result<()> {
-        if self.same_owned()? {
+    fn ensure_owned(&self) -> Result<(), TransferError> {
+        let location = Location::Local(self.path.clone());
+        if self
+            .same_owned()
+            .map_err(|error| AccessError::new(&location, AccessAction::ReadMetadata, error))?
+        {
             Ok(())
         } else {
-            Err(io::Error::other(crate::tr_format!(
-                "Staging directory identity changed; its contents were preserved"
-            )))
+            Err(StagingError::IdentityChanged(location).into())
         }
     }
 }
@@ -530,14 +525,8 @@ fn create_staging_directory(parent: &Path) -> Result<StagingDirectory, TransferE
             ".pawcommander-copy-{}-{unique}-{counter}",
             std::process::id()
         ));
-        let location = crate::vfs::Location::Local(path.clone());
-        crate::recovery::plan_staging(&location).map_err(|error| {
-            crate::tr_format!(
-                "Could not record temporary copy plan “{}”: {error}",
-                path.display(),
-                error = error
-            )
-        })?;
+        let location = Location::Local(path.clone());
+        crate::recovery::plan_staging(&location)?;
         let builder = fs::DirBuilder::new();
         #[cfg(unix)]
         let builder = {
@@ -547,26 +536,21 @@ fn create_staging_directory(parent: &Path) -> Result<StagingDirectory, TransferE
             builder
         };
         match builder.create(&path) {
-            Ok(()) => return StagingDirectory::new(path).map_err(Into::into),
+            Ok(()) => return StagingDirectory::new(path),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                crate::recovery::abandon_staging(&location).map_err(|error| error.to_string())?;
+                crate::recovery::abandon_staging(&location)?;
                 continue;
             }
             Err(e) => {
-                return Err(local_copy_error(Some(parent), e, |e| {
-                    at(
-                        crate::i18n::text!("Не удалось подготовить копирование в папку"),
-                        parent,
-                        e,
-                    )
-                }));
+                return Err(local_copy_error(
+                    Some(parent),
+                    access_io(&location, AccessAction::CreateStagingDirectory, e),
+                    ToString::to_string,
+                ));
             }
         }
     }
-    Err(
-        crate::i18n::text!("Не удалось создать временную папку для копирования; повторите попытку")
-            .into(),
-    )
+    Err(StagingError::NamesExhausted(Location::Local(parent.to_owned())).into())
 }
 
 #[cfg(test)]
@@ -659,30 +643,16 @@ pub(crate) fn copy_atomically_cancellable(
     check_local_copy_space(manifest.bytes, parent)?;
     progress.checkpoint()?;
     let staging = create_staging_directory(parent)?;
-    if let Err(error) =
-        crate::recovery::register_staging(&crate::vfs::Location::Local(staging.path.clone()))
-    {
-        let cleanup = remove_staging(&staging);
-        return Err(match cleanup {
-            Ok(()) => TransferError::from(error.to_string()),
-            Err(cleanup) => TransferError::from(crate::tr_format!(
-                "Could not register temporary copy “{}”: {error}; cleanup failed: {cleanup}",
-                staging.path.display(),
-                cleanup = cleanup,
-                error = error
-            )),
-        });
+    let location = Location::Local(staging.path.clone());
+    if let Err(error) = crate::recovery::register_staging(&location) {
+        return StagingCleanupError::combine(
+            Err(error),
+            remove_staging(&staging),
+            &location,
+            &target_location,
+        );
     }
-    let check_staging = || {
-        staging.ensure_owned().map_err(|error| {
-            TransferError::from(crate::tr_format!(
-                "Temporary copy “{}” changed: {error}",
-                staging.path.display(),
-                error = error
-            ))
-        })
-    };
-    check_staging()?;
+    staging.ensure_owned()?;
     let payload = staging.path.join("payload");
     let result = copy_tree(
         source,
@@ -709,13 +679,13 @@ pub(crate) fn copy_atomically_cancellable(
             at(crate::i18n::text!("Не удалось скопировать"), source, e)
         })
     })
-    .and_then(|()| check_staging())
+    .and_then(|()| staging.ensure_owned())
     // No cancellation inside publication, rollback, or staging cleanup.
     .and_then(|()| publish(&payload, destination));
     StagingCleanupError::combine(
         result,
-        remove_staging(&staging).map_err(Into::into),
-        &staging.path.into(),
+        remove_staging(&staging),
+        &location,
         &target_location,
     )
 }
@@ -801,6 +771,7 @@ pub(crate) fn local_copy_error(
             Ok(AccessError {
                 action:
                     AccessAction::CreateFile
+                    | AccessAction::CreateStagingDirectory
                     | AccessAction::WriteFile
                     | AccessAction::FlushFile
                     | AccessAction::SyncFile
@@ -1242,7 +1213,7 @@ fn copy_symlink(_: &Path, _: &Path, _: &fs::Metadata) -> io::Result<()> {
 
 /// Restore permissions only inside an unpublished private copy before cleanup;
 /// never follow a symlink or change any source permissions.
-fn remove_staging(staging: &StagingDirectory) -> io::Result<()> {
+fn remove_staging(staging: &StagingDirectory) -> Result<(), TransferError> {
     staging.ensure_owned()?;
     fn make_removable(path: &Path) -> io::Result<()> {
         let metadata = fs::symlink_metadata(path)?;
@@ -1272,9 +1243,11 @@ fn remove_staging(staging: &StagingDirectory) -> io::Result<()> {
         }
         Ok(())
     }
-    make_removable(&staging.path)?;
+    let location = Location::Local(staging.path.clone());
+    let cleanup = |error| AccessError::new(&location, AccessAction::RemoveStagingDirectory, error);
+    make_removable(&staging.path).map_err(cleanup)?;
     staging.ensure_owned()?;
-    fs::remove_dir_all(&staging.path)
+    fs::remove_dir_all(&staging.path).map_err(|error| cleanup(error).into())
 }
 
 fn at(action: &str, path: &Path, error: impl std::fmt::Display) -> String {

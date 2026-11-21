@@ -17,7 +17,7 @@ use super::{
     Location,
 };
 use crate::app::SavedLocation;
-use crate::file_error::RecoveryNotice;
+use crate::file_error::{RecoveryNotice, StagingError};
 use crate::i18n::text;
 use crate::operations::{AccessStream, Cancellation, Progress, TransferError};
 use crate::result_history::Outcome;
@@ -364,10 +364,24 @@ fn register_copy(
     folder_access_times: Option<&[Option<SavedTime>]>,
     cancel: &Cancellation,
 ) -> Result<Ticket, TransferError> {
-    let ticket = Ticket::create(&receipts(directory), receipt, folder_access_times)?;
-    if let Err(error) = create_owner_marker(stage, ticket.name(), cancel) {
-        ticket.finish()?;
-        return Err(error);
+    let directory = receipts(directory);
+    let ticket = Ticket::create(&directory, receipt, folder_access_times).map_err(|source| {
+        StagingError::ResumeReceipt {
+            staging: stage.clone(),
+            directory: directory.clone(),
+            source,
+        }
+    })?;
+    if let Err(cause) = create_owner_marker(stage, ticket.name(), cancel) {
+        if let Err(source) = ticket.finish() {
+            return Err(StagingError::ResumeReceiptCleanup {
+                receipt: directory.join(ticket.name()),
+                cause,
+                source,
+            }
+            .into());
+        }
+        return Err(cause);
     }
     Ok(ticket)
 }
