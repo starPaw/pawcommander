@@ -18,11 +18,11 @@ pub(crate) use archive::ArchiveError;
 pub(crate) use checksum::{ChecksumError, ManifestLineError};
 pub(crate) use host_key::{HostKeyError, KnownHostEntryError, KnownHostsError, PinError};
 pub(crate) use metadata::{MetadataError, MetadataField, MetadataWarning};
-pub(crate) use recovery_record::{
-    RecoveryRecordAction, RecoveryRecordError, RecoveryRecordProblem,
-};
 #[cfg(target_os = "macos")]
-pub(crate) use recovery_record::{ResumeRecordEvent, ResumeRecordSection};
+pub(crate) use recovery_record::ResumeRecordEvent;
+pub(crate) use recovery_record::{
+    RecoveryRecordAction, RecoveryRecordError, RecoveryRecordProblem, RecoveryRecordSection,
+};
 #[cfg(target_os = "macos")]
 pub(crate) use resume_check::{ResumeCheckError, ResumeCheckProblem, ResumeRole};
 pub(crate) use space::{ProbeAction, SftpSpaceFailure, SpaceError};

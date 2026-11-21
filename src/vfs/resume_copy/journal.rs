@@ -1,8 +1,8 @@
 //! Durable receipts for one worker and one staged copy.
 use super::{HeldSource, Intent, Original, Paths, Receipt, RenamedIdentity, SavedTime};
 use crate::file_error::{
-    RecoveryRecordAction as Action, RecoveryRecordError, RecoveryRecordProblem, ResumeRecordEvent,
-    ResumeRecordSection,
+    RecoveryRecordAction as Action, RecoveryRecordError, RecoveryRecordProblem,
+    RecoveryRecordSection, ResumeRecordEvent,
 };
 use crate::recovery::{check_record_identity, remove_record, same_owned_marker, store_record};
 use serde::{Deserialize, Serialize};
@@ -146,7 +146,7 @@ impl Ticket {
         }
         let invalid_header = |source| {
             failure(RecoveryRecordProblem::Json {
-                section: ResumeRecordSection::Header,
+                section: RecoveryRecordSection::Header,
                 source,
             })
         };
@@ -219,7 +219,7 @@ impl Ticket {
             let number = index + 1;
             let event = serde_json::from_slice(line).map_err(|source| {
                 failure(RecoveryRecordProblem::Json {
-                    section: ResumeRecordSection::Event(number),
+                    section: RecoveryRecordSection::Event(number),
                     source,
                 })
             })?;
@@ -281,7 +281,7 @@ impl Ticket {
         }
         let saved: Vec<Option<SavedTime>> = serde_json::from_slice(&bytes).map_err(|source| {
             failure(RecoveryRecordProblem::Json {
-                section: ResumeRecordSection::AccessTimes,
+                section: RecoveryRecordSection::AccessTimes,
                 source,
             })
         })?;

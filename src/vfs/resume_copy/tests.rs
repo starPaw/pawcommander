@@ -1,6 +1,6 @@
 use super::*;
 use crate::conflict::{Answer, Decision};
-use crate::file_error::{Failure, MutationError, PublicationError, ResumeRecordSection};
+use crate::file_error::{Failure, MutationError, PublicationError, RecoveryRecordSection};
 use crate::fs_ops::TransferKind;
 use crate::vfs::transfer_with_conflicts;
 use std::io::{Seek, SeekFrom, Write};
@@ -132,7 +132,7 @@ fn unreadable_recovery_records_report_their_path_and_cause() {
     for error in errors {
         match error.problem {
             RecoveryRecordProblem::Json {
-                section: ResumeRecordSection::Header,
+                section: RecoveryRecordSection::Header,
                 source,
             } => {
                 assert_eq!(error.path, malformed);
