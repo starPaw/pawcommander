@@ -10,8 +10,12 @@ mod compare;
 mod copy_metadata;
 mod cross_move;
 #[cfg(target_os = "macos")]
+pub(crate) mod duplicates;
+#[cfg(target_os = "macos")]
 mod external_editor;
 mod file_compare;
+#[cfg(target_os = "macos")]
+mod guarded_directory;
 mod listing;
 mod location;
 mod mutations;

@@ -125,6 +125,8 @@ impl PawCommander {
                                     self.files_to_compare().is_some(),
                                 ),
                                 #[cfg(target_os = "macos")]
+                                (Command::FindDuplicates, Action::FindDuplicates(Some(button.id)), self.can_find_duplicates()),
+                                #[cfg(target_os = "macos")]
                                 (Command::SyncFolders, Action::SyncFolders(Some(button.id)), self.can_open_folder_sync()),
                             ] {
                                 let compare = ui.add_enabled(enabled, egui::Button::new(

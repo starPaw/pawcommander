@@ -14,6 +14,8 @@ mod directory;
 mod directory_compare;
 #[cfg(any(target_os = "windows", test))]
 mod drives;
+#[cfg(target_os = "macos")]
+mod duplicates;
 mod entry_widget;
 #[cfg(target_os = "macos")]
 mod external_editors;

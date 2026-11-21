@@ -285,6 +285,12 @@ Open the folders in the two panes and choose **Compare folders** from the comman
 
 **Size and modified time** compares file sizes and modification times. Comparisons involving SFTP use whole seconds. **By contents** compares the SHA-256 hashes of equal-length files. The comparison treats each symbolic link as a single entry and compares its target path. Comparing is read-only. Use **Stop** to end the scan. The scanner supports up to 100,000 entries across both folders, 32 MiB of path data and 128 directory levels.
 
+## Find duplicates on macOS
+
+Open a local folder and choose **Find duplicates** from Settings or the command palette. Start the scan to search that folder and its subfolders. Equal file sizes select candidates for SHA-256 hashing. Equal hashes are then checked byte for byte. The search compares the data fork of regular files. It skips symbolic links and PawCommander staging folders. Hard links to one inode count as one file. The scan supports 100,000 entries, 32 MiB of path data and 128 directory levels and reports changed or unreadable entries.
+
+Each group starts with one file marked **Keep**. Select a different one if desired. Manually mark the other files you want to move to Trash, choose **Review selected**, then confirm. PawCommander checks the versions and contents again before moving a marked file to the system Trash. If anything changed, inspect the reported path and run a fresh search. To restore a file from Trash, drag it back to its original folder shown in Result history.
+
 ## One-way folder synchronization on macOS
 
 Open the two folders and choose **Folder sync preview** from Settings or the command palette. Select the source direction and choose **Build plan**. The preview lists each planned copy, replacement and deletion by relative path. It compares regular files by SHA-256 and symbolic links by their target paths.

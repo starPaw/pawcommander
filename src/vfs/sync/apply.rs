@@ -7,24 +7,18 @@ use crate::{
     vfs::{
         compare::scan,
         copy_metadata, err,
-        read_scope::{changed_during_read, local_subdirectory, ReadScope},
+        guarded_directory::{open_staging, retained, Directory},
+        read_scope::{changed_during_read, ReadScope},
         sftp::remote,
         staged_file::StagedFile,
         transfer::{
-            canonical, entry_metadata, rename_for_publication, with_preserved_staging,
-            with_tracked_staging, EntryMetadata, LocalEntryMetadata, SourceReader, StagingNotice,
-            TransferSourceEntry,
+            canonical, entry_metadata, with_preserved_staging, with_tracked_staging, EntryMetadata,
+            SourceReader, StagingNotice, TransferSourceEntry,
         },
         Location,
     },
 };
-use std::{
-    ffi::OsStr,
-    fs,
-    io::{self, Read},
-    os::{fd::OwnedFd, unix::fs::DirBuilderExt},
-    path::Path,
-};
+use std::{fs, io::Read, os::unix::fs::DirBuilderExt, path::Path};
 
 impl SyncPlan {
     pub(crate) fn folders(&self) -> &[Location; 2] {
@@ -351,13 +345,6 @@ fn groups(mut rows: &[SyncRow]) -> Vec<&[SyncRow]> {
     groups
 }
 
-fn retained(error: TransferError, staging: &Location) -> TransferError {
-    TransferError::PublicationUnconfirmed(crate::tr_format!(
-        "{error}. Временная папка сохранена для проверки: {staging}.",
-        "{error}. Temporary folder retained for inspection: {staging}."
-    ))
-}
-
 fn make_directory(location: &Location) -> Result<(), TransferError> {
     if let Some(path) = location.local() {
         fs::DirBuilder::new().mode(0o700).create(path)?;
@@ -367,14 +354,6 @@ fn make_directory(location: &Location) -> Result<(), TransferError> {
             .map_err(err)?;
     }
     Ok(())
-}
-
-fn open_staging(location: &Location) -> Result<ReadScope, TransferError> {
-    let scope = ReadScope::open(location)?;
-    if scope.parent.location != *location {
-        return Err(stale(location));
-    }
-    Ok(scope)
 }
 
 fn stage_source(
@@ -577,98 +556,4 @@ fn check_tree(
         return Err(stale(&actual.root.join(extra)));
     }
     Ok(())
-}
-
-struct Directory {
-    location: Location,
-    descriptor: Option<OwnedFd>,
-    metadata: EntryMetadata,
-}
-
-impl Directory {
-    fn from_scope(scope: &ReadScope) -> Result<Self, TransferError> {
-        let location = scope.parent.location.clone();
-        let metadata = entry_metadata(&location)?.ok_or_else(changed_during_read)?;
-        Self::at(scope, Path::new(""), &metadata, &Cancellation::default())
-    }
-
-    fn at(
-        scope: &ReadScope,
-        relative: &Path,
-        expected: &EntryMetadata,
-        cancel: &Cancellation,
-    ) -> Result<Self, TransferError> {
-        scope.parent.verify()?;
-        let location = scope
-            .checked_directory(relative, cancel)?
-            .ok_or_else(changed_during_read)?;
-        let descriptor = scope
-            .descriptor
-            .as_ref()
-            .map(|root| {
-                local_subdirectory(root, relative, cancel)?
-                    .map_or_else(|| rustix::io::dup(root).map_err(io::Error::from), Ok)
-            })
-            .transpose()?;
-        let anchor = Self {
-            location,
-            descriptor,
-            metadata: expected.clone(),
-        };
-        anchor.verify()?;
-        if let Some(fd) = &anchor.descriptor {
-            let file = fs::File::from(rustix::io::dup(fd).map_err(io::Error::from)?);
-            let captured =
-                EntryMetadata::Local(LocalEntryMetadata::from_file(&file, file.metadata()?));
-            if !expected.same_object(&captured) {
-                return Err(stale(&anchor.location));
-            }
-        }
-        Ok(anchor)
-    }
-
-    fn verify(&self) -> Result<(), TransferError> {
-        let actual = entry_metadata(&self.location)?.ok_or_else(|| stale(&self.location))?;
-        if !actual.is_directory()
-            || self.descriptor.is_some() && !self.metadata.same_object(&actual)
-            || canonical(&self.location)? != self.location.path()
-        {
-            return Err(stale(&self.location));
-        }
-        Ok(())
-    }
-
-    fn verify_absent(&self, name: &OsStr) -> Result<(), TransferError> {
-        self.verify()?;
-        let path = self.location.join(name);
-        if entry_metadata(&path)?.is_some() {
-            return Err(stale(&path));
-        }
-        Ok(())
-    }
-
-    fn rename(
-        &self,
-        name: &OsStr,
-        destination: &Directory,
-        new_name: &OsStr,
-    ) -> Result<(), TransferError> {
-        let from = self.location.join(name);
-        let to = destination.location.join(new_name);
-        if let (Some(old_fd), Some(new_fd)) = (&self.descriptor, &destination.descriptor) {
-            rustix::fs::renameat_with(
-                old_fd,
-                name,
-                new_fd,
-                new_name,
-                rustix::fs::RenameFlags::NOREPLACE,
-            )
-            .map_err(|error| {
-                crate::fs_ops::rename_error(from.path(), to.path(), io::Error::from(error))
-            })
-            .map_err(Into::into)
-        } else {
-            rename_for_publication(&from, &to)
-        }
-    }
 }

@@ -18,6 +18,8 @@ pub(super) enum ComparisonBody {
     Folders(DirectoryComparison),
     Files(FileComparisonDialog),
     #[cfg(target_os = "macos")]
+    Duplicates(super::duplicates::DuplicateSearch),
+    #[cfg(target_os = "macos")]
     Sync(Box<super::folder_sync::FolderSyncDialog>),
 }
 
@@ -26,6 +28,8 @@ pub(super) enum ComparisonResponse {
     Close,
     #[cfg(target_os = "macos")]
     ApplySync(super::folder_sync::Plan),
+    #[cfg(target_os = "macos")]
+    TrashDuplicates(Box<crate::vfs::duplicates::TrashPlan>),
 }
 
 impl ComparisonDialog {
@@ -45,6 +49,8 @@ impl ComparisonDialog {
             ComparisonBody::Folders(view) => view.poll(),
             ComparisonBody::Files(view) => view.poll(),
             #[cfg(target_os = "macos")]
+            ComparisonBody::Duplicates(view) => view.poll(),
+            #[cfg(target_os = "macos")]
             ComparisonBody::Sync(view) => view.poll(),
         }
     }
@@ -57,6 +63,8 @@ impl ComparisonDialog {
         let open = match &mut self.body {
             ComparisonBody::Folders(view) => view.show(ctx),
             ComparisonBody::Files(view) => view.show(ctx),
+            #[cfg(target_os = "macos")]
+            ComparisonBody::Duplicates(view) => return view.show(ctx),
             #[cfg(target_os = "macos")]
             ComparisonBody::Sync(view) => return view.show(ctx, profiles),
         };
@@ -83,8 +91,10 @@ impl PawCommander {
         self.palette_focus_to_restore = comparison.return_focus;
         self.comparison = None;
         #[cfg(target_os = "macos")]
-        if let ComparisonResponse::ApplySync(plan) = response {
-            self.enqueue_folder_sync(plan, ctx);
+        match response {
+            ComparisonResponse::ApplySync(plan) => self.enqueue_folder_sync(plan, ctx),
+            ComparisonResponse::TrashDuplicates(plan) => self.enqueue_duplicate_trash(*plan, ctx),
+            _ => {}
         }
         ctx.request_repaint();
     }

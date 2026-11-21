@@ -159,6 +159,8 @@ impl PawCommander {
             Command::CompareFolders => Action::CompareFolders(None),
             Command::CompareFiles => Action::CompareFiles(None),
             #[cfg(target_os = "macos")]
+            Command::FindDuplicates => Action::FindDuplicates(None),
+            #[cfg(target_os = "macos")]
             Command::SyncFolders => Action::SyncFolders(None),
             Command::AddToArchive => Action::AddToArchive,
             Command::RemoveFromArchive => Action::RemoveFromArchive,

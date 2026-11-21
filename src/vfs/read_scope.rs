@@ -28,6 +28,11 @@ pub(super) struct CheckedFile<'a> {
 }
 
 impl CheckedFile<'_> {
+    #[cfg(target_os = "macos")]
+    pub(super) fn stamp(&self) -> &TransferSourceEntry {
+        &self.stamp
+    }
+
     pub(super) fn stream(&mut self) -> (&Location, u64, &mut SourceReader) {
         (&self.source, self.stamp.size(), &mut self.input)
     }
