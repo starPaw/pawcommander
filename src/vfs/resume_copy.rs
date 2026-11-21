@@ -19,7 +19,7 @@ use super::{
 use crate::app::SavedLocation;
 use crate::file_error::RecoveryNotice;
 use crate::i18n::text;
-use crate::operations::{Cancellation, Progress, TransferError};
+use crate::operations::{AccessStream, Cancellation, Progress, TransferError};
 use crate::result_history::Outcome;
 use journal::{Event, Ticket};
 use serde::{Deserialize, Serialize};
@@ -136,7 +136,7 @@ impl FileProof {
         let digest = scope
             .read_checked(name, &cancel, |source, size, input| {
                 progress
-                    .hash_copy_check(source.path(), size, input)?
+                    .hash_copy_check(source.path(), size, &mut AccessStream::new(input, source))?
                     .ok_or_else(changed_copy)
             })?
             .ok_or_else(changed_copy)?;
@@ -337,7 +337,7 @@ fn start_file(
         *preserve = false;
         check_copy_space(original.stamp.size(), &target, stage)?;
         let payload = stage.join("payload");
-        StagedFile::open(&payload, cancel.clone())?.close()?;
+        StagedFile::open_for(&payload, &target, cancel.clone())?.close()?;
         let receipt = Receipt {
             intent,
             source: (&source).into(),
@@ -873,6 +873,7 @@ fn finish_copy(
         copy_suffix(
             &paths.source,
             &payload,
+            &paths.target,
             original,
             Some((&partial, &metadata)),
             progress,
@@ -975,6 +976,7 @@ fn finish_copy(
 fn copy_suffix(
     source: &Location,
     payload: &Location,
+    target: &Location,
     original: &FileProof,
     partial: Option<(&FileProof, &EntryMetadata)>,
     progress: &mut Progress,
@@ -984,12 +986,13 @@ fn copy_suffix(
     scope
         .read_checked(name, &cancel, |source, size, input| {
             verify_stamp(source, original.stamp)?;
+            let mut input = AccessStream::new(input, source);
             let offset = partial.map_or(0, |(proof, _)| proof.stamp.size());
             if offset > size {
                 return Err(changed_copy());
             }
             if let Some((proof, _)) = partial.filter(|_| offset != 0) {
-                let mut prefix = (&mut *input).take(offset);
+                let mut prefix = (&mut input).take(offset);
                 progress.set_copy_endpoints(source, source);
                 let actual = progress.hash_copy_check(source.path(), offset, &mut prefix)?;
                 if actual != Some(proof.digest) {
@@ -1002,16 +1005,16 @@ fn copy_suffix(
             progress.set_copy_endpoints(source, payload);
             let mut output = match partial {
                 Some((_, metadata)) => {
-                    StagedFile::open_at(payload, offset, metadata, cancel.clone())?
+                    StagedFile::open_at(payload, target, offset, metadata, cancel.clone())?
                 }
-                None => StagedFile::open(payload, cancel.clone())?,
+                None => StagedFile::open_for(payload, target, cancel.clone())?,
             };
             let remaining = size - offset;
             let written = progress.copy(
                 source.path(),
                 Some(remaining),
                 &mut input.take(remaining),
-                &mut output,
+                &mut AccessStream::new(&mut output, target),
             )?;
             if written != remaining {
                 return Err(changed_source());

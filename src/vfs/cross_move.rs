@@ -9,7 +9,7 @@ use super::transfer::{
     TransferSourceManifest,
 };
 use super::{err, Location};
-use crate::operations::{Cancellation, CopyReader, Progress, TransferError};
+use crate::operations::{AccessStream, Cancellation, CopyReader, Progress, TransferError};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
@@ -138,12 +138,15 @@ fn verify_file_pair(
     if !before.matches_moved_target(&input.metadata(source)?) {
         return Err(changed(source).into());
     }
-    let mut hashed = CopyReader::new((&mut input).take(before.size()), true);
+    let mut hashed = CopyReader::new(
+        AccessStream::new(&mut input, source).take(before.size()),
+        true,
+    );
     let mut buffer = [0; 64 * 1024];
     let mut size = 0;
     loop {
         cancel.check()?;
-        let n = hashed.read(&mut buffer).map_err(err)?;
+        let n = hashed.read(&mut buffer)?;
         if n == 0 {
             break;
         }
@@ -158,7 +161,12 @@ fn verify_file_pair(
         return Err(changed(target).into());
     }
     progress
-        .verify_copy_before_source_removal(displayed_source.path(), size, digest, &mut output)
+        .verify_copy_before_source_removal(
+            displayed_source.path(),
+            size,
+            digest,
+            &mut AccessStream::new(&mut output, target),
+        )
         .map_err(TransferError::from)?;
     if !copied.matches_moved_target(&output.metadata(target)?) {
         return Err(changed(target).into());
