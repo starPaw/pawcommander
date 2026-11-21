@@ -8,7 +8,10 @@ use crate::file_error::{
     StagingCleanupError, StagingError, StagingRecordAction,
 };
 #[cfg(target_os = "macos")]
-use crate::file_error::{ResumeRecordError, ResumeRecordProblem, ResumeRecordSection, SyncError};
+use crate::file_error::{
+    ResumeCheckError, ResumeCheckProblem, ResumeRecordError, ResumeRecordProblem,
+    ResumeRecordSection, ResumeRole, SyncError,
+};
 use crate::operations::TransferError;
 use crate::vfs::{DeletionFailure, TransferFailure};
 
@@ -49,6 +52,8 @@ pub(crate) fn file_error(error: &TransferError) -> String {
                 Failure::Publication(reason) => publication_error(reason),
                 Failure::Staging(error) => staging_error(error),
                 #[cfg(target_os = "macos")]
+                Failure::ResumeCheck(error) => resume_check_error(error),
+                #[cfg(target_os = "macos")]
                 Failure::ResumeRecord(error) => resume_record_error(error),
                 Failure::StagingCleanup(error) => staging_cleanup_error(error),
                 _ => error.to_string(),
@@ -56,6 +61,38 @@ pub(crate) fn file_error(error: &TransferError) -> String {
         }
         TransferError::Cancelled => crate::tr_format!("Operation cancelled"),
     }
+}
+
+#[cfg(target_os = "macos")]
+fn resume_check_error(error: &ResumeCheckError) -> String {
+    use ResumeCheckProblem::*;
+
+    let role = match error.role {
+        ResumeRole::Source => text!("Исходный объект"),
+        ResumeRole::Destination => text!("Объект назначения"),
+        ResumeRole::Staged => text!("Временная копия"),
+        ResumeRole::ParkedDestination => text!("Сохранённое прежнее назначение"),
+        ResumeRole::HeldOriginal => text!("Исходник во временной папке"),
+    };
+    let detail = match error.problem {
+        Missing => text!("Объект отсутствует."),
+        Unexpected => text!("На этом пути появился неожиданный объект."),
+        Changed => text!("Объект изменился с момента проверки."),
+        ContentsMismatch => text!("Содержимое отличается от проверенных данных."),
+        WrongType => text!("Неподходящий тип объекта."),
+        IncompleteMetadata => text!("Для сверки не хватает метаданных."),
+        InvalidPath => text!("Недопустимый путь для сверки."),
+        MissingProof => text!("В записи восстановления отсутствуют данные для сверки объекта."),
+        SizeMismatch { expected, actual } => {
+            let size = crate::tr_format!(
+                "Found {actual} bytes while verifying, expected {expected}.",
+                actual = actual,
+                expected = expected
+            );
+            return format!("{role} «{}». {size}", error.location);
+        }
+    };
+    format!("{role} «{}». {detail}", error.location)
 }
 
 #[cfg(target_os = "macos")]
@@ -102,6 +139,7 @@ fn resume_record_error(error: &ResumeRecordError) -> String {
         ),
         InvalidAccessTimes => format!("{} · {path}", text!("Некорректная запись времени доступа для переноса")),
         InvalidPaths => crate::tr_format!("Invalid paths in recovery record {path}", path = path),
+        InvalidProof => crate::tr_format!("Invalid transfer proof in recovery record {path}", path = path),
         InvalidName => crate::tr_format!("Invalid recovery record name in {path}", path = path),
         ScanLimit(limit) => crate::tr_format!(
             "Stopped reading recovery folder {path} after {limit} entries", path = path, limit = limit
@@ -840,6 +878,11 @@ fn mutation_error(error: &MutationError, unconfirmed: bool) -> String {
             "A copy was created at {target}. The move is incomplete. Check the source and result history. {error}",
             target = target,
             error = file_error(cause)
+        ),
+        #[cfg(target_os = "macos")]
+        RetainedMoveSource { held, cause } => crate::tr_format!(
+            "{error} Check the original folder and retained location {held}.",
+            error = file_error(cause), held = held
         ),
         #[cfg(target_os = "macos")]
         PlanChanged(location) => crate::tr_format!(

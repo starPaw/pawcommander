@@ -304,6 +304,8 @@ formats! {
     "Recovery record {path} has version {stored} but its contents require version {expected}" => ("В записи восстановления {path} указана версия {stored}, а её содержимое требует версии {expected}", "Záznam obnovení {path} má verzi {stored}, ale jeho obsah vyžaduje verzi {expected}"),
     "Event {number} is out of order in recovery record {path}" => ("Нарушен порядок событий в записи восстановления {path} на событии {number}", "V záznamu obnovení {path} je událost {number} mimo pořadí"),
     "Invalid paths in recovery record {path}" => ("Недопустимые пути в записи восстановления {path}", "Neplatné cesty v záznamu obnovení {path}"),
+    "Invalid transfer proof in recovery record {path}" => ("Некорректные данные для сверки передачи в записи восстановления {path}", "Neplatné údaje pro ověření přenosu v záznamu obnovení {path}"),
+    "Found {actual} bytes while verifying, expected {expected}." => ("При сверке найдено {actual} байт, ожидалось {expected}.", "Při ověřování nalezeno {actual} bajtů, očekáváno {expected}."),
     "Invalid recovery record name in {path}" => ("Недопустимое имя записи восстановления в папке {path}", "Neplatný název záznamu obnovení ve složce {path}"),
     "Stopped reading recovery folder {path} after {limit} entries" => ("Чтение папки восстановления {path} остановлено после {limit} записей", "Čtení složky obnovení {path} se zastavilo po {limit} položkách"),
     "Checking unfinished operations…" => ("Проверка незавершённых заданий…", "Kontrola nedokončených operací…"),

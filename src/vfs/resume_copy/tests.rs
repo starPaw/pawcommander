@@ -1,6 +1,6 @@
 use super::*;
 use crate::conflict::{Answer, Decision};
-use crate::file_error::{Failure, MutationError, ResumeRecordSection};
+use crate::file_error::{Failure, MutationError, PublicationError, ResumeRecordSection};
 use crate::fs_ops::TransferKind;
 use crate::vfs::transfer_with_conflicts;
 use std::io::{Seek, SeekFrom, Write};
@@ -86,6 +86,31 @@ fn continued(recovery: &Path, partial: &Path, source: &Path, target: &Path, byte
     );
 }
 
+fn retained_check<'a>(error: &'a TransferError, stage: &Path) -> &'a TransferError {
+    let TransferError::Failed(Failure::Publication(publication)) = error else {
+        panic!("Expected a retained copy, got {error:?}");
+    };
+    let PublicationError::Retained { staging, cause, .. } = publication.as_ref() else {
+        panic!("Expected a retained copy, got {publication:?}");
+    };
+    assert_eq!(staging.path(), stage);
+    cause
+}
+
+fn assert_resume_check(
+    error: &TransferError,
+    role: ResumeRole,
+    path: &Path,
+    problem: ResumeCheckProblem,
+) {
+    let TransferError::Failed(Failure::ResumeCheck(check)) = error else {
+        panic!("Expected a recovery check at {path:?}, got {error:?}");
+    };
+    assert_eq!(check.role, role);
+    assert_eq!(check.location.path(), path);
+    assert_eq!(check.problem, problem);
+}
+
 #[test]
 fn unreadable_recovery_records_report_their_path_and_cause() {
     let temp = tempfile::tempdir().unwrap();
@@ -149,6 +174,8 @@ fn retained_copy_restarts_from_checked_offset_and_never_retries_changed_data() {
         Some("source"),
         Some("target"),
         Some("payload"),
+        Some("size"),
+        Some("backup"),
         Some("parked"),
         Some("published"),
     ] {
@@ -210,31 +237,69 @@ fn retained_copy_restarts_from_checked_offset_and_never_retries_changed_data() {
             }
             continue;
         }
-        let changed = match change {
-            "source" => &source,
-            "target" => &target,
-            _ => &partial,
+        let backup = partial.parent().unwrap().join("previous");
+        let (role, changed, problem) = match change {
+            "source" => (ResumeRole::Source, &source, ResumeCheckProblem::Changed),
+            "target" => (
+                ResumeRole::Destination,
+                &target,
+                ResumeCheckProblem::Changed,
+            ),
+            "backup" => {
+                fs::rename(&target, &backup).unwrap();
+                (
+                    ResumeRole::ParkedDestination,
+                    &backup,
+                    ResumeCheckProblem::ContentsMismatch,
+                )
+            }
+            "size" => (
+                ResumeRole::Staged,
+                &partial,
+                ResumeCheckProblem::SizeMismatch {
+                    expected: bytes.len() as u64,
+                    actual: bytes.len() as u64 + 1,
+                },
+            ),
+            _ => (
+                ResumeRole::Staged,
+                &partial,
+                ResumeCheckProblem::ContentsMismatch,
+            ),
         };
         let times = changed.metadata().unwrap();
         let mut file = fs::OpenOptions::new().write(true).open(changed).unwrap();
-        file.seek(SeekFrom::Start(2)).unwrap();
-        file.write_all(b"changed").unwrap();
+        if change == "size" {
+            file.set_len(bytes.len() as u64 + 1).unwrap();
+        } else {
+            file.seek(SeekFrom::Start(2)).unwrap();
+            file.write_all(b"changed").unwrap();
+        }
         file.set_times(fs::FileTimes::new().set_modified(times.modified().unwrap()))
             .unwrap();
-        let snapshot = [&source, &target, &partial].map(|path| fs::read(path).unwrap());
+        let previous = if change == "backup" { &backup } else { &target };
+        let snapshot = [&source, previous, &partial].map(|path| fs::read(path).unwrap());
         let (offers, errors) = scan(&recovery);
         assert!(errors.is_empty());
         assert_eq!(offers.len(), 1);
         let (mut progress, mut view) = Progress::tracked_transfer();
-        assert!(
-            resume(&recovery, &offers[0].id, &mut progress).is_err(),
-            "{change}"
+        let error = resume(&recovery, &offers[0].id, &mut progress).unwrap_err();
+        assert_resume_check(
+            retained_check(&error, partial.parent().unwrap()),
+            role,
+            changed,
+            problem,
+        );
+        assert_eq!(
+            progress.results.items[0].outcome,
+            Outcome::PartialCopyRetained
         );
         assert_eq!(view.snapshot().total_written, 0, "{change}");
         assert_eq!(
             snapshot,
-            [&source, &target, &partial].map(|path| fs::read(path).unwrap())
+            [&source, previous, &partial].map(|path| fs::read(path).unwrap())
         );
+        assert_eq!(target.exists(), change != "backup");
         assert_eq!(scan(&recovery).0.len(), 1);
     }
 }
@@ -555,6 +620,34 @@ fn move_recovery_keeps_an_incomplete_or_unowned_held_tree() {
         }
         let (mut progress, mut view) = Progress::tracked_transfer();
         let error = resume(&recovery, &offer.id, &mut progress).unwrap_err();
+        let TransferError::Failed(Failure::Mutation(incomplete)) = &error else {
+            panic!("Expected an incomplete move, got {error:?}");
+        };
+        let MutationError::MoveIncomplete {
+            target: published,
+            cause,
+        } = incomplete.as_ref()
+        else {
+            panic!("Expected an incomplete move, got {incomplete:?}");
+        };
+        assert_eq!(published, &target);
+        let TransferError::Failed(Failure::Mutation(retained)) = cause else {
+            panic!("Expected a retained original, got {cause:?}");
+        };
+        let MutationError::RetainedMoveSource { held: kept, cause } = retained.as_ref() else {
+            panic!("Expected a retained original, got {retained:?}");
+        };
+        assert_eq!(kept, &held);
+        let (role, location, reason) = match problem {
+            "unexpected sibling" => (ResumeRole::Staged, &sibling, ResumeCheckProblem::Unexpected),
+            "legacy receipt" => (
+                ResumeRole::HeldOriginal,
+                &held,
+                ResumeCheckProblem::MissingProof,
+            ),
+            _ => (ResumeRole::HeldOriginal, &held, ResumeCheckProblem::Changed),
+        };
+        assert_resume_check(cause, role, location.path(), reason);
         let message = crate::i18n::file_error(&error);
         assert!(message.contains(&held.display()), "{problem}: {message}");
         assert_eq!(view.snapshot().total_written, 0);
@@ -766,9 +859,30 @@ fn interrupted_folder_reuses_verified_children_and_refuses_changed_trees() {
         let (offers, errors) = scan(&recovery);
         assert!(errors.is_empty() && offers.len() == 1);
         let (mut progress, mut view) = Progress::tracked_transfer();
-        assert!(
-            resume(&recovery, &offers[0].id, &mut progress).is_err(),
-            "{change}"
+        let error = resume(&recovery, &offers[0].id, &mut progress).unwrap_err();
+        let (role, location, problem) = match change {
+            "source" => (
+                ResumeRole::Source,
+                &source,
+                ResumeCheckProblem::ContentsMismatch,
+            ),
+            "target" => (
+                ResumeRole::Destination,
+                &target,
+                ResumeCheckProblem::Unexpected,
+            ),
+            "foreign" => (ResumeRole::Staged, &changed, ResumeCheckProblem::Unexpected),
+            _ => (
+                ResumeRole::Staged,
+                &changed,
+                ResumeCheckProblem::ContentsMismatch,
+            ),
+        };
+        let check = retained_check(&error, stage.parent().unwrap());
+        assert_resume_check(check, role, location, problem);
+        assert_eq!(
+            progress.results.items[0].outcome,
+            Outcome::PartialCopyRetained
         );
         assert_eq!(view.snapshot().total_written, 0, "{change}");
         assert_eq!(fs::read(&changed).unwrap(), changed_bytes);

@@ -31,6 +31,7 @@ pub(crate) enum ResumeRecordProblem {
     EventOrder(usize),
     InvalidAccessTimes,
     InvalidPaths,
+    InvalidProof,
     InvalidName,
     ScanLimit(usize),
 }
@@ -93,6 +94,9 @@ impl fmt::Display for ResumeRecordError {
             }
             ResumeRecordProblem::InvalidPaths => {
                 write!(f, "Invalid paths in recovery record {path}")
+            }
+            ResumeRecordProblem::InvalidProof => {
+                write!(f, "Invalid transfer proof in recovery record {path}")
             }
             ResumeRecordProblem::InvalidName => write!(f, "Invalid recovery record name in {path}"),
             ResumeRecordProblem::ScanLimit(limit) => write!(

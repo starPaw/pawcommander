@@ -1981,7 +1981,8 @@ impl TransferSourceManifest {
         if depth > MAX_TREE_DEPTH {
             return Err(crate::i18n::text!("Слишком большая глубина папок (более 128)").into());
         }
-        let metadata = entry_metadata(source)?.ok_or_else(|| changed_source(source))?;
+        let metadata =
+            entry_metadata(source)?.ok_or_else(|| MutationError::SourceChanged(source.clone()))?;
         let (is_dir, is_file) = match &metadata {
             EntryMetadata::Local(meta) => {
                 meta.modified()

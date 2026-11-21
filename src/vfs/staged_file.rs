@@ -81,41 +81,43 @@ impl StagedFile {
         cancel: Cancellation,
     ) -> Result<Self, TransferError> {
         use super::transfer::{EntryMetadata, LocalEntryMetadata};
+        use crate::file_error::{ResumeCheckProblem, ResumeRole};
         use std::io::{Seek, SeekFrom};
         use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
         cancel.check()?;
         let open = AccessAction::OpenFile;
         let metadata = AccessAction::ReadOpenMetadata;
-        let seek_error = |error| AccessError::stream(report_at, AccessAction::SeekFile, error);
-        let file = if let Some(path) = path.local() {
+        let seek_error = |error| AccessError::stream(path, AccessAction::SeekFile, error);
+        let changed = || ResumeRole::Staged.error(path, ResumeCheckProblem::Changed);
+        let file = if let Some(local) = path.local() {
             let mut file = fs::OpenOptions::new()
                 .write(true)
                 .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-                .open(path)
-                .map_err(|error| AccessError::new(report_at, open, error))?;
+                .open(local)
+                .map_err(|error| AccessError::new(path, open, error))?;
             let actual = file
                 .metadata()
-                .map_err(|error| AccessError::new(report_at, metadata, error))?;
+                .map_err(|error| AccessError::new(path, metadata, error))?;
             if actual.nlink() != 1
                 || !expected.matches_file(&EntryMetadata::Local(LocalEntryMetadata::from_file(
                     &file, actual,
                 )))
             {
-                return Err(super::resume_copy::changed_copy());
+                return Err(changed());
             }
             file.seek(SeekFrom::Start(offset)).map_err(seek_error)?;
             OutputFile::Local(file)
         } else {
             let mut file = remote(path)
-                .map_err(|error| AccessError::new(report_at, open, error))?
+                .map_err(|error| AccessError::new(path, open, error))?
                 .open_mode(path.path(), OpenFlags::WRITE, 0, OpenType::File)
-                .map_err(|error| AccessError::new(report_at, open, error))?;
+                .map_err(|error| AccessError::new(path, open, error))?;
             let actual = file
                 .stat()
-                .map_err(|error| AccessError::new(report_at, metadata, error))?;
+                .map_err(|error| AccessError::new(path, metadata, error))?;
             if !expected.matches_file(&EntryMetadata::Remote(actual)) {
-                return Err(super::resume_copy::changed_copy());
+                return Err(changed());
             }
             file.seek(SeekFrom::Start(offset)).map_err(seek_error)?;
             OutputFile::Remote(file)
