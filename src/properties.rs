@@ -17,6 +17,8 @@ use std::sync::{
 use std::time::{Duration, Instant, SystemTime};
 
 #[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
 mod sftp;
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) use sftp::check_sftp_properties;
@@ -285,9 +287,13 @@ fn scan(paths: &[PathBuf], cancel: &AtomicBool, mut progress: impl FnMut(&Summar
                 continue;
             }
         };
-        summary
-            .details
-            .push((path.clone().into(), details(&metadata)));
+        let item_details = details(&metadata);
+        #[cfg(target_os = "macos")]
+        let item_details = match macos::describe(&path, &metadata, cancel) {
+            Some(extended) => format!("{item_details}\n{extended}"),
+            None => item_details,
+        };
+        summary.details.push((path.clone().into(), item_details));
         if metadata.is_dir() {
             accepted.insert(path.clone());
         }

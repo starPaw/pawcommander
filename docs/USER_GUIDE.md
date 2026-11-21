@@ -269,6 +269,8 @@ Select items and use **Properties** or `Alt+Enter` to calculate their combined l
 
 Properties show available dates and permissions for selected items. Unix permissions show the mode, UID, and GID. Windows shows read-only state. SFTP shows the server's modification and access times, with creation time marked unavailable. The SFTP calculation can read up to 128 nested directory levels.
 
+On macOS, local Properties also show each selected item's file system, the hard-link count for regular files, Finder tag names, extended attribute names and ACL entries. Properties read attributes on a symbolic link itself. An empty field, a volume that lacks support and a read error have distinct messages. Large attribute lists and tag data can exceed the preview limit. See [transfer behavior](#copying-moving-and-conflicts) for which metadata copies preserve.
+
 While counting, **Stop calculation** receives initial keyboard focus. Press `Space` or `Enter` to stop and keep the partial result. Close the window or press `Esc` to dismiss it and request cancellation. Cancellation takes effect between filesystem or SFTP requests. When an entry disappears or cannot be read, the window identifies the result as partial.
 
 ## Compare folders
