@@ -249,7 +249,11 @@ impl Ticket {
     pub(super) fn paths(&self) -> Result<Paths, ResumeRecordError> {
         self.receipt
             .paths()
-            .ok_or_else(|| ResumeRecordError::new(&self.path, ResumeRecordProblem::InvalidPaths))
+            .ok_or_else(|| self.error(ResumeRecordProblem::InvalidPaths))
+    }
+
+    pub(super) fn error(&self, problem: ResumeRecordProblem) -> ResumeRecordError {
+        ResumeRecordError::new(&self.path, problem)
     }
 
     pub(super) fn folder_access_times(

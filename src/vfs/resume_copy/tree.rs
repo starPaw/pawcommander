@@ -1,11 +1,14 @@
 //! Folder recovery verifies a fresh snapshot against the recorded fingerprint.
 //! Moves retain original access times separately because reading changes them.
 use super::{
-    changed_copy, changed_source, copy_metadata, copy_suffix, discard_stage, entry_metadata,
-    file_scope, register_copy, rename_for_publication, retained_error, stage_contents,
+    copy_metadata, copy_suffix, discard_stage, entry_metadata, file_scope, manifest_error,
+    register_copy, rename_for_publication, required_metadata, retained_error, stage_contents,
     stage_identity, verify_stamp, verify_target, Cancellation, Completion, EntryMetadata,
     FileProof, Intent, Location, Original, Paths, Progress, Receipt, RenamedIdentity, SavedTime,
     Ticket, TransferError,
+};
+use crate::file_error::{
+    AccessAction, AccessError, ResumeCheckProblem, ResumeRecordProblem, ResumeRole,
 };
 use crate::operations::AccessStream;
 use crate::vfs::{
@@ -54,11 +57,13 @@ type Partials = BTreeMap<PathBuf, (FileProof, EntryMetadata)>;
 impl Snapshot {
     fn capture(
         root: &Location,
+        role: ResumeRole,
         local_names: bool,
         progress: &mut Progress,
     ) -> Result<Self, TransferError> {
         let cancel = progress.cancellation().pausable_scan();
-        let listing = TransferSourceManifest::capture_copy_tree(root, &cancel, local_names)?;
+        let listing = TransferSourceManifest::capture_copy_tree(root, &cancel, local_names)
+            .map_err(|error| manifest_error(role, error))?;
         let mut entries = BTreeMap::new();
         let mut manifest = Sha256::new();
         let mut contents = Sha256::new();
@@ -67,23 +72,21 @@ impl Snapshot {
             let relative = source
                 .path()
                 .strip_prefix(root.path())
-                .map_err(crate::vfs::err)?;
+                .map_err(|_| role.error(&source, ResumeCheckProblem::InvalidPath))?;
             let content = if entry.children.is_some() {
                 Content::Directory
             } else if entry.metadata.is_file() {
-                let (proof, actual) = FileProof::read(&source, progress)?;
-                entry.verify_metadata(&source, &actual)?;
+                let (proof, actual) = FileProof::read(&source, role, progress)?;
+                entry
+                    .verify_metadata(&source, &actual)
+                    .map_err(|error| manifest_error(role, error))?;
                 Content::File(proof)
             } else if local_names
                 && matches!(&entry.metadata, EntryMetadata::Local(meta) if meta.is_symlink())
             {
-                Content::Link(fs::read_link(source.path())?)
+                Content::Link(read_link(&source)?)
             } else {
-                return Err(crate::tr_format!(
-                    "Copying this object type is unavailable: {source}",
-                    source = source
-                )
-                .into());
+                return Err(role.error(&source, ResumeCheckProblem::WrongType));
             };
             feed_field(&mut manifest, relative.as_os_str().as_encoded_bytes());
             feed_field(&mut manifest, &metadata_bytes(&entry.metadata, false)?);
@@ -105,7 +108,7 @@ impl Snapshot {
             .get(Path::new(""))
             .is_some_and(|entry| matches!(entry.content, Content::Directory))
         {
-            return Err(changed_source());
+            return Err(role.error(root, ResumeCheckProblem::WrongType));
         }
         let snapshot = Self {
             entries,
@@ -116,18 +119,25 @@ impl Snapshot {
             bytes: listing.bytes,
             local_names,
         };
-        snapshot.verify_source(root, &cancel)?;
+        snapshot.verify(root, role, &cancel)?;
         Ok(snapshot)
     }
 
-    fn verify_source(&self, root: &Location, cancel: &Cancellation) -> Result<(), TransferError> {
+    fn verify(
+        &self,
+        root: &Location,
+        role: ResumeRole,
+        cancel: &Cancellation,
+    ) -> Result<(), TransferError> {
         for (relative, node) in &self.entries {
             let source = at(root, relative);
-            node.entry.verify(&source, cancel, self.local_names)?;
+            node.entry
+                .verify(&source, cancel, self.local_names)
+                .map_err(|error| manifest_error(role, error))?;
             if let Content::Link(expected) = &node.content
-                && fs::read_link(source.path())? != *expected
+                && read_link(&source)? != *expected
             {
-                return Err(changed_source());
+                return Err(role.error(&source, ResumeCheckProblem::ContentsMismatch));
             }
         }
         Ok(())
@@ -161,16 +171,17 @@ impl Snapshot {
     ) -> Result<Inventory, TransferError> {
         let mut present = Inventory::new();
         let mut discovered = BTreeSet::from([PathBuf::new()]);
+        let role = ResumeRole::Staged;
         for (relative, node) in &self.entries {
             cancel.check()?;
             if !discovered.remove(relative) {
                 if complete {
-                    return Err(changed_copy());
+                    return Err(role.error(&at(payload, relative), ResumeCheckProblem::Missing));
                 }
                 continue;
             }
             let copy = at(payload, relative);
-            let actual = entry_metadata(&copy)?.ok_or_else(changed_copy)?;
+            let actual = required_metadata(&copy, role)?;
             match (&node.content, &actual) {
                 (Content::Directory, actual) if actual.is_directory() => {
                     let expected = node
@@ -179,21 +190,34 @@ impl Snapshot {
                         .as_ref()
                         .expect("directory has children");
                     let names = source_children(&copy, cancel, self.local_names)?;
-                    if (complete && names != *expected)
-                        || names
-                            .iter()
-                            .any(|name| expected.binary_search(name).is_err())
+                    if let Some(name) = names
+                        .iter()
+                        .find(|name| expected.binary_search(name).is_err())
                     {
-                        return Err(changed_copy());
+                        return Err(role.error(&copy.join(name), ResumeCheckProblem::Unexpected));
+                    }
+                    if complete
+                        && names.len() != expected.len()
+                        && let Some(name) = expected
+                            .iter()
+                            .find(|name| names.binary_search(name).is_err())
+                    {
+                        return Err(role.error(&copy.join(name), ResumeCheckProblem::Missing));
                     }
                     discovered.extend(names.into_iter().map(|name| relative.join(name)));
                 }
                 (Content::File(_), EntryMetadata::Local(meta))
                     if meta.is_file() && meta.nlink() == 1 => {}
+                (Content::File(_), EntryMetadata::Local(meta)) if meta.is_file() => {
+                    return Err(role.error(&copy, ResumeCheckProblem::Changed));
+                }
                 (Content::File(_), EntryMetadata::Remote(stat)) if stat.is_file() => {}
-                (Content::Link(expected), EntryMetadata::Local(meta))
-                    if meta.is_symlink() && fs::read_link(copy.path())? == *expected => {}
-                _ => return Err(changed_copy()),
+                (Content::Link(expected), EntryMetadata::Local(meta)) if meta.is_symlink() => {
+                    if read_link(&copy)? != *expected {
+                        return Err(role.error(&copy, ResumeCheckProblem::ContentsMismatch));
+                    }
+                }
+                _ => return Err(role.error(&copy, ResumeCheckProblem::WrongType)),
             }
             present.insert(relative.clone(), actual);
         }
@@ -210,24 +234,35 @@ impl Snapshot {
     ) -> Result<(Partials, u64), TransferError> {
         let mut partials = Partials::new();
         let mut reused = 0;
+        let role = ResumeRole::Staged;
         for (relative, metadata) in present {
             let Content::File(original) = &self.entries[relative].content else {
                 continue;
             };
             let source = at(&paths.source, relative);
             let copy = at(payload, relative);
-            let (proof, actual) = FileProof::read(&copy, progress)?;
+            let (proof, actual) = FileProof::read(&copy, role, progress)?;
             let size = proof.stamp.size();
-            if !metadata.matches_file(&actual) || size > original.stamp.size() {
-                return Err(changed_copy());
+            let expected = original.stamp.size();
+            if !metadata.matches_file(&actual) {
+                return Err(role.error(&copy, ResumeCheckProblem::Changed));
             }
-            if size == original.stamp.size() {
-                if proof.digest != original.digest {
-                    return Err(changed_copy());
-                }
-            } else if complete || (size != 0 && !check_prefix(&source, original, &proof, progress)?)
-            {
-                return Err(changed_copy());
+            if size > expected || (complete && size < expected) {
+                return Err(role.error(
+                    &copy,
+                    ResumeCheckProblem::SizeMismatch {
+                        expected,
+                        actual: size,
+                    },
+                ));
+            }
+            let matches = if size == expected {
+                proof.digest == original.digest
+            } else {
+                size == 0 || check_prefix(&source, original, &proof, progress)?
+            };
+            if !matches {
+                return Err(role.error(&copy, ResumeCheckProblem::ContentsMismatch));
             }
             reused += size;
             partials.insert(relative.clone(), (proof, actual));
@@ -244,28 +279,34 @@ impl Snapshot {
         progress: &mut Progress,
     ) -> Result<(), TransferError> {
         let cancel = progress.cancellation();
+        let role = ResumeRole::Staged;
         for (relative, node) in &self.entries {
             progress.checkpoint()?;
             let source = at(&paths.source, relative);
             let copy = at(payload, relative);
             let existing = inventory.contains_key(relative);
             if let Some(parent) = relative.parent() {
+                let directory = at(payload, parent);
                 check_directory(
-                    &at(payload, parent),
-                    inventory.get(parent).ok_or_else(changed_copy)?,
+                    &directory,
+                    inventory
+                        .get(parent)
+                        .ok_or_else(|| role.error(&directory, ResumeCheckProblem::Missing))?,
                 )?;
             }
             let result = match &node.content {
                 Content::Directory if !existing => mkdir(&copy).and_then(|()| {
-                    let metadata = entry_metadata(&copy)?.ok_or_else(changed_copy)?;
+                    let metadata = required_metadata(&copy, role)?;
                     if !metadata.is_directory() {
-                        return Err(changed_copy());
+                        return Err(role.error(&copy, ResumeCheckProblem::WrongType));
                     }
                     inventory.insert(relative.clone(), metadata);
                     Ok(())
                 }),
                 Content::Link(target) if !existing => {
-                    std::os::unix::fs::symlink(target, copy.path()).map_err(Into::into)
+                    std::os::unix::fs::symlink(target, copy.path()).map_err(|error| {
+                        AccessError::new(&copy, AccessAction::CreateLink, error).into()
+                    })
                 }
                 Content::File(original) => {
                     let partial = partials
@@ -299,9 +340,6 @@ impl Snapshot {
         original_access_times: Option<&[Option<SystemTime>]>,
         progress: &mut Progress,
     ) -> Result<(), TransferError> {
-        if original_access_times.is_some_and(|times| times.len() != self.entries.len()) {
-            return Err(changed_source());
-        }
         for (index, (relative, node)) in self.entries.iter().enumerate().rev() {
             progress.checkpoint()?;
             if !matches!(node.content, Content::Link(_)) {
@@ -322,20 +360,24 @@ impl Snapshot {
     }
 
     fn discard(&self, payload: &Location, present: &Inventory) -> Result<(), TransferError> {
+        let role = ResumeRole::Staged;
         for (relative, recorded) in present.iter().rev() {
             let copy = at(payload, relative);
             if let Some(parent) = relative.parent() {
+                let directory = at(payload, parent);
                 check_directory(
-                    &at(payload, parent),
-                    present.get(parent).ok_or_else(changed_copy)?,
+                    &directory,
+                    present
+                        .get(parent)
+                        .ok_or_else(|| role.error(&directory, ResumeCheckProblem::Missing))?,
                 )?;
             }
-            let current = entry_metadata(&copy)?.ok_or_else(changed_copy)?;
+            let current = required_metadata(&copy, role)?;
             if recorded.is_directory() {
                 if !current.is_directory()
                     || (copy.local().is_some() && !recorded.same_object(&current))
                 {
-                    return Err(changed_copy());
+                    return Err(role.error(&copy, ResumeCheckProblem::Changed));
                 }
                 if let Some(path) = copy.local() {
                     fs::remove_dir(path)?;
@@ -350,7 +392,7 @@ impl Snapshot {
                     recorded.matches_file(&current)
                 };
                 if !same {
-                    return Err(changed_copy());
+                    return Err(role.error(&copy, ResumeCheckProblem::Changed));
                 }
                 if let Some(path) = copy.local() {
                     fs::remove_file(path)?;
@@ -376,7 +418,7 @@ pub(super) fn start(
 ) -> Result<(), TransferError> {
     let local_names = !source.remote() && !target.remote();
     verify_target(None, &target, false, progress)?;
-    let snapshot = Snapshot::capture(&source, local_names, progress)?;
+    let snapshot = Snapshot::capture(&source, ResumeRole::Source, local_names, progress)?;
     let original_access_times = if intent == Intent::Move {
         if snapshot.entries.len() > MAX_MOVE_JOURNAL_ENTRIES {
             return Err(crate::i18n::text!(
@@ -442,10 +484,10 @@ fn finish(
 ) -> Result<Completion, TransferError> {
     let receipt = &ticket.receipt;
     let Original::Folder(proof) = receipt.original else {
-        return Err(changed_copy());
+        return Err(ticket.error(ResumeRecordProblem::InvalidProof).into());
     };
     if receipt.previous.is_some() {
-        return Err(changed_copy());
+        return Err(ticket.error(ResumeRecordProblem::InvalidProof).into());
     }
     progress.partial_copy_retained = true;
     let owner = ticket.name();
@@ -456,13 +498,7 @@ fn finish(
     let local_names = !paths.source.remote() && !paths.target.remote();
     let result = (|| {
         if snapshot.is_none() && entry_metadata(&payload)?.is_none() {
-            if Snapshot::capture(&paths.target, local_names, progress)?
-                .proof
-                .contents
-                != proof.contents
-            {
-                return Err(changed_copy());
-            }
+            verify_published(paths, proof, None, progress)?;
             committed = true;
             published();
             return Ok(Completion::AlreadyPresent);
@@ -471,9 +507,15 @@ fn finish(
         verify_target(None, &paths.target, false, progress)?;
         let resuming = snapshot.is_none();
         if resuming {
-            let current = Snapshot::capture(&paths.source, local_names, progress)?;
+            let current =
+                Snapshot::capture(&paths.source, ResumeRole::Source, local_names, progress)?;
             if current.proof != proof {
-                return Err(changed_source());
+                let problem = if current.proof.contents != proof.contents {
+                    ResumeCheckProblem::ContentsMismatch
+                } else {
+                    ResumeCheckProblem::Changed
+                };
+                return Err(ResumeRole::Source.error(&paths.source, problem));
             }
             snapshot = Some(current);
         }
@@ -481,15 +523,21 @@ fn finish(
         snapshot.report(paths, progress);
         let draft = snapshot.inventory(&payload, false, &cancel)?;
         let (partials, reused) = snapshot.verify_bytes(paths, &payload, &draft, false, progress)?;
-        draft_verified = true;
         let original_access_times = ticket.folder_access_times()?;
+        if original_access_times
+            .as_ref()
+            .is_some_and(|times| times.len() != snapshot.entries.len())
+        {
+            return Err(ticket.error(ResumeRecordProblem::InvalidAccessTimes).into());
+        }
+        draft_verified = true;
         if resuming && reused < snapshot.bytes {
             check_copy_space(snapshot.bytes - reused, &paths.target, &paths.stage)?;
         }
         snapshot.extend(paths, &payload, draft, &partials, progress)?;
         let complete = snapshot.inventory(&payload, true, &cancel)?;
         snapshot.verify_bytes(paths, &payload, &complete, true, progress)?;
-        snapshot.verify_source(&paths.source, &cancel)?;
+        snapshot.verify(&paths.source, ResumeRole::Source, &cancel)?;
         snapshot.apply_metadata(
             paths,
             &payload,
@@ -498,7 +546,7 @@ fn finish(
             progress,
         )?;
         stage_contents(&paths.stage, receipt.stage_identity, owner, &["payload"])?;
-        snapshot.verify_source(&paths.source, &cancel)?;
+        snapshot.verify(&paths.source, ResumeRole::Source, &cancel)?;
         if receipt.intent == Intent::Move {
             let complete = snapshot.inventory(&payload, true, &cancel)?;
             ticket.seal(publication_seal(&complete)?)?;
@@ -537,19 +585,28 @@ fn finish(
 
 pub(super) fn verify_move_source(
     source: &Location,
+    role: ResumeRole,
     destination: &Location,
     proof: Proof,
     renamed: Option<RenamedIdentity>,
     progress: &mut Progress,
 ) -> Result<RenamedIdentity, TransferError> {
-    let snapshot = Snapshot::capture(source, !source.remote() && !destination.remote(), progress)?;
+    let snapshot = Snapshot::capture(
+        source,
+        role,
+        !source.remote() && !destination.remote(),
+        progress,
+    )?;
     let identity = snapshot.renamed_identity()?;
     let matches = match renamed {
-        Some(expected) => identity == expected && snapshot.proof.contents == proof.contents,
-        None => snapshot.proof == proof,
+        Some(expected) => identity == expected,
+        None => snapshot.proof.manifest == proof.manifest,
     };
     if !matches {
-        return Err(changed_source());
+        return Err(role.error(source, ResumeCheckProblem::Changed));
+    }
+    if snapshot.proof.contents != proof.contents {
+        return Err(role.error(source, ResumeCheckProblem::ContentsMismatch));
     }
     Ok(identity)
 }
@@ -561,14 +618,15 @@ pub(super) fn verify_published(
     progress: &mut Progress,
 ) -> Result<(), TransferError> {
     let local_names = !paths.source.remote() && !paths.target.remote();
-    let snapshot = Snapshot::capture(&paths.target, local_names, progress)?;
+    let role = ResumeRole::Destination;
+    let snapshot = Snapshot::capture(&paths.target, role, local_names, progress)?;
     if snapshot.proof.contents != proof.contents {
-        return Err(changed_copy());
+        return Err(role.error(&paths.target, ResumeCheckProblem::ContentsMismatch));
     }
     if let Some(expected) = seal
         && snapshot.renamed_identity()? != expected
     {
-        return Err(changed_copy());
+        return Err(role.error(&paths.target, ResumeCheckProblem::Changed));
     }
     Ok(())
 }
@@ -582,18 +640,29 @@ fn at(root: &Location, relative: &Path) -> Location {
 }
 
 fn mkdir(location: &Location) -> Result<(), TransferError> {
+    let action = AccessAction::CreateStagingDirectory;
     if let Some(path) = location.local() {
-        fs::DirBuilder::new().mode(0o700).create(path)?;
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(path)
+            .map_err(|error| AccessError::new(location, action, error))?;
     } else {
-        remote(location)?
+        remote(location)
+            .map_err(|error| AccessError::new(location, action, error))?
             .mkdir(location.path(), 0o700)
-            .map_err(crate::vfs::err)?;
+            .map_err(|error| AccessError::new(location, action, error))?;
     }
     Ok(())
 }
 
+fn read_link(location: &Location) -> Result<PathBuf, TransferError> {
+    fs::read_link(location.path())
+        .map_err(|source| AccessError::new(location, AccessAction::ReadLink, source).into())
+}
+
 fn check_directory(location: &Location, recorded: &EntryMetadata) -> Result<(), TransferError> {
-    let current = entry_metadata(location)?.ok_or_else(changed_copy)?;
+    let role = ResumeRole::Staged;
+    let current = required_metadata(location, role)?;
     let same = match (recorded, &current) {
         (EntryMetadata::Local(_), EntryMetadata::Local(now)) => {
             now.is_dir() && recorded.same_object(&current)
@@ -607,7 +676,7 @@ fn check_directory(location: &Location, recorded: &EntryMetadata) -> Result<(), 
         _ => false,
     };
     if !same || super::super::transfer::canonical(location)? != location.path() {
-        return Err(changed_copy());
+        return Err(role.error(location, ResumeCheckProblem::Changed));
     }
     Ok(())
 }
@@ -619,16 +688,17 @@ fn check_prefix(
     progress: &mut Progress,
 ) -> Result<bool, TransferError> {
     let cancel = progress.cancellation();
-    let (scope, name) = file_scope(source)?;
+    let role = ResumeRole::Source;
+    let (scope, name) = file_scope(source, role)?;
     scope
         .read_checked(name, &cancel, |path, _, input| {
-            verify_stamp(path, original.stamp)?;
+            verify_stamp(path, original.stamp, role)?;
             let size = partial.stamp.size();
             progress.set_copy_endpoints(path, path);
             let mut input = AccessStream::new(input, path).take(size);
             Ok(progress.hash_copy_check(path.path(), size, &mut input)? == Some(partial.digest))
         })?
-        .ok_or_else(changed_source)
+        .ok_or_else(|| role.error(source, ResumeCheckProblem::Missing))
 }
 
 fn feed_field(digest: &mut Sha256, bytes: &[u8]) {

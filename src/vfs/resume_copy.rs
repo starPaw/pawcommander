@@ -17,7 +17,10 @@ use super::{
     Location,
 };
 use crate::app::SavedLocation;
-use crate::file_error::{RecoveryNotice, ResumeRecordError, ResumeRecordProblem, StagingError};
+use crate::file_error::{
+    AccessAction, AccessError, Failure, MutationError, RecoveryNotice, ResumeCheckProblem,
+    ResumeRecordError, ResumeRecordProblem, ResumeRole, StagingError,
+};
 use crate::i18n::text;
 use crate::operations::{AccessStream, Cancellation, Progress, TransferError};
 use crate::result_history::Outcome;
@@ -51,7 +54,12 @@ enum FileStamp {
 }
 
 impl FileStamp {
-    fn from(metadata: &EntryMetadata) -> Result<Self, TransferError> {
+    fn from(
+        file: &Location,
+        metadata: &EntryMetadata,
+        role: ResumeRole,
+    ) -> Result<Self, TransferError> {
+        let incomplete = || role.error(file, ResumeCheckProblem::IncompleteMetadata);
         match metadata {
             EntryMetadata::Local(file) if file.is_file() => Ok(Self::Local {
                 device: file.dev(),
@@ -61,14 +69,15 @@ impl FileStamp {
                 changed: (file.ctime(), file.ctime_nsec()),
                 mode: file.mode(),
             }),
-            EntryMetadata::Remote(file) if file.is_file() => Ok(Self::Sftp {
-                size: file.size.ok_or_else(changed_copy)?,
-                modified: file.mtime.ok_or_else(changed_copy)?,
-                mode: file.perm.ok_or_else(changed_copy)?,
-                uid: file.uid,
-                gid: file.gid,
+            EntryMetadata::Remote(stat) if stat.perm.is_none() => Err(incomplete()),
+            EntryMetadata::Remote(stat) if stat.is_file() => Ok(Self::Sftp {
+                size: stat.size.ok_or_else(incomplete)?,
+                modified: stat.mtime.ok_or_else(incomplete)?,
+                mode: stat.perm.ok_or_else(incomplete)?,
+                uid: stat.uid,
+                gid: stat.gid,
             }),
-            _ => Err(changed_copy()),
+            _ => Err(role.error(file, ResumeCheckProblem::WrongType)),
         }
     }
 
@@ -126,21 +135,22 @@ impl SavedTime {
 impl FileProof {
     fn read(
         file: &Location,
+        role: ResumeRole,
         progress: &mut Progress,
     ) -> Result<(Self, EntryMetadata), TransferError> {
         let cancel = progress.cancellation().pausable_scan();
-        let (scope, name) = file_scope(file)?;
-        let metadata = entry_metadata(file)?.ok_or_else(changed_copy)?;
-        let stamp = FileStamp::from(&metadata)?;
+        let (scope, name) = file_scope(file, role)?;
+        let metadata = required_metadata(file, role)?;
+        let stamp = FileStamp::from(file, &metadata, role)?;
         progress.set_copy_endpoints(file, file);
         let digest = scope
             .read_checked(name, &cancel, |source, size, input| {
                 progress
                     .hash_copy_check(source.path(), size, &mut AccessStream::new(input, source))?
-                    .ok_or_else(changed_copy)
+                    .ok_or_else(|| role.error(source, ResumeCheckProblem::Changed))
             })?
-            .ok_or_else(changed_copy)?;
-        verify_stamp(file, stamp)?;
+            .ok_or_else(|| role.error(file, ResumeCheckProblem::Missing))?;
+        verify_stamp(file, stamp, role)?;
         Ok((Self { stamp, digest }, metadata))
     }
 }
@@ -309,14 +319,14 @@ fn start_file(
     after: impl FnOnce(&Ticket, &Paths, &mut Progress) -> Result<(), TransferError>,
 ) -> Result<(), TransferError> {
     let cancel = progress.cancellation();
-    let source = resolved_file(&item.source)?;
-    let target = resolved_file(&item.target)?;
-    let (original, source_metadata) = FileProof::read(&source, progress)?;
+    let source = resolved_file(&item.source, ResumeRole::Source)?;
+    let target = resolved_file(&item.target, ResumeRole::Destination)?;
+    let (original, source_metadata) = FileProof::read(&source, ResumeRole::Source, progress)?;
     let previous = match expected {
         Some(expected) => {
-            let (proof, metadata) = FileProof::read(&target, progress)?;
+            let (proof, metadata) = FileProof::read(&target, ResumeRole::Destination, progress)?;
             if !expected.matches_file(&metadata) {
-                return Err(changed_target());
+                return Err(ResumeRole::Destination.error(&target, ResumeCheckProblem::Changed));
             }
             Some(proof)
         }
@@ -392,8 +402,8 @@ pub(super) fn copy_folder(
     progress: &mut Progress,
     published: impl FnOnce(),
 ) -> Result<(), TransferError> {
-    let source = resolved_file(&item.source)?;
-    let target = resolved_file(&item.target)?;
+    let source = resolved_file(&item.source, ResumeRole::Source)?;
+    let target = resolved_file(&item.target, ResumeRole::Destination)?;
     tree::start(
         source,
         target,
@@ -434,8 +444,8 @@ pub(super) fn move_item(
         )
     } else if expected.is_none() {
         tree::start(
-            resolved_file(&item.source)?,
-            resolved_file(&item.target)?,
+            resolved_file(&item.source, ResumeRole::Source)?,
+            resolved_file(&item.target, ResumeRole::Destination)?,
             directory,
             Intent::Move,
             progress,
@@ -443,7 +453,7 @@ pub(super) fn move_item(
             after,
         )
     } else {
-        Err(changed_source())
+        Err(ResumeRole::Source.error(&item.source, ResumeCheckProblem::Changed))
     }
 }
 
@@ -460,7 +470,12 @@ fn verify_move_stage(
     let expected = receipt.previous.as_ref();
     let has_backup = entry_metadata(&backup)?.is_some();
     if has_backup != expected.is_some() && !(ticket.removed && !has_backup) {
-        return Err(changed_copy());
+        let problem = if has_backup {
+            ResumeCheckProblem::Unexpected
+        } else {
+            ResumeCheckProblem::Missing
+        };
+        return Err(ResumeRole::ParkedDestination.error(&backup, problem));
     }
     let extra: &[&str] = if has_backup { &["previous"] } else { &[] };
     stage_contents(&paths.stage, receipt.stage_identity, ticket.name(), extra)?;
@@ -475,15 +490,19 @@ fn verify_published_move(
     paths: &Paths,
     progress: &mut Progress,
 ) -> Result<(), TransferError> {
-    let seal = ticket.publication().ok_or_else(changed_target)?;
+    let destination = ResumeRole::Destination;
+    let seal = ticket
+        .publication()
+        .ok_or_else(|| destination.error(&paths.target, ResumeCheckProblem::MissingProof))?;
     let check_seal = !ticket.removed;
     match &ticket.receipt.original {
         Original::File(original) => {
-            let current = FileProof::read(&paths.target, progress)?.0;
-            if current.digest != original.digest
-                || check_seal && RenamedIdentity::File(current.stamp.ignore_rename_time()) != seal
-            {
-                return Err(changed_target());
+            let current = FileProof::read(&paths.target, destination, progress)?.0;
+            if current.digest != original.digest {
+                return Err(destination.error(&paths.target, ResumeCheckProblem::ContentsMismatch));
+            }
+            if check_seal && RenamedIdentity::File(current.stamp.ignore_rename_time()) != seal {
+                return Err(destination.error(&paths.target, ResumeCheckProblem::Changed));
             }
         }
         Original::Folder(proof) => {
@@ -495,6 +514,7 @@ fn verify_published_move(
 
 fn verify_move_source(
     source: &Location,
+    role: ResumeRole,
     paths: &Paths,
     original: &Original,
     renamed: Option<RenamedIdentity>,
@@ -502,19 +522,22 @@ fn verify_move_source(
 ) -> Result<RenamedIdentity, TransferError> {
     match original {
         Original::File(expected) => {
-            let (actual, _) = FileProof::read(source, progress)?;
+            let (actual, _) = FileProof::read(source, role, progress)?;
             let identity = RenamedIdentity::File(actual.stamp.ignore_rename_time());
             let matches = match renamed {
                 Some(value) => value == identity,
                 None => actual.stamp == expected.stamp,
             };
-            if !matches || actual.digest != expected.digest {
-                return Err(changed_source());
+            if !matches {
+                return Err(role.error(source, ResumeCheckProblem::Changed));
+            }
+            if actual.digest != expected.digest {
+                return Err(role.error(source, ResumeCheckProblem::ContentsMismatch));
             }
             Ok(identity)
         }
         Original::Folder(proof) => {
-            tree::verify_move_source(source, &paths.target, *proof, renamed, progress)
+            tree::verify_move_source(source, role, &paths.target, *proof, renamed, progress)
         }
     }
 }
@@ -530,15 +553,19 @@ fn restore_held_source(
             let held = location
                 .clone()
                 .into_location()
-                .ok_or_else(changed_source)?;
+                .ok_or_else(|| ticket.error(ResumeRecordProblem::InvalidPaths))?;
             if entry_metadata(&held)?.is_some() || entry_metadata(&paths.source)?.is_none() {
-                return Err(retained_source(&held, changed_source()));
+                return Err(retained_source(
+                    &held,
+                    ResumeRole::HeldOriginal.error(&held, ResumeCheckProblem::MissingProof),
+                ));
             }
             return Ok(None);
         }
         None => return Ok(None),
     };
-    let stage = staging_at(&paths.source, &record.stage_name).ok_or_else(changed_copy)?;
+    let stage = staging_at(&paths.source, &record.stage_name)
+        .ok_or_else(|| ticket.error(ResumeRecordProblem::InvalidPaths))?;
     let held = stage.join("source");
     let result = (|| {
         let source_present = entry_metadata(&paths.source)?.is_some();
@@ -546,15 +573,16 @@ fn restore_held_source(
             return if source_present {
                 Ok(())
             } else {
-                Err(changed_source())
+                Err(ResumeRole::HeldOriginal.error(&held, ResumeCheckProblem::Missing))
             };
         }
         if source_present {
-            return Err(changed_source());
+            return Err(ResumeRole::Source.error(&paths.source, ResumeCheckProblem::Unexpected));
         }
         stage_contents(&stage, record.stage_identity, ticket.name(), &["source"])?;
         verify_move_source(
             &held,
+            ResumeRole::HeldOriginal,
             paths,
             &ticket.receipt.original,
             Some(record.source_identity),
@@ -569,17 +597,17 @@ fn restore_held_source(
 }
 
 fn retained_source(held: &Location, error: TransferError) -> TransferError {
-    crate::tr_format!(
-        "{error} Check the original folder and retained location {held}.",
-        error = crate::i18n::file_error(&error),
-        held = held
-    )
+    MutationError::RetainedMoveSource {
+        held: held.clone(),
+        cause: error,
+    }
     .into()
 }
 
 fn discard_source_stage(ticket: &Ticket, paths: &Paths) -> Result<(), TransferError> {
     if let Some(HeldSource::Verified(record)) = &ticket.holding {
-        let stage = staging_at(&paths.source, &record.stage_name).ok_or_else(changed_copy)?;
+        let stage = staging_at(&paths.source, &record.stage_name)
+            .ok_or_else(|| ticket.error(ResumeRecordProblem::InvalidPaths))?;
         if entry_metadata(&stage)?.is_some() {
             discard_stage(&stage, record.stage_identity, ticket.name(), &[])
                 .map_err(|error| retained_source(&stage.join("source"), error))?;
@@ -594,7 +622,9 @@ fn record_source_stage(
     source_identity: RenamedIdentity,
     cancel: &Cancellation,
 ) -> Result<(), TransferError> {
-    let stage = held.parent().ok_or_else(changed_source)?;
+    let stage = held
+        .parent()
+        .ok_or_else(|| ResumeRole::HeldOriginal.error(held, ResumeCheckProblem::InvalidPath))?;
     let identity = stage_identity(&stage)?;
     create_owner_marker(&stage, ticket.name(), cancel)?;
     stage_contents(&stage, identity, ticket.name(), &[])?;
@@ -622,11 +652,10 @@ fn finish_move(
     let target = if history {
         None
     } else {
-        Some(TransferSourceManifest::capture_move_observed(
-            &paths.target,
-            &scan,
-            &mut |_, _| {},
-        )?)
+        Some(
+            TransferSourceManifest::capture_move_observed(&paths.target, &scan, &mut |_, _| {})
+                .map_err(|error| manifest_error(ResumeRole::Destination, error))?,
+        )
     };
     verify_published_move(ticket, paths, progress)?;
     published();
@@ -648,6 +677,7 @@ fn finish_move(
             let source = MoveSource::capture(item, progress)?;
             let source_identity = verify_move_source(
                 &paths.source,
+                ResumeRole::Source,
                 paths,
                 &ticket.receipt.original,
                 renamed,
@@ -685,11 +715,9 @@ fn finish_move(
     if has_stage {
         let backup = paths.stage.join("previous");
         let extra: &[&str] = if entry_metadata(&backup)?.is_some() {
-            let expected = ticket
-                .receipt
-                .previous
-                .as_ref()
-                .ok_or_else(changed_target)?;
+            let expected = ticket.receipt.previous.as_ref().ok_or_else(|| {
+                ResumeRole::ParkedDestination.error(&backup, ResumeCheckProblem::Unexpected)
+            })?;
             verify_target(Some(expected), &backup, true, &mut Progress::default())?;
             &["previous"]
         } else {
@@ -827,8 +855,9 @@ fn finish_copy(
 ) -> Result<Completion, TransferError> {
     let receipt = &ticket.receipt;
     let Original::File(original) = &receipt.original else {
-        return Err(changed_copy());
+        return Err(ticket.error(ResumeRecordProblem::InvalidProof).into());
     };
+    let staged = ResumeRole::Staged;
     let owner = ticket.name();
     progress.partial_copy_retained = true;
     let cancel = progress.cancellation();
@@ -838,8 +867,13 @@ fn finish_copy(
     let result = (|| {
         let payload = paths.stage.join("payload");
         if resuming && entry_metadata(&payload)?.is_none() {
-            if FileProof::read(&paths.target, progress)?.0.digest != original.digest {
-                return Err(changed_copy());
+            let destination = ResumeRole::Destination;
+            if FileProof::read(&paths.target, destination, progress)?
+                .0
+                .digest
+                != original.digest
+            {
+                return Err(destination.error(&paths.target, ResumeCheckProblem::ContentsMismatch));
             }
             committed = true;
             published();
@@ -858,15 +892,26 @@ fn finish_copy(
         } else {
             verify_target(receipt.previous.as_ref(), &paths.target, false, progress)?;
         }
-        let (partial, metadata) = FileProof::read(&payload, progress)?;
+        let (partial, metadata) = FileProof::read(&payload, staged, progress)?;
         let offset = partial.stamp.size();
         let size = original.stamp.size();
         if offset > size {
-            return Err(changed_copy());
+            return Err(staged.error(
+                &payload,
+                ResumeCheckProblem::SizeMismatch {
+                    expected: size,
+                    actual: offset,
+                },
+            ));
         }
         if resuming {
-            if FileProof::read(&paths.source, progress)?.0 != *original {
-                return Err(changed_source());
+            let source = ResumeRole::Source;
+            let actual = FileProof::read(&paths.source, source, progress)?.0;
+            if actual.stamp != original.stamp {
+                return Err(source.error(&paths.source, ResumeCheckProblem::Changed));
+            }
+            if actual.digest != original.digest {
+                return Err(source.error(&paths.source, ResumeCheckProblem::ContentsMismatch));
             }
             if offset < size {
                 check_copy_space(size - offset, &paths.target, &paths.stage)?;
@@ -880,10 +925,10 @@ fn finish_copy(
             Some((&partial, &metadata)),
             progress,
         )?;
-        if FileProof::read(&payload, progress)?.0.digest != original.digest {
-            return Err(changed_copy());
+        if FileProof::read(&payload, staged, progress)?.0.digest != original.digest {
+            return Err(staged.error(&payload, ResumeCheckProblem::ContentsMismatch));
         }
-        let source_metadata = verify_stamp(&paths.source, original.stamp)?;
+        let source_metadata = verify_stamp(&paths.source, original.stamp, ResumeRole::Source)?;
         copy_metadata::stage_resumed_entry(
             &paths.source,
             &payload,
@@ -892,11 +937,11 @@ fn finish_copy(
             receipt.intent.metadata(),
             progress,
         )?;
-        verify_stamp(&paths.source, original.stamp)?;
+        verify_stamp(&paths.source, original.stamp, ResumeRole::Source)?;
         stage_contents(&paths.stage, receipt.stage_identity, owner, entries)?;
         if receipt.intent == Intent::Move {
-            let metadata = entry_metadata(&payload)?.ok_or_else(changed_copy)?;
-            let stamp = FileStamp::from(&metadata)?;
+            let metadata = required_metadata(&payload, staged)?;
+            let stamp = FileStamp::from(&payload, &metadata, staged)?;
             ticket.seal(RenamedIdentity::File(stamp.ignore_rename_time()))?;
         }
         cancel.check()?;
@@ -984,21 +1029,24 @@ fn copy_suffix(
     progress: &mut Progress,
 ) -> Result<(), TransferError> {
     let cancel = progress.cancellation();
-    let (scope, name) = file_scope(source)?;
+    let role = ResumeRole::Source;
+    let (scope, name) = file_scope(source, role)?;
     scope
         .read_checked(name, &cancel, |source, size, input| {
-            verify_stamp(source, original.stamp)?;
+            verify_stamp(source, original.stamp, role)?;
             let mut input = AccessStream::new(input, source);
             let offset = partial.map_or(0, |(proof, _)| proof.stamp.size());
             if offset > size {
-                return Err(changed_copy());
+                return Err(role.error(source, ResumeCheckProblem::Changed));
             }
             if let Some((proof, _)) = partial.filter(|_| offset != 0) {
                 let mut prefix = (&mut input).take(offset);
                 progress.set_copy_endpoints(source, source);
                 let actual = progress.hash_copy_check(source.path(), offset, &mut prefix)?;
                 if actual != Some(proof.digest) {
-                    return Err(changed_copy());
+                    return Err(
+                        ResumeRole::Staged.error(payload, ResumeCheckProblem::ContentsMismatch)
+                    );
                 }
             }
             if offset == size && partial.is_some() {
@@ -1019,38 +1067,50 @@ fn copy_suffix(
                 &mut AccessStream::new(&mut output, target),
             )?;
             if written != remaining {
-                return Err(changed_source());
+                return Err(role.error(
+                    source,
+                    ResumeCheckProblem::SizeMismatch {
+                        expected: size,
+                        actual: offset + written,
+                    },
+                ));
             }
             output.close()
         })?
-        .ok_or_else(changed_source)
+        .ok_or_else(|| role.error(source, ResumeCheckProblem::Missing))
 }
 
-fn resolved_file(file: &Location) -> Result<Location, TransferError> {
-    let parent = file.parent().ok_or_else(changed_copy)?;
-    let name = file.path().file_name().ok_or_else(changed_copy)?;
+fn resolved_file(file: &Location, role: ResumeRole) -> Result<Location, TransferError> {
+    let invalid = || role.error(file, ResumeCheckProblem::InvalidPath);
+    let parent = file.parent().ok_or_else(invalid)?;
+    let name = file.path().file_name().ok_or_else(invalid)?;
     let resolved = super::transfer::canonical(&parent)?;
     Ok(parent.with_path(resolved).join(name))
 }
 
-fn file_scope(file: &Location) -> Result<(ReadScope, &Path), TransferError> {
-    let parent = file.parent().ok_or_else(changed_copy)?;
+fn file_scope(file: &Location, role: ResumeRole) -> Result<(ReadScope, &Path), TransferError> {
+    let invalid = || role.error(file, ResumeCheckProblem::InvalidPath);
+    let parent = file.parent().ok_or_else(invalid)?;
     let scope = ReadScope::open(&parent)?;
     if scope.parent.location != parent {
-        return Err(changed_copy());
+        return Err(role.error(file, ResumeCheckProblem::Changed));
     }
-    let name = file
-        .path()
-        .file_name()
-        .map(Path::new)
-        .ok_or_else(changed_copy)?;
+    let name = file.path().file_name().map(Path::new).ok_or_else(invalid)?;
     Ok((scope, name))
 }
 
-fn verify_stamp(file: &Location, stamp: FileStamp) -> Result<EntryMetadata, TransferError> {
-    let current = entry_metadata(file)?.ok_or_else(changed_source)?;
-    if FileStamp::from(&current)? != stamp {
-        return Err(changed_source());
+fn required_metadata(file: &Location, role: ResumeRole) -> Result<EntryMetadata, TransferError> {
+    entry_metadata(file)?.ok_or_else(|| role.error(file, ResumeCheckProblem::Missing))
+}
+
+fn verify_stamp(
+    file: &Location,
+    stamp: FileStamp,
+    role: ResumeRole,
+) -> Result<EntryMetadata, TransferError> {
+    let current = required_metadata(file, role)?;
+    if FileStamp::from(file, &current, role)? != stamp {
+        return Err(role.error(file, ResumeCheckProblem::Changed));
     }
     Ok(current)
 }
@@ -1061,8 +1121,13 @@ fn verify_target(
     parked: bool,
     progress: &mut Progress,
 ) -> Result<(), TransferError> {
+    let role = if parked {
+        ResumeRole::ParkedDestination
+    } else {
+        ResumeRole::Destination
+    };
     if let Some(expected) = expected {
-        let actual = FileProof::read(file, progress)?.0;
+        let actual = FileProof::read(file, role, progress)?.0;
         let stamp = |value: FileStamp| {
             if parked {
                 value.ignore_rename_time()
@@ -1070,28 +1135,27 @@ fn verify_target(
                 value
             }
         };
-        if stamp(actual.stamp) != stamp(expected.stamp) || actual.digest != expected.digest {
-            return Err(changed_target());
+        if stamp(actual.stamp) != stamp(expected.stamp) {
+            return Err(role.error(file, ResumeCheckProblem::Changed));
+        }
+        if actual.digest != expected.digest {
+            return Err(role.error(file, ResumeCheckProblem::ContentsMismatch));
         }
     } else if entry_metadata(file)?.is_some() {
-        return Err(changed_target());
+        return Err(role.error(file, ResumeCheckProblem::Unexpected));
     }
     Ok(())
 }
 
 fn stage_identity(stage: &Location) -> Result<Option<(u64, u64)>, TransferError> {
-    if let Some(path) = stage.local() {
-        let attr = fs::symlink_metadata(path)?;
-        if !attr.is_dir() {
-            return Err(changed_copy());
+    let role = ResumeRole::Staged;
+    match required_metadata(stage, role)? {
+        EntryMetadata::Local(attr) if attr.is_dir() => Ok(Some((attr.dev(), attr.ino()))),
+        EntryMetadata::Remote(attr) if attr.is_dir() => Ok(None),
+        EntryMetadata::Remote(attr) if attr.perm.is_none() => {
+            Err(role.error(stage, ResumeCheckProblem::IncompleteMetadata))
         }
-        Ok(Some((attr.dev(), attr.ino())))
-    } else {
-        let attr = remote(stage)?.lstat(stage.path()).map_err(super::err)?;
-        if !attr.is_dir() {
-            return Err(changed_copy());
-        }
-        Ok(None)
+        _ => Err(role.error(stage, ResumeCheckProblem::WrongType)),
     }
 }
 
@@ -1102,24 +1166,31 @@ fn stage_contents(
     extra: &[&str],
 ) -> Result<(), TransferError> {
     if stage_identity(stage)? != identity || super::transfer::canonical(stage)? != stage.path() {
-        return Err(changed_copy());
+        return Err(StagingError::IdentityChanged(stage.clone()).into());
     }
+    let role = ResumeRole::Staged;
+    let action = AccessAction::ReadChildren;
     let expected: BTreeSet<OsString> = std::iter::once(owner)
         .chain(extra.iter().copied())
         .map(OsString::from)
         .collect();
     let contents: BTreeSet<OsString> = if let Some(path) = stage.local() {
-        fs::read_dir(path)?
+        fs::read_dir(path)
+            .map_err(|error| AccessError::new(stage, action, error))?
             .take(expected.len() + 1)
             .map(|entry| entry.map(|entry| entry.file_name()))
-            .collect::<Result<_, _>>()?
+            .collect::<Result<_, _>>()
+            .map_err(|error| AccessError::new(stage, action, error))?
     } else {
-        let mut directory = remote(stage)?.opendir(stage.path()).map_err(super::err)?;
+        let mut directory = remote(stage)
+            .map_err(|error| AccessError::new(stage, action, error))?
+            .opendir(stage.path())
+            .map_err(|error| AccessError::new(stage, action, error))?;
         let mut names = BTreeSet::new();
         let mut exhausted = false;
         for _ in 0..expected.len() + 3 {
-            let Some((name, _)) =
-                super::listing::next_sftp_entry(&mut directory).map_err(super::err)?
+            let Some((name, _)) = super::listing::next_sftp_entry(&mut directory)
+                .map_err(|error| AccessError::new(stage, action, error))?
             else {
                 exhausted = true;
                 break;
@@ -1128,20 +1199,31 @@ fn stage_contents(
                 continue;
             }
             if !expected.contains(name.as_os_str()) || !names.insert(name.into_os_string()) {
-                return Err(changed_copy());
+                return Err(role.error(stage, ResumeCheckProblem::Unexpected));
             }
         }
         if !exhausted {
-            return Err(changed_copy());
+            return Err(role.error(stage, ResumeCheckProblem::Unexpected));
         }
         names
     };
-    if contents != expected {
-        return Err(changed_copy());
+    if let Some(name) = contents.difference(&expected).next() {
+        return Err(role.error(&stage.join(name), ResumeCheckProblem::Unexpected));
     }
-    let marker = entry_metadata(&stage.join(owner))?.ok_or_else(changed_copy)?;
-    if FileStamp::from(&marker)?.size() != 0 {
-        return Err(changed_copy());
+    if let Some(name) = expected.difference(&contents).next() {
+        return Err(role.error(&stage.join(name), ResumeCheckProblem::Missing));
+    }
+    let marker = stage.join(owner);
+    let metadata = required_metadata(&marker, role)?;
+    let actual = FileStamp::from(&marker, &metadata, role)?.size();
+    if actual != 0 {
+        return Err(role.error(
+            &marker,
+            ResumeCheckProblem::SizeMismatch {
+                expected: 0,
+                actual,
+            },
+        ));
     }
     Ok(())
 }
@@ -1154,9 +1236,9 @@ fn discard_stage(
 ) -> Result<(), TransferError> {
     stage_contents(stage, identity, owner, extra)?;
     for name in extra {
-        let item = entry_metadata(&stage.join(name))?.ok_or_else(changed_copy)?;
-        if !item.is_file() {
-            return Err(changed_copy());
+        let item = stage.join(name);
+        if !required_metadata(&item, ResumeRole::Staged)?.is_file() {
+            return Err(ResumeRole::Staged.error(&item, ResumeCheckProblem::WrongType));
         }
     }
     if let Some(path) = stage.local() {
@@ -1174,16 +1256,13 @@ fn discard_stage(
     Ok(())
 }
 
-pub(super) fn changed_copy() -> TransferError {
-    text!("Временная копия изменилась или недоступна. Проверьте файлы перед продолжением.").into()
-}
-
-fn changed_source() -> TransferError {
-    text!("Источник изменился со времени начала копирования.").into()
-}
-
-fn changed_target() -> TransferError {
-    text!("Файл назначения изменился со времени начала копирования.").into()
+fn manifest_error(role: ResumeRole, error: TransferError) -> TransferError {
+    if let TransferError::Failed(Failure::Mutation(reason)) = &error
+        && let MutationError::SourceChanged(location) = reason.as_ref()
+    {
+        return role.error(location, ResumeCheckProblem::Changed);
+    }
+    error
 }
 
 fn retained_error(stage: &Location, error: TransferError) -> TransferError {

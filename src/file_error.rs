@@ -8,6 +8,8 @@ mod checksum;
 mod host_key;
 mod metadata;
 #[cfg(target_os = "macos")]
+mod resume_check;
+#[cfg(target_os = "macos")]
 mod resume_record;
 mod space;
 mod staging;
@@ -17,6 +19,8 @@ pub(crate) use archive::ArchiveError;
 pub(crate) use checksum::{ChecksumError, ManifestLineError};
 pub(crate) use host_key::{HostKeyError, KnownHostEntryError, KnownHostsError, PinError};
 pub(crate) use metadata::{MetadataError, MetadataField, MetadataWarning};
+#[cfg(target_os = "macos")]
+pub(crate) use resume_check::{ResumeCheckError, ResumeCheckProblem, ResumeRole};
 #[cfg(target_os = "macos")]
 pub(crate) use resume_record::{ResumeRecordError, ResumeRecordProblem, ResumeRecordSection};
 pub(crate) use space::{ProbeAction, SftpSpaceFailure, SpaceError};
@@ -53,6 +57,8 @@ pub(crate) enum Failure {
     Mutation(Box<MutationError>),
     Publication(Box<PublicationError>),
     Staging(Box<StagingError>),
+    #[cfg(target_os = "macos")]
+    ResumeCheck(Box<ResumeCheckError>),
     #[cfg(target_os = "macos")]
     ResumeRecord(Box<ResumeRecordError>),
     StagingCleanup(Box<StagingCleanupError>),
@@ -94,6 +100,8 @@ impl Failure {
             Self::Publication(error) => Some(error.as_ref()),
             Self::Staging(error) => Some(error.as_ref()),
             #[cfg(target_os = "macos")]
+            Self::ResumeCheck(error) => Some(error.as_ref()),
+            #[cfg(target_os = "macos")]
             Self::ResumeRecord(error) => Some(error.as_ref()),
             Self::StagingCleanup(error) => Some(error.as_ref()),
         }
@@ -126,6 +134,8 @@ impl fmt::Display for Failure {
             Self::Mutation(error) => fmt::Display::fmt(error, f),
             Self::Publication(error) => fmt::Display::fmt(error, f),
             Self::Staging(error) => fmt::Display::fmt(error, f),
+            #[cfg(target_os = "macos")]
+            Self::ResumeCheck(error) => fmt::Display::fmt(error, f),
             #[cfg(target_os = "macos")]
             Self::ResumeRecord(error) => fmt::Display::fmt(error, f),
             Self::StagingCleanup(error) => fmt::Display::fmt(error, f),
@@ -842,6 +852,11 @@ pub(crate) enum MutationError {
         cause: TransferError,
     },
     #[cfg(target_os = "macos")]
+    RetainedMoveSource {
+        held: Location,
+        cause: TransferError,
+    },
+    #[cfg(target_os = "macos")]
     PlanChanged(Location),
     #[cfg(target_os = "macos")]
     SmbSourceNotRegular(Location),
@@ -925,6 +940,10 @@ impl fmt::Display for MutationError {
                 )
             }
             #[cfg(target_os = "macos")]
+            Self::RetainedMoveSource { held, cause } => {
+                write!(f, "Retained source at {held}: {cause}")
+            }
+            #[cfg(target_os = "macos")]
             Self::PlanChanged(location) => write!(f, "An item changed after planning: {location}"),
             #[cfg(target_os = "macos")]
             Self::SmbSourceNotRegular(source) => {
@@ -990,6 +1009,8 @@ impl Error for MutationError {
                 Some(reason)
             }
             Self::MoveIncomplete { cause, .. } => Some(cause),
+            #[cfg(target_os = "macos")]
+            Self::RetainedMoveSource { cause, .. } => Some(cause),
             Self::Trash { source, .. } => Some(source),
             _ => None,
         }
