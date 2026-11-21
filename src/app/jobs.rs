@@ -285,7 +285,7 @@ impl PawCommander {
         request: crate::native_drag::PromiseRequest,
         ctx: &egui::Context,
     ) {
-        use crate::native_drag::{PromiseKind, PromiseRequest};
+        use crate::native_drag::PromiseRequest;
         use fs_ops::DropDelivery;
 
         let PromiseRequest {
@@ -313,21 +313,16 @@ impl PawCommander {
                 work: Box::new(move |progress| {
                     progress.resume_directory = recovery;
                     progress.set_copy_verification(verify);
-                    fs_ops::copy_sftp_for_drop(
-                        &source,
-                        &target,
-                        matches!(kind, PromiseKind::Directory),
-                        progress,
-                    )
-                    .map(|delivery| match delivery {
+                    let delivery = fs_ops::copy_sftp_for_drop(&source, &target, kind, progress)?;
+                    let message = match delivery {
                         DropDelivery::Completed => {
-                            crate::i18n::text!("Файлы переданы принимающему приложению").into()
+                            crate::i18n::text!("Файлы переданы принимающему приложению")
                         }
                         DropDelivery::CompletedWithWarning => crate::i18n::text!(
                             "Файл передан. Подробности о предупреждениях в журнале результатов."
-                        )
-                        .into(),
-                    })
+                        ),
+                    };
+                    Ok(message.into())
                 }),
                 transfer: Some(TransferInteraction {
                     events,

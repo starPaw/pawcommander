@@ -3,7 +3,7 @@ use crate::{
     file_error::{FilePromiseError, TransferPlanError},
     i18n::text,
     operations::TransferError,
-    vfs::Location,
+    vfs::{Location, PromiseKind},
 };
 use eframe::egui;
 use objc2::{
@@ -28,12 +28,6 @@ use std::{
         Arc,
     },
 };
-
-#[derive(Clone, Copy)]
-pub(crate) enum PromiseKind {
-    File,
-    Directory,
-}
 
 impl PromiseKind {
     fn content_type(self) -> &'static str {

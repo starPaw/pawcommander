@@ -64,6 +64,13 @@ impl Snapshot {
         let cancel = progress.cancellation().pausable_scan();
         let listing = TransferSourceManifest::capture_copy_tree(root, &cancel, local_names)
             .map_err(|error| manifest_error(role, error))?;
+        if !listing
+            .entries
+            .get(root)
+            .is_some_and(|entry| entry.children.is_some())
+        {
+            return Err(role.error(root, ResumeCheckProblem::WrongType));
+        }
         let mut entries = BTreeMap::new();
         let mut manifest = Sha256::new();
         let mut contents = Sha256::new();
@@ -103,12 +110,6 @@ impl Snapshot {
                 }
             }
             entries.insert(relative.to_owned(), Node { entry, content });
-        }
-        if !entries
-            .get(Path::new(""))
-            .is_some_and(|entry| matches!(entry.content, Content::Directory))
-        {
-            return Err(role.error(root, ResumeCheckProblem::WrongType));
         }
         let snapshot = Self {
             entries,
