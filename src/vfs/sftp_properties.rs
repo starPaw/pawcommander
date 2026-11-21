@@ -4,12 +4,12 @@ use super::{
     sftp::{remote, should_reopen},
     Location, MAX_TREE_DEPTH,
 };
-use crate::i18n::text;
+use crate::file_error::{AccessAction, AccessError, ListingError, ListingErrorKind, ScanError};
 use crate::operations::TransferError;
 use ssh2::{Error, File, FileStat, Sftp};
 use std::{
     collections::HashSet,
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
 };
 
@@ -19,7 +19,7 @@ pub(crate) enum PropertyEvent<'a> {
         stat: &'a FileStat,
         selected: bool,
     },
-    Error(&'a Location, TransferError),
+    Error(TransferError),
 }
 
 /// Reads selected roots and their descendants on one authenticated channel.
@@ -40,8 +40,11 @@ pub(crate) fn visit_properties(
     }
     let channel = match channel {
         Ok(channel) => channel,
+        Err(TransferError::Cancelled) => return,
         Err(error) => {
-            visit(PropertyEvent::Error(first, error));
+            visit(PropertyEvent::Error(
+                AccessError::new(first, AccessAction::ReadMetadata, error).into(),
+            ));
             return;
         }
     };
@@ -69,7 +72,7 @@ pub(crate) fn visit_properties(
         let (location, stat) = match scanner.root_metadata(source) {
             Ok(root) => root,
             Err(error) => {
-                if !scanner.report(source, error) {
+                if !scanner.report(error) {
                     break;
                 }
                 continue;
@@ -91,8 +94,19 @@ pub(crate) fn visit_properties(
 
 enum ReadError {
     Cancelled,
-    Server(Error),
-    Path(TransferError),
+    Failed {
+        cause: TransferError,
+        disconnected: bool,
+    },
+}
+
+impl ReadError {
+    fn failed(cause: impl Into<TransferError>) -> Self {
+        Self::Failed {
+            cause: cause.into(),
+            disconnected: false,
+        }
+    }
 }
 
 struct Scanner<'a, F> {
@@ -106,7 +120,11 @@ impl<F: FnMut(PropertyEvent<'_>)> Scanner<'_, F> {
         self.cancel.load(Ordering::Relaxed)
     }
 
-    fn request<T>(&self, request: impl FnOnce() -> Result<T, Error>) -> Result<T, ReadError> {
+    fn request<T>(
+        &self,
+        request: impl FnOnce() -> Result<T, Error>,
+        context: impl FnOnce(Error) -> TransferError,
+    ) -> Result<T, ReadError> {
         if self.cancelled() {
             return Err(ReadError::Cancelled);
         }
@@ -114,47 +132,80 @@ impl<F: FnMut(PropertyEvent<'_>)> Scanner<'_, F> {
         if self.cancelled() {
             return Err(ReadError::Cancelled);
         }
-        result.map_err(ReadError::Server)
+        result.map_err(|error| ReadError::Failed {
+            disconnected: should_reopen(&error),
+            cause: context(error),
+        })
+    }
+
+    fn access<T>(
+        &self,
+        location: &Location,
+        action: AccessAction,
+        request: impl FnOnce(&Path) -> Result<T, Error>,
+    ) -> Result<T, ReadError> {
+        self.request(
+            || request(location.path()),
+            |error| AccessError::new(location, action, error).into(),
+        )
     }
 
     /// Returns whether to continue with siblings and other roots.
-    fn report(&mut self, location: &Location, error: ReadError) -> bool {
-        let (cause, keep_reading) = match error {
-            ReadError::Cancelled => return false,
-            ReadError::Server(error) => (error.to_string().into(), !should_reopen(&error)),
-            ReadError::Path(error) => (error, true),
+    fn report(&mut self, error: ReadError) -> bool {
+        let ReadError::Failed {
+            cause,
+            disconnected,
+        } = error
+        else {
+            return false;
         };
-        (self.visit)(PropertyEvent::Error(location, cause));
-        keep_reading
+        (self.visit)(PropertyEvent::Error(cause));
+        !disconnected
     }
 
     fn root_metadata(&self, source: &Location) -> Result<(Location, FileStat), ReadError> {
-        let path = normalize_remote(source.path()).map_err(ReadError::Path)?;
+        let path = normalized(source, source.path())?;
         let (parent, name) = match (path.parent(), path.file_name()) {
             (Some(parent), Some(name)) => (parent, Some(name)),
             _ => (path.as_path(), None),
         };
         // The selected item can be in a directory reached through an alias.
         // Resolve that directory, then lstat the item itself.
-        let canonical = self.request(|| self.channel.realpath(parent))?;
-        let canonical = normalize_remote(&canonical).map_err(ReadError::Path)?;
+        let parent = source.with_path(parent.to_owned());
+        let canonical = self.access(&parent, AccessAction::ResolvePath, |path| {
+            self.channel.realpath(path)
+        })?;
+        let canonical = normalized(&parent, &canonical)?;
         let path = name.map_or_else(|| canonical.clone(), |name| canonical.join(name));
-        let stat = self.request(|| self.channel.lstat(&path))?;
-        self.check_canonical(&canonical)?;
-        Ok((source.with_path(path), stat))
+        let location = source.with_path(path);
+        let stat = self.access(&location, AccessAction::ReadMetadata, |path| {
+            self.channel.lstat(path)
+        })?;
+        self.check_canonical(&source.with_path(canonical))?;
+        Ok((location, stat))
     }
 
-    fn check_canonical(&self, path: &Path) -> Result<(), ReadError> {
-        let resolved = self.request(|| self.channel.realpath(path))?;
-        if resolved.as_os_str() == path.as_os_str() {
+    fn check_canonical(&self, location: &Location) -> Result<(), ReadError> {
+        let resolved = self.access(location, AccessAction::ResolvePath, |path| {
+            self.channel.realpath(path)
+        })?;
+        if resolved.as_os_str() == location.path().as_os_str() {
             Ok(())
         } else {
-            Err(changed_directory())
+            Err(ReadError::failed(ScanError::DirectoryChanged(
+                location.clone(),
+            )))
         }
     }
 
-    fn check_directory(&self, path: &Path, expected: &FileStat) -> Result<FileStat, ReadError> {
-        let actual = self.request(|| self.channel.lstat(path))?;
+    fn check_directory(
+        &self,
+        location: &Location,
+        expected: &FileStat,
+    ) -> Result<FileStat, ReadError> {
+        let actual = self.access(location, AccessAction::ReadMetadata, |path| {
+            self.channel.lstat(path)
+        })?;
         // Access time can change when a directory is opened. It is not a
         // useful version check. READDIR can also omit optional attributes.
         if actual.perm != expected.perm
@@ -163,19 +214,23 @@ impl<F: FnMut(PropertyEvent<'_>)> Scanner<'_, F> {
             || differs(actual.size, expected.size)
             || differs(actual.mtime, expected.mtime)
         {
-            return Err(changed_directory());
+            return Err(ReadError::failed(ScanError::DirectoryChanged(
+                location.clone(),
+            )));
         }
-        self.check_canonical(path)?;
+        self.check_canonical(location)?;
         Ok(actual)
     }
 
     fn open_directory(&self, location: &Location, stat: &FileStat) -> Result<File, ReadError> {
-        let path = location.path();
-        let before = self.check_directory(path, stat)?;
-        let directory = self.request(|| self.channel.opendir(path))?;
+        let before = self.check_directory(location, stat)?;
+        let directory = self.request(
+            || self.channel.opendir(location.path()),
+            |error| ListingError::new(location.clone(), ListingErrorKind::OpenSftp(error)).into(),
+        )?;
         // SFTP resolves paths on the server, so recheck before reading the
         // handle in case this path changed during OPENDIR.
-        self.check_directory(path, &before)?;
+        self.check_directory(location, &before)?;
         Ok(directory)
     }
 
@@ -184,21 +239,24 @@ impl<F: FnMut(PropertyEvent<'_>)> Scanner<'_, F> {
             return false;
         }
         if depth >= MAX_TREE_DEPTH {
-            return self.report(
-                location,
-                ReadError::Path(text!("Достигнут предел вложенности папок").into()),
-            );
+            return self.report(ReadError::failed(ScanError::DepthLimit(location.clone())));
         }
         let mut directory = match self.open_directory(location, stat) {
             Ok(directory) => directory,
-            Err(error) => return self.report(location, error),
+            Err(error) => return self.report(error),
         };
         // Depth-first, with one handle per ancestor and no queue of siblings.
         loop {
-            let (name, stat) = match self.request(|| next_sftp_entry(&mut directory)) {
+            let entry = self.request(
+                || next_sftp_entry(&mut directory),
+                |error| {
+                    ListingError::new(location.clone(), ListingErrorKind::ReadSftp(error)).into()
+                },
+            );
+            let (name, stat) = match entry {
                 Ok(Some(entry)) => entry,
                 Ok(None) => return true,
-                Err(error) => return self.report(location, error),
+                Err(error) => return self.report(error),
             };
             if name == Path::new(".") || name == Path::new("..") {
                 continue;
@@ -206,10 +264,10 @@ impl<F: FnMut(PropertyEvent<'_>)> Scanner<'_, F> {
             if !matches!(name.components().next(), Some(Component::Normal(part)) if part == name.as_os_str())
                 || name.as_os_str().as_encoded_bytes().contains(&0)
             {
-                self.report(
-                    location,
-                    ReadError::Path(text!("Папка содержит недопустимое имя").into()),
-                );
+                self.report(ReadError::failed(ScanError::InvalidSftpEntry {
+                    directory: location.clone(),
+                    name,
+                }));
                 continue;
             }
             let child = location.join(name);
@@ -225,8 +283,10 @@ impl<F: FnMut(PropertyEvent<'_>)> Scanner<'_, F> {
     }
 }
 
-fn changed_directory() -> ReadError {
-    ReadError::Path(text!("Папка изменилась во время подсчёта").into())
+fn normalized(location: &Location, path: &Path) -> Result<PathBuf, ReadError> {
+    normalize_remote(path).map_err(|error| {
+        ReadError::failed(AccessError::new(location, AccessAction::ResolvePath, error))
+    })
 }
 
 fn differs<T: PartialEq>(left: Option<T>, right: Option<T>) -> bool {

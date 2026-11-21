@@ -3,7 +3,7 @@ use crate::file_error::{
     AccessAction, AccessCause, AccessError, ArchiveMemberError, ConnectionError, Failure,
     HostKeyError, KnownHostEntryError, KnownHostsError, ListingError, ListingErrorKind,
     LocalPathAction, MutationError, PathError, PinError, PreviewError, PublicationError,
-    RecoveryNotice, SearchError, SshStage, StagingCleanupError,
+    RecoveryNotice, ScanError, SearchError, SshStage, StagingCleanupError,
 };
 use crate::operations::TransferError;
 use crate::vfs::{DeletionFailure, TransferFailure};
@@ -17,6 +17,7 @@ pub(crate) fn file_error(error: &TransferError) -> String {
                 Failure::Access(error) => access_error(error),
                 Failure::Preview(error) => preview_error(error),
                 Failure::Search(error) => search_error(error),
+                Failure::Scan(error) => scan_error(error),
                 Failure::ComparisonPane { right, cause } => {
                     let pane = if *right {
                         text!("Правая панель")
@@ -168,6 +169,8 @@ fn host_key_error(error: &HostKeyError) -> String {
 fn access_error(error: &AccessError) -> String {
     let cause = match &error.cause {
         AccessCause::Connection(error) => file_error(error),
+        #[cfg(target_os = "macos")]
+        AccessCause::Path(error) => path_error(error),
         cause => cause.to_string(),
     };
     let action = match error.action {
@@ -205,9 +208,6 @@ fn search_error(error: &SearchError) -> String {
             text!("Результаты относятся к разным подключениям SFTP."),
             location,
         ),
-        SearchError::MissingFileType(location) => {
-            (text!("Сервер SFTP не сообщил тип объекта"), location)
-        }
         SearchError::DirectoryChanged { location, resolved } => {
             return crate::tr_format!(
                 "The SFTP folder {path} now resolves to {target}. It was skipped.",
@@ -215,6 +215,45 @@ fn search_error(error: &SearchError) -> String {
                 target = resolved.display()
             );
         }
+    };
+    format!("{message} · {location}")
+}
+
+fn scan_error(error: &ScanError) -> String {
+    let (message, location) = match error {
+        ScanError::PropertiesStart(source) => {
+            return format!("{}: {source}", text!("Подсчёт не запущен"));
+        }
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        ScanError::DirectoryChanged(location) => {
+            (text!("Папка изменилась во время подсчёта"), location)
+        }
+        #[cfg(target_os = "macos")]
+        ScanError::InvalidSftpEntry { directory, name } => {
+            return format!(
+                "{} · {directory}/{name:?}",
+                text!("Папка содержит недопустимое имя")
+            );
+        }
+        #[cfg(target_os = "macos")]
+        ScanError::DepthLimit(location) => (text!("Достигнут предел вложенности папок"), location),
+        #[cfg(target_os = "macos")]
+        ScanError::MissingSftpFileSize(location) => {
+            (text!("Сервер SFTP не сообщил размер файла"), location)
+        }
+        ScanError::MissingSftpFileType(location) => {
+            (text!("Сервер SFTP не сообщил тип объекта"), location)
+        }
+        #[cfg(target_os = "macos")]
+        ScanError::DiskUsageRequiresLocalFolder => {
+            return text!("Анализ места доступен в локальных папках").into();
+        }
+        #[cfg(target_os = "macos")]
+        ScanError::DiskUsageFolderUnavailable(location) => {
+            (text!("Папка изменилась или недоступна"), location)
+        }
+        #[cfg(target_os = "macos")]
+        ScanError::DiskUsageLimit => return text!("Достигнут предел анализа места").into(),
     };
     format!("{message} · {location}")
 }

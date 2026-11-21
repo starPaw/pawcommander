@@ -9,12 +9,12 @@ use crate::{
     i18n::text,
     shortcuts::Command,
     vfs::{
-        usage::{self, Analysis, Finish, Kind, Node, NodeId},
+        usage::{self, Analysis, Finish, Issue, Kind, Node, NodeId},
         Location,
     },
 };
 use eframe::egui;
-use std::collections::HashSet;
+use std::{borrow::Cow, collections::HashSet};
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum View {
@@ -242,7 +242,7 @@ fn show_tree(
                         ui.add(egui::Label::new(label).extend().selectable(true))
                             .on_hover_text(&detail);
                         if let Some(issue) = &node.issue {
-                            ui.colored_label(ui.visuals().warn_fg_color, issue)
+                            ui.colored_label(ui.visuals().warn_fg_color, issue_text(issue))
                                 .on_hover_text(&detail);
                         }
                     })
@@ -337,9 +337,18 @@ fn node_detail(analysis: &Analysis, node: &Node) -> String {
     }
     if let Some(issue) = &node.issue {
         detail.push('\n');
-        detail.push_str(issue);
+        detail.push_str(&issue_text(issue));
     }
     detail
+}
+
+fn issue_text(issue: &Issue) -> Cow<'static, str> {
+    match issue {
+        Issue::Failure(error) => crate::i18n::file_error(error).into(),
+        Issue::AlreadyCounted => text!("Эта папка уже учтена").into(),
+        Issue::Partial => text!("Папка проверена частично").into(),
+        Issue::Pending => text!("Папка ещё не проверена").into(),
+    }
 }
 
 impl PawCommander {

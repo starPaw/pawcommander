@@ -1,7 +1,9 @@
 use super::listing::next_sftp_entry;
 use super::location::{normalize_remote, validate_name, Endpoint, Location};
 use super::sftp::{cached, should_reopen};
-use crate::file_error::{AccessAction, AccessError, ListingError, ListingErrorKind, SearchError};
+use crate::file_error::{
+    AccessAction, AccessError, ListingError, ListingErrorKind, ScanError, SearchError,
+};
 use crate::operations::TransferError;
 use libssh2_sys::LIBSSH2_FX_NO_SUCH_FILE;
 use ssh2::{Error, ErrorCode, FileStat, Sftp};
@@ -252,7 +254,7 @@ fn walk_from(
                 Visit::Continue => {}
             }
             if stat.perm.is_none() {
-                coverage.record_skip(|| SearchError::MissingFileType(child.clone()).into());
+                coverage.record_skip(|| ScanError::MissingSftpFileType(child.clone()).into());
             }
             if stat.is_dir() {
                 if depth >= max_depth {

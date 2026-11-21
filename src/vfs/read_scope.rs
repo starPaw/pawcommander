@@ -238,6 +238,7 @@ pub(super) fn local_subdirectory(
 pub(super) fn visit_local_entries(
     descriptor: &OwnedFd,
     cancel: &Cancellation,
+    directory_changed: impl FnOnce() -> TransferError,
     mut visit: impl FnMut(
         &std::ffi::OsStr,
         rustix::io::Result<rustix::fs::Stat>,
@@ -264,7 +265,7 @@ pub(super) fn visit_local_entries(
         || before.st_ctime != after.st_ctime
         || before.st_ctime_nsec != after.st_ctime_nsec
     {
-        return Err(text!("Папка изменилась или недоступна").into());
+        return Err(directory_changed());
     }
     Ok(())
 }

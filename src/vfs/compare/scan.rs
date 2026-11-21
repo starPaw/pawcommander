@@ -99,7 +99,7 @@ fn visit_local(
 
     let nested = local_subdirectory(root, relative, cancel)?;
     let descriptor = nested.as_ref().unwrap_or(root);
-    visit_local_entries(descriptor, cancel, |name, stat| {
+    visit_local_entries(descriptor, cancel, folder_changed, |name, stat| {
         let entry = match stat {
             Ok(stat) => match FileType::from_raw_mode(stat.st_mode) {
                 FileType::Directory => Entry::Directory,

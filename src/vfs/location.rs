@@ -399,12 +399,12 @@ pub fn resolve(address: &str, current: &Location) -> Result<Location, TransferEr
     })
 }
 
-pub(super) fn normalize_remote(path: &Path) -> Result<PathBuf, TransferError> {
+pub(super) fn normalize_remote(path: &Path) -> Result<PathBuf, PathError> {
     let text = path
         .to_str()
         .ok_or_else(|| PathError::RemotePathEncoding(path.to_owned()))?;
     if !text.starts_with('/') || text.contains(['\0', '\\']) {
-        return Err(PathError::RemotePathSyntax(path.to_owned()).into());
+        return Err(PathError::RemotePathSyntax(path.to_owned()));
     }
     let mut parts = Vec::new();
     for part in text.split('/') {
