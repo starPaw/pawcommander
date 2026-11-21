@@ -222,17 +222,20 @@ impl Results {
     }
 
     /// Record a diagnostic without deduplicating member names.
-    pub(crate) fn diagnostic(
+    pub(crate) fn archive_diagnostic(
         &mut self,
         archive: &Location,
-        name: &str,
+        entry: usize,
+        name: Option<&str>,
         outcome: Outcome,
-        reason: &str,
+        error: &std::io::Error,
     ) {
+        let name = name.unwrap_or_else(|| crate::i18n::text!("Заголовок TAR"));
+        let name = crate::tr_format!("Entry {index} · {name}", index = entry, name = name);
         let parent = self.index.get(archive).copied();
-        if let Some(index) = self.add_display_row(name, None, parent) {
+        if let Some(index) = self.add_display_row(&name, None, parent) {
             self.items[index].outcome = outcome;
-            self.reason(index, Some(reason));
+            self.reason(index, Some(&error.to_string()));
         }
     }
 

@@ -4,7 +4,7 @@ use super::permissions::PermissionsDialog;
 use super::selection::{Rule, RuleKind};
 use super::state::Settings;
 use super::{file_name, PawCommander};
-use crate::archive::Format;
+use crate::archive::{ArchiveVerification, Format};
 use crate::shortcuts::Command;
 use crate::theme::Palette;
 use crate::vfs::{ArchiveEdit, Endpoint, FileEntry, Location};
@@ -141,6 +141,41 @@ fn archive_edit_command(edit: &ArchiveEdit) -> Command {
         ArchiveEdit::Add { .. } => Command::AddToArchive,
         ArchiveEdit::Remove(_) => Command::RemoveFromArchive,
         ArchiveEdit::Rename { .. } => Command::Rename,
+    }
+}
+
+fn archive_verification_message(report: ArchiveVerification) -> Result<String, String> {
+    use crate::i18n::text;
+    use crate::operations::TransferError;
+
+    let summary = crate::tr_format!(
+        "Verified entries: {}. Entry errors: {}. Unverified: {}.",
+        report.passed,
+        report.damaged,
+        report.unverified
+    );
+    let details = text!("Подробности в журнале результатов.");
+    match report.interruption {
+        Some(TransferError::Cancelled) => Ok(crate::tr_format!(
+            "Archive check stopped. {summary}",
+            summary = summary
+        )),
+        Some(error) => Err(crate::tr_format!(
+            "Archive check could not finish: {error}. {summary} {details}",
+            error = crate::i18n::file_error(&error),
+            summary = summary,
+            details = details
+        )),
+        None if report.damaged != 0 || report.unverified != 0 => {
+            Err(format!("{summary} {details}"))
+        }
+        None => {
+            let scope = match report.format {
+                Format::Zip => text!("Структура и данные ZIP проверены."),
+                Format::Tar => text!("Заголовки TAR проверены, данные прочитаны."),
+            };
+            Ok(format!("{scope} {summary}"))
+        }
     }
 }
 
@@ -740,7 +775,7 @@ impl PawCommander {
                     }
                     match fs_ops::archive_file_name(name, *format) {
                         Ok(file) => { ui.label(directory.join(file).display()); }
-                        Err(error) => { ui.label(error); }
+                        Err(_) => { ui.label(crate::i18n::text!("Введите допустимое имя архива")); }
                     }
                 }
                 Dialog::ExtractArchive { sources, archive_directory, other, address, password } => {
@@ -1038,14 +1073,23 @@ impl PawCommander {
                     let label = Command::CreateArchive.label();
                     let description = format!("{label} · {}", directory.join(file));
                     self.start_stoppable_job(ctx, label, description, move |progress| {
-                        fs_ops::create_archive(
+                        match fs_ops::create_archive(
                             &sources,
                             &directory,
                             &name,
                             format,
                             Some(password.as_str()),
                             progress,
-                        )
+                        ) {
+                            Ok(target) => Ok(crate::tr_format!(
+                                "Archive created: {target}",
+                                target = target
+                            )),
+                            Err(crate::operations::TransferError::Cancelled) => {
+                                Ok(crate::i18n::text!("Создание архива остановлено").into())
+                            }
+                            Err(error) => Err(crate::i18n::file_error(&error)),
+                        }
                     });
                 }
             }
@@ -1076,7 +1120,10 @@ impl PawCommander {
                 let label = Command::VerifyArchive.label();
                 let description = format!("{label} · {}", archive.display());
                 self.start_stoppable_job(ctx, label, description, move |progress| {
-                    crate::archive::verify_archive(&archive, Some(password.as_str()), progress)
+                    let report =
+                        crate::archive::verify_archive(&archive, Some(password.as_str()), progress)
+                            .map_err(|error| crate::i18n::file_error(&error))?;
+                    archive_verification_message(report)
                 });
             }
             Dialog::CreateChecksumManifest {

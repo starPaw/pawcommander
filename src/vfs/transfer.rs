@@ -1677,11 +1677,14 @@ impl TransferSourceEntry {
         &self,
         source: &Location,
         actual: &EntryMetadata,
-    ) -> Result<(), String> {
-        if self.matches_metadata(actual).map_err(err)? {
+    ) -> Result<(), TransferError> {
+        if self
+            .matches_metadata(actual)
+            .map_err(|error| AccessError::new(source, AccessAction::ReadMetadata, error))?
+        {
             Ok(())
         } else {
-            Err(changed_source(source))
+            Err(MutationError::SourceChanged(source.clone()).into())
         }
     }
 
@@ -1704,12 +1707,13 @@ impl TransferSourceEntry {
         moving: bool,
     ) -> Result<(), TransferError> {
         cancel.check()?;
-        let actual = entry_metadata(source)?.ok_or_else(|| changed_source(source))?;
+        let actual =
+            entry_metadata(source)?.ok_or_else(|| MutationError::SourceChanged(source.clone()))?;
         self.verify_metadata(source, &actual)?;
         if let Some(children) = &self.children
             && *children != source_children(source, cancel, moving)?
         {
-            return Err(changed_source(source).into());
+            return Err(MutationError::SourceChanged(source.clone()).into());
         }
         Ok(())
     }

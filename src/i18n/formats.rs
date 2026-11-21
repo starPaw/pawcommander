@@ -118,6 +118,7 @@ formats! {
     "Archive created: {target}" => ("Архив создан: {target}", "Archiv byl vytvořen: {target}"),
     "The server did not confirm publication of {target}: {error}" => ("Сервер не подтвердил сохранение архива {target}: {error}", "Server nepotvrdil uložení {target}: {error}"),
     "Only regular files and folders can be added to an archive: {source}" => ("Архив поддерживает только обычные файлы и папки: {source}", "Do archivu lze přidat pouze běžné soubory a složky: {source}"),
+    "Could not add {entry} to archive {archive}: {error}" => ("Не удалось добавить {entry} в архив {archive}: {error}", "Položku {entry} se nepodařilo přidat do archivu {archive}: {error}"),
     "The server did not report the source file size: {source}" => ("Сервер не сообщил размер исходного файла: {source}", "Server nesdělil velikost zdrojového souboru: {source}"),
     "Compatible transfer supports regular files and folders. Check {source}." => ("Совместимый перенос поддерживает обычные файлы и папки. Проверьте {source}.", "Kompatibilní přenos podporuje běžné soubory a složky. Zkontrolujte {source}."),
     "Completed items: {completed}. {error}" => ("Завершено объектов: {completed}. {error}", "Dokončené položky: {completed}. {error}"),

@@ -7,7 +7,7 @@ mod writer;
 
 pub(crate) use edit::{EditableArchive, MemberEdit};
 pub(crate) use extraction::{Extraction, SelectedTree};
-pub(crate) use integrity::verify_archive;
+pub(crate) use integrity::{verify_archive, ArchiveVerification};
 pub(crate) use writer::{ArchiveWriter, Attributes, CreationLimits};
 
 use crate::{
@@ -36,7 +36,7 @@ const MAX_METADATA_BYTES: usize = 32 * 1024 * 1024;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_DEPTH: usize = 64;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Format {
     Zip,
     Tar,
@@ -605,8 +605,36 @@ pub(crate) fn readonly() -> &'static str {
     text!("Эта операция недоступна внутри архива")
 }
 
+#[derive(Debug)]
+struct ArchiveMessage {
+    key: crate::i18n::MessageKey,
+    zip_error: Option<zip::result::ZipError>,
+}
+
+impl std::fmt::Display for ArchiveMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(text(self.key))
+    }
+}
+
+impl std::error::Error for ArchiveMessage {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.zip_error.as_ref().map(|error| error as _)
+    }
+}
+
+fn archive_io_error(kind: io::ErrorKind, key: crate::i18n::MessageKey) -> io::Error {
+    io::Error::new(
+        kind,
+        ArchiveMessage {
+            key,
+            zip_error: None,
+        },
+    )
+}
+
 fn invalid(message: crate::i18n::MessageKey) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, text(message))
+    archive_io_error(io::ErrorKind::InvalidData, message)
 }
 
 fn invalid_path() -> io::Error {

@@ -4,9 +4,9 @@
 mod bandwidth;
 
 use crate::file_error::{
-    AccessCause, AccessError, ChecksumError, ConnectionError, Failure, HostKeyError, ListingError,
-    MutationError, PathError, PermissionError, PreviewError, PublicationError, RecoveryNotice,
-    ScanError, SearchError,
+    AccessCause, AccessError, ArchiveError, ChecksumError, ConnectionError, Failure, HostKeyError,
+    ListingError, MutationError, PathError, PermissionError, PreviewError, PublicationError,
+    RecoveryNotice, ScanError, SearchError,
 };
 use crate::vfs::{Endpoint, Location};
 use bandwidth::Pacer;
@@ -321,6 +321,19 @@ impl From<PermissionError> for TransferError {
 impl From<ChecksumError> for TransferError {
     fn from(error: ChecksumError) -> Self {
         Self::Failed(Failure::Checksum(Box::new(error)))
+    }
+}
+
+impl From<ArchiveError> for TransferError {
+    fn from(error: ArchiveError) -> Self {
+        match &error {
+            ArchiveError::AddEntry { source, .. } | ArchiveError::Verify { source, .. }
+                if Self::is_cancelled_io(source) =>
+            {
+                Self::Cancelled
+            }
+            _ => Self::Failed(Failure::Archive(Box::new(error))),
+        }
     }
 }
 
