@@ -16,7 +16,6 @@ impl PawCommander {
             .filter(|(pane, file)| Some(self.panes[*pane].tab().entry_id(file)) == previous_focus)
             .map(|(_, file)| file.clone());
         self.command_palette = Some(CommandPalette::new(previous_focus, focused_file));
-        Self::restore_focus(ctx, None);
     }
 
     pub(super) fn restore_focus(ctx: &egui::Context, previous_focus: Option<egui::Id>) {

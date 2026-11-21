@@ -121,7 +121,9 @@ mod macos_input {
                 ..Default::default()
             };
             eframe::App::raw_input_hook(&mut app, &ctx, &mut input);
-            let _ = ctx.run_test_ui(input, |ui| app.keyboard(ui.ctx()));
+            let _ = ctx.run_test_ui(input, |ui| {
+                app.keyboard(ui.ctx());
+            });
             assert!(app.job.is_none());
             assert!(app.pending_jobs.is_empty());
             assert!(app.notice.is_none());

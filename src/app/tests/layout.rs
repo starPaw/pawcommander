@@ -506,7 +506,9 @@ fn folder_columns_keyboard_dispatches_in_pane_order_and_preserves_folder_overrid
             ..Default::default()
         };
         eframe::App::raw_input_hook(app, &ctx, &mut input);
-        let _ = ctx.run_test_ui(input, |ui| app.keyboard(ui.ctx()));
+        let _ = ctx.run_test_ui(input, |ui| {
+            app.keyboard(ui.ctx());
+        });
     };
     let stale = app.panes[1].tab().column_action(1, ColumnNavigation::Left);
     run(

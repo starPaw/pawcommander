@@ -76,9 +76,9 @@ impl CommandPalette {
             let navigate = keys
                 .iter()
                 .any(|key| matches!(key, egui::Key::ArrowUp | egui::Key::ArrowDown));
-            if (self.focus_query || navigate) && !ui.is_sizing_pass() {
+            if self.focus_query || navigate {
                 ui.memory_mut(|memory| memory.request_focus(query_id));
-                self.focus_query = false;
+                self.focus_query = ui.is_sizing_pass();
             }
             let query = ui.add(
                 egui::TextEdit::singleline(&mut self.query)

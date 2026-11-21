@@ -28,7 +28,9 @@ fn properties_shortcut_opens_selected_group_without_navigating() {
             ],
             ..Default::default()
         },
-        |ui| app.keyboard(ui.ctx()),
+        |ui| {
+            app.keyboard(ui.ctx());
+        },
     );
     assert!(app.properties.is_some());
     assert_eq!(app.tab().path, before);
@@ -204,22 +206,36 @@ fn command_palette_filters_navigates_runs_and_restores_focus() {
 
     run(&mut app, vec![]);
     let previous = ctx.memory(|memory| memory.focused()).unwrap();
-    run(&mut app, open());
+    let mut opening = vec![Event::Text("draft-".into())];
+    opening.extend(open());
+    opening.push(Event::Text("not-a-command".into()));
+    run(&mut app, opening);
     assert!(app.command_palette.is_some());
-    run(&mut app, vec![]);
-    run(&mut app, vec![Event::Text("not-a-command".into())]);
+    run(
+        &mut app,
+        vec![
+            key(Key::Enter, true, Modifiers::NONE),
+            key(Key::Enter, false, Modifiers::NONE),
+        ],
+    );
+    assert!(
+        app.command_palette.is_some(),
+        "opening input should leave a query with no matches"
+    );
     run(&mut app, vec![key(Key::Escape, true, Modifiers::NONE)]);
     assert!(app.command_palette.is_none());
     assert!(ctx.memory(|memory| memory.has_focus(previous)));
-    assert!(app.tab().filter.is_empty());
+    assert_eq!(app.tab().filter, "draft-");
     run(
         &mut app,
         vec![
             key(Key::Escape, true, Modifiers::NONE),
             key(Key::Escape, false, Modifiers::NONE),
+            Event::Text("after-dismissal".into()),
         ],
     );
     assert!(ctx.memory(|memory| memory.has_focus(previous)));
+    assert_eq!(app.tab().filter, "draft-after-dismissal");
 
     run(&mut app, open());
     run(&mut app, vec![]);
@@ -247,6 +263,31 @@ fn command_palette_filters_navigates_runs_and_restores_focus() {
     run(&mut app, vec![key(Key::Enter, true, Modifiers::NONE)]);
     assert!(app.command_palette.is_none());
     assert_eq!(app.panes[0].tabs.len(), 1);
+
+    run(&mut app, vec![key(Key::Enter, false, Modifiers::NONE)]);
+    app.action(Action::NewTab(0), &ctx);
+    let mut opening = open();
+    opening.extend([
+        Event::Text("TAB".into()),
+        key(Key::Tab, true, Modifiers::NONE),
+        key(Key::Tab, false, Modifiers::NONE),
+        key(Key::Enter, true, Modifiers::NONE),
+        key(Key::Enter, false, Modifiers::NONE),
+    ]);
+    run(&mut app, opening);
+    assert!(app.command_palette.is_none(), "Return should run the match");
+    assert_eq!(app.active, 0, "Tab should stay within the palette");
+    assert_eq!(app.panes[0].tabs.len(), 1, "Tab should choose Close tab");
+
+    let mut opening = open();
+    opening.extend([
+        Event::Text(Command::NewFolder.label().into()),
+        key(Key::Enter, true, Modifiers::NONE),
+        key(Key::Enter, false, Modifiers::NONE),
+    ]);
+    run(&mut app, opening);
+    assert!(matches!(&app.dialog, Some(Dialog::NewFolder { name, .. }) if name.is_empty()));
+    assert!(root.path().read_dir().unwrap().next().is_none());
 }
 
 #[test]
@@ -328,7 +369,9 @@ fn starting_filter_input_blocks_a_later_file_shortcut_in_the_same_frame() {
             ],
             ..Default::default()
         },
-        |ui| app.keyboard(ui.ctx()),
+        |ui| {
+            app.keyboard(ui.ctx());
+        },
     );
     assert!(app.tab().focus_filter);
     assert!(app.dialog.is_none());
