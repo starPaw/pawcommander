@@ -555,6 +555,7 @@ mod tests {
                 port: 2022,
                 user: "reader".into(),
                 key: Some(PathBuf::from("key")),
+                jump: None,
             },
             path: PathBuf::from("/one/two/three"),
         };

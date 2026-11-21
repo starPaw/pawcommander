@@ -196,7 +196,10 @@ impl PawCommander {
                                     actions.push(Action::ConnectSftp);
                                 }
                                 for profile in &self.settings.sftp_profiles {
-                                    if place_button(ui, &profile.name(), current == *profile) {
+                                    let label = profile.name();
+                                    #[cfg(target_os = "macos")]
+                                    let label = profile.with_sftp_route_label(label);
+                                    if place_button(ui, &label, current == *profile) {
                                         actions
                                             .push(Action::Navigate(self.active, profile.clone()));
                                     }

@@ -1,8 +1,7 @@
-use super::host_key::HostKey;
+use super::{host_key::HostKey, Endpoint};
 use crate::i18n::text;
 use ssh2::{KeyboardInteractivePrompt, Prompt, Session};
 use std::{
-    net::{Shutdown, TcpStream},
     sync::{mpsc, Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -17,7 +16,7 @@ const CANCEL_POLL: Duration = Duration::from_millis(50);
 pub(crate) struct ConnectionControl(Arc<Mutex<Attempt>>);
 
 enum Attempt {
-    Pending(Option<TcpStream>),
+    Pending(Option<Box<dyn FnOnce() + Send>>),
     Aborted(Abort),
     Finalizing,
 }
@@ -57,8 +56,8 @@ impl ConnectionControl {
             *attempt = Attempt::Aborted(reason);
             socket
         };
-        if let Some(socket) = socket {
-            let _ = socket.shutdown(Shutdown::Both);
+        if let Some(shutdown) = socket {
+            shutdown();
         }
         true
     }
@@ -78,12 +77,11 @@ impl ConnectionControl {
         }
     }
 
-    pub(super) fn attach(&self, socket: &TcpStream) -> Result<(), String> {
-        let copy = socket.try_clone().map_err(|error| error.to_string())?;
+    pub(super) fn attach(&self, shutdown: impl FnOnce() + Send + 'static) -> Result<(), String> {
         let mut attempt = self.0.lock().unwrap();
         match &mut *attempt {
             Attempt::Pending(slot) => {
-                *slot = Some(copy);
+                *slot = Some(Box::new(shutdown));
                 Ok(())
             }
             Attempt::Aborted(reason) => Err(reason.message().into()),
@@ -111,6 +109,7 @@ pub(crate) enum ConnectionPrompt {
 
 pub(crate) struct HostKeyRequest {
     pub key: HostKey,
+    pub title: &'static str,
     pub deadline: Instant,
     reply: mpsc::Sender<()>,
 }
@@ -127,6 +126,7 @@ pub(crate) struct Question {
 }
 
 pub(crate) struct AuthRequest {
+    pub server: String,
     pub title: String,
     pub instructions: String,
     pub questions: Vec<Question>,
@@ -148,6 +148,9 @@ pub(crate) struct InteractiveAuth {
     notify: Box<dyn Fn() + Send>,
     timeout: Duration,
     exchange_deadline: Option<Instant>,
+    server: String,
+    #[cfg(target_os = "macos")]
+    host_key_title: Option<&'static str>,
 }
 
 impl InteractiveAuth {
@@ -162,6 +165,9 @@ impl InteractiveAuth {
                 notify: Box::new(notify),
                 timeout: PROMPT_TIMEOUT,
                 exchange_deadline: None,
+                server: String::new(),
+                #[cfg(target_os = "macos")]
+                host_key_title: None,
             },
             receive,
         )
@@ -171,24 +177,34 @@ impl InteractiveAuth {
         self.control.clone()
     }
 
+    #[cfg(target_os = "macos")]
+    pub(super) fn set_host_key_title(&mut self, title: &'static str) {
+        self.host_key_title = Some(title);
+    }
+
     pub(crate) fn confirm_host_key(&self, key: HostKey) -> Result<(), String> {
         let (reply, receive) = mpsc::channel();
         let deadline = Instant::now() + HOST_KEY_TIMEOUT;
+        let title = "Проверка ключа сервера";
+        #[cfg(target_os = "macos")]
+        let title = self.host_key_title.unwrap_or(title);
         self.send(ConnectionPrompt::HostKey(HostKeyRequest {
             key,
+            title: text(title),
             deadline,
             reply,
         }));
         self.wait(receive, deadline, Abort::HostKeyTimedOut)
     }
 
-    pub(super) fn authenticate(&mut self, session: &Session, user: &str) {
+    pub(super) fn authenticate(&mut self, session: &Session, endpoint: &Endpoint) {
         let previous_timeout = session.timeout();
         let deadline = Instant::now() + Duration::from_millis(u64::from(EXCHANGE_TIMEOUT_MS));
         self.exchange_deadline = Some(deadline);
+        self.server = endpoint.label();
         // libssh2's blocking timeout includes every prompt in the exchange.
         session.set_timeout(EXCHANGE_TIMEOUT_MS);
-        let result = session.userauth_keyboard_interactive(user, self);
+        let result = session.userauth_keyboard_interactive(&endpoint.user, self);
         session.set_timeout(previous_timeout);
         self.exchange_deadline = None;
         if result.is_err() && Instant::now() >= deadline {
@@ -208,6 +224,7 @@ impl InteractiveAuth {
             .exchange_deadline
             .map_or(round_deadline, |limit| limit.min(round_deadline));
         let request = AuthRequest {
+            server: self.server.clone(),
             title: server_text(title),
             instructions: server_text(instructions),
             questions: prompts

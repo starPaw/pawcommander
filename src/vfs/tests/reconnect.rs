@@ -157,6 +157,7 @@ fn sftp_reconnect_checks_lost_publication_replies() {
             .unwrap(),
         user: std::env::var("PAWCOMMANDER_TEST_SFTP_USER").unwrap(),
         key: None,
+        jump: None,
     };
     let remote_root = Location::Sftp {
         endpoint: endpoint.clone(),

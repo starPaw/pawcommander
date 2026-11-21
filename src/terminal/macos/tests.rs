@@ -59,6 +59,7 @@ fn terminal_ssh_uses_explicit_coordinates_and_validates_folder() {
         port: 2222,
         user: "guest@example.test".into(),
         key: None,
+        jump: None,
     };
     let command = ssh_command(&endpoint, Path::new("/root/draft ' é\n")).unwrap();
     let args = command.get_args().collect::<Vec<_>>();
@@ -91,6 +92,7 @@ fn openssh_terminal_starts_interactively_in_the_exact_folder() {
         key: Some(PathBuf::from(
             std::env::var_os("PAWCOMMANDER_TEST_TERMINAL_KEY").unwrap(),
         )),
+        jump: None,
     };
     let folder = root.join("reports ' \" é & [draft] ! %h ${USER}\n");
     std::fs::create_dir(&folder).unwrap();

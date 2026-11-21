@@ -343,6 +343,7 @@ fn sftp_file_double_click_and_zed_context_menu_keep_the_clicked_path() {
                 port: 2222,
                 user: "test".into(),
                 key: None,
+                jump: None,
             },
             path: "/project/.env".into(),
         };

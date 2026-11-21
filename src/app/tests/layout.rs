@@ -791,6 +791,7 @@ fn folder_view_storage_keeps_native_names_and_distinct_sftp_keys() {
         port: 2022,
         user: "reader".into(),
         key: None,
+        jump: None,
     };
     let remote = Location::Sftp {
         endpoint: endpoint.clone(),

@@ -691,6 +691,7 @@ mod tests {
                 port: 22,
                 user: "user".into(),
                 key: None,
+                jump: None,
             },
             path: "/remote".into(),
         };

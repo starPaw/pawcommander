@@ -302,6 +302,7 @@ mod tests {
                 port: 22,
                 user: "test".into(),
                 key: None,
+                jump: None,
             },
             path: path.into(),
         }

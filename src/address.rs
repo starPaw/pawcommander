@@ -311,6 +311,7 @@ mod tests {
                 port: 2222,
                 user: "alice".into(),
                 key: Some(PathBuf::from("test-key")),
+                jump: None,
             },
             path: "/work".into(),
         };

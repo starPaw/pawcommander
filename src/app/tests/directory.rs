@@ -414,6 +414,7 @@ fn automatic_refresh_schedules_remote_tab_without_reconnecting_or_clearing_it() 
             port: 0,
             user: "test".into(),
             key: None,
+            jump: None,
         },
         path: "/".into(),
     };

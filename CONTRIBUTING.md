@@ -37,6 +37,7 @@ PAWCOMMANDER_TEST_SFTP_HOST=::1 bash scripts/test-sftp.sh
 PAWCOMMANDER_TEST_DISABLE_STATVFS=1 bash scripts/test-sftp.sh
 PAWCOMMANDER_TEST_SFTP_RECONNECT=1 bash scripts/test-sftp.sh
 PAWCOMMANDER_TEST_SFTP_METADATA_DENIED=1 bash scripts/test-sftp.sh
+PAWCOMMANDER_TEST_SFTP_PROXYJUMP=1 bash scripts/test-sftp.sh # macOS
 ```
 
 The script creates a temporary loopback-only SSH server, generates disposable keys, and cleans up on exit. It does not change your SSH configuration. Local OS policy may prevent launching `sshd`.
@@ -48,6 +49,8 @@ The reconnect mode starts a temporary SSH agent and uses an OpenSSH SFTP subsyst
 On macOS the reconnect mode also drops the socket during file and folder copies and moves in both directions. It checks exact remaining writes, preservation of an existing destination for a file replacement, and reuse of already complete children. It withholds the reply after a move puts the original on the server into staging and verifies that recovery finishes using the existing destination.
 
 The metadata-denied mode disables `setstat` and `fsetstat` on the temporary server. It checks that copies complete with field-specific warnings and that **Change permissions** reports the server's refusal. The standard mode also checks that numeric and symbolic permission changes match their preview, skips changed entries and symbolic links, and honors cancellation before sending a permission update.
+
+The ProxyJump mode starts two OpenSSH servers with separate host and client keys. It checks both SHA-256 fingerprints, cancellation before authenticating to the target, a 5 MiB upload and download, reconnect, and refusal when either host key differs or the jump host denies forwarding.
 
 On macOS, run `PAWCOMMANDER_TEST_SFTP_TERMINAL=1 bash scripts/test-sftp.sh` to execute the SSH launch document against a disposable OpenSSH server. The test verifies the interactive shell, PTY, exact folder and identity path, and refusal when the folder is missing or the host is unknown.
 

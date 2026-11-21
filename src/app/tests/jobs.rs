@@ -1082,6 +1082,7 @@ fn transfer_speed_dialog_updates_the_running_job_and_persists_connection_limits(
         port: 2222,
         user: "test".into(),
         key: Some("/test/key-filename".into()),
+        jump: None,
     };
     app.settings.sftp_profiles.push(Location::Sftp {
         endpoint: saved_connection.clone(),

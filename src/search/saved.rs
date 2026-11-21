@@ -443,6 +443,7 @@ mod tests {
                 port: 0,
                 user: "fixture".into(),
                 key: Some("/keys/explicit-key".into()),
+                jump: None,
             },
             path: "/reports".into(),
         };

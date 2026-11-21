@@ -26,6 +26,7 @@ fn remote_addresses_round_trip_and_keep_connection_and_posix_history() {
             port: 2222,
             user: "a%40b".into(),
             key: None,
+            jump: None,
         },
         path: "/".into(),
     };
@@ -48,6 +49,7 @@ fn remote_key_path_survives_address_edits() {
             port: 22,
             user: "alice".into(),
             key: Some(PathBuf::from("/keys/id")),
+            jump: None,
         },
         path: "/".into(),
     };
@@ -55,6 +57,35 @@ fn remote_key_path_survives_address_edits() {
         resolve("sftp://alice@example.com/sub", &current).unwrap(),
         current.join("sub")
     );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn sftp_address_keeps_the_jump_route_for_the_same_server() {
+    let local = Location::Local("/tmp".into());
+    let direct = resolve("sftp://alice@private.example:2222/a", &local).unwrap();
+    let mut routed = direct.clone();
+    if let Location::Sftp { endpoint, .. } = &mut routed {
+        endpoint.key = Some("/keys/target".into());
+        endpoint.jump = Some(Box::new(crate::vfs::JumpHost {
+            host: "jump.example".into(),
+            port: 22,
+            user: "relay".into(),
+            key: Some("/keys/jump".into()),
+        }));
+    }
+    assert!(!routed.same_sftp_authority(&direct));
+    assert!(routed.might_share_filesystem(&direct));
+    assert_eq!(
+        resolve("sftp://alice@PRIVATE.example:2222/b", &routed).unwrap(),
+        routed.with_path("/b".into())
+    );
+    let other = resolve("sftp://bob@private.example:2222/b", &routed).unwrap();
+    let endpoint = other.sftp_endpoint().unwrap();
+    assert_eq!(endpoint.jump, routed.sftp_endpoint().unwrap().jump);
+    assert!(endpoint.key.is_none());
+    let other_server = resolve("sftp://bob@elsewhere.example:2222/b", &routed).unwrap();
+    assert!(other_server.sftp_endpoint().unwrap().jump.is_none());
 }
 
 #[test]
@@ -83,6 +114,7 @@ fn ipv6_address_edits_keep_exact_authenticated_endpoint_without_crossing_authori
                 port: 2222,
                 user: "alice".into(),
                 key: Some("/keys/explicit".into()),
+                jump: None,
             },
             path: "/".into(),
         };

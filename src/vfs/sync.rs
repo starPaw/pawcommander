@@ -293,7 +293,11 @@ fn check_roots(
     cancel: &Cancellation,
 ) -> Result<(), TransferError> {
     let overlap = || text("Источник и назначение синхронизации пересекаются").into();
-    if (source.same_backend(destination) || source.same_sftp_authority(destination))
+    if (source.might_share_filesystem(destination)
+        || source
+            .sftp_endpoint()
+            .zip(destination.sftp_endpoint())
+            .is_some_and(|(a, b)| a.same_authority(b)))
         && (source.path().starts_with(destination.path())
             || destination.path().starts_with(source.path()))
     {

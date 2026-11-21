@@ -40,10 +40,7 @@ impl ConnectionJob {
         request: ConnectRequest,
         ctx: &egui::Context,
     ) -> Result<Self, String> {
-        let target = format!(
-            "{}@{} · {}",
-            request.endpoint.user, request.endpoint.host, request.endpoint.port
-        );
+        let target = request.endpoint.label();
         let repaint = ctx.clone();
         let (auth, requests) = InteractiveAuth::new(move || repaint.request_repaint());
         let control = auth.control();
@@ -112,7 +109,7 @@ impl ConnectionJob {
         egui::Modal::new(egui::Id::unique("sftp_authentication")).show(ctx, |ui| {
             ui.set_width((ctx.content_rect().width() - 32.0).clamp(180.0, 470.0));
             if let Some(PendingPrompt::HostKey(request)) = &self.prompt {
-                ui.heading(text("Проверка ключа сервера"));
+                ui.heading(request.title);
                 ui.label(format!("{} · {}", request.key.address, request.key.algorithm));
                 ui.monospace(&request.key.fingerprint);
                 let copy = ui.button(text("Копировать отпечаток"));
@@ -123,7 +120,11 @@ impl ConnectionJob {
                 ui.label(text("Сверьте отпечаток с администратором сервера. PawCommander запомнит его для этого адреса."));
             } else {
                 ui.heading(text("Подключение SFTP"));
-                ui.label(&self.target);
+                let server = match &self.prompt {
+                    Some(PendingPrompt::Authentication(form)) => &form.request.server,
+                    _ => &self.target,
+                };
+                ui.label(server);
             }
             if let Some(PendingPrompt::Authentication(form)) = &mut self.prompt {
                 egui::ScrollArea::vertical()

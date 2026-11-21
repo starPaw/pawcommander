@@ -21,6 +21,7 @@ fn permissions_command_requires_an_sftp_selection_and_preview() {
             port: 0,
             user: "fixture".into(),
             key: None,
+            jump: None,
         },
         path: "/data".into(),
     };
@@ -117,6 +118,15 @@ fn ssh_config_form_reviews_the_effective_endpoint_and_selects_an_identity() {
             user: "deploy".into(),
             port: 2202,
             key: Some(ssh.join("default key")),
+            #[cfg(target_os = "macos")]
+            jump: Some(Box::new(crate::vfs::JumpHost {
+                host: "bastion".into(),
+                port: 22,
+                user: "fixture-user".into(),
+                key: None,
+            })),
+            #[cfg(not(target_os = "macos"))]
+            jump: None,
         }
     );
     assert_eq!(form.path, "/work");
@@ -128,7 +138,13 @@ fn ssh_config_form_reviews_the_effective_endpoint_and_selects_an_identity() {
     for label in [
         "Load SSH alias",
         "Loaded SSH alias project",
+        #[cfg(target_os = "macos")]
+        "ProxyJump · fixture-user@bastion · 22",
+        #[cfg(target_os = "macos")]
+        "Connect via ProxyJump",
+        #[cfg(not(target_os = "macos"))]
         "ProxyJump · line 7",
+        #[cfg(not(target_os = "macos"))]
         "Connect directly",
     ] {
         assert!(rendered.contains(label), "missing {label} in {rendered}");
@@ -177,6 +193,6 @@ fn ssh_config_form_reviews_the_effective_endpoint_and_selects_an_identity() {
         draw(&mut app, vec![]);
         let rendered = operation_footer_text(&draw(&mut app, vec![]));
         assert!(rendered.contains("SHA256:previous") && rendered.contains("SHA256:rotated"));
-        assert!(rendered.contains("Cancel") && rendered.contains("Connect directly"));
+        assert!(rendered.contains("Cancel") && rendered.contains("Connect via ProxyJump"));
     }
 }

@@ -14,9 +14,41 @@ pub struct Endpoint {
     pub port: u16,
     pub user: String,
     pub key: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) jump: Option<Box<JumpHost>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub(crate) struct JumpHost {
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub key: Option<PathBuf>,
+}
+
+impl JumpHost {
+    #[cfg(target_os = "macos")]
+    pub(crate) fn label(&self) -> String {
+        format!("{}@{} · {}", self.user, self.host, self.port)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn endpoint(&self) -> Endpoint {
+        Endpoint {
+            host: self.host.clone(),
+            port: self.port,
+            user: self.user.clone(),
+            key: self.key.clone(),
+            jump: None,
+        }
+    }
 }
 
 impl Endpoint {
+    pub(crate) fn label(&self) -> String {
+        format!("{}@{} · {}", self.user, self.host, self.port)
+    }
+
     pub(crate) fn host_name(&self) -> &str {
         self.host
             .strip_prefix('[')
@@ -25,15 +57,23 @@ impl Endpoint {
             .unwrap_or(&self.host)
     }
 
-    pub(crate) fn same_authority(&self, other: &Self) -> bool {
+    fn same_host_port(&self, other: &Self) -> bool {
         let left = self.host_name();
         let right = other.host_name();
-        let same_host = left == right
+        let same_host = left.eq_ignore_ascii_case(right)
             || matches!(
                 (left.parse::<std::net::Ipv6Addr>(), right.parse::<std::net::Ipv6Addr>()),
                 (Ok(left), Ok(right)) if left == right
             );
-        same_host && self.port == other.port && self.user == other.user
+        same_host && self.port == other.port
+    }
+
+    pub(crate) fn same_authority(&self, other: &Self) -> bool {
+        self.same_host_port(other) && self.user == other.user
+    }
+
+    pub(super) fn same_route(&self, other: &Self) -> bool {
+        self.same_authority(other) && self.jump == other.jump
     }
 }
 
@@ -101,10 +141,15 @@ impl Location {
             && match self {
                 Self::Local(_) => true,
                 Self::Archive { archive, .. } => archive.to_str().is_some(),
-                Self::Sftp { endpoint, .. } => endpoint
-                    .key
-                    .as_deref()
-                    .is_none_or(|key| key.to_str().is_some()),
+                Self::Sftp { endpoint, .. } => {
+                    let jump_key = endpoint.jump.as_ref().and_then(|jump| jump.key.as_deref());
+                    endpoint
+                        .key
+                        .iter()
+                        .map(PathBuf::as_path)
+                        .chain(jump_key)
+                        .all(|key| key.to_str().is_some())
+                }
             }
     }
     pub fn with_path(&self, path: PathBuf) -> Self {
@@ -155,6 +200,16 @@ impl Location {
     pub fn display(&self) -> String {
         self.to_string()
     }
+    #[cfg(target_os = "macos")]
+    pub(crate) fn with_sftp_route_label(&self, label: String) -> String {
+        match self
+            .sftp_endpoint()
+            .and_then(|endpoint| endpoint.jump.as_deref())
+        {
+            Some(jump) => format!("{label} · ProxyJump {}", jump.label()),
+            None => label,
+        }
+    }
     pub fn name(&self) -> String {
         let name = self
             .path()
@@ -172,7 +227,16 @@ impl Location {
         }
     }
     pub(crate) fn same_sftp_authority(&self, other: &Self) -> bool {
-        matches!((self, other), (Self::Sftp { endpoint: a, .. }, Self::Sftp { endpoint: b, .. }) if a.same_authority(b))
+        self.sftp_endpoint()
+            .zip(other.sftp_endpoint())
+            .is_some_and(|(a, b)| a.same_route(b))
+    }
+    pub(super) fn might_share_filesystem(&self, other: &Self) -> bool {
+        self.same_backend(other)
+            || self
+                .sftp_endpoint()
+                .zip(other.sftp_endpoint())
+                .is_some_and(|(a, b)| a.same_host_port(b) && (a.jump.is_some() || b.jump.is_some()))
     }
 }
 
@@ -285,15 +349,19 @@ pub fn resolve(address: &str, current: &Location) -> Result<Location, String> {
             port: url.port().unwrap_or(22),
             user,
             key: None,
+            jump: None,
         };
-        if let Location::Sftp {
-            endpoint: existing, ..
-        } = current
-            && endpoint.same_authority(existing)
+        if let Some(existing) = current
+            .sftp_endpoint()
+            .filter(|existing| endpoint.same_host_port(existing))
         {
-            // Keep the exact authenticated session key, including the form
-            // used when connecting. URL rendering may normalize IPv6 text.
-            endpoint = existing.clone();
+            if endpoint.user == existing.user {
+                // Keep the exact session key. URL rendering may normalize the hostname.
+                endpoint = existing.clone();
+            } else {
+                // Changing the account keeps the route to this server and uses new credentials.
+                endpoint.jump.clone_from(&existing.jump);
+            }
         }
         let path = percent_decode_str(url.path())
             .decode_utf8()

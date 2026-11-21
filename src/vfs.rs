@@ -51,6 +51,7 @@ pub use listing::{
     read_automatic_directory, read_directory, visit_address_directory, visit_connected_directory,
     visit_directory, FileEntry,
 };
+pub(crate) use location::JumpHost;
 pub use location::{resolve, Endpoint, Location};
 pub use mutations::{create_directory, trash_entries_with_progress};
 #[cfg(test)]

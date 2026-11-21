@@ -149,10 +149,10 @@ pub fn visit_address_directory(
             if !allow_unique_session {
                 return None;
             }
-            // A URL identifies an authority, but it carries no key path.
+            // A URL carries neither a key path nor an SSH route.
             let mut matching = sessions
                 .iter()
-                .filter(|(candidate, _)| candidate.same_authority(endpoint));
+                .filter(|(candidate, _)| candidate.same_route(endpoint));
             let only = matching.next()?;
             matching.next().is_none().then_some(only)
         });
