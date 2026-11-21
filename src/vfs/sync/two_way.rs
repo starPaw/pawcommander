@@ -7,8 +7,8 @@ pub(in crate::vfs) use tests::two_way_round_trip;
 
 use super::{
     apply::{self, Execution},
-    check_new_name, observe_folders, revalidate_folders, Budget, Kind, ReadScope, Snapshot,
-    SyncChange, SyncRow,
+    check_new_name, observe_folders, revalidate_folders, Budget, Exclusions, Kind, ReadScope,
+    Snapshot, SyncChange, SyncRow,
 };
 use crate::{
     i18n::text,
@@ -49,6 +49,7 @@ pub(crate) struct TwoWayRow {
 pub(crate) struct TwoWayPlan {
     folders: [Location; 2],
     observed: [Snapshot; 2],
+    exclusions: Exclusions,
     store: BaselineStore,
     baseline: Option<Tree>,
     matches_baseline: bool,
@@ -61,21 +62,28 @@ pub(crate) struct TwoWayPlan {
 impl TwoWayPlan {
     pub(crate) fn build(
         folders: [Location; 2],
+        exclusions: Exclusions,
         progress: &mut Progress,
     ) -> Result<Self, TransferError> {
         let data =
             dirs::data_local_dir().ok_or_else(|| text("Папка данных приложения недоступна"))?;
-        Self::build_in(folders, data.join("PawCommander/sync-baselines"), progress)
+        Self::build_in(
+            folders,
+            data.join("PawCommander/sync-baselines"),
+            exclusions,
+            progress,
+        )
     }
 
     fn build_in(
         folders: [Location; 2],
         directory: PathBuf,
+        exclusions: Exclusions,
         progress: &mut Progress,
     ) -> Result<Self, TransferError> {
         let cancel = progress.cancellation();
-        let (_, observed) = observe_folders(&folders, progress)?;
-        let store = BaselineStore::new(directory, &observed)?;
+        let (_, observed) = observe_folders(&folders, &exclusions, progress)?;
+        let store = BaselineStore::new(directory, &observed, exclusions.patterns())?;
         let baseline = store.read(&cancel)?;
         let interrupted = store.read_run()?;
         if let Some(run) = &interrupted {
@@ -96,6 +104,7 @@ impl TwoWayPlan {
         Ok(Self {
             folders,
             observed,
+            exclusions,
             store,
             baseline,
             matches_baseline,
@@ -116,6 +125,13 @@ impl TwoWayPlan {
 
     pub(crate) fn interrupted(&self) -> bool {
         self.interrupted.is_some()
+    }
+
+    pub(crate) fn excluded_count(&self) -> usize {
+        self.observed
+            .iter()
+            .map(|snapshot| snapshot.excluded.len())
+            .sum()
     }
 
     pub(crate) fn can_apply(&self) -> bool {
@@ -169,7 +185,7 @@ impl TwoWayPlan {
 
     fn revalidate(&self, progress: &mut Progress) -> Result<[ReadScope; 2], TransferError> {
         let cancel = progress.cancellation();
-        let scopes = revalidate_folders(&self.folders, &self.observed, progress)?;
+        let scopes = revalidate_folders(&self.folders, &self.observed, &self.exclusions, progress)?;
         self.store.check_roots(&self.observed)?;
         if self.store.read(&cancel)? != self.baseline || self.store.read_run()? != self.interrupted
         {
@@ -234,6 +250,7 @@ impl TwoWayPlan {
             folders: &self.folders,
             observed: &self.observed,
             rows: &rows,
+            exclusions: &self.exclusions,
         };
         execution.plan_history(progress);
         let cancel = progress.cancellation();
@@ -251,7 +268,7 @@ impl TwoWayPlan {
                 Some(&mut |stage| lock.track_stage(&mut run, stage, &self.observed, &cancel)),
             )?;
             self.store.check_stage(&run, &self.observed)?;
-            let (_, final_state) = observe_folders(&self.folders, progress)?;
+            let (_, final_state) = observe_folders(&self.folders, &self.exclusions, progress)?;
             self.store.check_roots(&final_state)?;
             if !final_state.iter().all(|side| matches_tree(side, &target)) {
                 return Err(text(
@@ -362,6 +379,9 @@ fn reconcile(
                         (Some(from), Some(to)) if from != to => SyncChange::Replace,
                         _ => continue,
                     };
+                    if change != SyncChange::Copy {
+                        observed[destination].protect_excluded(path)?;
+                    }
                     if left.root.remote() || right.root.remote() {
                         for name in path.iter() {
                             validate_source_child_name(&observed[source].root, name)?;

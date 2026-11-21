@@ -30,9 +30,14 @@ impl Pair {
     }
 
     fn build(&self) -> TwoWayPlan {
+        self.build_with(Exclusions::default())
+    }
+
+    fn build_with(&self, exclusions: Exclusions) -> TwoWayPlan {
         TwoWayPlan::build_in(
             self.folders.clone(),
             self.records.clone(),
+            exclusions,
             &mut Progress::default(),
         )
         .unwrap()
@@ -204,7 +209,13 @@ fn common_state_round_trips_raw_names_and_fails_closed_on_damaged_records() {
 fn refuses_a_pair_that_contains_the_state_directory() {
     let pair = Pair::new();
     let inside = pair.folders[0].path().join("PawCommander/states");
-    assert!(TwoWayPlan::build_in(pair.folders, inside.clone(), &mut Progress::default()).is_err());
+    assert!(TwoWayPlan::build_in(
+        pair.folders,
+        inside.clone(),
+        Exclusions::default(),
+        &mut Progress::default()
+    )
+    .is_err());
     assert!(!inside.exists());
 }
 
@@ -295,7 +306,12 @@ fn interrupted_pair_blocks_held_entries_then_requires_review_of_the_actual_folde
     fs::rename(&original, &held).unwrap();
     pair.file(0, "entry", b"left");
     pair.folders.swap(0, 1);
-    let blocked = TwoWayPlan::build_in(pair.folders.clone(), pair.records.clone(), &mut progress);
+    let blocked = TwoWayPlan::build_in(
+        pair.folders.clone(),
+        pair.records.clone(),
+        Exclusions::default(),
+        &mut progress,
+    );
     assert!(blocked.err().unwrap().to_string().contains(stage_name));
     assert_eq!(fs::read(&held).unwrap(), b"base");
     assert_eq!(fs::read(&plan.store.path).unwrap(), previous);
@@ -339,6 +355,62 @@ fn matching_folders_can_finish_an_interrupted_run_by_saving_the_verified_state()
     assert!(!recovered.interrupted());
     pair.file(0, "file", b"next");
     assert_plan(&pair.build(), &[("file", change(1, SyncChange::Replace))]);
+}
+
+#[test]
+fn two_way_exclusion_changes_use_a_fresh_scope_for_deletion_inference() {
+    let pair = Pair::new();
+    for side in 0..2 {
+        pair.file(side, "excluded.tmp", b"original");
+    }
+    let mut progress = Progress::default();
+    pair.build().remember(&mut progress).unwrap();
+    fs::remove_file(pair.folders[0].join("excluded.tmp").path()).unwrap();
+    pair.file(1, "from-right", b"peer");
+    let filtered = pair.build_with(Exclusions::parse("*.TMP\n.git").unwrap());
+    assert!(!filtered.has_baseline());
+    assert_plan(&filtered, &[("from-right", change(0, SyncChange::Copy))]);
+    filtered.apply(&mut progress).unwrap();
+    assert_eq!(
+        fs::read(pair.folders[1].join("excluded.tmp").path()).unwrap(),
+        b"original"
+    );
+    assert!(!pair.folders[0].join("excluded.tmp").path().exists());
+    let reopened = pair.build_with(Exclusions::parse(".git\n*.tmp\n.git").unwrap());
+    assert!(reopened.has_baseline());
+    assert!(reopened.rows.is_empty());
+    let unfiltered = pair.build();
+    assert!(!unfiltered.has_baseline());
+    assert_plan(
+        &unfiltered,
+        &[("excluded.tmp", change(0, SyncChange::Copy))],
+    );
+}
+
+#[test]
+fn two_way_choice_cannot_replace_a_branch_that_contains_an_exclusion() {
+    let pair = Pair::new();
+    pair.file(0, "branch", b"regular file");
+    pair.file(1, "branch/retained.tmp", b"preserve");
+    let mut plan = pair.build_with(Exclusions::parse("*.tmp").unwrap());
+    assert_plan(
+        &plan,
+        &[(
+            "branch",
+            Reconcile::Conflict(ReconcileConflict::FirstComparison),
+        )],
+    );
+    let mut progress = Progress::default();
+    assert!(plan
+        .choose("branch".into(), 0, &progress)
+        .unwrap_err()
+        .to_string()
+        .contains("retained.tmp"));
+    assert!(plan.apply(&mut progress).is_err());
+    assert_eq!(
+        fs::read(pair.folders[1].join("branch/retained.tmp").path()).unwrap(),
+        b"preserve"
+    );
 }
 
 pub(in crate::vfs) fn two_way_round_trip(remote: &Location) {

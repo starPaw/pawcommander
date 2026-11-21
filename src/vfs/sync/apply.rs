@@ -1,4 +1,6 @@
-use super::{is_link, stale, Budget, Kind, Observed, Snapshot, SyncChange, SyncPlan, SyncRow};
+use super::{
+    is_link, stale, Budget, Exclusions, Kind, Observed, Snapshot, SyncChange, SyncPlan, SyncRow,
+};
 use crate::{
     operations::{Cancellation, Progress, TransferError},
     result_history::Outcome,
@@ -34,6 +36,7 @@ impl SyncPlan {
             folders: &self.folders,
             observed: &self.observed,
             rows: &self.rows,
+            exclusions: &self.exclusions,
         };
         execution.plan_history(progress);
         let mut completed = 0;
@@ -72,6 +75,7 @@ pub(super) struct Execution<'a> {
     pub(super) folders: &'a [Location; 2],
     pub(super) observed: &'a [Snapshot; 2],
     pub(super) rows: &'a [SyncRow],
+    pub(super) exclusions: &'a Exclusions,
 }
 
 impl Execution<'_> {
@@ -191,6 +195,9 @@ impl Execution<'_> {
         };
         let mut committed = false;
         let mut metadata_warning = None;
+        // Only a source subtree is filtered. A temporary copy and every
+        // subtree being replaced or removed must match in full.
+        let unfiltered = Exclusions::default();
         let work = |staging: &Location, preserve: &mut bool| {
             *preserve = false;
             parent.verify()?;
@@ -200,7 +207,7 @@ impl Execution<'_> {
             let payload = staging.join(incoming);
             if row.change != SyncChange::Delete {
                 stage_source(source, relative, source_scope, &payload, progress)?;
-                let staged = required_tree(&stage_scope, incoming, progress)?;
+                let staged = required_tree(&stage_scope, incoming, &unfiltered, progress)?;
                 check_tree(
                     source,
                     relative,
@@ -209,7 +216,7 @@ impl Execution<'_> {
                     Check::Contents,
                     &cancel,
                 )?;
-                let current = required_tree(source_scope, relative, progress)?;
+                let current = required_tree(source_scope, relative, self.exclusions, progress)?;
                 check_tree(
                     source,
                     relative,
@@ -235,7 +242,7 @@ impl Execution<'_> {
                     Err(error) => return Err(error),
                 }
             } else {
-                let current = required_tree(destination_scope, relative, progress)?;
+                let current = required_tree(destination_scope, relative, &unfiltered, progress)?;
                 check_tree(
                     destination,
                     relative,
@@ -264,7 +271,8 @@ impl Execution<'_> {
                 }
 
                 let publication = (|| {
-                    let held = required_tree(&backup_scope, Path::new(name), progress)?;
+                    let held =
+                        required_tree(&backup_scope, Path::new(name), &unfiltered, progress)?;
                     check_tree(
                         destination,
                         relative,
@@ -461,6 +469,7 @@ fn preserve_attributes(
 fn required_tree(
     scope: &ReadScope,
     path: &Path,
+    exclusions: &Exclusions,
     progress: &mut Progress,
 ) -> Result<Snapshot, TransferError> {
     let cancel = progress.cancellation();
@@ -481,8 +490,8 @@ fn required_tree(
             scope,
             path.to_owned(),
             scan::Entry::Directory,
+            exclusions,
             &mut Budget::default(),
-            &cancel,
             progress,
         )?;
     } else {

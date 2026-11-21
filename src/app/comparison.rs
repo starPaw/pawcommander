@@ -18,7 +18,7 @@ pub(super) enum ComparisonBody {
     Folders(DirectoryComparison),
     Files(FileComparisonDialog),
     #[cfg(target_os = "macos")]
-    Sync(super::folder_sync::FolderSyncDialog),
+    Sync(Box<super::folder_sync::FolderSyncDialog>),
 }
 
 pub(super) enum ComparisonResponse {
@@ -49,12 +49,16 @@ impl ComparisonDialog {
         }
     }
 
-    fn show(&mut self, ctx: &egui::Context) -> ComparisonResponse {
+    fn show(
+        &mut self,
+        ctx: &egui::Context,
+        #[cfg(target_os = "macos")] profiles: &mut Vec<super::sync_profiles::SyncProfile>,
+    ) -> ComparisonResponse {
         let open = match &mut self.body {
             ComparisonBody::Folders(view) => view.show(ctx),
             ComparisonBody::Files(view) => view.show(ctx),
             #[cfg(target_os = "macos")]
-            ComparisonBody::Sync(view) => return view.show(ctx),
+            ComparisonBody::Sync(view) => return view.show(ctx, profiles),
         };
         if open {
             ComparisonResponse::Open
@@ -69,6 +73,9 @@ impl PawCommander {
         let Some(comparison) = &mut self.comparison else {
             return;
         };
+        #[cfg(target_os = "macos")]
+        let response = comparison.show(ctx, &mut self.sync_profiles);
+        #[cfg(not(target_os = "macos"))]
         let response = comparison.show(ctx);
         if matches!(response, ComparisonResponse::Open) {
             return;
@@ -141,9 +148,8 @@ impl<T: Send + 'static> Phase<T> {
     }
 }
 
-pub(super) fn show_pair(ui: &mut egui::Ui, pair: &[Location; 2]) {
-    for (title, location) in ["Левая панель", "Правая панель"].into_iter().zip(pair)
-    {
+pub(super) fn show_pair(ui: &mut egui::Ui, pair: &[Location; 2], titles: [&'static str; 2]) {
+    for (title, location) in titles.into_iter().zip(pair) {
         ui.label(RichText::new(text(title)).weak());
         let path = location.display().escape_debug().to_string();
         ui.add(egui::Label::new(&path).truncate().selectable(true))

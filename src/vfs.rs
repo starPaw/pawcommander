@@ -72,7 +72,7 @@ pub(crate) use sftp::{
 #[cfg(target_os = "macos")]
 pub(crate) use sftp_properties::{visit_properties, PropertyEvent};
 #[cfg(target_os = "macos")]
-pub(crate) use sync::{Reconcile, ReconcileConflict, TwoWayPlan};
+pub(crate) use sync::{Exclusions, Reconcile, ReconcileConflict, TwoWayPlan};
 #[cfg(target_os = "macos")]
 pub(crate) use sync::{SyncChange, SyncPlan};
 #[cfg(target_os = "macos")]
