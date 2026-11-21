@@ -14,6 +14,7 @@ use super::{
     Location,
 };
 use crate::{
+    file_error::{AccessAction, AccessError},
     fs_ops::TransferKind,
     i18n::text,
     operations::{Cancellation, Progress, TransferError},
@@ -275,9 +276,10 @@ pub(super) fn names_in(
 ) -> Result<HashSet<String>, TransferError> {
     folder.verify()?;
     let mut names = HashSet::new();
-    for item in fs::read_dir(folder.location.path())? {
+    let read_error = |error| AccessError::new(&folder.location, AccessAction::ReadChildren, error);
+    for item in fs::read_dir(folder.location.path()).map_err(read_error)? {
         cancel.check()?;
-        names.insert(portable_key(&item?.file_name()));
+        names.insert(portable_key(&item.map_err(read_error)?.file_name()));
     }
     folder.verify()?;
     Ok(names)

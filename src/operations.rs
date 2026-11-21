@@ -211,10 +211,6 @@ pub(crate) enum TransferError {
 }
 
 impl TransferError {
-    pub(crate) fn publication_unconfirmed(message: String) -> Self {
-        Self::PublicationUnconfirmed(Failure::Message(message))
-    }
-
     pub(crate) fn with_unconfirmed_publication(self) -> Self {
         match self {
             Self::Failed(reason) => Self::PublicationUnconfirmed(reason),

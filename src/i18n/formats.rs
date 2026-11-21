@@ -125,7 +125,6 @@ formats! {
     "Completed items: {completed}. {error}" => ("Завершено объектов: {completed}. {error}", "Dokončené položky: {completed}. {error}"),
     "Transfer with compatible names finished. Items: {completed}" => ("Перенос с совместимыми именами завершён. Объектов: {completed}", "Přenos s kompatibilními názvy dokončen. Položky: {completed}"),
     "Destination name became occupied after preview: {target}. Rebuild the plan." => ("Имя назначения занято после предпросмотра: {target}. Пересчитайте план.", "Cílový název byl po náhledu obsazen: {target}. Sestavte plán znovu."),
-    "Source file changed: {source}" => ("Исходный файл изменился: {source}", "Zdrojový soubor se změnil: {source}"),
     "Destination differs from the verified copy: {target}" => ("Назначение не совпадает с проверенной копией: {target}", "Cíl se liší od ověřené kopie: {target}"),
     "Inspect the possibly incomplete copy at {target}. The source was preserved. {error}" => ("Проверьте возможную неполную копию {target}. Источник сохранён. {error}", "Zkontrolujte možnou neúplnou kopii v {target}. Zdroj zůstal zachován. {error}"),
     "{error}. Inspect the destination and retained folder {staging}." => ("{error}. Проверьте назначение и сохранённую папку {staging}.", "{error}. Zkontrolujte cíl a ponechanou složku {staging}."),

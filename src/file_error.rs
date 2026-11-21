@@ -672,6 +672,18 @@ pub(crate) enum PublicationError {
         actual: u64,
     },
     #[cfg(target_os = "macos")]
+    CompatibleOutputChanged(Location),
+    #[cfg(target_os = "macos")]
+    CompatibleCopyUnconfirmed {
+        target: Location,
+        cause: TransferError,
+    },
+    #[cfg(target_os = "macos")]
+    DirectoryUnverified {
+        target: Location,
+        cause: TransferError,
+    },
+    #[cfg(target_os = "macos")]
     RecoveryFinalization {
         target: Location,
         moving: bool,
@@ -739,6 +751,18 @@ impl fmt::Display for PublicationError {
                 )
             }
             #[cfg(target_os = "macos")]
+            Self::CompatibleOutputChanged(target) => {
+                write!(f, "Destination differs from the verified copy: {target}")
+            }
+            #[cfg(target_os = "macos")]
+            Self::CompatibleCopyUnconfirmed { target, cause } => {
+                write!(f, "Compatible copy at {target} is unconfirmed: {cause}")
+            }
+            #[cfg(target_os = "macos")]
+            Self::DirectoryUnverified { target, cause } => {
+                write!(f, "The new folder {target} could not be verified: {cause}")
+            }
+            #[cfg(target_os = "macos")]
             Self::RecoveryFinalization {
                 target,
                 moving,
@@ -784,6 +808,11 @@ impl Error for PublicationError {
             Self::SmbUpload { cause, .. } => Some(cause),
             #[cfg(target_os = "macos")]
             Self::SmbTargetChanged(_) | Self::SmbTargetSize { .. } => None,
+            #[cfg(target_os = "macos")]
+            Self::CompatibleOutputChanged(_) => None,
+            #[cfg(target_os = "macos")]
+            Self::CompatibleCopyUnconfirmed { cause, .. }
+            | Self::DirectoryUnverified { cause, .. } => Some(cause),
             #[cfg(target_os = "macos")]
             Self::RecoveryFinalization { cause, .. } => Some(cause),
             Self::Backup { cause, .. } | Self::Retained { cause, .. } => Some(cause),
@@ -897,6 +926,8 @@ pub(crate) enum MutationError {
     RenameRoot(Location),
     UndoUnavailable(Location),
     DestinationExists(Location),
+    #[cfg(target_os = "macos")]
+    CompatibleNameOccupied(Location),
     SourceChanged(Location),
     MoveIncomplete {
         target: Location,
@@ -983,6 +1014,13 @@ impl fmt::Display for MutationError {
                 write!(f, "Undo unavailable for {}", path.path().display())
             }
             Self::DestinationExists(location) => write!(f, "Destination {location} already exists"),
+            #[cfg(target_os = "macos")]
+            Self::CompatibleNameOccupied(target) => {
+                write!(
+                    f,
+                    "Destination name became occupied after preview: {target}"
+                )
+            }
             Self::SourceChanged(location) => write!(f, "Source changed during copying: {location}"),
             Self::MoveIncomplete { target, cause } => {
                 write!(
