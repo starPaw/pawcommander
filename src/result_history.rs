@@ -126,7 +126,7 @@ impl Results {
         self.clear_active();
     }
 
-    /// Record an operation whose scope is exactly the selected paths.
+    /// Record an operation defined by an explicit list of paths.
     pub(crate) fn plan_selected_items(&mut self, items: impl IntoIterator<Item = Location>) {
         self.plan(items.into_iter().map(|source| (source, None)));
         self.selected_items_only = true;
@@ -629,8 +629,15 @@ impl ItemResult {
 
 impl Record {
     fn selected_items_only(&self) -> bool {
-        // Older permission records stored only the translated command label.
+        // Older checksum and permission records stored only the translated command label.
         self.selected_items_only
+            || matches!(
+                self.label.as_str(),
+                "Create SHA-256 manifest"
+                    | "Создать манифест SHA-256"
+                    | "Verify SHA-256 manifest"
+                    | "Проверить манифест SHA-256"
+            )
             || (matches!(
                 self.label.as_str(),
                 "Change permissions" | "Изменить права доступа"
@@ -1180,6 +1187,27 @@ mod tests {
         let mut copy = record();
         copy.label = "Change permissions".into();
         assert!(!copy.selected_items_only());
+    }
+
+    #[test]
+    fn checksum_history_recognizes_legacy_manifest_commands_in_both_languages() {
+        let mut results = Results::default();
+        results.plan([(local("SHA256SUMS"), None)]);
+        let mut record = results
+            .finish(String::new(), 0, &Ok(String::new()))
+            .unwrap();
+        for label in [
+            "Create SHA-256 manifest",
+            "Создать манифест SHA-256",
+            "Verify SHA-256 manifest",
+            "Проверить манифест SHA-256",
+        ] {
+            record.label = label.into();
+            let saved = serde_json::to_value(&record).unwrap();
+            assert!(saved.get("selected_items_only").is_none());
+            let restored: Record = serde_json::from_value(saved).unwrap();
+            assert!(restored.selected_items_only(), "{label}");
+        }
     }
 
     #[test]

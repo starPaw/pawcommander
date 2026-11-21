@@ -86,8 +86,13 @@ fn checksum_commands_save_a_manifest_and_keep_distinct_results_in_history() {
     assert!(app.notice.as_ref().is_some_and(|(_, error)| *error));
     let history: serde_json::Value =
         serde_json::from_slice(&fs::read(history_path).unwrap()).unwrap();
-    let operation = history["records"].as_array().unwrap().last().unwrap();
+    let [created, operation] = history["records"].as_array().unwrap().as_slice() else {
+        panic!("Expected creation and verification records, got {history}");
+    };
+    assert_eq!(created["label"], Command::CreateChecksumManifest.label());
+    assert_eq!(created["selected_items_only"], true);
     assert_eq!(operation["label"], Command::VerifyChecksumManifest.label());
+    assert_eq!(operation["selected_items_only"], true);
     for (name, reason) in [
         ("changed.txt", "Файл изменён (SHA-256 не совпала)"),
         ("missing.txt", "Файл отсутствует"),

@@ -40,7 +40,7 @@ pub(crate) fn create_checksum_manifest(
 ) -> Result<String, String> {
     let name = checksum_manifest_name(name)?;
     let target = directory.join(name);
-    progress.results.plan([(target.clone(), None)]);
+    progress.results.plan_selected_items([target.clone()]);
     progress.results.begin(&target);
     let mut published = false;
     match write_manifest(directory, name, sources, progress, &mut published) {
@@ -133,7 +133,7 @@ pub(crate) fn verify_checksum_manifest(
     manifest: &Location,
     progress: &mut Progress,
 ) -> Result<String, String> {
-    progress.results.plan([(manifest.clone(), None)]);
+    progress.results.plan_selected_items([manifest.clone()]);
     progress.results.begin(manifest);
     let mut totals = Totals::default();
     match verify_manifest(manifest, progress, &mut totals) {
@@ -186,11 +186,9 @@ fn verify_manifest(
         })?
         .ok_or_else(|| text("Файл манифеста отсутствует"))?;
 
-    progress.results.plan(
-        entries
-            .iter()
-            .map(|entry| (directory.join(&entry.path), None)),
-    );
+    progress
+        .results
+        .plan_selected_items(entries.iter().map(|entry| directory.join(&entry.path)));
     for entry in entries {
         cancel.check()?;
         let source = directory.join(&entry.path);
