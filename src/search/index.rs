@@ -4,6 +4,7 @@
 //! modification dates are therefore shown as freshness estimates.
 
 use std::{
+    cell::{Cell, RefCell},
     env,
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
@@ -18,6 +19,21 @@ use std::{
 
 const MAX_PROBE_BYTES: usize = 32 * 1024;
 const READER_POLL: Duration = Duration::from_millis(5);
+
+/// Metadata that follows a set of results from the dialog to the results pane.
+pub(super) struct IndexStatus {
+    pub(super) info: RefCell<IndexInfo>,
+    pub(super) pending: Cell<Option<PathBuf>>,
+}
+
+impl IndexStatus {
+    pub(super) fn new(cli: Option<PathBuf>) -> Self {
+        Self {
+            info: RefCell::new(IndexInfo::unknown()),
+            pending: Cell::new(cli),
+        }
+    }
+}
 
 /// User-facing provenance and freshness strings, prepared off the UI thread.
 pub(super) struct IndexInfo {

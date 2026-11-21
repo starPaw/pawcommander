@@ -18,12 +18,13 @@ use content::{LineMatch, Scan, Scanner};
 use directory::{Directory, Entry, EntryKind, EntryMetadata};
 use eframe::egui;
 use filters::{FilterInput, Filters};
-use index::IndexInfo;
+use index::{IndexInfo, IndexStatus};
 use std::{
     ffi::OsStr,
     io::{self, Read},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    rc::{Rc, Weak},
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver},
@@ -104,6 +105,11 @@ struct IndexReveal {
     result: Receiver<(Instant, io::Result<()>)>,
 }
 
+struct IndexInspection {
+    job: Job<IndexInfo>,
+    status: Weak<IndexStatus>,
+}
+
 impl<T> Job<T> {
     fn cancel(&self) {
         self.cancel.store(true, Ordering::Relaxed);
@@ -155,9 +161,8 @@ pub struct Search {
     results: Option<Results>,
     selected: Option<usize>,
     error: Option<String>,
-    index_info: Option<IndexInfo>,
-    index_inspection: Option<Job<IndexInfo>>,
-    pending_index_inspection: Option<PathBuf>,
+    index_status: Option<Rc<IndexStatus>>,
+    index_inspection: Option<IndexInspection>,
     index_reveal: Option<IndexReveal>,
 }
 
@@ -198,17 +203,21 @@ impl Search {
         self.results = None;
         self.selected = None;
         self.error = None;
-        self.index_info = None;
+        self.index_status = None;
     }
 
     fn cancel_work(&mut self) {
         for job in self.jobs.iter().flatten() {
             job.cancel();
         }
-        if let Some(inspection) = &self.index_inspection {
-            inspection.cancel();
+        if let Some(status) = &self.index_status {
+            status.pending.set(None);
+            if let Some(inspection) = &self.index_inspection
+                && inspection.status.ptr_eq(&Rc::downgrade(status))
+            {
+                inspection.job.cancel();
+            }
         }
-        self.pending_index_inspection = None;
         self.cancel_index_reveal();
     }
 
@@ -309,8 +318,7 @@ impl Search {
                     self.remote_deadline = remote_deadline;
                 }
                 if mode == Mode::Index {
-                    self.index_info = Some(IndexInfo::unknown());
-                    self.pending_index_inspection = cli.map(Path::to_path_buf);
+                    self.index_status = Some(Rc::new(IndexStatus::new(cli.map(Path::to_path_buf))));
                     self.poll_index_inspection(ctx);
                 }
             }
@@ -351,18 +359,35 @@ impl Search {
     fn poll_index_inspection(&mut self, ctx: &egui::Context) {
         // A slow metadata call must not delay search results or start more workers.
         if let Some(inspection) = &self.index_inspection {
-            match inspection.result.try_recv() {
-                Ok(info) => {
-                    if !inspection.cancelled() {
-                        self.index_info = Some(info);
-                    }
-                    self.index_inspection = None;
-                }
-                Err(mpsc::TryRecvError::Disconnected) => self.index_inspection = None,
-                Err(mpsc::TryRecvError::Empty) => return,
+            let status = inspection.status.upgrade();
+            if status.is_none() {
+                inspection.job.cancel();
             }
+            match inspection.job.result.try_recv() {
+                Ok(info) => {
+                    if let Some(status) = status
+                        && !inspection.job.cancelled()
+                    {
+                        *status.info.borrow_mut() = info;
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => return,
+                Err(mpsc::TryRecvError::Disconnected) => {}
+            }
+            self.index_inspection = None;
         }
-        let Some(cli) = self.pending_index_inspection.take() else {
+        let request = self
+            .panel
+            .index_status()
+            .into_iter()
+            .chain(self.index_status.iter())
+            .find_map(|status| {
+                status
+                    .pending
+                    .take()
+                    .map(|cli| (cli, Rc::downgrade(status)))
+            });
+        let Some((cli, status)) = request else {
             return;
         };
         let (tx, result) = mpsc::channel();
@@ -376,7 +401,10 @@ impl Search {
             })
             .is_ok()
         {
-            self.index_inspection = Some(Job { cancel, result });
+            self.index_inspection = Some(IndexInspection {
+                job: Job { cancel, result },
+                status,
+            });
         }
     }
 
@@ -642,7 +670,8 @@ impl Search {
                     ui.colored_label(ui.visuals().error_fg_color, error);
                 }
                 if self.mode == Mode::Index {
-                    if let Some(info) = &self.index_info {
+                    if let Some(status) = &self.index_status {
+                        let info = status.info.borrow();
                         ui.small(&info.source);
                         ui.small(&info.freshness);
                     }
@@ -740,8 +769,12 @@ impl Search {
             && let Some(results) = self.results.take()
         {
             let matching_lines = self.mode == Mode::Folder && self.target() != FolderTarget::Name;
-            self.panel
-                .replace(results, matching_lines, self.query.clone());
+            self.panel.replace(
+                results,
+                matching_lines,
+                self.query.clone(),
+                self.index_status.take(),
+            );
             self.selected = None;
             visible = false;
             ctx.request_repaint();
@@ -1389,15 +1422,20 @@ mod tests {
 
     #[test]
     fn index_results_arrive_even_if_inspection_is_still_waiting() {
+        let status = Rc::new(IndexStatus::new(None));
         let mut search = Search {
             mode: Mode::Index,
+            index_status: Some(status.clone()),
             ..Default::default()
         };
         let (tx, result) = mpsc::channel();
         let (inspection_tx, inspection) = mpsc::channel();
-        search.index_inspection = Some(Job {
-            cancel: Arc::new(AtomicBool::new(false)),
-            result: inspection,
+        search.index_inspection = Some(IndexInspection {
+            job: Job {
+                cancel: Arc::new(AtomicBool::new(false)),
+                result: inspection,
+            },
+            status: Rc::downgrade(&status),
         });
         search.jobs[Mode::Index as usize] = Some(Job {
             cancel: Arc::new(AtomicBool::new(false)),
@@ -1419,15 +1457,72 @@ mod tests {
 
         let ctx = egui::Context::default();
         let fixture = tempfile::tempdir().unwrap();
-        search.index_inspection.as_ref().unwrap().cancel();
-        search.pending_index_inspection = Some(fixture.path().join("missing-locate"));
+        search.clear();
+        let next_status = Rc::new(IndexStatus::new(Some(
+            fixture.path().join("missing-locate"),
+        )));
+        search.index_status = Some(next_status.clone());
         search.poll_index_inspection(&ctx);
-        assert!(search.pending_index_inspection.is_some());
-        inspection_tx.send(IndexInfo::unknown()).unwrap();
+        assert!(search.index_inspection.as_ref().unwrap().job.cancelled());
+        inspection_tx
+            .send(IndexInfo {
+                source: "cancelled index".into(),
+                freshness: "cancelled date".into(),
+            })
+            .unwrap();
         search.poll_index_inspection(&ctx);
-        assert!(search.index_info.is_none());
-        assert!(search.pending_index_inspection.is_none());
-        assert!(!search.index_inspection.as_ref().unwrap().cancelled());
+        assert_eq!(status.info.borrow().source, IndexInfo::unknown().source);
+        assert!(next_status.pending.take().is_none());
+        assert!(!search.index_inspection.as_ref().unwrap().job.cancelled());
+    }
+
+    #[test]
+    fn late_index_metadata_follows_the_docked_results_during_a_new_search() {
+        let ctx = egui::Context::default();
+        let status = Rc::new(IndexStatus::new(None));
+        let (sender, result) = mpsc::channel();
+        let mut search = Search {
+            mode: Mode::Index,
+            index_inspection: Some(IndexInspection {
+                job: Job {
+                    cancel: Arc::new(AtomicBool::new(false)),
+                    result,
+                },
+                status: Rc::downgrade(&status),
+            }),
+            index_status: Some(status),
+            ..Default::default()
+        };
+        search.panel.replace(
+            Results {
+                matches: vec![PathBuf::from("/indexed.txt").into()],
+                limited: false,
+                warning: String::new(),
+            },
+            false,
+            "indexed".into(),
+            search.index_status.take(),
+        );
+        search.cancel_work();
+        assert!(!search.index_inspection.as_ref().unwrap().job.cancelled());
+        let next_status = Rc::new(IndexStatus::new(None));
+        search.index_status = Some(next_status.clone());
+
+        sender
+            .send(IndexInfo {
+                source: "docked index".into(),
+                freshness: "docked date".into(),
+            })
+            .unwrap();
+        search.poll_index_inspection(&ctx);
+
+        let info = search.panel.index_status().unwrap().info.borrow();
+        assert_eq!(info.source, "docked index");
+        assert_eq!(info.freshness, "docked date");
+        assert_eq!(
+            next_status.info.borrow().source,
+            IndexInfo::unknown().source
+        );
     }
 
     #[test]
