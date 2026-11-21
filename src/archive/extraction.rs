@@ -158,7 +158,7 @@ impl<'a> Extraction<'a> {
     }
 
     pub(crate) fn verify_source(&self) -> Result<(), TransferError> {
-        if self.source_unchanged() {
+        if self.source_matches().unwrap_or(false) {
             Ok(())
         } else {
             Err(crate::tr_format!(
@@ -169,12 +169,11 @@ impl<'a> Extraction<'a> {
         }
     }
 
-    pub(super) fn source_unchanged(&self) -> bool {
-        self.file.metadata().ok().is_some_and(|current| {
-            fs_ops::source_metadata_matches(&self.stamp, &current).unwrap_or(false)
-        }) && fs::metadata(&self.path).ok().is_some_and(|current| {
-            fs_ops::source_metadata_matches(&self.stamp, &current).unwrap_or(false)
-        })
+    pub(super) fn source_matches(&self) -> io::Result<bool> {
+        Ok(
+            fs_ops::source_metadata_matches(&self.stamp, &self.file.metadata()?)?
+                && fs_ops::source_metadata_matches(&self.stamp, &fs::metadata(&self.path)?)?,
+        )
     }
 
     pub(crate) fn is_source_file(&self, target: &Path, metadata: &Metadata) -> bool {

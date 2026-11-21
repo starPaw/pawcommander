@@ -1,4 +1,5 @@
-use super::{member_path, Format, MAX_ENTRIES, MAX_INDEX_BYTES, MAX_METADATA_BYTES};
+use super::{parse_member_path, Format, MAX_ENTRIES, MAX_INDEX_BYTES, MAX_METADATA_BYTES};
+use crate::file_error::ArchiveMemberError;
 use flate2::{write::DeflateEncoder, Compression};
 use rawzip::time::{DosDateTime, UtcDateTime};
 use std::{
@@ -27,13 +28,13 @@ impl CreationLimits {
         name: &str,
         directory: bool,
         protected: bool,
-    ) -> io::Result<()> {
-        let path = member_path(name.as_bytes())?;
+    ) -> Result<(), ArchiveMemberError> {
+        let path = parse_member_path(name.as_bytes())?;
         let length = name.len();
         if path.as_os_str().is_empty()
             || (format == Format::Zip && directory && length == super::MAX_PATH_BYTES)
         {
-            return Err(super::invalid_path());
+            return Err(ArchiveMemberError::InvalidPath);
         }
         self.entries += 1;
         self.path_bytes += length;
@@ -55,9 +56,7 @@ impl CreationLimits {
             || self.path_bytes > MAX_INDEX_BYTES
             || self.metadata_bytes + trailer > MAX_METADATA_BYTES
         {
-            return Err(io::Error::other(crate::i18n::text!(
-                "Превышен лимит записей или путей в архиве",
-            )));
+            return Err(ArchiveMemberError::LimitExceeded);
         }
         Ok(())
     }
@@ -211,6 +210,6 @@ impl<'a, W: Write> ArchiveWriter<'a, W> {
 fn zip_io(error: rawzip::Error) -> io::Error {
     match error.into_kind() {
         rawzip::ErrorKind::IO(error) => error,
-        kind => io::Error::other(kind.to_string()),
+        kind => io::Error::other(rawzip::Error::from(kind)),
     }
 }

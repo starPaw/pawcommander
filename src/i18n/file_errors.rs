@@ -1,10 +1,10 @@
 use super::text;
 use crate::file_error::{
-    AccessAction, AccessCause, AccessError, ArchiveMemberError, ChecksumError, ConnectionError,
-    Failure, HostKeyError, KnownHostEntryError, KnownHostsError, ListingError, ListingErrorKind,
-    LocalPathAction, ManifestLineError, MutationError, PathError, PermissionError, PinError,
-    PreviewError, PublicationError, RecoveryNotice, ScanError, SearchError, SshStage,
-    StagingCleanupError,
+    AccessAction, AccessCause, AccessError, ArchiveError, ArchiveMemberError, ChecksumError,
+    ConnectionError, Failure, HostKeyError, KnownHostEntryError, KnownHostsError, ListingError,
+    ListingErrorKind, LocalPathAction, ManifestLineError, MutationError, PathError,
+    PermissionError, PinError, PreviewError, PublicationError, RecoveryNotice, ScanError,
+    SearchError, SshStage, StagingCleanupError,
 };
 use crate::operations::TransferError;
 use crate::vfs::{DeletionFailure, TransferFailure};
@@ -20,6 +20,7 @@ pub(crate) fn file_error(error: &TransferError) -> String {
                 Failure::Search(error) => search_error(error),
                 Failure::Scan(error) => scan_error(error),
                 Failure::Checksum(error) => checksum_error(error),
+                Failure::Archive(error) => archive_error(error),
                 Failure::Permissions(reason) => permission_error(
                     reason,
                     matches!(error, TransferError::PublicationUnconfirmed(_)),
@@ -52,6 +53,54 @@ pub(crate) fn connection_result_error(error: &TransferError) -> String {
         text!("Подключение отменено").into()
     } else {
         file_error(error)
+    }
+}
+
+fn archive_error(error: &ArchiveError) -> String {
+    match error {
+        ArchiveError::InvalidName(_) => text!("Введите допустимое имя архива").into(),
+        ArchiveError::SelectCurrentFolder => {
+            text!("Выберите файлы или папки из текущей папки").into()
+        }
+        ArchiveError::PasswordRequiresZip => text!("Пароль можно задать только для ZIP").into(),
+        ArchiveError::UnsupportedFormat(archive) => {
+            format!("{} · {archive}", text!("Поддерживаются архивы ZIP и TAR"))
+        }
+        ArchiveError::UnsupportedEntry(entry) => crate::tr_format!(
+            "Only regular files and folders can be added to an archive: {source}",
+            source = entry
+        ),
+        ArchiveError::MissingEntrySize(entry) => crate::tr_format!(
+            "The server did not report the source file size: {source}",
+            source = entry
+        ),
+        ArchiveError::EntryEncoding(entry) => format!(
+            "{} · {entry}",
+            text!("Для создания архива нужны имена файлов в UTF-8")
+        ),
+        ArchiveError::EntryPath { entry, source } => {
+            let reason = match source {
+                ArchiveMemberError::InvalidPath => text!("Недопустимый путь внутри архива"),
+                ArchiveMemberError::LimitExceeded => {
+                    text!("Превышен лимит записей или путей в архиве")
+                }
+            };
+            format!("{reason} · {entry}")
+        }
+        ArchiveError::AddEntry {
+            archive,
+            entry,
+            source,
+        } => crate::tr_format!(
+            "Could not add {entry} to archive {archive}: {error}",
+            archive = archive,
+            entry = entry,
+            error = source
+        ),
+        ArchiveError::Verify { archive, source } => format!("{archive}: {source}"),
+        ArchiveError::ChangedDuringVerification(archive) => {
+            format!("{} · {archive}", text!("Архив изменился во время проверки"))
+        }
     }
 }
 
@@ -546,6 +595,7 @@ fn mutation_error(error: &MutationError, unconfirmed: bool) -> String {
             "“{}” already exists. Choose another name or folder. Existing items are preserved",
             path.display()
         ),
+        SourceChanged(path) => super::source_changed_during_copy(path),
         ReadOnlyArchive(_) => text!("Эта операция недоступна внутри архива").into(),
         RenameLocal { from, to, source } => {
             #[cfg(unix)]

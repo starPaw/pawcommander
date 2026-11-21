@@ -1,116 +1,120 @@
 use super::extraction::{copy_exact, Extraction};
 use super::{
-    invalid, member_path, scan_zip, too_large, Contents, Format, MetadataReader, MAX_ENTRIES,
-    MAX_INDEX_BYTES, MAX_METADATA_BYTES,
+    archive_io_error, invalid, member_path, scan_zip, too_large, Contents, Format, MetadataReader,
+    MAX_ENTRIES, MAX_INDEX_BYTES, MAX_METADATA_BYTES,
 };
 use crate::{
-    i18n::text,
+    file_error::{AccessAction, AccessError, ArchiveError},
     operations::{Progress, TransferError},
     result_history::Outcome,
     vfs::Location,
 };
 use std::{cell::Cell, io, path::Path};
 
+#[derive(Debug)]
+pub(crate) struct ArchiveVerification {
+    pub(crate) format: Format,
+    pub(crate) passed: usize,
+    pub(crate) damaged: usize,
+    pub(crate) unverified: usize,
+    pub(crate) interruption: Option<TransferError>,
+}
+
 pub(crate) fn verify_archive(
     path: &Path,
     password: Option<&str>,
     progress: &mut Progress,
-) -> Result<String, String> {
+) -> Result<ArchiveVerification, TransferError> {
     let source = Location::Local(path.to_owned());
     progress.results.plan([(source.clone(), None)]);
     progress.results.begin(&source);
     progress.item(path);
-    let format = Format::from_path(path).ok_or_else(|| text!("Поддерживаются архивы ZIP и TAR"))?;
+    let Some(format) = Format::from_path(path) else {
+        let error = ArchiveError::UnsupportedFormat(source.clone()).into();
+        progress
+            .results
+            .record_with_error(&source, Outcome::Failed, Some(&error));
+        return Err(error);
+    };
     let mut report = Report {
         source: &source,
         progress,
-        passed: 0,
-        damaged: 0,
-        unverified: 0,
+        verification: ArchiveVerification {
+            format,
+            passed: 0,
+            damaged: 0,
+            unverified: 0,
+            interruption: None,
+        },
     };
     let result = report.check(path, format, password);
-    let summary = crate::tr_format!(
-        "Verified entries: {}. Entry errors: {}. Unverified: {}.",
-        report.passed,
-        report.damaged,
-        report.unverified
-    );
-    let cancelled = report.progress.cancellation().is_requested()
-        || result.as_ref().is_err_and(TransferError::is_cancelled_io);
-    if result.is_ok() && !cancelled {
-        report.progress.results.finish_diagnostics(&source);
-    }
-    let reason = result
-        .as_ref()
-        .err()
-        .filter(|_| !cancelled)
-        .map(ToString::to_string);
-    let details = text!("Подробности в журнале результатов.");
-    let (outcome, message) = if cancelled {
-        report.progress.results.cancelled = true;
-        (
-            Outcome::Cancelled,
-            crate::tr_format!("Archive check stopped. {summary}", summary = summary),
-        )
-    } else if let Err(error) = result {
-        (
-            Outcome::Failed,
-            crate::tr_format!(
-                "Archive check could not finish: {error}. {summary} {details}",
-                details = details,
-                error = error,
-                summary = summary
-            ),
-        )
-    } else if report.damaged != 0 {
-        (Outcome::Failed, format!("{summary} {details}"))
-    } else if report.unverified != 0 {
-        (
-            Outcome::CompletedWithWarning,
-            format!("{summary} {details}"),
-        )
+    report.verification.interruption = if report.progress.cancellation().is_requested() {
+        Some(TransferError::Cancelled)
     } else {
-        let scope = match format {
-            Format::Zip => text!("Структура и данные ZIP проверены."),
-            Format::Tar => text!("Заголовки TAR проверены, данные прочитаны."),
-        };
-        (Outcome::Completed, format!("{scope} {summary}"))
+        result.err()
     };
+    let findings = &report.verification;
+    let outcome = match &findings.interruption {
+        Some(TransferError::Cancelled) => {
+            report.progress.results.cancelled = true;
+            Outcome::Cancelled
+        }
+        Some(_) => Outcome::Failed,
+        None => {
+            report.progress.results.finish_diagnostics(&source);
+            if findings.damaged != 0 {
+                Outcome::Failed
+            } else if findings.unverified != 0 {
+                Outcome::CompletedWithWarning
+            } else {
+                Outcome::Completed
+            }
+        }
+    };
+    let error = findings
+        .interruption
+        .as_ref()
+        .filter(|_| outcome != Outcome::Cancelled);
     report
         .progress
         .results
-        .record(&source, None, outcome, reason);
-    if matches!(outcome, Outcome::Completed | Outcome::Cancelled) {
-        Ok(message)
-    } else {
-        Err(message)
-    }
+        .record_with_error(&source, outcome, error);
+    Ok(report.verification)
 }
 
 struct Report<'a> {
     source: &'a Location,
     progress: &'a mut Progress,
-    passed: usize,
-    damaged: usize,
-    unverified: usize,
+    verification: ArchiveVerification,
 }
 
 impl Report<'_> {
-    fn check(&mut self, path: &Path, format: Format, password: Option<&str>) -> io::Result<()> {
+    fn check(
+        &mut self,
+        path: &Path,
+        format: Format,
+        password: Option<&str>,
+    ) -> Result<(), TransferError> {
         self.progress.check_cancelled()?;
-        let mut archive = Extraction::open(path, password)?;
+        let mut archive = Extraction::open(path, password)
+            .map_err(|source| AccessError::new(self.source, AccessAction::OpenFile, source))?;
         match format {
             Format::Zip => self.check_zip(
                 &mut archive,
                 password.is_some_and(|secret| !secret.is_empty()),
-            )?,
-            Format::Tar => self.check_tar(&archive)?,
+            ),
+            Format::Tar => self.check_tar(&archive),
         }
+        .map_err(|source| ArchiveError::Verify {
+            archive: self.source.clone(),
+            source,
+        })?;
         self.progress.check_cancelled()?;
-        if !archive.source_unchanged() {
-            return Err(invalid(crate::i18n::key!(
-                "Архив изменился во время проверки"
-            )));
+        if !archive
+            .source_matches()
+            .map_err(|source| AccessError::new(self.source, AccessAction::ReadMetadata, source))?
+        {
+            return Err(ArchiveError::ChangedDuringVerification(self.source.clone()).into());
         }
         Ok(())
     }
@@ -140,7 +144,7 @@ impl Report<'_> {
                         }
                         records.push((index, record));
                     }
-                    Err(error) => self.member_result(index, name, Err(error))?,
+                    Err(error) => self.member_result(index, Some(name), Err(&error))?,
                 }
                 Ok(())
             },
@@ -171,11 +175,13 @@ impl Report<'_> {
                     .peek()
                     .is_some_and(|(_, next)| next.span.start < record.span.end);
             previous_end = previous_end.max(record.span.end);
+            let name = Some(record.path.to_string_lossy());
+            let name = name.as_deref();
             if overlaps {
                 self.member_result(
                     index,
-                    &record.path.to_string_lossy(),
-                    Err(invalid(crate::i18n::key!(
+                    name,
+                    Err(&invalid(crate::i18n::key!(
                         "Данные записей ZIP перекрываются"
                     ))),
                 )?;
@@ -191,9 +197,10 @@ impl Report<'_> {
                 Contents::Encrypted(_) if !has_password => Err(unsupported(crate::i18n::key!(
                     "Укажите пароль для проверки ZIP"
                 ))),
-                Contents::Encrypted(_) if let Some(ref error) = protected_error => Err(
-                    io::Error::new(io::ErrorKind::Unsupported, error.to_string()),
-                ),
+                Contents::Encrypted(_) if let Some(ref error) = protected_error => {
+                    self.member_failure(index, name, Outcome::Skipped, error)?;
+                    continue;
+                }
                 _ => archive.check_payload(
                     record.payload,
                     record.member.size,
@@ -201,7 +208,7 @@ impl Report<'_> {
                     self.progress,
                 ),
             };
-            self.member_result(index, &record.path.to_string_lossy(), result)?;
+            self.member_result(index, name, result.as_ref().copied())?;
         }
         scanned
     }
@@ -231,11 +238,7 @@ impl Report<'_> {
             let mut entry = match entry {
                 Ok(entry) => entry,
                 Err(error) => {
-                    self.member_result(
-                        index + 1,
-                        text!("Заголовок TAR"),
-                        Err(io::Error::new(error.kind(), error.to_string())),
-                    )?;
+                    self.member_result(index + 1, None, Err(&error))?;
                     return Err(error);
                 }
             };
@@ -273,7 +276,11 @@ impl Report<'_> {
                 reading_payload.set(false);
                 checked
             });
-            self.member_result(index + 1, &String::from_utf8_lossy(&raw), result)?;
+            self.member_result(
+                index + 1,
+                Some(&String::from_utf8_lossy(&raw)),
+                result.as_ref().copied(),
+            )?;
         }
         check_tar_trailer(tar.into_inner(), self.source.path(), self.progress)
     }
@@ -281,12 +288,12 @@ impl Report<'_> {
     fn member_result(
         &mut self,
         index: usize,
-        name: &str,
-        result: io::Result<()>,
+        name: Option<&str>,
+        result: Result<(), &io::Error>,
     ) -> io::Result<()> {
-        self.progress.check_cancelled()?;
         let Err(error) = result else {
-            self.passed += 1;
+            self.progress.check_cancelled()?;
+            self.verification.passed += 1;
             return Ok(());
         };
         let outcome = if matches!(
@@ -295,16 +302,29 @@ impl Report<'_> {
                 | io::ErrorKind::InvalidInput
                 | io::ErrorKind::PermissionDenied
         ) {
-            self.unverified += 1;
             Outcome::Skipped
         } else {
-            self.damaged += 1;
             Outcome::Failed
         };
-        let name = crate::tr_format!("Entry {index} · {name}", index = index, name = name);
+        self.member_failure(index, name, outcome, error)
+    }
+
+    fn member_failure(
+        &mut self,
+        index: usize,
+        name: Option<&str>,
+        outcome: Outcome,
+        error: &io::Error,
+    ) -> io::Result<()> {
+        self.progress.check_cancelled()?;
+        if outcome == Outcome::Skipped {
+            self.verification.unverified += 1;
+        } else {
+            self.verification.damaged += 1;
+        }
         self.progress
             .results
-            .diagnostic(self.source, &name, outcome, &error.to_string());
+            .archive_diagnostic(self.source, index, name, outcome, error);
         Ok(())
     }
 }
@@ -351,12 +371,13 @@ pub(super) fn check_tar_trailer(
 }
 
 fn unsupported(message: crate::i18n::MessageKey) -> io::Error {
-    io::Error::new(io::ErrorKind::Unsupported, text(message))
+    archive_io_error(io::ErrorKind::Unsupported, message)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_error::{AccessCause, Failure};
     use crate::operations::Cancellation;
     use std::{
         fs::{self, File},
@@ -384,7 +405,8 @@ mod tests {
         fs::write(&path, &bytes).unwrap();
         let mut progress = Progress::default();
         let good = verify_archive(&path, None, &mut progress).unwrap();
-        assert!(good.contains("Verified entries: 4"), "{good}");
+        assert_eq!((good.passed, good.damaged, good.unverified), (4, 0, 0));
+        assert!(good.interruption.is_none());
 
         let (first_payload, last_header) = {
             let zip = rawzip::ZipArchive::from_slice(&bytes).unwrap();
@@ -403,11 +425,12 @@ mod tests {
         bytes[first_payload] ^= 1;
         bytes[last_header + 30] = b'X'; // First filename byte of the local header.
         fs::write(&path, &bytes).unwrap();
-        let error = verify_archive(&path, None, &mut progress).unwrap_err();
-        assert!(
-            error.contains("Verified entries: 2. Entry errors: 2"),
-            "{error}"
+        let damaged = verify_archive(&path, None, &mut progress).unwrap();
+        assert_eq!(
+            (damaged.passed, damaged.damaged, damaged.unverified),
+            (2, 2, 0)
         );
+        assert!(damaged.interruption.is_none());
         let [root, header_error, crc_error] = progress.results.items.as_slice() else {
             panic!("expected the archive result and two distinct entry diagnostics");
         };
@@ -443,11 +466,12 @@ mod tests {
         let mut bytes = zip.finish().unwrap().into_inner();
         fs::write(&path, &bytes).unwrap();
         let mut progress = Progress::default();
-        let partial = verify_archive(&path, None, &mut progress).unwrap_err();
-        assert!(
-            partial.contains("Verified entries: 1. Entry errors: 0. Unverified: 1"),
-            "{partial}"
+        let partial = verify_archive(&path, None, &mut progress).unwrap();
+        assert_eq!(
+            (partial.passed, partial.damaged, partial.unverified),
+            (1, 0, 1)
         );
+        assert!(partial.interruption.is_none());
         assert_eq!(
             progress.results.items[0].outcome,
             Outcome::CompletedWithWarning
@@ -455,7 +479,8 @@ mod tests {
         assert_eq!(progress.results.items[1].outcome, Outcome::Skipped);
         assert_eq!(progress.results.items[1].source, "Entry 2 · secret.txt");
         let good = verify_archive(&path, Some(password), &mut progress).unwrap();
-        assert!(good.contains("Verified entries: 2"), "{good}");
+        assert_eq!((good.passed, good.damaged, good.unverified), (2, 0, 0));
+        assert!(good.interruption.is_none());
 
         let last_auth_byte = {
             let zip = rawzip::ZipArchive::from_slice(&bytes).unwrap();
@@ -470,14 +495,15 @@ mod tests {
         };
         bytes[last_auth_byte] ^= 1;
         fs::write(&path, bytes).unwrap();
-        let error = verify_archive(&path, Some(password), &mut progress).unwrap_err();
-        assert!(
-            error.contains("Verified entries: 1. Entry errors: 1"),
-            "{error}"
+        let damaged = verify_archive(&path, Some(password), &mut progress).unwrap();
+        assert_eq!(
+            (damaged.passed, damaged.damaged, damaged.unverified),
+            (1, 1, 0)
         );
+        assert!(damaged.interruption.is_none());
         let record = progress
             .results
-            .finish("Check archive".into(), 0, &Err(error))
+            .finish("Check archive".into(), 0, &Err("Damaged entry".into()))
             .unwrap();
         assert_eq!(record.items[1].source, "Entry 2 · secret.txt");
         assert_eq!(record.items[1].outcome, Outcome::Failed);
@@ -501,7 +527,8 @@ mod tests {
 
         let mut progress = Progress::default();
         let good = verify_archive(&path, None, &mut progress).unwrap();
-        assert!(good.contains("Verified entries: 2"), "{good}");
+        assert_eq!((good.passed, good.damaged, good.unverified), (2, 0, 0));
+        assert!(good.interruption.is_none());
 
         let mut checkpoints = 0;
         let cancel = Cancellation::at_checkpoint(move || {
@@ -510,10 +537,14 @@ mod tests {
         });
         let mut progress = Progress::with_cancellation(cancel);
         let stopped = verify_archive(&path, None, &mut progress).unwrap();
-        assert!(
-            stopped.contains("Archive check stopped. Verified entries: 1"),
-            "{stopped}"
+        assert_eq!(
+            (stopped.passed, stopped.damaged, stopped.unverified),
+            (1, 0, 0)
         );
+        assert!(matches!(
+            stopped.interruption,
+            Some(TransferError::Cancelled)
+        ));
         assert!(progress.results.cancelled);
         assert_eq!(progress.results.items[0].outcome, Outcome::Cancelled);
         assert_eq!(fs::metadata(&path).unwrap().len(), size + 4 * 512);
@@ -532,16 +563,49 @@ mod tests {
         let mut bytes = tar.into_inner().unwrap();
         fs::write(&path, &bytes[..bytes.len() - 512]).unwrap();
         let mut progress = Progress::default();
-        let ending = verify_archive(&path, None, &mut progress).unwrap_err();
-        assert!(ending.contains("TAR end blocks are missing"), "{ending}");
+        let ending = verify_archive(&path, None, &mut progress).unwrap();
+        let Some(TransferError::Failed(Failure::Archive(error))) = ending.interruption else {
+            panic!("expected a typed archive verification error");
+        };
+        let ArchiveError::Verify { archive, source } = *error else {
+            panic!("expected a format error: {error}");
+        };
+        assert_eq!(archive.path(), path);
+        assert_eq!(source.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(source.to_string(), "TAR end blocks are missing");
+        assert!(!progress.results.items[0].descendants_enumerated);
         bytes[512] ^= 1;
         fs::write(&path, bytes).unwrap();
-        let damaged = verify_archive(&path, None, &mut progress).unwrap_err();
-        assert!(
-            damaged.contains("Verified entries: 1. Entry errors: 1"),
-            "{damaged}"
+        let damaged = verify_archive(&path, None, &mut progress).unwrap();
+        assert_eq!(
+            (damaged.passed, damaged.damaged, damaged.unverified),
+            (1, 1, 0)
         );
+        assert!(matches!(
+            damaged.interruption,
+            Some(TransferError::Failed(Failure::Archive(_)))
+        ));
         assert_eq!(progress.results.items[1].source, "Entry 2 · TAR header");
         assert_eq!(progress.results.items[1].outcome, Outcome::Failed);
+    }
+
+    #[test]
+    fn an_archive_open_failure_retains_the_path_and_os_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.zip");
+        let mut progress = Progress::default();
+        let report = verify_archive(&path, None, &mut progress).unwrap();
+        let Some(TransferError::Failed(Failure::Access(error))) = report.interruption else {
+            panic!("expected a typed archive access error");
+        };
+        assert_eq!(error.location.path(), path);
+        assert_eq!(error.action, AccessAction::OpenFile);
+        assert!(
+            matches!(error.cause, AccessCause::Local(source) if source.kind() == io::ErrorKind::NotFound)
+        );
+        let row = &progress.results.items[0];
+        assert_eq!(row.outcome, Outcome::Failed);
+        assert_eq!(row.source, path.display().to_string());
+        assert!(!row.descendants_enumerated);
     }
 }

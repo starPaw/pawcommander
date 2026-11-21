@@ -152,7 +152,7 @@ fn rebuild(
         let output = StagedFile::open(&payload, cancel.clone())?;
         let mut writer = ArchiveWriter::rebuild(format, password, output)?;
         archive.write_existing(&mut writer, progress)?;
-        additions.append(&mut writer, progress, &cancel)?;
+        additions.append(source, &mut writer, progress, &cancel)?;
         progress.item(source.path());
         writer.finish()?.close()?;
         archive.validate_output(payload.path(), additions.names(), progress)?;
