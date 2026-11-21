@@ -1,8 +1,11 @@
 use super::protected_zip::{password_required, EntryReader, ProtectedZip};
-use super::{invalid, open_regular, Contents, Format, Index, Member};
+use super::{
+    archive_io_error, archive_io_error_with_cause, invalid, open_regular, Contents, Format, Index,
+    Member,
+};
 use crate::{
+    file_error::{AccessAction, AccessError, ArchiveError, ArchiveMemberError},
     fs_ops,
-    i18n::text,
     operations::{Cancellation, Progress, TransferError},
     vfs::Location,
 };
@@ -45,8 +48,14 @@ impl SelectedEntry {
 }
 
 impl<'a> Extraction<'a> {
-    pub(super) fn open(path: &Path, password: Option<&'a str>) -> io::Result<Self> {
-        let (file, stamp) = open_regular(path)?;
+    pub(super) fn open(path: &Path, password: Option<&'a str>) -> Result<Self, TransferError> {
+        let (file, stamp) = open_regular(path).map_err(|source| {
+            AccessError::new(
+                &Location::Local(path.to_owned()),
+                AccessAction::OpenFile,
+                source,
+            )
+        })?;
         Ok(Self {
             path: path.into(),
             file,
@@ -58,6 +67,10 @@ impl<'a> Extraction<'a> {
 
     pub(super) fn input(&self) -> (&File, u64) {
         (&self.file, self.stamp.len())
+    }
+
+    pub(super) fn location(&self) -> Location {
+        Location::Local(self.path.clone())
     }
 
     pub(super) fn prepare_protected(
@@ -76,18 +89,23 @@ impl<'a> Extraction<'a> {
         password: Option<&'a str>,
         cancel: &Cancellation,
     ) -> Result<(Self, Vec<SelectedTree>), TransferError> {
-        let first = sources.first().ok_or_else(selection_required)?;
-        let path = first.archive_source().ok_or_else(selection_required)?;
-        let parent = first.path().parent().ok_or_else(selection_required)?;
-        let format = Format::from_path(path).ok_or_else(selection_required)?;
+        let first = sources.first().ok_or(ArchiveError::SelectArchiveEntries)?;
+        let path = first
+            .archive_source()
+            .ok_or(ArchiveError::SelectArchiveEntries)?;
+        let parent = first
+            .path()
+            .parent()
+            .ok_or(ArchiveError::SelectArchiveEntries)?;
+        let format = Format::from_path(path)
+            .ok_or_else(|| ArchiveError::UnsupportedFormat(Location::Local(path.to_owned())))?;
         if sources.iter().any(|source| {
             source.archive_source() != Some(path) || source.path().parent() != Some(parent)
         }) {
-            return Err(selection_required().into());
+            return Err(ArchiveError::SelectArchiveEntries.into());
         }
         cancel.check()?;
-        let mut archive =
-            Self::open(path, password).map_err(|error| archive_read_error(path, error))?;
+        let mut archive = Self::open(path, password)?;
         let (file, length) = archive.input();
         let parsed = Index::read(file, length, format, &|| cancel.is_requested());
         cancel.check()?;
@@ -97,16 +115,22 @@ impl<'a> Extraction<'a> {
         let mut budget = MAX_OUTPUT_BYTES;
         let mut seen = BTreeSet::new();
         let mut trees = Vec::new();
-        let folder = index.folders.get(parent).ok_or_else(selection_required)?;
+        let folder = index
+            .folders
+            .get(parent)
+            .ok_or_else(|| ArchiveError::MemberMissing(first.with_path(parent.to_owned())))?;
         for source in sources {
             cancel.check()?;
-            let name = source.path().file_name().ok_or_else(selection_required)?;
+            let name = source
+                .path()
+                .file_name()
+                .ok_or(ArchiveError::SelectArchiveEntries)?;
             if !seen.insert(name) {
                 continue;
             }
-            let member = folder.get(name).ok_or_else(|| {
-                crate::tr_format!("Archive entry no longer exists: {source}", source = source)
-            })?;
+            let member = folder
+                .get(name)
+                .ok_or_else(|| ArchiveError::MemberMissing(source.clone()))?;
             let mut plan = Selection {
                 index: &index,
                 source,
@@ -158,14 +182,12 @@ impl<'a> Extraction<'a> {
     }
 
     pub(crate) fn verify_source(&self) -> Result<(), TransferError> {
-        if self.source_matches().unwrap_or(false) {
+        if self.source_matches().map_err(|source| {
+            AccessError::new(&self.location(), AccessAction::ReadMetadata, source)
+        })? {
             Ok(())
         } else {
-            Err(crate::tr_format!(
-                "The archive changed during extraction: {}",
-                self.path.display()
-            )
-            .into())
+            Err(ArchiveError::SourceChanged(self.location()).into())
         }
     }
 
@@ -259,9 +281,11 @@ impl<'a> Extraction<'a> {
                 // In AES ZIP, the reader authenticates the data at EOF.
                 copy_exact(path, size, &mut input, output, progress).map_err(|error| {
                     if error.kind() == io::ErrorKind::InvalidData {
-                        invalid(crate::i18n::key!(
-                            "Неверный пароль или повреждены данные ZIP"
-                        ))
+                        archive_io_error_with_cause(
+                            io::ErrorKind::InvalidData,
+                            crate::i18n::key!("Неверный пароль или повреждены данные ZIP"),
+                            error,
+                        )
                     } else {
                         error
                     }
@@ -284,13 +308,16 @@ impl Selection<'_> {
     fn visit(&mut self, relative: PathBuf, member: Member) -> Result<(), TransferError> {
         self.cancel.check()?;
         let path = self.source.path().join(&relative);
-        for part in path.components() {
-            let Component::Normal(name) = part else {
-                return Err(super::invalid_path().into());
-            };
-            if !safe_component(name) {
-                return Err(super::invalid_path().into());
-            }
+        let location = || self.source.with_path(path.clone());
+        let invalid_path = || ArchiveError::EntryPath {
+            entry: location(),
+            source: ArchiveMemberError::InvalidPath,
+        };
+        if !path
+            .components()
+            .all(|part| matches!(part, Component::Normal(name) if safe_component(name)))
+        {
+            return Err(invalid_path().into());
         }
         let size = match member.contents {
             Contents::Directory => 0,
@@ -299,27 +326,33 @@ impl Selection<'_> {
                 deflate: false,
                 ..
             } if length != member.size => {
-                return Err(bad_data().into());
+                return Err(AccessError::read(&location(), bad_data()).into());
             }
             Contents::Tar { offset } if offset.checked_add(member.size).is_none() => {
-                return Err(bad_data().into());
+                return Err(AccessError::read(&location(), bad_data()).into());
             }
             Contents::Tar { .. } | Contents::Zip { .. } | Contents::Encrypted(_) => member.size,
             contents => {
                 let reason = match contents {
                     Contents::UnsupportedEncryption => {
-                        text!("Шифрование или сжатие ZIP не поддерживается")
+                        crate::i18n::key!("Шифрование или сжатие ZIP не поддерживается")
                     }
-                    Contents::UnsupportedCompression => text!("Метод сжатия ZIP не поддерживается"),
-                    _ => text!("Распаковка поддерживает только обычные файлы и папки"),
+                    Contents::UnsupportedCompression => {
+                        crate::i18n::key!("Метод сжатия ZIP не поддерживается")
+                    }
+                    _ => crate::i18n::key!("Распаковка поддерживает только обычные файлы и папки"),
                 };
-                return Err(format!("{}: {reason}", self.source.with_path(path)).into());
+                return Err(AccessError::read(
+                    &location(),
+                    archive_io_error(io::ErrorKind::Unsupported, reason),
+                )
+                .into());
             }
         };
         *self.budget = self
             .budget
             .checked_sub(size)
-            .ok_or_else(|| text!("Выбрано больше 32 ГиБ для распаковки"))?;
+            .ok_or_else(|| ArchiveError::ExtractionLimit(location()))?;
         if member.is_dir {
             self.entries.push(SelectedEntry {
                 relative: relative.clone(),
@@ -327,11 +360,7 @@ impl Selection<'_> {
                 modified: member.modified,
                 contents: member.contents,
             });
-            let children = self
-                .index
-                .folders
-                .get(&path)
-                .ok_or_else(super::invalid_path)?;
+            let children = self.index.folders.get(&path).ok_or_else(invalid_path)?;
             for (name, member) in children {
                 self.visit(relative.join(name), *member)?;
             }
@@ -354,18 +383,12 @@ fn safe_component(name: &std::ffi::OsStr) -> bool {
         && !name.as_encoded_bytes().contains(&b'\\')
 }
 
-fn selection_required() -> &'static str {
-    text!("Выберите записи из одной папки архива")
-}
-
-fn archive_read_error(path: &Path, error: io::Error) -> TransferError {
-    TransferError::io(error, |error| {
-        crate::tr_format!(
-            "Could not read archive “{}”: {error}",
-            path.display(),
-            error = error
-        )
-    })
+pub(super) fn archive_read_error(path: &Path, source: io::Error) -> TransferError {
+    ArchiveError::Read {
+        archive: Location::Local(path.to_owned()),
+        source,
+    }
+    .into()
 }
 
 fn bad_data() -> io::Error {
@@ -439,7 +462,13 @@ impl<R: Read> Read for DeflateReader<R> {
             let status = self
                 .codec
                 .decompress(input, buffer, FlushDecompress::None)
-                .map_err(|_| bad_data())?;
+                .map_err(|error| {
+                    archive_io_error_with_cause(
+                        io::ErrorKind::InvalidData,
+                        crate::i18n::key!("Повреждены данные записи архива"),
+                        error,
+                    )
+                })?;
             let consumed = (self.codec.total_in() - before) as usize;
             let produced = (self.codec.total_out() - written) as usize;
             self.input.consume(consumed);

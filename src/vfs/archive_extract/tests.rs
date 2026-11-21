@@ -1,5 +1,5 @@
 use super::*;
-use crate::{archive::Format, operations::Cancellation, vfs::create_archive};
+use crate::{archive::Format, file_error::Failure, operations::Cancellation, vfs::create_archive};
 use flate2::{write::DeflateEncoder, Compression};
 use std::{io::Write, path::Path};
 
@@ -121,9 +121,15 @@ fn password_zip_uses_aes_and_keeps_secrets_out_of_results() {
         &mut progress,
         unexpected_conflict,
     );
-    assert!(missing.as_ref().is_err_and(
-        |message| message.contains(crate::i18n::text!("Укажите пароль для распаковки ZIP"))
+    let missing = missing.unwrap_err();
+    assert!(matches!(
+        &missing.error,
+        TransferError::Failed(Failure::Archive(reason))
+            if matches!(reason.as_ref(), ArchiveError::Read { archive: location, source }
+                if location == &archive && source.kind() == std::io::ErrorKind::InvalidInput)
     ));
+    assert!(crate::i18n::file_error(&missing.error)
+        .contains(crate::i18n::text!("Укажите пароль для распаковки ZIP")));
     assert_eq!(fs::read_dir(dest.path()).unwrap().count(), 0);
 
     // AES ZIP has a short password verifier. Pick a definitely rejected test
@@ -147,11 +153,10 @@ fn password_zip_uses_aes_and_keeps_secrets_out_of_results() {
         &mut progress,
         unexpected_conflict,
     );
-    assert!(wrong_result
-        .as_ref()
-        .is_err_and(|message| message.contains(crate::i18n::text!("Неверный пароль ZIP"))));
+    let error = crate::i18n::file_error(&wrong_result.unwrap_err().error);
+    assert!(error.contains(crate::i18n::text!("Неверный пароль ZIP")));
     let failed_record = std::mem::take(&mut progress.results)
-        .finish("Extract".into(), 0, &wrong_result)
+        .finish("Extract".into(), 0, &Err(error))
         .unwrap();
     let json = serde_json::to_string(&failed_record).unwrap();
     assert!(!json.contains(&wrong) && !json.contains(password));
@@ -174,7 +179,10 @@ fn password_zip_uses_aes_and_keeps_secrets_out_of_results() {
         fs::metadata(dest.join("Folder/zero").path()).unwrap().len(),
         0
     );
-    let success_record = progress.results.finish("Extract".into(), 0, &good).unwrap();
+    let success_record = progress
+        .results
+        .finish("Extract".into(), 0, &Ok("Extracted".into()))
+        .unwrap();
     assert!(!serde_json::to_string(&success_record)
         .unwrap()
         .contains(password));
@@ -226,11 +234,12 @@ fn a_bad_aes_authenticator_blocks_replacement_even_for_an_empty_member() {
         })
     });
     assert!(saw_conflict);
-    assert!(result
-        .as_ref()
-        .is_err_and(|message| message.contains(crate::i18n::text!(
+    let failure = result.unwrap_err();
+    assert!(
+        crate::i18n::file_error(&failure.error).contains(crate::i18n::text!(
             "Неверный пароль или повреждены данные ZIP"
-        ))));
+        ))
+    );
     assert_eq!(progress.results.items[0].outcome, Outcome::Failed);
     assert_eq!(fs::read(source.path()).unwrap(), before);
     assert_eq!(fs::read(archive.path()).unwrap(), bytes);
@@ -333,7 +342,7 @@ fn conflicting_files_can_be_replaced_or_kept_with_reserved_names() {
 #[test]
 fn staged_output_is_withheld_for_crc_or_length_mismatch_and_volume_limit() {
     let temp = tempfile::tempdir().unwrap();
-    let directory = Location::Local(temp.path().into());
+    let directory = Location::Local(temp.path().canonicalize().unwrap());
     let file = directory.join("item.txt");
     let before = b"existing destination";
     let data = b"archive payload that must be checked";
@@ -349,16 +358,36 @@ fn staged_output_is_withheld_for_crc_or_length_mismatch_and_volume_limit() {
         let mut prompts = 0;
         let mut progress = Progress::default();
         let source = archive.browse_archive().unwrap().join("item.txt");
-        assert!(
-            extract_archive(&[source], &directory, None, &mut progress, |conflict| {
+        let failure = extract_archive(
+            std::slice::from_ref(&source),
+            &directory,
+            None,
+            &mut progress,
+            |conflict| {
                 assert!(conflict.can_replace);
                 prompts += 1;
                 Ok(Answer {
                     decision: Decision::Replace,
                     apply_to_group: false,
                 })
-            })
-            .is_err()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(failure.summary.remaining(), 1);
+        let TransferError::Failed(Failure::Archive(cause)) = failure.error else {
+            panic!("expected archive error: {failure:?}");
+        };
+        assert!(
+            matches!(
+                (expected_prompts, cause.as_ref()),
+                (0, ArchiveError::ExtractionLimit(entry)) if entry == &source
+            ) || matches!(
+                (expected_prompts, cause.as_ref()),
+                (1, ArchiveError::ExtractEntry { entry, destination, source: io_error })
+                    if entry == &source && destination == &file
+                        && io_error.kind() == std::io::ErrorKind::InvalidData
+            ),
+            "{cause:?}"
         );
         assert_eq!(prompts, expected_prompts);
         assert_eq!(fs::read(file.path()).unwrap(), before);
@@ -506,7 +535,7 @@ fn stopping_a_stream_keeps_completed_entries_and_removes_the_active_payload() {
             })
     });
     let mut progress = Progress::with_cancellation(cancellation);
-    extract_archive(
+    let stopped = extract_archive(
         &[
             root.join("first.txt"),
             root.join("large.bin"),
@@ -517,7 +546,16 @@ fn stopping_a_stream_keeps_completed_entries_and_removes_the_active_payload() {
         &mut progress,
         unexpected_conflict,
     )
-    .unwrap();
+    .unwrap_err();
+    assert!(matches!(stopped.error, TransferError::Cancelled));
+    assert_eq!(
+        (
+            stopped.summary.completed,
+            stopped.summary.skipped,
+            stopped.summary.remaining()
+        ),
+        (1, 0, 2)
+    );
     assert_eq!(
         fs::read(directory.join("first.txt").path()).unwrap(),
         b"completed"

@@ -1,15 +1,23 @@
 use super::{
-    extraction::Extraction, integrity::check_tar_trailer, invalid, invalid_path, member_path,
-    protected_zip::zip_error, scan_zip, too_large, ArchiveWriter, Contents, Format, Index, Member,
-    MetadataReader, MAX_ENTRIES, MAX_INDEX_BYTES, MAX_METADATA_BYTES,
+    extraction::{archive_read_error, Extraction},
+    integrity::check_tar_trailer,
+    invalid, invalid_path, member_path, parse_member_path,
+    protected_zip::zip_error,
+    scan_zip, too_large, ArchiveWriter, Contents, Format, Index, Member, MetadataReader,
+    MAX_ENTRIES, MAX_INDEX_BYTES, MAX_METADATA_BYTES,
 };
-use crate::operations::{Progress, TransferError};
+use crate::{
+    file_error::{AccessError, ArchiveError, ArchiveMemberError},
+    operations::{Progress, TransferError},
+    vfs::Location,
+};
 use std::{
     cell::Cell,
     collections::BTreeSet,
     io::{self, Seek, SeekFrom, Write},
     ops::Range,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 pub(crate) enum MemberEdit<'a> {
@@ -35,30 +43,26 @@ impl MemberEdit<'_> {
         }
     }
 
-    fn validate(&self, index: &Index) -> io::Result<()> {
-        let validate_path = |path: &Path| {
-            if member_path(path.as_os_str().as_encoded_bytes())? != path {
-                return Err(invalid_path());
-            }
-            Ok(())
-        };
+    fn validate(&self, root: &Location, index: &Index) -> Result<(), TransferError> {
         let require_entry = |path: &Path| {
-            validate_path(path)?;
+            validate_path(root, path)?;
             if !member_exists(index, path) {
-                return Err(missing_entry(path));
+                return Err(TransferError::from(ArchiveError::MemberMissing(
+                    root.join(path),
+                )));
             }
             Ok(())
         };
         match self {
             Self::Add(folder) => {
-                validate_path(folder)?;
+                validate_path(root, folder)?;
                 if !index.folders.contains_key(*folder) {
-                    return Err(missing_entry(folder));
+                    return Err(ArchiveError::MemberMissing(root.join(folder)).into());
                 }
             }
             Self::Remove(roots) => {
                 if roots.is_empty() {
-                    return Err(invalid_path());
+                    return Err(ArchiveError::SelectArchiveEntries.into());
                 }
                 for root in roots {
                     require_entry(root)?;
@@ -66,12 +70,12 @@ impl MemberEdit<'_> {
             }
             Self::Rename { from, to } => {
                 require_entry(from)?;
-                validate_path(to)?;
+                validate_path(root, to)?;
                 if to.parent().is_none() || from.parent() != to.parent() {
-                    return Err(invalid_path());
+                    return Err(path_error(root, to, ArchiveMemberError::InvalidPath));
                 }
                 if member_exists(index, to) {
-                    return Err(occupied(to));
+                    return Err(ArchiveError::MemberOccupied(root.join(to)).into());
                 }
             }
         }
@@ -81,6 +85,7 @@ impl MemberEdit<'_> {
 
 pub(crate) struct EditableArchive {
     source: Extraction<'static>,
+    root: Location,
     format: Format,
     records: Vec<Record>,
     zip_entries: usize,
@@ -123,6 +128,10 @@ impl EditableArchive {
         let cancel = progress.cancellation();
         cancel.check()?;
         let source = Extraction::open(path, None)?;
+        let root = Location::Archive {
+            archive: Arc::new(path.to_owned()),
+            path: PathBuf::new(),
+        };
         let (file, length) = source.input();
         let cancelled = || cancel.is_requested();
         let input = MetadataReader {
@@ -134,15 +143,20 @@ impl EditableArchive {
             reading_payload: None,
         };
         let (mut records, protected) = match format {
-            Format::Zip => read_zip(input)?,
-            Format::Tar => (read_tar(input, path, edit, progress)?, false),
-        };
+            Format::Zip => read_zip(input),
+            Format::Tar => read_tar(input, path, edit, progress).map(|records| (records, false)),
+        }
+        .map_err(|error| archive_read_error(path, error))?;
         source.verify_source()?;
-        edit.validate(&layout(
-            records
-                .iter()
-                .filter_map(|r| Some((r.path.as_deref()?, r.directory))),
-        )?)?;
+        edit.validate(
+            &root,
+            &layout(
+                &root,
+                records
+                    .iter()
+                    .filter_map(|r| Some((r.path.as_deref()?, r.directory))),
+            )?,
+        )?;
         let zip_entries = records.len();
         records.retain_mut(|record| {
             if let Some(path) = &record.path {
@@ -155,6 +169,7 @@ impl EditableArchive {
         });
         Ok(Self {
             source,
+            root,
             format,
             records,
             zip_entries,
@@ -165,14 +180,14 @@ impl EditableArchive {
     pub(crate) fn validate_additions<'a>(
         &'a self,
         additions: impl Iterator<Item = (&'a Path, bool)> + Clone,
-    ) -> io::Result<()> {
-        let retained = layout(self.names())?;
+    ) -> Result<(), TransferError> {
+        let retained = layout(&self.root, self.names())?;
         for (path, _) in additions.clone() {
             if member_exists(&retained, path) {
-                return Err(occupied(path));
+                return Err(ArchiveError::MemberOccupied(self.root.join(path)).into());
             }
         }
-        layout(self.names().chain(additions)).map(|_| ())
+        layout(&self.root, self.names().chain(additions)).map(|_| ())
     }
 
     pub(crate) fn validate_output<'a>(
@@ -192,9 +207,12 @@ impl EditableArchive {
                     .is_some_and(|(path, dir)| path == expected_path && dir == expected_dir)
             });
         if !matches || actual.next().is_some() {
-            return Err(invalid(crate::i18n::key!(
-                "Список записей пересобранного архива не совпадает"
-            ))
+            return Err(ArchiveError::Rebuild {
+                location: self.source.location(),
+                source: invalid(crate::i18n::key!(
+                    "Список записей пересобранного архива не совпадает"
+                )),
+            }
             .into());
         }
         Ok(())
@@ -224,41 +242,50 @@ impl EditableArchive {
     ) -> Result<(), TransferError> {
         match (self.format, writer) {
             (Format::Zip, ArchiveWriter::StreamZip { writer, .. }) => {
-                self.write_zip(writer, progress)?
+                self.write_zip(writer, progress)
             }
-            (Format::Tar, ArchiveWriter::Tar(writer)) => self.write_tar(writer, progress)?,
-            _ => {
-                return Err(invalid(crate::i18n::key!("Неподдерживаемый формат пересборки")).into())
-            }
+            (Format::Tar, ArchiveWriter::Tar(writer)) => self.write_tar(writer, progress),
+            _ => Err(self.rebuild_error(
+                None,
+                invalid(crate::i18n::key!("Неподдерживаемый формат пересборки")),
+            )),
         }
-        Ok(())
+    }
+
+    fn rebuild_error(&self, member: Option<&Path>, source: io::Error) -> TransferError {
+        ArchiveError::Rebuild {
+            location: member.map_or_else(|| self.source.location(), |path| self.root.join(path)),
+            source,
+        }
+        .into()
     }
 
     fn write_zip<W: Write>(
         &self,
         writer: &mut zip::ZipWriter<zip::write::StreamWriter<W>>,
         progress: &mut Progress,
-    ) -> io::Result<()> {
+    ) -> Result<(), TransferError> {
         // Read and check the retained plain entries before copying their encoded bytes.
         for record in &self.records {
             progress.check_cancelled()?;
             let RecordKind::Zip { size, payload, .. } = record.kind else {
                 unreachable!()
             };
+            let path = record.path.as_deref().unwrap();
             match payload {
                 Contents::Zip { .. } => {
-                    self.source.check_payload(
-                        payload,
-                        size,
-                        record.path.as_deref().unwrap(),
-                        progress,
-                    )?;
+                    self.source
+                        .check_payload(payload, size, path, progress)
+                        .map_err(|source| AccessError::read(&self.root.join(path), source))?;
                 }
                 Contents::Encrypted(_) => {}
                 _ => {
-                    return Err(invalid(crate::i18n::key!(
-                        "Редактирование этого метода ZIP не поддерживается"
-                    )))
+                    return Err(self.rebuild_error(
+                        Some(path),
+                        invalid(crate::i18n::key!(
+                            "Редактирование этого метода ZIP не поддерживается"
+                        )),
+                    ))
                 }
             }
         }
@@ -274,17 +301,20 @@ impl EditableArchive {
             cancelled: &cancelled,
             reading_payload: Some(&copying),
         })
-        .map_err(zip_error)?;
+        .map_err(|error| self.rebuild_error(None, zip_error(error)))?;
         // The second reader keys its records by name. Comparing its count and
         // the exact local offsets prevents silently losing or copying aliases.
         if zip.len() != self.zip_entries || zip.offset() != 0 {
-            return Err(invalid(crate::i18n::key!(
-                "Структура ZIP не поддерживает безопасную пересборку"
-            )));
+            return Err(self.rebuild_error(
+                None,
+                invalid(crate::i18n::key!(
+                    "Структура ZIP не поддерживает безопасную пересборку"
+                )),
+            ));
         }
         writer
             .set_raw_comment(zip.comment().into())
-            .map_err(zip_error)?;
+            .map_err(|error| self.rebuild_error(None, zip_error(error)))?;
         for record in &self.records {
             cancel.check()?;
             let RecordKind::Zip {
@@ -296,8 +326,12 @@ impl EditableArchive {
             else {
                 unreachable!()
             };
-            progress.item(record.path.as_deref().unwrap());
-            let entry = zip.by_index_raw(index).map_err(zip_error)?;
+            let path = record.path.as_deref().unwrap();
+            let failure = |source| self.rebuild_error(Some(path), source);
+            progress.item(path);
+            let entry = zip
+                .by_index_raw(index)
+                .map_err(|error| failure(zip_error(error)))?;
             let (length, crc, encrypted) = match payload {
                 Contents::Zip { length, crc, .. } => (length, crc, false),
                 Contents::Encrypted(member) => (member.length, member.crc, true),
@@ -309,13 +343,15 @@ impl EditableArchive {
                 || entry.crc32() != crc
                 || entry.encrypted() != encrypted
             {
-                return Err(invalid(crate::i18n::key!(
+                return Err(failure(invalid(crate::i18n::key!(
                     "Структура ZIP не поддерживает безопасную пересборку"
-                )));
+                ))));
             }
             copying.set(true);
             if let Some(name) = &record.renamed {
-                let name = name.to_str().ok_or_else(invalid_path)?;
+                let name = name
+                    .to_str()
+                    .ok_or_else(|| path_error(&self.root, name, ArchiveMemberError::InvalidPath))?;
                 writer.raw_copy_file_rename(
                     entry,
                     format!("{name}{}", if record.directory { "/" } else { "" }),
@@ -323,7 +359,7 @@ impl EditableArchive {
             } else {
                 writer.raw_copy_file(entry)
             }
-            .map_err(zip_error)?;
+            .map_err(|error| failure(zip_error(error)))?;
             copying.set(false);
         }
         Ok(())
@@ -333,64 +369,89 @@ impl EditableArchive {
         &self,
         writer: &mut tar::Builder<W>,
         progress: &mut Progress,
-    ) -> io::Result<()> {
+    ) -> Result<(), TransferError> {
         let (file, _) = self.source.input();
         for record in &self.records {
             let RecordKind::Tar { original, rewrite } = &record.kind else {
                 unreachable!()
             };
             let shown = record.path.as_deref().unwrap_or_else(|| Path::new("."));
+            let failure = |source| self.rebuild_error(record.path.as_deref(), source);
             let range = rewrite.as_ref().map_or(original, |rewrite| &rewrite.data);
             let mut input = file;
-            input.seek(SeekFrom::Start(range.start))?;
+            input.seek(SeekFrom::Start(range.start)).map_err(failure)?;
             let expected = range.end - range.start;
-            let actual = progress.read_stream(shown, expected, input, |reader| {
-                if let Some(rewrite) = rewrite {
-                    let mut header = rewrite.header.clone();
-                    writer.append_pax_extensions(
-                        rewrite
-                            .pax
-                            .iter()
-                            .map(|(key, value)| (key.as_str(), value.as_slice())),
-                    )?;
-                    writer.append_data(
-                        &mut header,
-                        record.renamed.as_deref().unwrap_or(shown),
-                        reader,
-                    )
-                } else {
-                    io::copy(reader, writer.get_mut()).map(|_| ())
-                }
-            })?;
+            let actual = progress
+                .read_stream(shown, expected, input, |reader| {
+                    if let Some(rewrite) = rewrite {
+                        let mut header = rewrite.header.clone();
+                        writer.append_pax_extensions(
+                            rewrite
+                                .pax
+                                .iter()
+                                .map(|(key, value)| (key.as_str(), value.as_slice())),
+                        )?;
+                        writer.append_data(
+                            &mut header,
+                            record.renamed.as_deref().unwrap_or(shown),
+                            reader,
+                        )
+                    } else {
+                        io::copy(reader, writer.get_mut()).map(|_| ())
+                    }
+                })
+                .map_err(failure)?;
             if actual != expected {
-                return Err(invalid(crate::i18n::key!(
+                return Err(failure(invalid(crate::i18n::key!(
                     "Размер данных записи архива не совпадает"
-                )));
+                ))));
             }
         }
         Ok(())
     }
 }
 
-fn layout<'a>(members: impl Iterator<Item = (&'a Path, bool)>) -> io::Result<Index> {
+fn validate_path(root: &Location, path: &Path) -> Result<(), TransferError> {
+    let normalized = parse_member_path(path.as_os_str().as_encoded_bytes())
+        .map_err(|source| path_error(root, path, source))?;
+    if normalized != path {
+        return Err(path_error(root, path, ArchiveMemberError::InvalidPath));
+    }
+    Ok(())
+}
+
+fn path_error(root: &Location, path: &Path, source: ArchiveMemberError) -> TransferError {
+    ArchiveError::EntryPath {
+        entry: root.join(path),
+        source,
+    }
+    .into()
+}
+
+fn layout<'a>(
+    root: &Location,
+    members: impl Iterator<Item = (&'a Path, bool)>,
+) -> Result<Index, TransferError> {
     let mut index = Index::default();
     index.folders.insert(PathBuf::new(), Default::default());
     let mut names = BTreeSet::new();
     for (path, directory) in members {
         if !names.insert(path) {
-            return Err(occupied(path));
+            return Err(ArchiveError::MemberOccupied(root.join(path)).into());
         }
-        let raw = path.as_os_str().as_encoded_bytes();
-        if member_path(raw)? != path || (path.as_os_str().is_empty() && !directory) {
-            return Err(invalid_path());
+        validate_path(root, path)?;
+        if path.as_os_str().is_empty() && !directory {
+            return Err(path_error(root, path, ArchiveMemberError::InvalidPath));
         }
-        index.add(
-            path,
-            Member {
-                is_dir: directory,
-                ..Member::default()
-            },
-        )?;
+        index
+            .add(
+                path,
+                Member {
+                    is_dir: directory,
+                    ..Member::default()
+                },
+            )
+            .map_err(|source| AccessError::read(&root.join(path), source))?;
     }
     Ok(index)
 }
@@ -400,13 +461,6 @@ fn member_exists(index: &Index, path: &Path) -> bool {
         .and_then(|parent| index.folders.get(parent))
         .zip(path.file_name())
         .is_some_and(|(children, name)| children.contains_key(name))
-}
-
-fn occupied(path: &Path) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        crate::tr_format!("Path is already used in the archive: {}", path.display()),
-    )
 }
 
 fn read_zip(input: MetadataReader<'_>) -> io::Result<(Vec<Record>, bool)> {
@@ -560,11 +614,4 @@ fn read_tar(
     }
     check_tar_trailer(archive.into_inner(), path, progress)?;
     Ok(records)
-}
-
-fn missing_entry(path: &Path) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::NotFound,
-        crate::tr_format!("Archive entry no longer exists: {}", path.display()),
-    )
 }

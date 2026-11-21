@@ -144,6 +144,39 @@ fn archive_edit_command(edit: &ArchiveEdit) -> Command {
     }
 }
 
+fn archive_extraction_message(
+    result: Result<fs_ops::ExtractionSummary, fs_ops::ExtractionFailure>,
+) -> Result<String, String> {
+    use crate::operations::TransferError;
+
+    let summary_text = |summary: fs_ops::ExtractionSummary| {
+        crate::tr_format!(
+            "Extracted: {completed}. Skipped: {skipped}. Remaining: {remaining}.",
+            completed = summary.completed,
+            skipped = summary.skipped,
+            remaining = summary.remaining()
+        )
+    };
+    match result {
+        Ok(summary) => Ok(summary_text(summary)),
+        Err(fs_ops::ExtractionFailure {
+            summary,
+            error: TransferError::Cancelled,
+        }) => Ok(crate::tr_format!(
+            "Extraction stopped. {summary}",
+            summary = summary_text(summary)
+        )),
+        Err(fs_ops::ExtractionFailure { summary, error }) => {
+            let error = crate::i18n::file_error(&error);
+            if summary.completed != 0 || summary.skipped != 0 {
+                Err(format!("{error}. {}", summary_text(summary)))
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
 fn archive_verification_message(report: ArchiveVerification) -> Result<String, String> {
     use crate::i18n::text;
     use crate::operations::TransferError;
@@ -1106,13 +1139,13 @@ impl PawCommander {
                     let label = Command::ExtractArchive.label();
                     let description = format!("{label} · {}", directory.display());
                     self.start_conflict_job(ctx, label, description, move |progress, decide| {
-                        fs_ops::extract_archive(
+                        archive_extraction_message(fs_ops::extract_archive(
                             &sources,
                             &directory,
                             Some(password.as_str()),
                             progress,
                             decide,
-                        )
+                        ))
                     });
                 }
             }
@@ -1158,7 +1191,16 @@ impl PawCommander {
                 let label = archive_edit_command(&edit).label();
                 let description = format!("{label} · {}", archive.display());
                 self.start_stoppable_job(ctx, label, description, move |progress| {
-                    fs_ops::edit_archive(&archive, edit, Some(password.as_str()), progress)
+                    match fs_ops::edit_archive(&archive, edit, Some(password.as_str()), progress) {
+                        Ok(source) => Ok(crate::tr_format!(
+                            "Archive updated: {source}",
+                            source = source
+                        )),
+                        Err(crate::operations::TransferError::Cancelled) => {
+                            Ok(crate::i18n::text!("Редактирование архива остановлено").into())
+                        }
+                        Err(error) => Err(crate::i18n::file_error(&error)),
+                    }
                 });
             }
             Dialog::WorkspaceName { editing, name } => {

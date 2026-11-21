@@ -608,7 +608,7 @@ pub(crate) fn readonly() -> &'static str {
 #[derive(Debug)]
 struct ArchiveMessage {
     key: crate::i18n::MessageKey,
-    zip_error: Option<zip::result::ZipError>,
+    cause: Option<Box<dyn std::error::Error + Send + Sync>>,
 }
 
 impl std::fmt::Display for ArchiveMessage {
@@ -619,16 +619,24 @@ impl std::fmt::Display for ArchiveMessage {
 
 impl std::error::Error for ArchiveMessage {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.zip_error.as_ref().map(|error| error as _)
+        self.cause.as_deref().map(|error| error as _)
     }
 }
 
 fn archive_io_error(kind: io::ErrorKind, key: crate::i18n::MessageKey) -> io::Error {
+    io::Error::new(kind, ArchiveMessage { key, cause: None })
+}
+
+fn archive_io_error_with_cause(
+    kind: io::ErrorKind,
+    key: crate::i18n::MessageKey,
+    cause: impl std::error::Error + Send + Sync + 'static,
+) -> io::Error {
     io::Error::new(
         kind,
         ArchiveMessage {
             key,
-            zip_error: None,
+            cause: Some(Box::new(cause)),
         },
     )
 }
