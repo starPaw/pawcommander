@@ -349,6 +349,121 @@ fn retained_location(recovery: &Path, offer: &Offer) -> Location {
 }
 
 #[test]
+fn a_replaced_receipt_does_not_make_a_confirmed_move_uncertain() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let recovery = root.join("recovery");
+    let original: Location = root.join("source").into();
+    let target: Location = root.join("target").into();
+    fs::write(original.path(), b"move this data").unwrap();
+    let item = TransferItem::new(original.clone(), original.clone(), target.clone());
+    let mut progress = Progress::default();
+    progress.resume_directory = Some(recovery.clone());
+    let saved = root.join("original-receipt");
+    let mut replaced = None;
+    let mut published = false;
+    let mut removed = false;
+    let error = cross_move::run(
+        &item,
+        None,
+        &mut progress,
+        || published = true,
+        || removed = true,
+        &mut |_, phase| {
+            if phase == Phase::Removed {
+                let path = fs::read_dir(receipts(&recovery))
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap()
+                    .path();
+                fs::rename(&path, &saved).unwrap();
+                fs::write(&path, b"preserve this record").unwrap();
+                replaced = Some(path);
+            }
+            Ok(())
+        },
+    )
+    .unwrap_err();
+    let replaced = replaced.unwrap();
+    let TransferError::Failed(Failure::Publication(error)) = error else {
+        panic!("Expected a recovery finalization warning after a confirmed move");
+    };
+    assert!(matches!(
+        *error,
+        PublicationError::RecoveryFinalization { target: location, moving: true, cause }
+            if location == target && cause.path == replaced && matches!(cause.problem, ResumeRecordProblem::IdentityChanged)
+    ));
+    assert!(published && removed && !progress.partial_copy_retained);
+    assert!(!original.path().exists());
+    assert_eq!(fs::read(target.path()).unwrap(), b"move this data");
+    assert_eq!(fs::read(&replaced).unwrap(), b"preserve this record");
+    assert!(Ticket::open(saved).unwrap().unwrap().removed);
+}
+
+#[test]
+fn stopping_a_resumed_copy_reports_receipt_failure_after_draft_cleanup() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let recovery = root.join("recovery");
+    let output = root.join("destination");
+    let original = root.join("source");
+    let bytes = vec![9; 1024 * 1024];
+    fs::create_dir(&output).unwrap();
+    fs::write(&original, &bytes).unwrap();
+    let observed = output.clone();
+    let interrupted = std::panic::catch_unwind(|| {
+        first_copy(
+            &original.clone().into(),
+            &output.clone().into(),
+            &recovery,
+            move || {
+                if staged_payload(&observed)
+                    .and_then(|file| file.metadata().ok())
+                    .is_some_and(|meta| meta.len() >= 128 * 1024)
+                {
+                    std::panic::panic_any("interrupted copy");
+                }
+                false
+            },
+        )
+    });
+    assert_eq!(
+        interrupted.unwrap_err().downcast_ref::<&str>(),
+        Some(&"interrupted copy")
+    );
+    let (offers, errors) = scan(&recovery);
+    assert!(errors.is_empty() && offers.len() == 1);
+    let record = receipts(&recovery).join(&offers[0].id);
+    let valid = fs::read(&record).unwrap();
+    let draft = staged_payload(&output).unwrap();
+    let offset = draft.metadata().unwrap().len();
+    let saved = root.join("original-receipt");
+    let (original_record, saved_record) = (record.clone(), saved.clone());
+    let (mut progress, _) = Progress::tracked_transfer();
+    progress.cancellation().set_checkpoint(move || {
+        if fs::metadata(&draft).is_ok_and(|meta| meta.len() > offset) {
+            fs::rename(&original_record, &saved_record).unwrap();
+            fs::write(&original_record, b"preserve the replacement").unwrap();
+            return true;
+        }
+        false
+    });
+    let error = resume(&recovery, &offers[0].id, &mut progress).unwrap_err();
+    assert!(matches!(
+        error,
+        TransferError::Failed(Failure::ResumeRecord(error))
+            if error.path == record && matches!(error.problem, ResumeRecordProblem::IdentityChanged)
+    ));
+    assert_eq!(progress.results.items[0].outcome, Outcome::Failed);
+    assert!(!progress.partial_copy_retained && staged_payload(&output).is_none());
+    assert!(!output.join("source").exists());
+    assert_eq!(fs::read(original).unwrap(), bytes);
+    assert_eq!(fs::read(saved).unwrap(), valid);
+    assert_eq!(fs::read(record).unwrap(), b"preserve the replacement");
+}
+
+#[test]
 fn published_move_requires_the_original_source_and_the_sealed_destination() {
     for tree in [false, true] {
         for replaced in [None, Some("source"), Some("target")] {

@@ -1,6 +1,9 @@
 //! Durable receipts for one worker and one staged copy.
 use super::{HeldSource, Intent, Original, Paths, Receipt, RenamedIdentity, SavedTime};
-use crate::file_error::{ResumeRecordError, ResumeRecordProblem, ResumeRecordSection};
+use crate::file_error::{
+    ResumeRecordAction as Action, ResumeRecordError, ResumeRecordEvent, ResumeRecordProblem,
+    ResumeRecordSection,
+};
 use crate::recovery::{same_owned_marker, sync_directory};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -39,17 +42,21 @@ pub(super) struct AccessTimesSection {
     digest: [u8; 32],
 }
 
-fn invalid_access_times() -> io::Error {
-    io::Error::other(crate::i18n::text!(
-        "Некорректная запись времени доступа для переноса",
-    ))
-}
-
 #[derive(Deserialize, Serialize)]
 pub(super) enum Event {
     Publication(RenamedIdentity),
     Removing(HeldSource),
     Removed,
+}
+
+impl Event {
+    fn kind(&self) -> ResumeRecordEvent {
+        match self {
+            Self::Publication(_) => ResumeRecordEvent::Publication,
+            Self::Removing(_) => ResumeRecordEvent::HoldingSource,
+            Self::Removed => ResumeRecordEvent::SourceRemoved,
+        }
+    }
 }
 
 fn version(receipt: &Receipt) -> u32 {
@@ -65,11 +72,15 @@ impl Ticket {
         directory: &Path,
         mut receipt: Receipt,
         folder_access_times: Option<&[Option<SavedTime>]>,
-    ) -> io::Result<Self> {
+    ) -> Result<Self, ResumeRecordError> {
+        let encode = |source| ResumeRecordProblem::Encode {
+            event: None,
+            source,
+        };
         let encoded = folder_access_times
             .map(serde_json::to_vec)
             .transpose()
-            .map_err(io::Error::other)?;
+            .map_err(|error| ResumeRecordError::new(directory, encode(error)))?;
         receipt.folder_access_times = encoded.as_ref().map(|bytes| AccessTimesSection {
             bytes: bytes.len() as u64,
             digest: Sha256::digest(bytes).into(),
@@ -77,33 +88,63 @@ impl Ticket {
         if let Some(section) = &receipt.folder_access_times
             && !valid_access_times(&receipt, section)
         {
-            return Err(invalid_access_times());
+            return Err(ResumeRecordError::new(
+                directory,
+                ResumeRecordProblem::InvalidAccessTimes,
+            ));
         }
         DirBuilder::new()
             .recursive(true)
             .mode(0o700)
-            .create(directory)?;
+            .create(directory)
+            .map_err(|error| ResumeRecordError::io(directory, Action::CreateDirectory, error))?;
         let mut file = tempfile::Builder::new()
             .prefix(PREFIX)
             .suffix(".pending")
-            .tempfile_in(directory)?;
-        file.as_file().try_lock().map_err(io::Error::other)?;
-        let bytes = serde_json::to_vec(&(version(&receipt), &receipt)).map_err(io::Error::other)?;
-        if bytes.len() as u64 + u64::from(encoded.is_some()) > MAX_BYTES {
-            return Err(io::Error::other("Copy recovery record exceeds 128 KiB"));
+            .tempfile_in(directory)
+            .map_err(|error| ResumeRecordError::io(directory, Action::CreateFile, error))?;
+        let temporary = file.path().to_owned();
+        match file.as_file().try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => {
+                return Err(ResumeRecordError::new(
+                    &temporary,
+                    ResumeRecordProblem::InUse,
+                ));
+            }
+            Err(TryLockError::Error(error)) => {
+                return Err(ResumeRecordError::new(
+                    &temporary,
+                    ResumeRecordProblem::Lock(error),
+                ));
+            }
         }
-        file.write_all(&bytes)?;
+        let bytes = serde_json::to_vec(&(version(&receipt), &receipt))
+            .map_err(|error| ResumeRecordError::new(&temporary, encode(error)))?;
+        if bytes.len() as u64 + u64::from(encoded.is_some()) > MAX_BYTES {
+            return Err(ResumeRecordError::new(
+                &temporary,
+                ResumeRecordProblem::SizeLimit(MAX_BYTES),
+            ));
+        }
+        let write = |error| ResumeRecordError::io(&temporary, Action::WriteInitial, error);
+        file.write_all(&bytes).map_err(write)?;
         let access_times_offset = if let Some(encoded) = encoded {
-            file.write_all(b"\n")?;
-            file.write_all(&encoded)?;
+            file.write_all(b"\n").map_err(write)?;
+            file.write_all(&encoded).map_err(write)?;
             Some(bytes.len() as u64 + 1)
         } else {
             None
         };
-        file.as_file().sync_all()?;
-        let path = file.path().with_extension("json");
-        let file = file.persist_noclobber(&path).map_err(|e| e.error)?;
-        sync_directory(directory)?;
+        file.as_file()
+            .sync_all()
+            .map_err(|error| ResumeRecordError::io(&temporary, Action::SyncInitial, error))?;
+        let path = temporary.with_extension("json");
+        let file = file
+            .persist_noclobber(&path)
+            .map_err(|error| ResumeRecordError::io(&path, Action::Publish, error.error))?;
+        sync_directory(directory)
+            .map_err(|error| ResumeRecordError::io(&path, Action::SyncPublication, error))?;
         Ok(Self {
             file,
             path,
@@ -303,7 +344,7 @@ impl Ticket {
         self.publication.get()
     }
 
-    pub(super) fn seal(&self, proof: RenamedIdentity) -> io::Result<()> {
+    pub(super) fn seal(&self, proof: RenamedIdentity) -> Result<(), ResumeRecordError> {
         if self.publication() != Some(proof) {
             self.record(&Event::Publication(proof))?;
             self.publication.set(Some(proof));
@@ -311,32 +352,75 @@ impl Ticket {
         Ok(())
     }
 
-    pub(super) fn record(&self, event: &Event) -> io::Result<()> {
-        if self.receipt.intent != Intent::Move || !same_owned_marker(&self.file, &self.path)? {
-            return Err(io::Error::other("Move recovery record identity changed"));
+    pub(super) fn record(&self, event: &Event) -> Result<(), ResumeRecordError> {
+        if self.receipt.intent != Intent::Move {
+            return Err(self.error(ResumeRecordProblem::InvalidProof));
         }
+        self.check_identity()?;
+        let kind = event.kind();
         let mut bytes = vec![b'\n'];
-        serde_json::to_writer(&mut bytes, event).map_err(io::Error::other)?;
+        serde_json::to_writer(&mut bytes, event).map_err(|source| {
+            self.error(ResumeRecordProblem::Encode {
+                event: Some(kind),
+                source,
+            })
+        })?;
         let mut file = &self.file;
         let access_times_bytes = self
             .receipt
             .folder_access_times
             .as_ref()
             .map_or(0, |section| section.bytes + 1);
-        if file.seek(SeekFrom::End(0))? + bytes.len() as u64 > MAX_BYTES + access_times_bytes {
-            return Err(io::Error::other("Move recovery record exceeds 128 KiB"));
+        let start = file
+            .seek(SeekFrom::End(0))
+            .map_err(|error| ResumeRecordError::io(&self.path, Action::SeekEnd, error))?;
+        if start.saturating_add(bytes.len() as u64) > MAX_BYTES + access_times_bytes {
+            return Err(self.error(ResumeRecordProblem::SizeLimit(MAX_BYTES)));
         }
-        file.write_all(&bytes)?;
+        if let Err(source) = file.write_all(&bytes) {
+            // The ticket remains locked. Remove only bytes from this failed append.
+            if let Err(restore) = restore_append(file, start) {
+                return Err(self.error(ResumeRecordProblem::AppendRollback {
+                    event: kind,
+                    source,
+                    restore,
+                }));
+            }
+            return Err(ResumeRecordError::io(
+                &self.path,
+                Action::Append(kind),
+                source,
+            ));
+        }
+        // A complete event may already be readable after a synchronization error.
         file.sync_all()
+            .map_err(|error| ResumeRecordError::io(&self.path, Action::SyncEvent(kind), error))
     }
 
-    pub(super) fn finish(&self) -> io::Result<()> {
-        if !same_owned_marker(&self.file, &self.path)? {
-            return Err(io::Error::other("Copy recovery record identity changed"));
-        }
-        fs::remove_file(&self.path)?;
+    pub(super) fn finish(&self) -> Result<(), ResumeRecordError> {
+        self.check_identity()?;
+        fs::remove_file(&self.path)
+            .map_err(|error| ResumeRecordError::io(&self.path, Action::Remove, error))?;
         sync_directory(self.path.parent().unwrap())
+            .map_err(|error| ResumeRecordError::io(&self.path, Action::SyncRemoval, error))
     }
+
+    fn check_identity(&self) -> Result<(), ResumeRecordError> {
+        if !same_owned_marker(&self.file, &self.path)
+            .map_err(|error| ResumeRecordError::io(&self.path, Action::CheckIdentity, error))?
+        {
+            return Err(self.error(ResumeRecordProblem::IdentityChanged));
+        }
+        Ok(())
+    }
+}
+
+fn restore_append(file: &File, start: u64) -> io::Result<()> {
+    if file.metadata()?.len() > start {
+        file.set_len(start)?;
+        file.sync_all()?;
+    }
+    Ok(())
 }
 
 fn valid_access_times(receipt: &Receipt, section: &AccessTimesSection) -> bool {

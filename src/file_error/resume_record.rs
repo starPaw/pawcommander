@@ -11,11 +11,47 @@ pub(crate) enum ResumeRecordSection {
     AccessTimes,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ResumeRecordEvent {
+    Publication,
+    HoldingSource,
+    SourceRemoved,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ResumeRecordAction {
+    CreateDirectory,
+    CreateFile,
+    WriteInitial,
+    SyncInitial,
+    Publish,
+    SyncPublication,
+    CheckIdentity,
+    SeekEnd,
+    Append(ResumeRecordEvent),
+    SyncEvent(ResumeRecordEvent),
+    Remove,
+    SyncRemoval,
+}
+
 #[derive(Debug)]
 pub(crate) enum ResumeRecordProblem {
     Read(io::Error),
     ReadDirectory(io::Error),
     Lock(io::Error),
+    Write {
+        action: ResumeRecordAction,
+        source: io::Error,
+    },
+    Encode {
+        event: Option<ResumeRecordEvent>,
+        source: serde_json::Error,
+    },
+    AppendRollback {
+        event: ResumeRecordEvent,
+        source: io::Error,
+        restore: io::Error,
+    },
     InUse,
     IdentityChanged,
     SizeLimit(u64),
@@ -50,6 +86,10 @@ impl ResumeRecordError {
         }
     }
 
+    pub(crate) fn io(path: &Path, action: ResumeRecordAction, source: io::Error) -> Self {
+        Self::new(path, ResumeRecordProblem::Write { action, source })
+    }
+
     pub(crate) fn is_missing(&self) -> bool {
         matches!(&self.problem, ResumeRecordProblem::Read(error) if error.kind() == io::ErrorKind::NotFound)
     }
@@ -68,6 +108,16 @@ impl fmt::Display for ResumeRecordError {
             ResumeRecordProblem::Lock(error) => {
                 write!(f, "Could not lock recovery record {path}: {error}")
             }
+            ResumeRecordProblem::Write { action, source } => {
+                write!(f, "Recovery record {action:?} at {path}: {source}")
+            }
+            ResumeRecordProblem::Encode { event, source } => {
+                write!(f, "Could not encode recovery record data ({event:?}) at {path}: {source}")
+            }
+            ResumeRecordProblem::AppendRollback { event, source, restore } => write!(
+                f,
+                "Could not append {event:?} to recovery record {path}: {source}. Could not restore the previous length: {restore}"
+            ),
             ResumeRecordProblem::InUse => write!(f, "Recovery record {path} is in use"),
             ResumeRecordProblem::IdentityChanged => {
                 write!(f, "Recovery record {path} changed identity")
@@ -112,8 +162,11 @@ impl Error for ResumeRecordError {
         match &self.problem {
             ResumeRecordProblem::Read(error)
             | ResumeRecordProblem::ReadDirectory(error)
-            | ResumeRecordProblem::Lock(error) => Some(error),
-            ResumeRecordProblem::Json { source, .. } => Some(source),
+            | ResumeRecordProblem::Lock(error)
+            | ResumeRecordProblem::Write { source: error, .. }
+            | ResumeRecordProblem::AppendRollback { source: error, .. } => Some(error),
+            ResumeRecordProblem::Json { source, .. }
+            | ResumeRecordProblem::Encode { source, .. } => Some(source),
             _ => None,
         }
     }
