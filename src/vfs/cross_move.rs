@@ -1,7 +1,7 @@
 //! Verified copy followed by guarded, nonrecursive source removal.
 //! A published copy and a completed move are separate facts. Partial moves
 //! are never automatic retry or inverse-rename candidates.
-use super::copy_metadata::{self, Mode as MetadataMode};
+use super::copy_metadata::{self, Attributes, Mode as MetadataMode};
 use super::sftp::remote;
 use super::transfer::{
     copy_item_cancellable, entry_metadata, rename_for_publication, source_children,
@@ -126,7 +126,7 @@ fn verify_file_pair(
     displayed_source: &Location,
     before: &TransferSourceEntry,
     copied: &TransferSourceEntry,
-    finish_attributes: bool,
+    attributes: Option<Attributes>,
     progress: &mut Progress,
 ) -> Result<(), TransferError> {
     let cancel = progress.cancellation();
@@ -173,8 +173,8 @@ fn verify_file_pair(
     }
     verify_entry(target, copied, &cancel)?;
     copied.verify(target, &cancel, true)?;
-    if finish_attributes {
-        let warning = copy_metadata::finish_file(target, &before.metadata, &mut output)?;
+    if let Some(wanted) = attributes {
+        let warning = copy_metadata::finish_file(target, &wanted, &mut output)?;
         let open_version = TransferSourceEntry {
             metadata: output.metadata()?,
             children: None,
@@ -255,6 +255,8 @@ pub(super) fn run(
 pub(super) struct MoveSource {
     manifest: TransferSourceManifest,
     links: BTreeMap<Location, PathBuf>,
+    #[cfg(target_os = "macos")]
+    original_access_times: Option<Vec<Option<std::time::SystemTime>>>,
 }
 
 impl MoveSource {
@@ -281,7 +283,38 @@ impl MoveSource {
                 }
             }
         }
-        Ok(Self { manifest, links })
+        Ok(Self {
+            manifest,
+            links,
+            #[cfg(target_os = "macos")]
+            original_access_times: None,
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn with_original_access_times(
+        mut self,
+        times: Option<Vec<Option<std::time::SystemTime>>>,
+    ) -> Result<Self, TransferError> {
+        let entries = self.manifest.entries.len();
+        let times = times.unwrap_or_else(|| vec![None; entries]);
+        if times.len() != entries {
+            return Err(
+                crate::i18n::text("Некорректная запись времени доступа для переноса").into(),
+            );
+        }
+        // The saved timestamps use the same sorted relative paths as the verified manifest.
+        self.original_access_times = Some(times);
+        Ok(self)
+    }
+
+    fn attributes(&self, metadata: &EntryMetadata, _index: usize) -> Attributes {
+        let wanted = Attributes::from_entry(metadata);
+        #[cfg(target_os = "macos")]
+        if let Some(times) = &self.original_access_times {
+            return wanted.with_accessed(times[_index]);
+        }
+        wanted
     }
 
     #[cfg(target_os = "macos")]
@@ -296,13 +329,14 @@ impl MoveSource {
 
 pub(super) fn remove_verified(
     item: &TransferItem,
-    original: MoveSource,
+    source_plan: MoveSource,
     verified_target: Option<TransferSourceManifest>,
     progress: &mut Progress,
     removed: impl FnOnce(),
     observe: &mut impl FnMut(&Location, Phase) -> Result<(), TransferError>,
 ) -> Result<(), TransferError> {
-    let MoveSource { manifest, links } = original;
+    let manifest = &source_plan.manifest;
+    let links = &source_plan.links;
     let cancel = progress.cancellation();
     progress.results.copied_source_remaining();
     let mut fully_removed = false;
@@ -367,7 +401,7 @@ pub(super) fn remove_verified(
                 }
                 // Reverse path order visits children before their parents.
                 // Never remove an unenumerated entry or recursively delete.
-                for (original, entry) in manifest.entries.iter().rev() {
+                for (index, (original, entry)) in manifest.entries.iter().enumerate().rev() {
                     let source = mapped(original, &item.source, &held);
                     let target = mapped(original, &item.source, &item.target);
                     let copied = &target_manifest.entries[&target];
@@ -377,7 +411,7 @@ pub(super) fn remove_verified(
                     if !directory_matches(&staging_meta, &metadata(staging)?) {
                         return Err(changed(staging).into());
                     }
-                    verify_ancestors(original, &manifest, &item.source, &held, &cancel)?;
+                    verify_ancestors(original, manifest, &item.source, &held, &cancel)?;
                     verify_ancestors(
                         &target,
                         &target_manifest,
@@ -387,14 +421,16 @@ pub(super) fn remove_verified(
                     )?;
                     let finish_attributes =
                         finish_local_attributes || original.remote() || target.remote();
+                    let attributes =
+                        finish_attributes.then(|| source_plan.attributes(&entry.metadata, index));
                     if entry.children.is_some() {
                         if !directory_matches(&entry.metadata, &metadata(&source)?) {
                             return Err(changed(&source).into());
                         }
                         copied.verify(&target, &cancel, true)?;
-                        if finish_attributes {
+                        if let Some(wanted) = attributes {
                             let warning =
-                                copy_metadata::finish_directory(&target, &entry.metadata, copied)?;
+                                copy_metadata::finish_directory(&target, &wanted, copied)?;
                             progress.results.note_metadata(original, warning.as_deref());
                             cancel.check()?;
                             if !directory_matches(&entry.metadata, &metadata(&source)?) {
@@ -417,13 +453,7 @@ pub(super) fn remove_verified(
                             }
                         } else {
                             verify_file_pair(
-                                &source,
-                                &target,
-                                original,
-                                entry,
-                                copied,
-                                finish_attributes,
-                                progress,
+                                &source, &target, original, entry, copied, attributes, progress,
                             )?;
                         }
                         cancel.check()?;
@@ -453,12 +483,14 @@ pub(super) fn remove_verified(
                     deletion
                 }
                 Err(restore) => {
+                    let reason = deletion
+                        .err()
+                        .map_or_else(|| changed(&held), |e| e.to_string());
+                    let source = &item.source;
                     Err(crate::tr_format!(
-                    "{}. Остаток источника сохранён в {held}; возврат в {} не выполнен: {restore}",
-                    "{}. Remaining source retained at {held}; restoration to {} failed: {restore}",
-                    deletion.err().map_or_else(|| changed(&held), |e| e.to_string()), item.source
-                )
-                    .into())
+                        "{reason}. Остаток источника сохранён в {held}; возврат в {source} не выполнен: {restore}",
+                        "{reason}. Remaining source retained at {held}; restoration to {source} failed: {restore}"
+                    ).into())
                 }
             }
         })

@@ -243,6 +243,17 @@ fn published_move_requires_the_original_source_and_the_sealed_destination() {
             }
             let bytes = b"verified payload";
             fs::write(payload(&source), bytes).unwrap();
+            let accessed = UNIX_EPOCH - Duration::new(86_400, 123_456_789);
+            let set_accessed = |path: &Path, time| {
+                fs::File::open(path)
+                    .unwrap()
+                    .set_times(fs::FileTimes::new().set_accessed(time))
+                    .unwrap();
+            };
+            set_accessed(&payload(&source), accessed);
+            if tree {
+                set_accessed(source.path(), accessed + Duration::from_secs(7));
+            }
             let item = TransferItem::new(source.clone(), source.clone(), target.clone());
             let offer = interrupt_move(&item, &recovery, Phase::Copied);
 
@@ -257,9 +268,18 @@ fn published_move_requires_the_original_source_and_the_sealed_destination() {
             let (mut progress, mut view) = Progress::tracked_transfer();
             let result = resume(&recovery, &offer.id, &mut progress);
             assert_eq!(view.snapshot().total_written, 0);
-            assert_eq!(fs::read(payload(&target)).unwrap(), bytes);
             if replaced.is_none() {
                 assert!(result.is_ok(), "{result:?}");
+                assert_eq!(
+                    fs::metadata(payload(&target)).unwrap().accessed().unwrap(),
+                    accessed
+                );
+                if tree {
+                    assert_eq!(
+                        fs::metadata(target.path()).unwrap().accessed().unwrap(),
+                        accessed + Duration::from_secs(7)
+                    );
+                }
                 assert!(!source.path().exists());
                 assert!(scan(&recovery).0.is_empty());
             } else {
@@ -267,7 +287,77 @@ fn published_move_requires_the_original_source_and_the_sealed_destination() {
                 assert_eq!(fs::read(payload(&source)).unwrap(), bytes);
                 assert_eq!(scan(&recovery).0.len(), 1);
             }
+            assert_eq!(fs::read(payload(&target)).unwrap(), bytes);
         }
+    }
+}
+
+#[test]
+fn older_folder_moves_warn_and_a_damaged_access_time_section_preserves_the_source() {
+    for legacy in [true, false] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let recovery = root.join("recovery");
+        let source: Location = root.join("source").into();
+        let target: Location = root.join("target").into();
+        fs::create_dir(source.path()).unwrap();
+        fs::write(source.path().join("child"), b"source bytes").unwrap();
+        let item = TransferItem::new(source.clone(), source.clone(), target.clone());
+        let offer = interrupt_move(&item, &recovery, Phase::Copied);
+        let path = receipts(&recovery).join(&offer.id);
+        let mut bytes = fs::read(&path).unwrap();
+        if legacy {
+            let mut lines = bytes.split(|&byte| byte == b'\n');
+            let mut header: serde_json::Value =
+                serde_json::from_slice(lines.next().unwrap()).unwrap();
+            header[0] = serde_json::Value::from(2);
+            assert!(header[1]
+                .as_object_mut()
+                .unwrap()
+                .remove("folder_access_times")
+                .is_some());
+            lines.next().expect("access time section");
+            let mut previous = serde_json::to_vec(&header).unwrap();
+            for line in lines {
+                previous.push(b'\n');
+                previous.extend_from_slice(line);
+            }
+            bytes = previous;
+        } else {
+            let section = bytes.iter().position(|&byte| byte == b'\n').unwrap() + 1;
+            assert_eq!(bytes[section], b'[');
+            bytes[section] = b'{';
+        }
+        fs::write(&path, bytes).unwrap();
+        let mut progress = Progress::default();
+        let result = resume(&recovery, &offer.id, &mut progress);
+        if legacy {
+            assert!(result.unwrap().contains(text(
+                "Даты или права доступа сохранены частично. Подробности указаны в строках журнала."
+            )));
+            assert!(progress.results.items.iter().all(|row| {
+                row.outcome == Outcome::CompletedWithWarning
+                    && row
+                        .metadata_warning
+                        .as_deref()
+                        .is_some_and(|warning| warning.contains(text("время доступа")))
+            }));
+            assert!(!source.path().exists());
+            assert!(!path.exists());
+        } else {
+            assert!(result
+                .unwrap_err()
+                .contains(text("Некорректная запись времени доступа для переноса")));
+            assert_eq!(
+                fs::read(source.path().join("child")).unwrap(),
+                b"source bytes"
+            );
+            assert!(path.exists());
+        }
+        assert_eq!(
+            fs::read(target.path().join("child")).unwrap(),
+            b"source bytes"
+        );
     }
 }
 

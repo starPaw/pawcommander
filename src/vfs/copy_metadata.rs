@@ -37,7 +37,7 @@ enum Shape {
     Directory,
 }
 
-struct Attributes {
+pub(super) struct Attributes {
     shape: Option<Shape>,
     mode: Option<u32>,
     accessed: Option<SystemTime>,
@@ -45,11 +45,17 @@ struct Attributes {
 }
 
 impl Attributes {
-    fn from_entry(entry: &EntryMetadata) -> Self {
+    pub(super) fn from_entry(entry: &EntryMetadata) -> Self {
         match entry {
             EntryMetadata::Local(local) => Self::from_local(local),
             EntryMetadata::Remote(remote) => Self::from_remote(remote),
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn with_accessed(mut self, accessed: Option<SystemTime>) -> Self {
+        self.accessed = accessed;
+        self
     }
 
     fn from_local(metadata: &fs::Metadata) -> Self {
@@ -404,27 +410,26 @@ pub(super) fn stage_resumed_entry(
 
 pub(super) fn finish_file(
     target: &Location,
-    source: &EntryMetadata,
+    wanted: &Attributes,
     opened: &mut SourceReader,
 ) -> Result<Option<String>, TransferError> {
-    let wanted = Attributes::from_entry(source);
     match opened {
-        SourceReader::Local(file) => local_apply(file, &wanted, Mode::Final, target, None),
+        SourceReader::Local(file) => local_apply(file, wanted, Mode::Final, target, None),
         SourceReader::Remote(handle) => {
-            RemoteObject::Handle(handle).apply(&wanted, Mode::Final, target, None)
+            RemoteObject::Handle(handle).apply(wanted, Mode::Final, target, None)
         }
     }
 }
 
 pub(super) fn finish_directory(
     target: &Location,
-    source: &EntryMetadata,
+    wanted: &Attributes,
     existing: &TransferSourceEntry,
 ) -> Result<Option<String>, TransferError> {
     let channel = target.remote().then(|| remote(target)).transpose()?;
     apply_path(
         target,
-        &Attributes::from_entry(source),
+        wanted,
         channel.as_ref(),
         Mode::Final,
         Some(existing),

@@ -205,7 +205,7 @@ On Linux, a Secret Service provider must be running on the desktop session bus. 
 
 Regular files and folders can be copied recursively in either direction and between connections. Moves to or from local storage and between different connections use mandatory verification before guarded source removal. A same-connection move uses server rename. SFTP copying rejects symbolic links and special files.
 
-SFTP copies preserve ordinary permissions, the directory sticky bit, and the access and modification times supported by the destination. SFTP dates use whole seconds. Destination ownership follows the destination filesystem or account. If the destination cannot preserve some attributes, the transfer result reports partial preservation and the affected rows list the fields in **Details**.
+SFTP copies and copy-based moves preserve ordinary permissions, the directory sticky bit, and the access and modification times supported by the destination. SFTP dates use whole seconds. Destination ownership follows the destination filesystem or account. On macOS, new move recovery records keep the original access times. If an older folder move record lacks those times or the destination cannot preserve an attribute, the transfer result reports partial preservation and the affected rows list the fields in **Details**.
 
 The server must support `fstatvfs@openssh.com` free-space reporting and provide the metadata required for source checks. Unsupported reporting stops the current item before data transfer. Destination space checks may create and remove an empty probe in a private temporary directory.
 

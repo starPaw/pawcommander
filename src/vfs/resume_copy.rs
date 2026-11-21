@@ -155,6 +155,8 @@ struct Receipt {
     stage_identity: Option<(u64, u64)>,
     original: Original,
     source_accessed: Option<SavedTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    folder_access_times: Option<journal::AccessTimesSection>,
     previous: Option<FileProof>,
 }
 
@@ -344,9 +346,10 @@ fn start_file(
             stage_identity: stage_identity(stage)?,
             original: Original::File(original),
             source_accessed: copy_metadata::access_time(&source_metadata).map(SavedTime::from),
+            folder_access_times: None,
             previous,
         };
-        let ticket = register_copy(directory, stage, receipt, &cancel)?;
+        let ticket = register_copy(directory, stage, receipt, None, &cancel)?;
         *preserve = true;
         let paths = ticket.receipt.paths()?;
         finish_copy(&ticket, &paths, progress, false, published)?;
@@ -358,9 +361,10 @@ fn register_copy(
     directory: &Path,
     stage: &Location,
     receipt: Receipt,
+    folder_access_times: Option<&[Option<SavedTime>]>,
     cancel: &Cancellation,
 ) -> Result<Ticket, TransferError> {
-    let ticket = Ticket::create(&receipts(directory), receipt)?;
+    let ticket = Ticket::create(&receipts(directory), receipt, folder_access_times)?;
     if let Err(error) = create_owner_marker(stage, ticket.name(), cancel) {
         ticket.finish()?;
         return Err(error);
@@ -634,6 +638,15 @@ fn finish_move(
                 renamed,
                 progress,
             )?;
+            let original_access_times = match &ticket.receipt.original {
+                Original::File(_) => Some(vec![ticket
+                    .receipt
+                    .source_accessed
+                    .as_ref()
+                    .and_then(SavedTime::get)]),
+                Original::Folder(_) => ticket.folder_access_times()?,
+            };
+            let source = source.with_original_access_times(original_access_times)?;
             discard_source_stage(ticket, paths)?;
             Ok((source, source_identity))
         })();
@@ -741,11 +754,12 @@ pub(crate) fn resume(
         Ok(completion)
     })();
     let mut reason = result.as_ref().err().map(ToString::to_string);
+    let metadata_warning = progress.results.active_metadata_warning();
+    let partial_metadata =
+        text("Даты или права доступа сохранены частично. Подробности указаны в строках журнала.");
     let outcome = match (&result, committed) {
         (_, true) if moving && !removed => Outcome::CopiedSourceRemaining,
-        (_, true) if result.is_err() || progress.results.active_metadata_warning() => {
-            Outcome::CompletedWithWarning
-        }
+        (_, true) if result.is_err() || metadata_warning => Outcome::CompletedWithWarning,
         (_, true) => Outcome::Completed,
         (Err(TransferError::Cancelled), false) => {
             progress.results.cancelled = true;
@@ -755,12 +769,7 @@ pub(crate) fn resume(
         _ => Outcome::PartialCopyRetained,
     };
     if outcome == Outcome::CompletedWithWarning && reason.is_none() {
-        reason = Some(
-            text(
-                "Даты или права доступа сохранены частично. Подробности указаны в строках журнала.",
-            )
-            .into(),
-        );
+        reason = Some(partial_metadata.into());
     }
     progress
         .results
@@ -789,6 +798,13 @@ pub(crate) fn resume(
                 "Копирование папки завершено. Использовано сохранённых байтов: {bytes}.",
                 "Folder copy completed. Reused {bytes} staged bytes."
             ),
+        })
+        .map(|mut message| {
+            if metadata_warning {
+                message.push('\n');
+                message.push_str(partial_metadata);
+            }
+            message
         })
         .map_err(|err| err.to_string())
 }
