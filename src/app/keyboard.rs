@@ -211,10 +211,10 @@ impl PawCommander {
         })
     }
 
-    pub(super) fn keyboard(&mut self, ctx: &egui::Context) {
+    pub(super) fn keyboard(&mut self, ctx: &egui::Context) -> Option<Vec<egui::Event>> {
         let pane_key_presses = std::mem::take(&mut self.pane_key_presses);
         if self.keyboard_blocked(ctx) {
-            return;
+            return None;
         }
         // egui drops a text field's focus on Escape before this update runs.
         let file_focus = if let Some((pane, path)) = self.file_row_focus(ctx) {
@@ -231,14 +231,19 @@ impl PawCommander {
                     && ctx.input(|input| input.key_pressed(egui::Key::Escape))));
         let mut actions = Vec::new();
         let mut pane = self.active;
-        ctx.input_mut(|input| {
+        let palette_input = ctx.input_mut(|input| {
             let clipboard_enabled = !focused && input.focused;
+            let mut events_after_opening = None;
             if !focused {
                 for (index, event) in pane_key_presses {
                     input.events.insert(index.min(input.events.len()), event);
                 }
             }
             input.events.retain(|event| {
+                if let Some(count) = &mut events_after_opening {
+                    *count += 1;
+                    return true;
+                }
                 let action = if let Some(action) = clipboard_enabled
                     .then(|| file_clipboard_action(event))
                     .flatten()
@@ -330,6 +335,9 @@ impl PawCommander {
                     None
                 };
                 if let Some(action) = action {
+                    if matches!(action, Action::Shortcut(Command::Palette)) {
+                        events_after_opening = Some(0);
+                    }
                     if self.settings.split && matches!(action, Action::Shortcut(Command::OtherPane))
                     {
                         pane = 1 - pane;
@@ -340,6 +348,8 @@ impl PawCommander {
                     true
                 }
             });
+            // Give only events after the opening shortcut to the new palette.
+            events_after_opening.map(|count| input.events.split_off(input.events.len() - count))
         });
         for action in actions {
             if self.keyboard_blocked(ctx) {
@@ -354,6 +364,13 @@ impl PawCommander {
             if moves_widget_focus {
                 break;
             }
+        }
+        match palette_input {
+            Some(events) if self.command_palette.is_none() => {
+                ctx.input_mut(|input| input.events.extend(events));
+                None
+            }
+            events => events,
         }
     }
 

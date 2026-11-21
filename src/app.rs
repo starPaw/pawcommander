@@ -402,7 +402,7 @@ impl eframe::App for PawCommander {
         } else {
             Vec::new()
         };
-        self.keyboard(ctx);
+        let opening_palette_input = self.keyboard(ctx);
         let quick_look_focus = self.show_quick_look(ctx);
         let mut actions = vec![];
         let mut drop_targets = DropTargets::default();
@@ -574,8 +574,17 @@ impl eframe::App for PawCommander {
             ctx.memory_mut(|memory| memory.request_focus(id));
             ctx.request_repaint();
         }
+        let picker_keys = if let Some(events) = opening_palette_input {
+            ctx.input_mut(|input| input.events = events);
+            CommandPalette::take_keys(ctx)
+        } else {
+            picker_keys
+        };
         if self.command_palette.is_some() {
             self.show_command_palette(ctx, &picker_keys);
+            // Query text belongs to the palette, including when the command
+            // opens another dialog later in the frame.
+            ctx.input_mut(|input| input.events.clear());
         } else {
             self.show_folder_jump(ctx, &picker_keys);
         }
