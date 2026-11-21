@@ -1002,7 +1002,7 @@ impl PawCommander {
                         )),
                         Err(error) => Err(crate::tr_format!(
                             "{error}. Available for another attempt: {remaining}.",
-                            error = error,
+                            error = crate::i18n::file_error(&error),
                             remaining = remaining
                         )),
                     }

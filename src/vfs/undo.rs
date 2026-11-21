@@ -272,7 +272,7 @@ impl UndoBatch {
                 &entry.capture.current,
                 Some(entry.capture.original.display()),
                 outcome,
-                result.as_ref().err().map(ToString::to_string),
+                result.as_ref().err().map(crate::i18n::file_error),
             );
             if result.is_ok() || matches!(result, Err(TransferError::PublicationUnconfirmed(_))) {
                 self.weight -= self.entries.pop().unwrap().entries.len();
@@ -288,9 +288,12 @@ pub(crate) fn rename_with_undo(
     source: &Location,
     name: &str,
     progress: &mut Progress,
-) -> Result<Location, String> {
-    super::location::validate_name(name).map_err(|error| crate::i18n::path_error(&error))?;
-    let target = source.parent().ok_or_else(unavailable)?.join(name);
+) -> Result<Location, TransferError> {
+    super::location::validate_name(name)?;
+    let target = source
+        .parent()
+        .ok_or_else(|| crate::file_error::MutationError::UndoUnavailable(source.clone()))?
+        .join(name);
     progress
         .results
         .plan([(source.clone(), Some(target.display()))]);
@@ -305,9 +308,7 @@ pub(crate) fn rename_with_undo(
         .ok()
         .map(|manifest| (capture, manifest))
     });
-    progress
-        .check_cancelled()
-        .map_err(|error| error.to_string())?;
+    progress.check_cancelled()?;
     let renamed = if source.remote() && source != &target {
         match rename_for_publication(source, &target) {
             Ok(()) => target.clone(),
@@ -321,9 +322,9 @@ pub(crate) fn rename_with_undo(
                     source,
                     Some(target.display()),
                     outcome,
-                    Some(error.to_string()),
+                    Some(crate::i18n::file_error(&error)),
                 );
-                return Err(error.to_string());
+                return Err(error);
             }
         }
     } else {

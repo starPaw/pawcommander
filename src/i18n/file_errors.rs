@@ -1,5 +1,8 @@
 use super::text;
-use crate::file_error::{ArchiveMemberError, Failure, ListingError, ListingErrorKind, PathError};
+use crate::file_error::{
+    ArchiveMemberError, Failure, ListingError, ListingErrorKind, LocalPathAction, MutationError,
+    PathError,
+};
 use crate::operations::TransferError;
 use crate::vfs::TransferFailure;
 
@@ -8,6 +11,7 @@ pub(crate) fn file_error(error: &TransferError) -> String {
         TransferError::Failed(Failure::Path(error)) => path_error(error),
         TransferError::Failed(Failure::Listing(error)) => listing_error(error),
         TransferError::Failed(Failure::ConflictClosed) => text!("Диалог конфликта закрыт").into(),
+        TransferError::Failed(Failure::Mutation(error)) => mutation_error(error),
         _ => error.to_string(),
     }
 }
@@ -70,8 +74,73 @@ pub(crate) fn path_error(error: &PathError) -> String {
             text!("Используйте абсолютный POSIX-путь SFTP без обратных слешей")
         }
         PathError::InvalidName(_) => text!("Введите имя без /, \\, NUL, . и .."),
+        PathError::InvalidLocalName(_) => text!("Введите имя файла или папки без / и \\"),
     };
     message.into()
+}
+
+fn mutation_error(error: &MutationError) -> String {
+    use MutationError::*;
+    match error {
+        LocalIo {
+            path,
+            action,
+            source,
+        } => {
+            let action = match action {
+                LocalPathAction::OpenDirectory => text!("Не удалось открыть папку"),
+                LocalPathAction::ResolveParent => text!("Не удалось определить путь к папке"),
+                LocalPathAction::ResolveEntry => text!("Не удалось определить путь к элементу"),
+                LocalPathAction::ReadMetadata => text!("Не удалось получить сведения об элементе"),
+                LocalPathAction::CheckDestination => text!("Не удалось проверить место назначения"),
+                LocalPathAction::CreateDirectory => text!("Не удалось создать папку"),
+            };
+            format!("{action} «{}»: {source}", path.display())
+        }
+        CurrentDirectory { source, .. } => {
+            crate::tr_format!("Could not determine the current folder: {e}", e = source)
+        }
+        NotDirectory(path) => crate::tr_format!("“{}” is not a folder", path.display()),
+        ModifyRoot(_) => text!("Нельзя изменять корень файловой системы").into(),
+        RenameRoot(path) if path.remote() => text!("Нельзя переименовать корень").into(),
+        RenameRoot(_) => text!("Нельзя переименовать корень файловой системы").into(),
+        UndoUnavailable(_) => crate::tr_format!(
+            "Undo unavailable: a file or folder changed or is inaccessible. Inspect both paths."
+        ),
+        DestinationExists(path) => crate::tr_format!(
+            "“{}” already exists. Choose another name or folder. Existing items are preserved",
+            path.display()
+        ),
+        ReadOnlyArchive(_) => text!("Эта операция недоступна внутри архива").into(),
+        RenameLocal { from, to, source } => {
+            #[cfg(unix)]
+            let cross_volume = source.raw_os_error() == Some(libc::EXDEV);
+            #[cfg(windows)]
+            let cross_volume = source.raw_os_error() == Some(17); // ERROR_NOT_SAME_DEVICE
+            #[cfg(not(any(unix, windows)))]
+            let cross_volume = false;
+            if cross_volume {
+                return crate::tr_format!(
+                    "Cross-volume move is unavailable: {error}. Copy the item, check the copy, and move the original to Trash",
+                    error = source
+                );
+            }
+            crate::tr_format!(
+                "Could not move “{}” to “{}” without replacing existing items: {error}",
+                from.display(),
+                to.display(),
+                error = source
+            )
+        }
+        CreateSftp {
+            destination,
+            source,
+        } => format!(
+            "{} «{}»: {source}",
+            text!("Не удалось создать папку"),
+            destination.path().display(),
+        ),
+    }
 }
 
 fn listing_error(error: &ListingError) -> String {

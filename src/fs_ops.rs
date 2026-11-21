@@ -1,7 +1,9 @@
 //! Local filesystem operations. Copies are staged privately on the destination
 //! volume before publication. This does not snapshot a changing filesystem.
 
-use crate::file_error::{ListingError, ListingErrorKind};
+use crate::file_error::{
+    ListingError, ListingErrorKind, LocalPathAction, MutationError, PathError,
+};
 use crate::operations::{Cancellation, CopyReader, Progress, TransferError};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
@@ -179,41 +181,30 @@ pub fn visit_directory(
     Ok(())
 }
 
-pub fn create_directory(parent: &Path, name: &str) -> Result<PathBuf, String> {
+pub fn create_directory(parent: &Path, name: &str) -> Result<PathBuf, TransferError> {
     validate_name(name)?;
     let parent = directory_path(parent)?;
     let destination = parent.join(name);
-    fs::create_dir(&destination).map_err(|e| {
-        at(
-            crate::i18n::text!("Не удалось создать папку"),
-            &destination,
-            e,
-        )
+    fs::create_dir(&destination).map_err(|error| {
+        MutationError::local(&destination, LocalPathAction::CreateDirectory, error)
     })?;
     Ok(destination)
 }
 
-pub fn rename_entry(source: &Path, name: &str) -> Result<PathBuf, String> {
+pub fn rename_entry(source: &Path, name: &str) -> Result<PathBuf, TransferError> {
     validate_name(name)?;
     let source = entry_path(source)?;
-    fs::symlink_metadata(&source).map_err(|e| {
-        at(
-            crate::i18n::text!("Не удалось получить сведения об элементе"),
-            &source,
-            e,
-        )
-    })?;
+    fs::symlink_metadata(&source)
+        .map_err(|error| MutationError::local(&source, LocalPathAction::ReadMetadata, error))?;
     let destination = source
         .parent()
-        .ok_or(crate::i18n::text!(
-            "Нельзя переименовать корень файловой системы",
-        ))?
+        .ok_or_else(|| MutationError::RenameRoot(source.clone().into()))?
         .join(name);
     if source == destination {
         return Ok(source);
     }
     ensure_absent(&destination)?;
-    rename_no_replace(&source, &destination).map_err(|e| rename_error(&source, &destination, e))?;
+    rename_with_context(&source, &destination)?;
     Ok(destination)
 }
 
@@ -288,7 +279,8 @@ fn transfer(sources: &[PathBuf], destination: &Path, kind: TransferKind) -> Resu
 }
 
 pub fn trash_entries(paths: &[PathBuf], progress: &mut Progress) -> Result<usize, String> {
-    let paths = normalize_selection(paths, progress).map_err(|error| error.to_string())?;
+    let paths =
+        normalize_selection(paths, progress).map_err(|error| crate::i18n::file_error(&error))?;
     progress.results.plan(
         paths
             .iter()
@@ -343,69 +335,55 @@ pub fn trash_entries(paths: &[PathBuf], progress: &mut Progress) -> Result<usize
     Ok(paths.len())
 }
 
-pub(crate) fn validate_name(name: &str) -> Result<(), String> {
+pub(crate) fn validate_name(name: &str) -> Result<(), PathError> {
     let mut components = Path::new(name).components();
     if name.trim().is_empty()
         || name.contains(['/', '\\', '\0'])
         || !matches!(components.next(), Some(Component::Normal(_)))
         || components.next().is_some()
     {
-        return Err(crate::i18n::text!("Введите имя файла или папки без / и \\").to_owned());
+        return Err(PathError::InvalidLocalName(name.to_owned()));
     }
     Ok(())
 }
 
-fn directory_path(path: &Path) -> Result<PathBuf, String> {
+fn directory_path(path: &Path) -> Result<PathBuf, TransferError> {
     let path = fs::canonicalize(path)
-        .map_err(|e| at(crate::i18n::text!("Не удалось открыть папку"), path, e))?;
+        .map_err(|error| MutationError::local(path, LocalPathAction::OpenDirectory, error))?;
     if !path.is_dir() {
-        return Err(crate::tr_format!("“{}” is not a folder", path.display()));
+        return Err(MutationError::NotDirectory(path).into());
     }
     Ok(path)
 }
 
 /// Resolve parent aliases but preserve the final component: canonicalizing a
 /// selected symlink itself would accidentally operate on the link's target.
-fn entry_path(path: &Path) -> Result<PathBuf, String> {
+fn entry_path(path: &Path) -> Result<PathBuf, TransferError> {
     let absolute = if path.is_absolute() {
         path.to_owned()
     } else {
         std::env::current_dir()
-            .map_err(|e| crate::tr_format!("Could not determine the current folder: {e}", e = e))?
+            .map_err(|source| MutationError::CurrentDirectory {
+                input: path.to_owned(),
+                source,
+            })?
             .join(path)
     };
-    let name = absolute.file_name().ok_or(crate::i18n::text!(
-        "Нельзя изменять корень файловой системы"
-    ))?;
-    let parent = absolute.parent().ok_or(crate::i18n::text!(
-        "Нельзя изменять корень файловой системы"
-    ))?;
-    let parent = fs::canonicalize(parent).map_err(|e| {
-        at(
-            crate::i18n::text!("Не удалось определить путь к папке"),
-            parent,
-            e,
-        )
-    })?;
+    let root = || MutationError::ModifyRoot(absolute.clone());
+    let name = absolute.file_name().ok_or_else(root)?;
+    let parent = absolute.parent().ok_or_else(root)?;
+    let parent = fs::canonicalize(parent)
+        .map_err(|error| MutationError::local(parent, LocalPathAction::ResolveParent, error))?;
     let entry = parent.join(name);
-    let metadata = fs::symlink_metadata(&entry).map_err(|e| {
-        at(
-            crate::i18n::text!("Не удалось получить сведения об элементе"),
-            &entry,
-            e,
-        )
-    })?;
+    let metadata = fs::symlink_metadata(&entry)
+        .map_err(|error| MutationError::local(&entry, LocalPathAction::ReadMetadata, error))?;
     if metadata.file_type().is_symlink() {
         Ok(entry)
     } else {
         // Resolve the actual spelling on case-insensitive volumes as well as
         // parent aliases, so descendant protection compares canonical paths.
-        fs::canonicalize(&entry).map_err(|e| {
-            at(
-                crate::i18n::text!("Не удалось определить путь к элементу"),
-                &entry,
-                e,
-            )
+        fs::canonicalize(&entry).map_err(|error| {
+            MutationError::local(entry, LocalPathAction::ResolveEntry, error).into()
         })
     }
 }
@@ -426,13 +404,8 @@ fn normalize_selection(
         progress.checkpoint()?;
         progress.item(original);
         let path = entry_path(original)?;
-        let metadata = fs::symlink_metadata(&path).map_err(|e| {
-            at(
-                crate::i18n::text!("Не удалось получить сведения об элементе"),
-                &path,
-                e,
-            )
-        })?;
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| MutationError::local(&path, LocalPathAction::ReadMetadata, error))?;
         entries.push((path, metadata));
     }
     let mut first = HashMap::with_capacity(entries.len());
@@ -472,18 +445,13 @@ fn normalize_selection(
         .collect())
 }
 
-fn ensure_absent(path: &Path) -> Result<(), String> {
+fn ensure_absent(path: &Path) -> Result<(), TransferError> {
     match fs::symlink_metadata(path) {
-        Ok(_) => Err(crate::tr_format!(
-            "“{}” already exists. Choose another name or folder. Existing items are preserved",
-            path.display()
-        )),
+        Ok(_) => Err(MutationError::DestinationExists(path.to_owned()).into()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(at(
-            crate::i18n::text!("Не удалось проверить место назначения"),
-            path,
-            e,
-        )),
+        Err(error) => {
+            Err(MutationError::local(path, LocalPathAction::CheckDestination, error).into())
+        }
     }
 }
 
@@ -1255,24 +1223,17 @@ fn at(action: &str, path: &Path, error: impl std::fmt::Display) -> String {
     format!("{action} «{}»: {error}", path.display())
 }
 
-pub(crate) fn rename_error(source: &Path, destination: &Path, error: io::Error) -> String {
-    #[cfg(unix)]
-    let cross_volume = error.raw_os_error() == Some(18); // EXDEV
-    #[cfg(windows)]
-    let cross_volume = error.raw_os_error() == Some(17); // ERROR_NOT_SAME_DEVICE
-    #[cfg(not(any(unix, windows)))]
-    let cross_volume = false;
-    if cross_volume {
-        return crate::tr_format!(
-            "Cross-volume move is unavailable: {error}. Copy the item, check the copy, and move the original to Trash", error = error
-        );
+pub(crate) fn rename_error(from: &Path, to: &Path, source: io::Error) -> TransferError {
+    MutationError::RenameLocal {
+        from: from.to_owned(),
+        to: to.to_owned(),
+        source,
     }
-    crate::tr_format!(
-        "Could not move “{}” to “{}” without replacing existing items: {error}",
-        source.display(),
-        destination.display(),
-        error = error
-    )
+    .into()
+}
+
+pub(crate) fn rename_with_context(source: &Path, destination: &Path) -> Result<(), TransferError> {
+    rename_no_replace(source, destination).map_err(|error| rename_error(source, destination, error))
 }
 
 // Native no-replacement renames close the check-then-rename overwrite race.

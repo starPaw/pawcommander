@@ -997,6 +997,15 @@ fn openssh_round_trip_and_host_verification() {
     let local_root = Location::Local(root.join("local"));
     fs::create_dir(local_root.path()).unwrap();
     fs::create_dir(remote_root.path()).unwrap();
+    let duplicate = create_directory(&remote_root.parent().unwrap(), "remote").unwrap_err();
+    let TransferError::Failed(crate::file_error::Failure::Mutation(duplicate)) = duplicate else {
+        panic!("expected a typed SFTP directory conflict: {duplicate:?}");
+    };
+    assert!(matches!(
+        duplicate.as_ref(),
+        crate::file_error::MutationError::CreateSftp { destination, source }
+            if destination == &remote_root && matches!(source.code(), ssh2::ErrorCode::SFTP(_))
+    ));
     let missing = remote_root.join("nonexistent-listing-test");
     let failure = read_directory(&missing, &|| false).unwrap_err();
     let TransferError::Failed(crate::file_error::Failure::Listing(failure)) = failure else {

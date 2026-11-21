@@ -412,7 +412,7 @@ pub(super) fn remove_verified_at(
                 return Err(crate::tr_format!(
                     "{error}. Inspect source {} and retained folder {held}",
                     item.source,
-                    error = error,
+                    error = crate::i18n::file_error(&error),
                     held = held
                 )
                 .into());
@@ -530,10 +530,10 @@ pub(super) fn remove_verified_at(
                 Err(restore) => {
                     let reason = deletion
                         .err()
-                        .map_or_else(|| changed(&held), |e| e.to_string());
+                        .map_or_else(|| changed(&held), |error| crate::i18n::file_error(&error));
                     let source = &item.source;
                     Err(crate::tr_format!(
-                        "{reason}. Remaining source retained at {held}; restoration to {source} failed: {restore}", held = held, reason = reason, restore = restore, source = source
+                        "{reason}. Remaining source retained at {held}; restoration to {source} failed: {restore}", held = held, reason = reason, restore = crate::i18n::file_error(&restore), source = source
                     ).into())
                 }
             }
@@ -559,6 +559,6 @@ pub(super) fn incomplete(
         progress.results.cancelled = true;
     }
     crate::tr_format!(
-        "A copy was created at {target}. The move is incomplete. Check the source and result history. {error}", error = error, target = target
+        "A copy was created at {target}. The move is incomplete. Check the source and result history. {error}", error = crate::i18n::file_error(&error), target = target
     ).into()
 }

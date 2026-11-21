@@ -412,9 +412,12 @@ fn finish_failure(
         TransferError::PublicationUnconfirmed(_) => Outcome::PublicationUnconfirmed,
     };
     let remaining = total - completed;
-    progress
-        .results
-        .record(&row.source, None, outcome, Some(error.to_string()));
+    progress.results.record(
+        &row.source,
+        None,
+        outcome,
+        Some(crate::i18n::file_error(&error)),
+    );
     if outcome == Outcome::Cancelled {
         progress.results.cancelled = true;
         Ok(crate::tr_format!(

@@ -60,7 +60,7 @@ pub(crate) fn create_checksum_manifest(
             } else {
                 Outcome::Failed
             };
-            let message = error.to_string();
+            let message = crate::i18n::file_error(&error);
             progress
                 .results
                 .record(&target, None, outcome, Some(message.clone()));
@@ -252,9 +252,9 @@ fn ensure_absent(target: &Location) -> Result<(), TransferError> {
 
 fn file_error(source: &Location, error: TransferError) -> TransferError {
     match error {
-        TransferError::Failed(error) => crate::tr_format!(
+        error @ TransferError::Failed(_) => crate::tr_format!(
             "Could not read {source}: {error}",
-            error = error,
+            error = crate::i18n::file_error(&error),
             source = source
         )
         .into(),

@@ -565,7 +565,7 @@ fn restore_held_source(
 fn retained_source(held: &Location, error: TransferError) -> TransferError {
     crate::tr_format!(
         "{error} Check the original folder and retained location {held}.",
-        error = error,
+        error = crate::i18n::file_error(&error),
         held = held
     )
     .into()
@@ -754,7 +754,7 @@ pub(crate) fn resume(
         }
         Ok(completion)
     })();
-    let mut reason = result.as_ref().err().map(ToString::to_string);
+    let mut reason = result.as_ref().err().map(crate::i18n::file_error);
     let metadata_warning = progress.results.active_metadata_warning();
     let partial_metadata =
         text!("Даты или права доступа сохранены частично. Подробности указаны в строках журнала.");
@@ -807,7 +807,7 @@ pub(crate) fn resume(
             }
             message
         })
-        .map_err(|err| err.to_string())
+        .map_err(|error| crate::i18n::file_error(&error))
 }
 
 enum Completion {
@@ -1200,6 +1200,6 @@ fn retained_error(stage: &Location, error: TransferError) -> TransferError {
         TransferError::PublicationUnconfirmed(message) => {
             TransferError::PublicationUnconfirmed(retained(stage, &message))
         }
-        other => retained(stage, &other.to_string()).into(),
+        other => retained(stage, &crate::i18n::file_error(&other)).into(),
     }
 }

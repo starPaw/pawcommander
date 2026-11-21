@@ -61,7 +61,7 @@ pub(super) fn finish(
         Err(error) => Err(crate::tr_format!(
             "{error}. Completed: {completed}.",
             completed = completed,
-            error = error
+            error = crate::i18n::file_error(&error)
         )),
     }
 }
@@ -303,8 +303,8 @@ impl Execution<'_> {
                         return Err(retained(
                             TransferError::PublicationUnconfirmed(crate::tr_format!(
                                 "{error}. Could not restore the previous item: {restore}",
-                                error = error,
-                                restore = restore
+                                error = crate::i18n::file_error(&error),
+                                restore = crate::i18n::file_error(&restore)
                             )),
                             staging,
                         ));
@@ -324,10 +324,13 @@ impl Execution<'_> {
         };
         match result {
             Ok(()) => Ok(metadata_warning),
-            Err(error) if committed => Ok(Some(match metadata_warning {
-                Some(warning) => format!("{warning}. {error}"),
-                None => error.to_string(),
-            })),
+            Err(error) if committed => {
+                let error = crate::i18n::file_error(&error);
+                Ok(Some(match metadata_warning {
+                    Some(warning) => format!("{warning}. {error}"),
+                    None => error,
+                }))
+            }
             Err(error) => Err(error),
         }
     }

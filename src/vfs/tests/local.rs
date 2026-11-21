@@ -1,6 +1,40 @@
 use super::*;
 
 #[test]
+fn local_mutations_keep_typed_conflicts_and_preserve_existing_items() {
+    use crate::file_error::{Failure, LocalPathAction, MutationError};
+
+    let fixture = tempfile::tempdir().unwrap();
+    let root: Location = fixture.path().to_path_buf().into();
+    let directory = create_directory(&root, "existing").unwrap();
+    let duplicate = create_directory(&root, "existing").unwrap_err();
+    let TransferError::Failed(Failure::Mutation(duplicate)) = duplicate else {
+        panic!("expected a typed folder creation failure: {duplicate:?}");
+    };
+    assert!(matches!(
+        duplicate.as_ref(),
+        MutationError::LocalIo { action: LocalPathAction::CreateDirectory, path, source }
+            if path == directory.path() && source.kind() == std::io::ErrorKind::AlreadyExists
+    ));
+
+    let source = directory.join("source.txt");
+    let target = directory.join("target.txt");
+    fs::write(source.path(), b"source").unwrap();
+    fs::write(target.path(), b"target").unwrap();
+    let failure =
+        crate::vfs::rename_with_undo(&source, "target.txt", &mut Progress::default()).unwrap_err();
+    let TransferError::Failed(Failure::Mutation(failure)) = failure else {
+        panic!("expected a typed rename conflict: {failure:?}");
+    };
+    assert!(matches!(
+        failure.as_ref(),
+        MutationError::DestinationExists(path) if path == target.path()
+    ));
+    assert_eq!(fs::read(source.path()).unwrap(), b"source");
+    assert_eq!(fs::read(target.path()).unwrap(), b"target");
+}
+
+#[test]
 fn missing_directory_retains_its_path_and_original_io_error() {
     use crate::file_error::{Failure, ListingErrorKind};
 

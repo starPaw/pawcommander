@@ -56,7 +56,7 @@ pub(crate) fn create_archive(
                 TransferError::PublicationUnconfirmed(_) => Outcome::PublicationUnconfirmed,
                 TransferError::Failed(_) => Outcome::Failed,
             },
-            Some(error.to_string()),
+            Some(crate::i18n::file_error(error)),
         ),
     };
     for source in sources {
@@ -73,7 +73,7 @@ pub(crate) fn create_archive(
             progress.results.cancelled = true;
             Ok(crate::i18n::text!("Создание архива остановлено").into())
         }
-        Err(error) => Err(error.to_string()),
+        Err(error) => Err(crate::i18n::file_error(&error)),
     }
 }
 
