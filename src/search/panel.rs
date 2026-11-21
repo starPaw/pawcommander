@@ -1,5 +1,5 @@
 //! Docked search results and asynchronous validation for their actions.
-use super::{Job, Results};
+use super::{index::IndexStatus, Job, Results};
 #[cfg(test)]
 use crate::test_ui::ContextExt as _;
 use crate::{
@@ -12,6 +12,7 @@ use std::{
     collections::BTreeSet,
     io,
     path::PathBuf,
+    rc::Rc,
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver},
@@ -183,6 +184,7 @@ struct Snapshot {
     results: Results,
     matching_lines: bool,
     query: String,
+    index_status: Option<Rc<IndexStatus>>,
     scroll_to_top: bool,
     selected: BTreeSet<Location>,
 }
@@ -200,15 +202,26 @@ impl Panel {
         self.snapshot.is_some()
     }
 
-    pub(super) fn replace(&mut self, results: Results, matching_lines: bool, query: String) {
+    pub(super) fn replace(
+        &mut self,
+        results: Results,
+        matching_lines: bool,
+        query: String,
+        index_status: Option<Rc<IndexStatus>>,
+    ) {
         self.close();
         self.snapshot = Some(Snapshot {
             results,
             matching_lines,
             query,
+            index_status,
             scroll_to_top: true,
             selected: BTreeSet::new(),
         });
+    }
+
+    pub(super) fn index_status(&self) -> Option<&Rc<IndexStatus>> {
+        self.snapshot.as_ref()?.index_status.as_ref()
     }
 
     fn close(&mut self) {
@@ -458,6 +471,13 @@ impl Panel {
                             }
                         });
                     });
+                    if let Some(status) = &snapshot.index_status {
+                        let info = status.info.borrow();
+                        for value in [&info.source, &info.freshness] {
+                            ui.add(egui::Label::new(egui::RichText::new(value).small()).truncate())
+                                .on_hover_text(value);
+                        }
+                    }
                     ui.horizontal_wrapped(|ui| {
                         let single = (snapshot.selected.len() == 1)
                             .then(|| snapshot.selected.first())
@@ -673,6 +693,7 @@ mod tests {
             results(&[&stale, &present, &stale, &present]),
             true,
             "match".into(),
+            None,
         );
         let selected = &mut panel.snapshot.as_mut().unwrap().selected;
         selected.extend([
@@ -721,9 +742,9 @@ mod tests {
         let old = root.path().join("old");
         let new = root.path().join("new");
         let mut panel = Panel::default();
-        panel.replace(results(&[&old]), true, "old".into());
+        panel.replace(results(&[&old]), true, "old".into(), None);
         let sender = check(&mut panel, Instant::now());
-        panel.replace(results(&[&new]), true, "new".into());
+        panel.replace(results(&[&new]), true, "new".into(), None);
         sender
             .send(CheckEvent::Finished(
                 Instant::now(),
@@ -839,7 +860,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("file.txt");
         let mut panel = Panel::default();
-        panel.replace(results(&[&path]), true, "old".into());
+        panel.replace(results(&[&path]), true, "old".into(), None);
         let (started, started_rx) = mpsc::channel();
         let (finish, finish_rx) = mpsc::channel();
         panel.launch_file(&ctx, move || {
@@ -852,7 +873,7 @@ mod tests {
             std::thread::current().id(),
         );
         panel.close();
-        panel.replace(results(&[&path]), true, "new".into());
+        panel.replace(results(&[&path]), true, "new".into(), None);
         panel.launch_file(&ctx, || Err(io::Error::other("unexpected second launch")));
         assert!(panel.launch.as_ref().unwrap().cancelled());
         finish.send(()).unwrap();
@@ -873,7 +894,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("file.txt");
         let mut panel = Panel::default();
-        panel.replace(results(&[&path, &path]), true, "match".into());
+        panel.replace(results(&[&path, &path]), true, "match".into(), None);
         let mut draw = |events| {
             ctx.run_test_ui(
                 egui::RawInput {
