@@ -1,6 +1,7 @@
 //! Persistent list column preferences and shared header/row geometry.
 
 use crate::i18n::text;
+use crate::icons::{self, Icon};
 use crate::theme::paint_focus;
 use crate::vfs::FileEntry;
 use eframe::egui;
@@ -216,24 +217,30 @@ impl ListColumns {
                             .inner
                         })
                         .inner;
-                    for (target, symbol, hint) in [
-                        (index.checked_sub(1), "↑", text("Переместить выше")),
+                    for (direction, (target, icon, hint)) in [
+                        (
+                            index.checked_sub(1),
+                            Icon::ChevronUp,
+                            text("Переместить выше"),
+                        ),
                         (
                             (index + 1 < count).then_some(index + 1),
-                            "↓",
+                            Icon::ChevronDown,
                             text("Переместить ниже"),
                         ),
-                    ] {
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
                         let title = format!("{hint} · {}", setting.column.label());
                         let response = ui
-                            .push_id((setting.column as u8, symbol), |ui| {
-                                ui.add_enabled(target.is_some(), egui::Button::new(symbol))
+                            .push_id((setting.column as u8, direction), |ui| {
+                                ui.add_enabled_ui(target.is_some(), |ui| {
+                                    icons::compact_button(ui, icon, &title, false)
+                                })
+                                .inner
                             })
-                            .inner
-                            .on_hover_text(&title);
-                        ui.ctx()
-                            .accesskit_node_builder(response.id, |node| node.set_label(title));
-                        paint_focus(ui, &response, 4);
+                            .inner;
                         if response.clicked() {
                             move_column = target.map(|target| (index, target));
                         }
