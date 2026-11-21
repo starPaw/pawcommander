@@ -5,7 +5,8 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const LOCAL_SELECTION: &str = "Выберите локальные файлы или папки для запуска действия.";
+const LOCAL_SELECTION: crate::i18n::MessageKey =
+    crate::i18n::key!("Выберите локальные файлы или папки для запуска действия.");
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub(crate) struct Template {
@@ -27,11 +28,11 @@ impl Default for Template {
 impl Template {
     fn program_path(&self) -> Result<&Path, String> {
         if self.name.trim().is_empty() {
-            return Err(text("Введите название действия.").into());
+            return Err(text!("Введите название действия.").into());
         }
         let program = Path::new(&self.program);
         if !program.is_absolute() || self.program.contains('\0') {
-            return Err(text("Укажите абсолютный путь к исполняемому файлу").into());
+            return Err(text!("Укажите абсолютный путь к исполняемому файлу").into());
         }
         Ok(program)
     }
@@ -65,7 +66,7 @@ impl Template {
                             Part::File => {
                                 let [file] = files else {
                                     return Err(
-                                        text("Для {file} выберите ровно один объект.").into()
+                                        text!("Для {file} выберите ровно один объект.").into()
                                     );
                                 };
                                 value.push(file);
@@ -99,7 +100,7 @@ enum Part<'a> {
 impl<'a> Argument<'a> {
     fn parse(source: &'a str) -> Result<Self, String> {
         if source.contains('\0') {
-            return Err(text("Аргумент содержит нулевой байт.").into());
+            return Err(text!("Аргумент содержит нулевой байт.").into());
         }
         if source == "{files}" {
             return Ok(Self::Files);
@@ -120,9 +121,9 @@ impl<'a> Argument<'a> {
             } else if let Some(tail) = suffix.strip_prefix("{folder}") {
                 (Part::Folder, tail)
             } else if suffix.starts_with("{files}") {
-                return Err(text("{files} должен занимать отдельный аргумент.").into());
+                return Err(text!("{files} должен занимать отдельный аргумент.").into());
             } else {
-                return Err(text(
+                return Err(text!(
                     "Неизвестная подстановка. Удваивайте фигурные скобки для буквального ввода.",
                 )
                 .into());

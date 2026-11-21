@@ -46,7 +46,7 @@ enum Part<'a> {
 
 fn parse_template(input: &str) -> Result<Vec<Part<'_>>, String> {
     let invalid =
-        || text("В шаблоне допустимы {stem}, {ext} и {n}. Скобки можно удвоить.").to_owned();
+        || text!("В шаблоне допустимы {stem}, {ext} и {n}. Скобки можно удвоить.").to_owned();
     let mut parts = Vec::new();
     let mut rest = input;
     while let Some(index) = rest.find(['{', '}']) {
@@ -126,18 +126,18 @@ impl BatchRenamePreview {
         cancel: &Cancellation,
     ) -> Result<Self, String> {
         if !(2..=MAX_UNDO_ENTRIES).contains(&sources.len()) {
-            return Err(text("Выберите от 2 до 100 000 элементов.").into());
+            return Err(text!("Выберите от 2 до 100 000 элементов.").into());
         }
         if [&rules.template, &rules.search, &rules.replacement]
             .iter()
             .any(|input| input.len() > MAX_RULE_BYTES)
         {
-            return Err(text("Шаблон или регулярное выражение слишком длинные.").into());
+            return Err(text!("Шаблон или регулярное выражение слишком длинные.").into());
         }
         cancel.check().map_err(|error| error.to_string())?;
-        let directory = sources[0]
-            .parent()
-            .ok_or_else(|| text("Для массового переименования выберите элементы в одной папке."))?;
+        let directory = sources[0].parent().ok_or_else(|| {
+            text!("Для массового переименования выберите элементы в одной папке.")
+        })?;
         let mut unique = HashSet::new();
         if directory.is_archive()
             || sources.iter().any(|source| {
@@ -145,7 +145,7 @@ impl BatchRenamePreview {
             })
         {
             return Err(
-                text("Для массового переименования выберите элементы в одной папке.").into(),
+                text!("Для массового переименования выберите элементы в одной папке.").into(),
             );
         }
         let template = parse_template(&rules.template)?;
@@ -177,7 +177,7 @@ impl BatchRenamePreview {
                     .path()
                     .file_name()
                     .and_then(|name| name.to_str())
-                    .ok_or_else(|| text("Массовое переименование требует имена в UTF-8."))?;
+                    .ok_or_else(|| text!("Массовое переименование требует имена в UTF-8."))?;
                 let actual_source = parent.location.join(old);
                 let metadata = entry_metadata(&actual_source)?
                     .ok_or_else(|| changed_since_preview(&row.source))?;
@@ -198,13 +198,13 @@ impl BatchRenamePreview {
                         Part::Counter => &counter,
                     });
                     if name.len() > MAX_RULE_BYTES {
-                        return Err(text("Новое имя слишком длинное.").into());
+                        return Err(text!("Новое имя слишком длинное.").into());
                     }
                 }
                 row.name = Some(name);
                 let name = row.name.as_deref().unwrap();
                 validate_name(name).map_err(|_| {
-                    text("Новое имя должно быть допустимым именем файла или папки.")
+                    text!("Новое имя должно быть допустимым именем файла или папки.")
                 })?;
                 if name != old {
                     let target = parent.location.join(name);
@@ -250,7 +250,7 @@ impl BatchRenamePreview {
         mut rename: impl FnMut(&Location, &Location) -> Result<(), TransferError>,
     ) -> Result<String, String> {
         if !self.can_apply() {
-            return Err(text("Сначала проверьте новые имена.").into());
+            return Err(text!("Сначала проверьте новые имена.").into());
         }
         let changes: Vec<_> = self.rows.iter().filter(|row| row.changes_name()).collect();
         progress.results.plan(
@@ -277,9 +277,10 @@ impl BatchRenamePreview {
                     &mut |_, _| {},
                 )?;
                 if !progress.undo.can_fit(manifest.entries.len()) {
-                    return Err(
-                        text("Слишком много файлов для безопасной отмены переименования.").into(),
-                    );
+                    return Err(text!(
+                        "Слишком много файлов для безопасной отмены переименования."
+                    )
+                    .into());
                 }
                 manifest.verify(&cancel, |_, _| {})?;
                 self.check_row(row, &cancel)?;
@@ -394,7 +395,7 @@ fn mark_duplicate_targets(rows: &mut [BatchRenameRow], case_sensitive: bool) {
             crate::name_match::normalize(name).into_owned()
         };
         if let Some(previous) = seen.insert(key, index) {
-            let duplicate = text("Несколько элементов получают совпадающее имя.");
+            let duplicate = text!("Несколько элементов получают совпадающее имя.");
             for duplicate_index in [previous, index] {
                 rows[duplicate_index]
                     .problem

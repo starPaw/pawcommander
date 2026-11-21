@@ -20,7 +20,7 @@ use std::{io::Write, path::Path};
 
 pub(crate) fn checksum_manifest_name(name: &str) -> Result<&str, String> {
     let name = name.trim();
-    validate_name(name).map_err(|_| text("Введите допустимое имя манифеста").to_owned())?;
+    validate_name(name).map_err(|_| text!("Введите допустимое имя манифеста").to_owned())?;
     Ok(name)
 }
 
@@ -50,7 +50,7 @@ pub(crate) fn create_checksum_manifest(
         )),
         Err(TransferError::Cancelled) => {
             progress.results.cancelled = true;
-            Ok(text("Создание манифеста остановлено").into())
+            Ok(text!("Создание манифеста остановлено").into())
         }
         Err(error) => {
             let outcome = if published {
@@ -81,7 +81,7 @@ fn write_manifest(
             .iter()
             .any(|source| source.parent().as_ref() != Some(directory))
     {
-        return Err(text("Выберите обычные файлы из текущей папки").into());
+        return Err(text!("Выберите обычные файлы из текущей папки").into());
     }
     if sources.len() > manifest::MAX_ENTRIES {
         return Err(manifest::too_large());
@@ -98,7 +98,7 @@ fn write_manifest(
             source
                 .path()
                 .file_name()
-                .ok_or_else(|| text("Выберите обычные файлы из текущей папки"))?,
+                .ok_or_else(|| text!("Выберите обычные файлы из текущей папки"))?,
         );
         let digest = scope
             .digest(relative, progress, &cancel)
@@ -119,7 +119,7 @@ fn write_manifest(
         output.close()?;
         scope.parent.verify()?;
         if canonical(directory)? != scope.parent.location.path() {
-            return Err(text("Папка манифеста изменилась").into());
+            return Err(text!("Папка манифеста изменилась").into());
         }
         ensure_absent(&target)?;
         cancel.check()?;
@@ -141,7 +141,7 @@ pub(crate) fn verify_checksum_manifest(
             progress.results.cancelled = true;
             Ok(format!(
                 "{}\n{}",
-                text("Проверка манифеста остановлена"),
+                text!("Проверка манифеста остановлена"),
                 totals.message()
             ))
         }
@@ -158,11 +158,11 @@ fn verify_manifest(
 ) -> Result<(), TransferError> {
     let directory = path
         .parent()
-        .ok_or_else(|| text("Нужен файл манифеста SHA-256"))?;
+        .ok_or_else(|| text!("Нужен файл манифеста SHA-256"))?;
     let name = path
         .path()
         .file_name()
-        .ok_or_else(|| text("Нужен файл манифеста SHA-256"))?;
+        .ok_or_else(|| text!("Нужен файл манифеста SHA-256"))?;
     let cancel = progress.cancellation();
     cancel.check()?;
     if path.is_archive() {
@@ -184,7 +184,7 @@ fn verify_manifest(
             }
             manifest::parse(&bytes, &cancel)
         })?
-        .ok_or_else(|| text("Файл манифеста отсутствует"))?;
+        .ok_or_else(|| text!("Файл манифеста отсутствует"))?;
 
     progress
         .results
@@ -197,18 +197,18 @@ fn verify_manifest(
         let (outcome, reason) = match scope.digest(&entry.path, progress, &cancel) {
             Ok(Some(actual)) if actual == entry.digest => {
                 totals.matched += 1;
-                (Outcome::Completed, text("SHA-256 совпала").into())
+                (Outcome::Completed, text!("SHA-256 совпала").into())
             }
             Ok(Some(_)) => {
                 totals.changed += 1;
                 (
                     Outcome::Failed,
-                    text("Файл изменён (SHA-256 не совпала)").into(),
+                    text!("Файл изменён (SHA-256 не совпала)").into(),
                 )
             }
             Ok(None) => {
                 totals.missing += 1;
-                (Outcome::Failed, text("Файл отсутствует").into())
+                (Outcome::Failed, text!("Файл отсутствует").into())
             }
             Err(TransferError::Cancelled) => return Err(TransferError::Cancelled),
             Err(error) => {

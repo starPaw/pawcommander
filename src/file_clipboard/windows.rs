@@ -24,10 +24,10 @@ impl SystemClipboard {
     }
 
     pub fn write(&mut self, paths: &[PathBuf], cut: bool) -> Result<(), String> {
-        let hwnd = self.hwnd.ok_or(crate::i18n::text(
+        let hwnd = self.hwnd.ok_or(crate::i18n::text!(
             "Окно PawCommander недоступно для записи в буфер Windows",
         ))?;
-        let preferred = raw::register_format("Preferred DropEffect").ok_or(crate::i18n::text(
+        let preferred = raw::register_format("Preferred DropEffect").ok_or(crate::i18n::text!(
             "Не удалось зарегистрировать Preferred DropEffect",
         ))?;
         // DROPFILES: pFiles, POINT, fNC, fWide. The filenames are UTF-16 followed by a double NUL.
@@ -38,7 +38,7 @@ impl SystemClipboard {
         for path in paths {
             for word in path.as_os_str().encode_wide() {
                 if word == 0 {
-                    return Err(crate::i18n::text("Путь содержит нулевой символ").into());
+                    return Err(crate::i18n::text!("Путь содержит нулевой символ").into());
                 }
                 files.extend(word.to_le_bytes());
             }

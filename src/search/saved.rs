@@ -56,13 +56,13 @@ impl Scope {
         let folder = match self {
             Self::Folder(folder) => folder.path.clone().into_path().map(Location::Local),
             Self::Sftp(folder) => folder.location.clone().into_location(),
-            Self::Locate => return text("Индекс locate").into(),
+            Self::Locate => return text!("Индекс locate").into(),
         };
         if let Some(folder) = folder {
             let path = folder.display();
             crate::tr_format!("Папка поиска: {path}", "Search folder: {path}")
         } else {
-            text("Путь сохранённого поиска несовместим с системой.").into()
+            text!("Путь сохранённого поиска несовместим с системой.").into()
         }
     }
 }
@@ -102,7 +102,7 @@ impl Search {
         let scope = match self.mode {
             Mode::Folder => {
                 let folder = self.folder.as_ref().ok_or_else(|| {
-                    text("Откройте локальную папку или папку SFTP для поиска.").to_owned()
+                    text!("Откройте локальную папку или папку SFTP для поиска.").to_owned()
                 })?;
                 let target = self.target();
                 let filters = self.filters.parse(target)?;
@@ -155,7 +155,7 @@ impl Search {
                 self.filters = folder.filters;
                 if self.folder.is_none() {
                     self.error =
-                        Some(text("Путь сохранённого поиска несовместим с системой.").into());
+                        Some(text!("Путь сохранённого поиска несовместим с системой.").into());
                     return;
                 }
             }
@@ -166,13 +166,13 @@ impl Search {
                 self.filters = folder.filters;
                 if self.folder.is_none() {
                     self.error =
-                        Some(text("Путь сохранённого поиска несовместим с системой.").into());
+                        Some(text!("Путь сохранённого поиска несовместим с системой.").into());
                     return;
                 }
             }
             Scope::Locate => {
                 if cli.is_none() {
-                    self.error = Some(text("locate не найден").into());
+                    self.error = Some(text!("locate не найден").into());
                     return;
                 }
             }
@@ -191,11 +191,11 @@ impl Search {
         let mut submit = false;
         let mut cancel = false;
         ui.horizontal(|ui| {
-            let label = text(if edit_index.is_some() {
-                "Переименовать поиск"
+            let label = if edit_index.is_some() {
+                text!("Переименовать поиск")
             } else {
-                "Название поиска"
-            });
+                text!("Название поиска")
+            };
             let response = ui.add(
                 egui::TextEdit::singleline(&mut editor.name)
                     .id_salt("saved_search_name")
@@ -216,16 +216,16 @@ impl Search {
                 .enumerate()
                 .any(|(index, saved)| Some(index) != edit_index && saved.name == name);
             let valid = !name.is_empty() && !taken;
-            let save = ui.add_enabled(valid, egui::Button::new(text("Сохранить")));
+            let save = ui.add_enabled(valid, egui::Button::new(text!("Сохранить")));
             if taken {
-                save.on_disabled_hover_text(text("Поиск с таким названием уже сохранён."));
+                save.on_disabled_hover_text(text!("Поиск с таким названием уже сохранён."));
             } else {
                 submit = save.clicked()
                     || (valid
                         && response.lost_focus()
                         && ui.input(|input| input.key_pressed(egui::Key::Enter)));
             }
-            cancel = ui.button(text("Отмена")).clicked();
+            cancel = ui.button(text!("Отмена")).clicked();
         });
         if submit {
             let editor = self.saved_edit.take().expect("visible saved search editor");
@@ -243,7 +243,7 @@ impl Search {
     }
 
     pub(super) fn show_saved(&mut self, ui: &mut egui::Ui, cli: Option<&Path>) {
-        if self.saved_edit.is_none() && ui.button(text("Сохранить поиск…")).clicked()
+        if self.saved_edit.is_none() && ui.button(text!("Сохранить поиск…")).clicked()
         {
             match self.saved_candidate() {
                 Ok(saved) => {
@@ -265,7 +265,7 @@ impl Search {
             return;
         }
         let mut action = None;
-        let header = egui::CollapsingHeader::new(text("Сохранённые поиски"))
+        let header = egui::CollapsingHeader::new(text!("Сохранённые поиски"))
             .id_salt("saved_searches")
             .default_open(true)
             .show(ui, |ui| {
@@ -353,10 +353,10 @@ impl SavedSearch {
                 .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                 .show(|ui| {
                     ui.set_min_width(170.0);
-                    if ui.button(text("Переименовать…")).clicked() {
+                    if ui.button(text!("Переименовать…")).clicked() {
                         return Some(Action::Rename(index));
                     }
-                    if ui.button(text("Удалить сохранённый поиск")).clicked()
+                    if ui.button(text!("Удалить сохранённый поиск")).clicked()
                     {
                         return Some(Action::Remove(index));
                     }
@@ -582,7 +582,7 @@ mod tests {
         reopened.run_saved(0, None, &ctx);
         assert!(reopened.mode == Mode::Index);
         assert_eq!(reopened.query, "Cargo");
-        assert_eq!(reopened.error.as_deref(), Some(text("locate не найден")));
+        assert_eq!(reopened.error.as_deref(), Some(text!("locate не найден")));
         assert!(reopened.job().is_none());
     }
 
@@ -706,7 +706,7 @@ mod tests {
         let open = click(draw(&mut search, vec![]), &label);
         let popup = draw(&mut search, open);
         assert!(egui::Popup::is_any_open(&ctx));
-        let collapse = click(popup, text("Сохранённые поиски"));
+        let collapse = click(popup, text!("Сохранённые поиски"));
         let _ = draw(&mut search, collapse);
         assert!(!egui::Popup::is_any_open(&ctx));
         let _ = draw(&mut search, vec![escape(true)]);

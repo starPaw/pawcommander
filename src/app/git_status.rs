@@ -36,11 +36,11 @@ impl FileStatus {
     }
 
     pub(super) fn label(self) -> &'static str {
-        text(match self {
-            Self::Modified => "Изменено в Git",
-            Self::Untracked => "Не отслеживается Git",
-            Self::Ignored => "Игнорируется Git",
-        })
+        match self {
+            Self::Modified => text!("Изменено в Git"),
+            Self::Untracked => text!("Не отслеживается Git"),
+            Self::Ignored => text!("Игнорируется Git"),
+        }
     }
 
     pub(super) fn paint(self, ui: &egui::Ui, center: egui::Pos2, colors: Palette) {
@@ -94,7 +94,7 @@ impl Snapshot {
     pub(super) fn branch_label(&self) -> String {
         match &self.head {
             Head::Branch(branch) => format!("Git · {branch}"),
-            Head::Detached(oid) => format!("{} · {oid}", text("Git · Отсоединённый HEAD")),
+            Head::Detached(oid) => format!("{} · {oid}", text!("Git · Отсоединённый HEAD")),
         }
     }
 

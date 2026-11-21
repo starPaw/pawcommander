@@ -192,9 +192,9 @@ pub(super) fn tab_strip(
                                 response.context_menu(|ui| {
                                     tab_context_menu = Some(response.id);
                                     let pin = if tab.pinned {
-                                        crate::i18n::text("Открепить вкладку")
+                                        crate::i18n::text!("Открепить вкладку")
                                     } else {
-                                        crate::i18n::text("Закрепить вкладку")
+                                        crate::i18n::text!("Закрепить вкладку")
                                     };
                                     let reopen = Command::ReopenTab.label();
                                     for (label, action, enabled) in [
@@ -299,7 +299,7 @@ pub(super) fn tab_strip(
                 egui::WidgetInfo::labeled(
                     egui::Role::Button,
                     true,
-                    crate::i18n::text("Новая вкладка"),
+                    crate::i18n::text!("Новая вкладка"),
                 )
             });
             paint_tab(
@@ -320,7 +320,7 @@ pub(super) fn tab_strip(
             );
             paint_focus(ui, &response, 5);
             if response
-                .on_hover_text(crate::i18n::text("Новая вкладка"))
+                .on_hover_text(crate::i18n::text!("Новая вкладка"))
                 .clicked()
             {
                 actions.push(Action::NewTab(index));

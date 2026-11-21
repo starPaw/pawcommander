@@ -25,7 +25,7 @@ For reproducible timing records, use `python3 scripts/check.py --offline --repor
 
 Changes to file operations should cover cancellation, conflicts, partial failures, and preservation of existing source/destination data where relevant. Include meaningful regression tests for changed behavior. Mention the platforms and native integrations you actually tested in your pull request.
 
-The UI supports English and Russian through `src/i18n.rs`. Keep both languages in sync when adding visible text. Keep the application and credential-store identifiers consistent with the macOS bundle identifier.
+The UI supports English and Russian. Add static interface messages to [the translation catalog](src/i18n/catalog.rs) and use `text!` to display them. Use `key!` when passing a message for translation later and `tr_format!` for messages with values. Rust checks the registered keys and format arguments during compilation. Keep the application and credential-store identifiers consistent with the macOS bundle identifier.
 
 ## Optional integration checks
 

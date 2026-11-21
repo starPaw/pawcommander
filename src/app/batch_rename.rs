@@ -42,27 +42,28 @@ impl BatchRenameDialog {
                 .num_columns(2)
                 .spacing([10.0, 8.0])
                 .show(ui, |ui| {
-                    let template = rule_field(ui, text("Шаблон нового имени"), &mut rules.template);
+                    let template =
+                        rule_field(ui, text!("Шаблон нового имени"), &mut rules.template);
                     if focus {
                         template.request_focus();
                     }
                     changed |= template.changed();
                     changed |=
-                        rule_field(ui, text("Поиск (регулярное выражение)"), &mut rules.search)
+                        rule_field(ui, text!("Поиск (регулярное выражение)"), &mut rules.search)
                             .changed();
                     changed |= rule_field(
                         ui,
-                        text("Замена (группы $1, $2, …)"),
+                        text!("Замена (группы $1, $2, …)"),
                         &mut rules.replacement,
                     )
                     .changed();
-                    let label = ui.label(text("Счётчик с"));
+                    let label = ui.label(text!("Счётчик с"));
                     changed |= ui
                         .horizontal(|ui| {
                             let start = ui
                                 .add(egui::DragValue::new(&mut rules.start).range(0..=999_999_999))
                                 .labelled_by(label.id);
-                            let digits = ui.label(text("Минимум цифр"));
+                            let digits = ui.label(text!("Минимум цифр"));
                             let width = ui
                                 .add(egui::DragValue::new(&mut rules.digits).range(1..=12))
                                 .labelled_by(digits.id);
@@ -75,12 +76,12 @@ impl BatchRenameDialog {
         if changed {
             self.preview = None;
         }
-        ui.weak(text("{stem} — основа имени, {ext} — расширение с точкой, {n} — счётчик. Регулярное выражение изменяет основу имени."));
+        ui.weak(text!("{stem} — основа имени, {ext} — расширение с точкой, {n} — счётчик. Регулярное выражение изменяет основу имени."));
         ui.add_space(8.0);
         if ui
             .add_enabled(
                 self.work.is_none(),
-                egui::Button::new(text("Проверить имена")),
+                egui::Button::new(text!("Проверить имена")),
             )
             .clicked()
         {
@@ -89,7 +90,7 @@ impl BatchRenameDialog {
         if self.work.is_some() {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label(text("Проверка новых имён…"));
+                ui.label(text!("Проверка новых имён…"));
             });
         }
         match &self.preview {
@@ -134,7 +135,7 @@ impl BatchRenameDialog {
             Ok(result) => result,
             Err(mpsc::TryRecvError::Empty) => return,
             Err(mpsc::TryRecvError::Disconnected) => {
-                Err(text("Проверка новых имён завершилась неожиданно.").into())
+                Err(text!("Проверка новых имён завершилась неожиданно.").into())
             }
         };
         self.work = None;
@@ -163,8 +164,8 @@ fn show_preview(ui: &mut egui::Ui, preview: &BatchRenamePreview) {
         "{changes} changed names · {conflicts} conflicts"
     ));
     ui.columns(2, |columns| {
-        columns[0].strong(text("Текущее имя"));
-        columns[1].strong(text("Новое имя"));
+        columns[0].strong(text!("Текущее имя"));
+        columns[1].strong(text!("Новое имя"));
     });
     const HEIGHT: f32 = 27.0;
     let error_color = Palette::from_ctx(ui.ctx()).error;

@@ -98,7 +98,7 @@ fn plan_rejects_nested_or_aliased_folders() {
     .unwrap();
     assert_eq!(
         error.to_string(),
-        text("Источник и назначение синхронизации пересекаются")
+        text!("Источник и назначение синхронизации пересекаются")
     );
 }
 

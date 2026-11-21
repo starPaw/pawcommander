@@ -72,5 +72,5 @@ impl<W: Send + 'static, R: Send + 'static> Worker<W, R> {
 }
 
 fn unavailable() -> String {
-    crate::i18n::text("Служба предпросмотра недоступна").into()
+    crate::i18n::text!("Служба предпросмотра недоступна").into()
 }

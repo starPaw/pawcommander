@@ -33,7 +33,7 @@ impl FileList {
             .iter()
             .any(|path| !path.is_absolute() || path.file_name().is_none())
         {
-            return Err(crate::i18n::text(
+            return Err(crate::i18n::text!(
                 "Файловый буфер содержит путь без имени или относительный путь",
             )
             .into());
@@ -50,7 +50,7 @@ impl FileList {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn local_file_url(uri: &str) -> Result<PathBuf, String> {
     let invalid = || {
-        crate::i18n::text("Файловый буфер содержит недопустимый или нелокальный URL").to_string()
+        crate::i18n::text!("Файловый буфер содержит недопустимый или нелокальный URL").to_string()
     };
     let url = url::Url::parse(uri).map_err(|_| invalid())?;
     if url.scheme() != "file"
@@ -74,7 +74,7 @@ impl SystemClipboard {
     }
 
     pub fn write(&mut self, _: &[PathBuf], _: bool) -> Result<(), String> {
-        Err(crate::i18n::text("Системный файловый буфер недоступен на этой платформе").into())
+        Err(crate::i18n::text!("Системный файловый буфер недоступен на этой платформе").into())
     }
 
     pub fn read(&mut self) -> Result<Option<FileList>, String> {

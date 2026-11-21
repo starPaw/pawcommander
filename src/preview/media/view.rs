@@ -54,7 +54,7 @@ impl Player {
         if self.error.is_none() && self.state.mode == Mode::Loading {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label(text("Подготовка медиафайла…"));
+                ui.label(text!("Подготовка медиафайла…"));
             });
             return;
         }
@@ -96,43 +96,51 @@ impl Player {
         metadata::section(ui, scroll_rows, |ui| {
             field(
                 ui,
-                "Длительность",
+                crate::i18n::key!("Длительность"),
                 self.state.duration.map(timestamp).as_deref(),
             );
             if let Some(video) = self.metadata.video {
                 field(
                     ui,
-                    "Размер кадра",
+                    crate::i18n::key!("Размер кадра"),
                     video.dimensions.map(metadata::dimensions).as_deref(),
                 );
-                field(ui, "Видеокодек", video.codec.and_then(codec).as_deref());
                 field(
                     ui,
-                    "Частота кадров",
+                    crate::i18n::key!("Видеокодек"),
+                    video.codec.and_then(codec).as_deref(),
+                );
+                field(
+                    ui,
+                    crate::i18n::key!("Частота кадров"),
                     video
                         .fps
-                        .map(|rate| format!("{rate:.2} {}", text("кадр/с")))
+                        .map(|rate| format!("{rate:.2} {}", text!("кадр/с")))
                         .as_deref(),
                 );
             }
             if let Some(audio) = self.metadata.audio {
-                field(ui, "Аудиокодек", audio.codec.and_then(codec).as_deref());
                 field(
                     ui,
-                    "Частота дискретизации",
+                    crate::i18n::key!("Аудиокодек"),
+                    audio.codec.and_then(codec).as_deref(),
+                );
+                field(
+                    ui,
+                    crate::i18n::key!("Частота дискретизации"),
                     audio
                         .sample_rate
-                        .map(|rate| format!("{rate:.0} {}", text("Гц")))
+                        .map(|rate| format!("{rate:.0} {}", text!("Гц")))
                         .as_deref(),
                 );
                 field(
                     ui,
-                    "Каналы",
+                    crate::i18n::key!("Каналы"),
                     audio.channels.map(|count| count.to_string()).as_deref(),
                 );
             }
             if self.metadata.audio.is_none() && self.metadata.video.is_none() {
-                field(ui, "Медиадорожки", None);
+                field(ui, crate::i18n::key!("Медиадорожки"), None);
             }
         });
     }
@@ -142,11 +150,11 @@ impl Player {
             let playing = self
                 .button
                 .map_or(self.state.playing(), |(_, intent)| intent);
-            let label = text(if playing {
-                "Пауза"
+            let label = if playing {
+                text!("Пауза")
             } else {
-                "Воспроизвести"
-            });
+                text!("Воспроизвести")
+            };
             if ui.button(label).clicked() {
                 let command = if playing {
                     Command::Pause
@@ -157,7 +165,7 @@ impl Player {
             }
             if self.state.mode == Mode::Buffering {
                 ui.spinner();
-                ui.label(text("Буферизация…"));
+                ui.label(text!("Буферизация…"));
             }
         });
         let mut seconds = self
@@ -174,7 +182,7 @@ impl Player {
                         .smart_aim(false),
                 );
                 ui.ctx()
-                    .accesskit_node_builder(response.id, |node| node.set_label(text("Позиция")));
+                    .accesskit_node_builder(response.id, |node| node.set_label(text!("Позиция")));
                 self.seek_widget = Some(response.id);
                 if response.dragged() {
                     self.dragging_to = Some(seconds);
@@ -342,7 +350,7 @@ fn run(
             metadata,
         } = session.update(command, cancel)?;
         if next.mode == Mode::Loading && began.elapsed() >= STARTUP_LIMIT {
-            return Err(text("Медиаплеер не ответил вовремя.").into());
+            return Err(text!("Медиаплеер не ответил вовремя.").into());
         }
         if next != state || ticket != applied || frame.is_some() || metadata.is_some() {
             let Ok(mut update) = latest.lock() else {
@@ -460,7 +468,7 @@ mod tests {
                 })
         };
         draw(&mut player, vec![]);
-        let header = visible(&draw(&mut player, vec![]), text("Метаданные")).unwrap();
+        let header = visible(&draw(&mut player, vec![]), text!("Метаданные")).unwrap();
         draw(&mut player, vec![egui::Event::PointerMoved(header)]);
         for pressed in [true, false] {
             draw(
@@ -493,9 +501,9 @@ mod tests {
             draw(player, vec![])
         };
         let bottom = scroll(&mut player, -700.0);
-        assert!(visible(&bottom, text("Каналы")).is_some());
+        assert!(visible(&bottom, text!("Каналы")).is_some());
         let top = scroll(&mut player, 700.0);
-        assert!(visible(&top, text("Воспроизвести")).is_some());
+        assert!(visible(&top, text!("Воспроизвести")).is_some());
     }
 
     #[test]

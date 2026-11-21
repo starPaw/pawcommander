@@ -58,7 +58,7 @@ fn permissions_command_requires_an_sftp_selection_and_preview() {
         "{rendered}"
     );
     assert!(
-        rendered.contains(crate::i18n::text("Предпросмотр")),
+        rendered.contains(crate::i18n::text!("Предпросмотр")),
         "{rendered}"
     );
     assert!(app.job.is_none());

@@ -124,7 +124,7 @@ pub fn visit_connected_directory(
         None => None,
     };
     let channel = channel.ok_or_else(|| {
-        crate::i18n::text("Для просмотра дерева подключитесь по SFTP.").to_owned()
+        crate::i18n::text!("Для просмотра дерева подключитесь по SFTP.").to_owned()
     })?;
     visit_sftp_directory(location, &channel, cancelled, visit)
 }

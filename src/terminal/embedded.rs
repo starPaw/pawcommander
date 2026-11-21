@@ -129,12 +129,12 @@ impl Panel {
             )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.strong(text("Терминал"));
+                    ui.strong(text!("Терминал"));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         close = ui
                             .add_enabled(
                                 interactive && !self.close_requested,
-                                egui::Button::new(text("Закрыть терминал")),
+                                egui::Button::new(text!("Закрыть терминал")),
                             )
                             .clicked();
                         let folder = self.folder.display();
@@ -145,16 +145,16 @@ impl Panel {
                     });
                 });
                 if self.close_requested {
-                    ui.label(text("Завершение сеанса терминала…"));
+                    ui.label(text!("Завершение сеанса терминала…"));
                 } else {
                     match &self.session.state {
                         State::Starting => {
-                            ui.label(text("Запуск сеанса терминала…"));
+                            ui.label(text!("Запуск сеанса терминала…"));
                         }
                         State::Running => {}
                         State::Exited(status) => {
                             let message = status.code().map_or_else(
-                                || text("Процесс терминала завершён.").into(),
+                                || text!("Процесс терминала завершён.").into(),
                                 |code| {
                                     crate::tr_format!(
                                         "Процесс терминала завершился с кодом {code}.",
@@ -165,14 +165,14 @@ impl Panel {
                             ui.label(message);
                         }
                         State::Stopped => {
-                            ui.label(text("Процесс терминала завершён."));
+                            ui.label(text!("Процесс терминала завершён."));
                         }
                         State::Failed(error) => {
                             ui.colored_label(colors.error, error);
                         }
                     }
                     if self.input_full {
-                        ui.colored_label(colors.error, text("Очередь ввода терминала заполнена."));
+                        ui.colored_label(colors.error, text!("Очередь ввода терминала заполнена."));
                     }
                 }
                 let (rect, _) = ui.allocate_exact_size(

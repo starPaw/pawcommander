@@ -44,7 +44,7 @@ fn result_history_skip_retains_covered_selections_without_walking_the_tree() {
         assert!(record.items[1].target.is_none());
         assert_eq!(
             record.items[1].reason.as_deref(),
-            Some(crate::i18n::text(
+            Some(crate::i18n::text!(
                 "Пропущено вместе с выбранным элементом; отдельный перенос не начинался"
             ))
         );

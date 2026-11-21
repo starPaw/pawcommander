@@ -93,7 +93,7 @@ pub(super) fn connect_with_key(
 fn login_primary(session: &Session, user: &str, primary: PrimaryAuth<'_>) -> Result<(), String> {
     primary.attempt(session, user)?;
     if !session.authenticated() {
-        return Err(text("Сервер не подтвердил аутентификацию").into());
+        return Err(text!("Сервер не подтвердил аутентификацию").into());
     }
     Ok(())
 }
@@ -173,7 +173,7 @@ fn open_connection(
         #[cfg(not(target_os = "macos"))]
         {
             let _ = jump;
-            return Err(text("Подключения через ProxyJump доступны на macOS").into());
+            return Err(text!("Подключения через ProxyJump доступны на macOS").into());
         }
     }
     open_verified(endpoint, trust, interactive.as_deref())
@@ -288,7 +288,7 @@ fn authenticate(
             interactive.authenticate(session, endpoint);
             control.check()?;
             if !session.authenticated() {
-                failure = Some(text("Сервер не подтвердил интерактивную аутентификацию").into());
+                failure = Some(text!("Сервер не подтвердил интерактивную аутентификацию").into());
                 if tried_primary {
                     break;
                 }
@@ -302,7 +302,7 @@ fn authenticate(
         Ok(key_accepted)
     } else {
         Err(failure
-            .unwrap_or_else(|| text("Сервер не предложил доступный способ аутентификации").into()))
+            .unwrap_or_else(|| text!("Сервер не предложил доступный способ аутентификации").into()))
     }
 }
 

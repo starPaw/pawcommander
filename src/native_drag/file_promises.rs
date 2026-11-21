@@ -60,7 +60,7 @@ struct PromiseState {
 impl PromiseState {
     fn request(&self, url: &NSURL) -> Result<(), String> {
         if self.drag_result.load(Ordering::Acquire) == super::macos::DRAG_CANCELLED {
-            return Err(text("Передача принимающему приложению отменена.").into());
+            return Err(text!("Передача принимающему приложению отменена.").into());
         }
         let target = destination_path(url)?;
         let (completion, result) = mpsc::channel();
@@ -170,7 +170,7 @@ impl FilePromises {
             .path()
             .file_name()
             .and_then(OsStr::to_str)
-            .ok_or_else(|| text("Недопустимый путь файла").to_owned())?;
+            .ok_or_else(|| text!("Недопустимый путь файла").to_owned())?;
         let queue = self.queue.get_or_insert_with(|| {
             let queue = NSOperationQueue::new();
             queue.setMaxConcurrentOperationCount(1);
@@ -212,11 +212,11 @@ fn destination_path(url: &NSURL) -> Result<PathBuf, String> {
 }
 
 fn invalid_destination() -> String {
-    text("Принимающее приложение не указало путь к файлу.").into()
+    text!("Принимающее приложение не указало путь к файлу.").into()
 }
 
 fn cancelled() -> String {
-    text("Передача принимающему приложению отменена.").into()
+    text!("Передача принимающему приложению отменена.").into()
 }
 
 fn promise_error(reason: String) -> Retained<NSError> {

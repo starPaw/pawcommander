@@ -65,7 +65,7 @@ fn directory_comparison_dialog_runs_both_modes_and_displays_differences() {
         draw(app, vec![]);
         let pos = draw(app, vec![])
             .into_iter()
-            .find(|(value, _)| value == text(label))
+            .find(|(value, _)| value == label)
             .unwrap_or_else(|| panic!("Missing button {label}"))
             .1;
         draw(app, vec![egui::Event::PointerMoved(pos)]);
@@ -95,19 +95,21 @@ fn directory_comparison_dialog_runs_both_modes_and_displays_differences() {
         }
         panic!("Comparison did not finish");
     };
-    click(&mut app, "Сравнить");
+    click(&mut app, crate::i18n::text!("Сравнить"));
     let labels = wait(&mut app);
     for filename in ["left.txt", "right.txt"] {
         assert!(labels.iter().any(|(label, _)| label == filename));
     }
     assert!(!labels.iter().any(|(label, _)| label == "equal-size.bin"));
 
-    click(&mut app, "По содержимому");
-    click(&mut app, "Сравнить");
+    click(&mut app, crate::i18n::text!("По содержимому"));
+    click(&mut app, crate::i18n::text!("Сравнить"));
     let labels = wait(&mut app);
     assert!(labels.iter().any(|(label, _)| label == "equal-size.bin"));
-    assert!(labels.iter().any(|(label, _)| label == text("Различаются")));
-    click(&mut app, "Закрыть");
+    assert!(labels
+        .iter()
+        .any(|(label, _)| label == text!("Различаются")));
+    click(&mut app, crate::i18n::text!("Закрыть"));
     assert!(app.comparison.is_none());
     assert_eq!(fs::read(paths[0].join("equal-size.bin")).unwrap(), b"abc");
     assert_eq!(fs::read(paths[1].join("equal-size.bin")).unwrap(), b"xyz");
@@ -188,15 +190,15 @@ fn comparison_from_settings_returns_focus_to_the_settings_button() {
         }
     };
     for command in [Command::CompareFolders, Command::CompareFiles] {
-        click(&mut app, text("Настройки"));
+        click(&mut app, text!("Настройки"));
         click(&mut app, command.label());
         assert!(app.comparison.is_some());
         let deadline = Instant::now() + Duration::from_secs(4);
-        while position(draw(&mut app, vec![]), text("Закрыть")).is_none() {
+        while position(draw(&mut app, vec![]), text!("Закрыть")).is_none() {
             assert!(Instant::now() < deadline, "{command:?} did not finish");
             std::thread::sleep(Duration::from_millis(5));
         }
-        click(&mut app, text("Закрыть"));
+        click(&mut app, text!("Закрыть"));
         assert!(app.comparison.is_none());
         assert_eq!(app.palette_focus_to_restore, Some(settings), "{command:?}");
     }

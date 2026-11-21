@@ -64,7 +64,7 @@ impl Backend {
             }
         };
         if data.len() > MAX_BYTES {
-            return Err(crate::i18n::text("Список файлов в буфере слишком велик").into());
+            return Err(crate::i18n::text!("Список файлов в буфере слишком велик").into());
         }
         Ok(data)
     }
@@ -121,7 +121,7 @@ impl SystemClipboard {
                 url::Url::from_file_path(path)
                     .map(String::from)
                     .map_err(|_| {
-                        crate::i18n::text("Путь нельзя записать в буфер как файловый URL")
+                        crate::i18n::text!("Путь нельзя записать в буфер как файловый URL")
                             .to_string()
                     })
             })
@@ -129,7 +129,7 @@ impl SystemClipboard {
         let uri_list = format!("{}\r\n", uris.join("\r\n"));
         let gnome = format!("{}\n{}", if cut { "cut" } else { "copy" }, uris.join("\n"));
         if uri_list.len().max(gnome.len()) > MAX_BYTES {
-            return Err(crate::i18n::text("Список файлов в буфере слишком велик").into());
+            return Err(crate::i18n::text!("Список файлов в буфере слишком велик").into());
         }
         self.write_count += 1;
         let clock = SystemTime::now()
@@ -161,9 +161,10 @@ impl SystemClipboard {
             let cut = if has(KDE_CUT) {
                 let cut = backend.read(KDE_CUT)? == b"1";
                 if cut && backend.read(URI_LIST)? != payload {
-                    return Err(
-                        crate::i18n::text("Системный буфер изменился. Повторите вставку.").into(),
-                    );
+                    return Err(crate::i18n::text!(
+                        "Системный буфер изменился. Повторите вставку."
+                    )
+                    .into());
                 }
                 cut
             } else {
@@ -176,7 +177,7 @@ impl SystemClipboard {
         if let Some(revision) = &revision
             && backend.read(REVISION)? != revision.as_bytes()
         {
-            return Err(crate::i18n::text("Системный буфер изменился. Повторите вставку.").into());
+            return Err(crate::i18n::text!("Системный буфер изменился. Повторите вставку.").into());
         }
         FileList::new(paths, cut, revision)
     }
@@ -193,7 +194,7 @@ fn parse_gnome(data: &[u8]) -> Result<(Vec<PathBuf>, bool), String> {
     let cut = match lines.next() {
         Some("cut") => true,
         Some("copy") => false,
-        _ => return Err(crate::i18n::text("Неизвестный режим файлового буфера Linux").into()),
+        _ => return Err(crate::i18n::text!("Неизвестный режим файлового буфера Linux").into()),
     };
     Ok((parse_uri_list(lines)?, cut))
 }
@@ -219,7 +220,7 @@ fn read_pipe(mut pipe: impl Read + AsRawFd) -> Result<Vec<u8>, String> {
         // The pipe is owned by this reader. poll may also return POLLHUP when the writer closes.
         let ready = unsafe { libc::poll(&mut fd, 1, remaining.as_millis() as i32) };
         if ready == 0 {
-            return Err(crate::i18n::text("Владелец системного буфера не ответил вовремя").into());
+            return Err(crate::i18n::text!("Владелец системного буфера не ответил вовремя").into());
         }
         if ready < 0 {
             let error = io::Error::last_os_error();
@@ -233,7 +234,7 @@ fn read_pipe(mut pipe: impl Read + AsRawFd) -> Result<Vec<u8>, String> {
             return Ok(data);
         }
         if data.len() + count > MAX_BYTES {
-            return Err(crate::i18n::text("Список файлов в буфере слишком велик").into());
+            return Err(crate::i18n::text!("Список файлов в буфере слишком велик").into());
         }
         data.extend_from_slice(&buffer[..count]);
     }

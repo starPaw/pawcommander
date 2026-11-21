@@ -21,7 +21,7 @@ struct Update {
 }
 
 enum ResultView {
-    Updated(Update, Option<&'static str>),
+    Updated(Update, Option<crate::i18n::MessageKey>),
     Imported(Update),
     Exported(Location),
     Reveal(Location),
@@ -108,18 +108,23 @@ impl CollectionsDialog {
                 });
             ui.add_space(4.0);
             if let Phase::Running(worker) = &mut self.work {
-                show_progress_with_stop(ui, worker, "Работа с коллекцией…", "Остановка…");
+                show_progress_with_stop(
+                    ui,
+                    worker,
+                    crate::i18n::key!("Работа с коллекцией…"),
+                    crate::i18n::key!("Остановка…"),
+                );
                 if ui
                     .add_enabled(
                         !worker.progress.cancel.is_requested(),
-                        egui::Button::new(text("Остановить")),
+                        egui::Button::new(text!("Остановить")),
                     )
                     .clicked()
                 {
                     worker.progress.cancel.request();
                 }
             } else {
-                close = ui.button(text("Закрыть")).clicked();
+                close = ui.button(text!("Закрыть")).clicked();
             }
         });
         if modal.should_close() || close {
@@ -145,18 +150,18 @@ impl CollectionsDialog {
                         }
                     });
             }
-            if ui.button(text("Новая коллекция")).clicked() {
+            if ui.button(text!("Новая коллекция")).clicked() {
                 self.edit_name = Some(NameEdit::Create);
                 self.name.clear();
                 self.remove_group = false;
             }
             if let Some(index) = self.active {
-                if ui.button(text("Переименовать")).clicked() {
+                if ui.button(text!("Переименовать")).clicked() {
                     self.edit_name = Some(NameEdit::Rename);
                     self.name.clone_from(&catalog.collections[index].name);
                     self.remove_group = false;
                 }
-                if ui.button(text("Удалить коллекцию")).clicked() {
+                if ui.button(text!("Удалить коллекцию")).clicked() {
                     self.remove_group = true;
                     self.edit_name = None;
                 }
@@ -168,15 +173,15 @@ impl CollectionsDialog {
         if let Some(edit) = &self.edit_name {
             let create = matches!(edit, NameEdit::Create);
             ui.horizontal(|ui| {
-                let label = text("Название коллекции");
+                let label = text!("Название коллекции");
                 let field = ui.add(egui::TextEdit::singleline(&mut self.name).hint_text(label));
                 field.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, label));
                 if ui
-                    .button(text(if create {
-                        "Создать"
+                    .button(if create {
+                        text!("Создать")
                     } else {
-                        "Сохранить"
-                    }))
+                        text!("Сохранить")
+                    })
                     .clicked()
                 {
                     let result = if create {
@@ -191,7 +196,7 @@ impl CollectionsDialog {
                         Err(error) => self.notice = Some((error, true)),
                     }
                 }
-                if ui.button(text("Отмена")).clicked() {
+                if ui.button(text!("Отмена")).clicked() {
                     self.edit_name = None;
                 }
             });
@@ -205,7 +210,7 @@ impl CollectionsDialog {
                     "Удалить коллекцию «{name}»?",
                     "Remove collection “{name}”?"
                 ));
-                if ui.button(text("Удалить коллекцию")).clicked() {
+                if ui.button(text!("Удалить коллекцию")).clicked() {
                     catalog.collections.remove(index);
                     let next = catalog
                         .collections
@@ -214,7 +219,7 @@ impl CollectionsDialog {
                         .map(|last| index.min(last));
                     self.choose_group(next, catalog, ui.ctx());
                 }
-                if ui.button(text("Отмена")).clicked() {
+                if ui.button(text!("Отмена")).clicked() {
                     self.remove_group = false;
                 }
             });
@@ -228,7 +233,7 @@ impl CollectionsDialog {
         ui.horizontal_wrapped(|ui| {
             let count = self.selection.len();
             if count != 0 {
-                let label = text("Теги через запятую");
+                let label = text!("Теги через запятую");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.add_tags)
                         .hint_text(label)
@@ -248,22 +253,26 @@ impl CollectionsDialog {
                             let paths = self.selection.clone();
                             self.start(ui.ctx(), move |progress| {
                                 group.add(&paths, &tags, capacity, progress)?;
-                                update(group, Some("Объекты добавлены"), progress)
+                                update(
+                                    group,
+                                    Some(crate::i18n::key!("Объекты добавлены")),
+                                    progress,
+                                )
                             });
                         }
                         Err(error) => self.notice = Some((error, true)),
                     }
                 }
             }
-            if !group.members.is_empty() && ui.button(text("Обновить")).clicked() {
+            if !group.members.is_empty() && ui.button(text!("Обновить")).clicked() {
                 self.refresh(group, ui.ctx());
             }
         });
         if group.members.is_empty() {
-            ui.label(text("В коллекции пока нет объектов"));
+            ui.label(text!("В коллекции пока нет объектов"));
             return;
         }
-        let label = text("Фильтр по тегу");
+        let label = text!("Фильтр по тегу");
         ui.add(
             egui::TextEdit::singleline(&mut self.filter)
                 .hint_text(label)
@@ -296,7 +305,7 @@ impl CollectionsDialog {
             self.selected = None;
         }
         if rows.is_empty() {
-            ui.label(text("Нет объектов с таким тегом"));
+            ui.label(text!("Нет объектов с таким тегом"));
             return;
         }
         let height = ui.spacing().interact_size.y;
@@ -361,14 +370,14 @@ impl CollectionsDialog {
         let can_relink = unavailable.is_some();
         let can_open = self.states.get(row).is_some_and(Option::is_none);
         ui.horizontal_wrapped(|ui| {
-            let label = text("Теги через запятую");
+            let label = text!("Теги через запятую");
             ui.add(
                 egui::TextEdit::singleline(&mut self.tags)
                     .hint_text(label)
                     .desired_width(190.0),
             )
             .widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, label));
-            if ui.button(text("Сохранить теги")).clicked() {
+            if ui.button(text!("Сохранить теги")).clicked() {
                 match collections::parse_tags(&self.tags) {
                     Ok(tags) => {
                         self.tags = tags.join(", ");
@@ -379,7 +388,7 @@ impl CollectionsDialog {
                 }
             }
             if ui
-                .add_enabled(can_open, egui::Button::new(text("Показать в панели")))
+                .add_enabled(can_open, egui::Button::new(text!("Показать в панели")))
                 .clicked()
             {
                 let mut member = group.members[row].clone();
@@ -392,19 +401,19 @@ impl CollectionsDialog {
             }
             if can_relink
                 && let [path] = self.selection.as_slice()
-                && ui.button(text("Связать с выделенным")).clicked()
+                && ui.button(text!("Связать с выделенным")).clicked()
             {
                 let path = path.clone();
                 let mut group = group.clone();
                 self.start(ui.ctx(), move |progress| {
                     if group.members[row].resolve().is_ok() {
-                        return Err(text("Объект снова доступен. Обновите коллекцию.").into());
+                        return Err(text!("Объект снова доступен. Обновите коллекцию.").into());
                     }
                     group.relink(row, &path)?;
-                    update(group, Some("Связь обновлена"), progress)
+                    update(group, Some(crate::i18n::key!("Связь обновлена")), progress)
                 });
             }
-            if ui.button(text("Убрать из коллекции")).clicked() {
+            if ui.button(text!("Убрать из коллекции")).clicked() {
                 group.members.remove(row);
                 if row < self.states.len() {
                     self.states.remove(row);
@@ -419,7 +428,7 @@ impl CollectionsDialog {
         let Some(root) = self.root.clone() else {
             return;
         };
-        egui::CollapsingHeader::new(text("Импорт и экспорт коллекций")).show(ui, |ui| {
+        egui::CollapsingHeader::new(text!("Импорт и экспорт коллекций")).show(ui, |ui| {
             let path = root.display().escape_debug().to_string();
             ui.add(egui::Label::new(&path).truncate().selectable(true))
                 .on_hover_text(&path);
@@ -429,10 +438,10 @@ impl CollectionsDialog {
             };
             let import = ui.add_enabled(
                 source.is_some(),
-                egui::Button::new(text("Импортировать выделенный файл")),
+                egui::Button::new(text!("Импортировать выделенный файл")),
             );
             if import
-                .on_disabled_hover_text(text("Выберите файл .pawcollection.json в активной папке"))
+                .on_disabled_hover_text(text!("Выберите файл .pawcollection.json в активной папке"))
                 .clicked()
                 && let Some(source) = source
             {
@@ -446,14 +455,14 @@ impl CollectionsDialog {
             }
             if let Some(index) = self.active {
                 ui.horizontal_wrapped(|ui| {
-                    let label = text("Имя файла экспорта");
+                    let label = text!("Имя файла экспорта");
                     ui.add(
                         egui::TextEdit::singleline(&mut self.export_name)
                             .hint_text(label)
                             .desired_width(245.0),
                     )
                     .widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, label));
-                    if ui.button(text("Экспортировать в эту папку")).clicked()
+                    if ui.button(text!("Экспортировать в эту папку")).clicked()
                     {
                         let mut group = catalog.collections[index].clone();
                         let name = self.export_name.clone();
@@ -519,7 +528,7 @@ impl CollectionsDialog {
                         self.filter.clear();
                         self.edit_name = None;
                         self.remove_group = false;
-                        self.notice = Some((text("Коллекция импортирована").into(), false));
+                        self.notice = Some((text!("Коллекция импортирована").into(), false));
                     }
                     Err(error) => self.notice = Some((error, true)),
                 }
@@ -536,7 +545,7 @@ impl CollectionsDialog {
             }
             Phase::Finished(ResultView::Reveal(path)) => return Some(path),
             Phase::Failed(error) => self.notice = Some((error, true)),
-            Phase::Stopped => self.notice = Some((text("Операция остановлена").into(), false)),
+            Phase::Stopped => self.notice = Some((text!("Операция остановлена").into(), false)),
             Phase::Running(_) | Phase::Ready => unreachable!(),
         }
         None
@@ -545,7 +554,7 @@ impl CollectionsDialog {
 
 fn update(
     mut group: Collection,
-    notice: Option<&'static str>,
+    notice: Option<crate::i18n::MessageKey>,
     progress: &mut Progress,
 ) -> Result<ResultView, TransferError> {
     let states = group.refresh(progress)?;

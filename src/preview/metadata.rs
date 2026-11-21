@@ -64,33 +64,33 @@ impl Exif {
     }
 
     fn fields(&self, ui: &mut egui::Ui) {
-        field(ui, "Камера", self.camera.as_deref());
-        field(ui, "Объектив", self.lens.as_deref());
-        field(ui, "Дата съёмки", self.taken.as_deref());
+        field(ui, crate::i18n::key!("Камера"), self.camera.as_deref());
+        field(ui, crate::i18n::key!("Объектив"), self.lens.as_deref());
+        field(ui, crate::i18n::key!("Дата съёмки"), self.taken.as_deref());
         field(
             ui,
-            "ISO",
+            crate::i18n::key!("ISO"),
             self.iso.map(|value| format!("{value:.0}")).as_deref(),
         );
         field(
             ui,
-            "Диафрагма",
+            crate::i18n::key!("Диафрагма"),
             self.aperture
                 .map(|value| format!("f/{value:.1}"))
                 .as_deref(),
         );
         field(
             ui,
-            "Выдержка",
+            crate::i18n::key!("Выдержка"),
             self.exposure
-                .map(|value| format!("{value} {}", text("с")))
+                .map(|value| format!("{value} {}", text!("с")))
                 .as_deref(),
         );
         field(
             ui,
-            "Фокусное расстояние",
+            crate::i18n::key!("Фокусное расстояние"),
             self.focal_length
-                .map(|value| format!("{value} {}", text("мм")))
+                .map(|value| format!("{value} {}", text!("мм")))
                 .as_deref(),
         );
     }
@@ -114,7 +114,7 @@ pub(super) fn dimensions([width, height]: [u32; 2]) -> String {
 
 pub(super) fn show_image(ui: &mut egui::Ui, size: [u32; 2], exif: Option<&Exif>) {
     section(ui, true, |ui| {
-        field(ui, "Разрешение", Some(&dimensions(size)));
+        field(ui, crate::i18n::key!("Разрешение"), Some(&dimensions(size)));
         exif_fields(ui, exif);
     });
 }
@@ -123,12 +123,12 @@ pub(super) fn exif_fields(ui: &mut egui::Ui, exif: Option<&Exif>) {
     if let Some(exif) = exif {
         exif.fields(ui);
     } else {
-        field(ui, "EXIF", None);
+        field(ui, crate::i18n::key!("EXIF"), None);
     }
 }
 
 pub(super) fn section(ui: &mut egui::Ui, scroll_rows: bool, fields: impl FnOnce(&mut egui::Ui)) {
-    egui::CollapsingHeader::new(text("Метаданные")).show(ui, |ui| {
+    egui::CollapsingHeader::new(text!("Метаданные")).show(ui, |ui| {
         let rows = |ui: &mut egui::Ui| {
             egui::Grid::new("metadata-fields")
                 .num_columns(2)
@@ -150,10 +150,10 @@ pub(super) fn section(ui: &mut egui::Ui, scroll_rows: bool, fields: impl FnOnce(
     });
 }
 
-pub(super) fn field(ui: &mut egui::Ui, label: &'static str, value: Option<&str>) {
+pub(super) fn field(ui: &mut egui::Ui, label: crate::i18n::MessageKey, value: Option<&str>) {
     let label = ui.label(RichText::new(text(label)).weak());
     ui.add(
-        egui::Label::new(value.unwrap_or_else(|| text("Недоступно")))
+        egui::Label::new(value.unwrap_or_else(|| text!("Недоступно")))
             .wrap()
             .selectable(true),
     )

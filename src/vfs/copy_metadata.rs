@@ -127,13 +127,13 @@ impl Attributes {
         if self.mode.is_none()
             || self.mode.map(|mode| mode & 0o7777) != current.mode.map(|mode| mode & 0o7777)
         {
-            fields.push(text("права доступа"));
+            fields.push(text!("права доступа"));
         }
         if !exact_time(self.accessed, current.accessed) {
-            fields.push(text("время доступа"));
+            fields.push(text!("время доступа"));
         }
         if !exact_time(self.modified, current.modified) {
-            fields.push(text("время изменения"));
+            fields.push(text!("время изменения"));
         }
         if fields.is_empty() {
             return None;
@@ -466,7 +466,7 @@ pub(super) fn reopen_for_cleanup(
                 }
                 Err(error) if error.code() == ErrorCode::SFTP(LIBSSH2_FX_NO_SUCH_FILE) => {}
                 Err(error) => return Err(err(error).into()),
-                Ok(_) => return Err(text("Временная папка изменилась перед очисткой").into()),
+                Ok(_) => return Err(text!("Временная папка изменилась перед очисткой").into()),
             }
         } else {
             match fs::symlink_metadata(dir.path()) {
@@ -483,7 +483,7 @@ pub(super) fn reopen_for_cleanup(
                 }
                 Err(error) if error.kind() == ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
-                Ok(_) => return Err(text("Временная папка изменилась перед очисткой").into()),
+                Ok(_) => return Err(text!("Временная папка изменилась перед очисткой").into()),
             }
         }
     }

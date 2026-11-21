@@ -54,9 +54,7 @@ fn archive_edit_dialogs_run_the_queue_and_refresh_the_pane() {
             .nodes
             .iter()
             .find(|(_, node)| {
-                node.role() == Role::Button
-                    && node.label() == Some(crate::i18n::text(label))
-                    && !node.is_disabled()
+                node.role() == Role::Button && node.label() == Some(label) && !node.is_disabled()
             })
             .unwrap_or_else(|| panic!("expected visible button {label}"))
             .0;
@@ -80,7 +78,7 @@ fn archive_edit_dialogs_run_the_queue_and_refresh_the_pane() {
     assert!(matches!(&app.dialog, Some(Dialog::ArchiveEdit {
         edit: ArchiveEdit::Add { sources, .. }, ..
     }) if sources == std::slice::from_ref(&addition)));
-    click(&mut app, "Добавить");
+    click(&mut app, crate::i18n::text!("Добавить"));
     finish(&mut app);
     let added = root_member.join("new.txt");
     assert!(app.tab().entries.iter().any(|entry| entry.path == added));
@@ -95,7 +93,7 @@ fn archive_edit_dialogs_run_the_queue_and_refresh_the_pane() {
         panic!("expected the archive rename dialog");
     };
     *name = "renamed.txt".into();
-    click(&mut app, "Переименовать");
+    click(&mut app, crate::i18n::text!("Переименовать"));
     finish(&mut app);
     let renamed = root_member.join("renamed.txt");
     assert!(app.tab().entries.iter().any(|entry| entry.path == renamed));
@@ -103,10 +101,10 @@ fn archive_edit_dialogs_run_the_queue_and_refresh_the_pane() {
     app.tab_mut().select_revealed(renamed);
     let before = fs::read(&tar_path).unwrap();
     app.run_shortcut(Command::RemoveFromArchive, &ctx);
-    click(&mut app, "Отмена");
+    click(&mut app, crate::i18n::text!("Отмена"));
     assert_eq!(fs::read(&tar_path).unwrap(), before);
     app.run_shortcut(Command::RemoveFromArchive, &ctx);
-    click(&mut app, "Удалить");
+    click(&mut app, crate::i18n::text!("Удалить"));
     finish(&mut app);
     assert_eq!(app.tab().entries.len(), 1);
     assert_eq!(app.tab().entries[0].name, "keep.txt");

@@ -376,7 +376,7 @@ impl PageText {
 }
 
 pub(super) fn changed() -> String {
-    crate::i18n::text("Текстовый файл изменился. Откройте быстрый просмотр заново.").into()
+    crate::i18n::text!("Текстовый файл изменился. Откройте быстрый просмотр заново.").into()
 }
 
 pub(super) fn read_error(error: io::Error) -> String {

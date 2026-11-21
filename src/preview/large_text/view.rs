@@ -83,7 +83,7 @@ struct Viewer {
     reset_page: bool,
     query: String,
     line: String,
-    notice: Option<&'static str>,
+    notice: Option<crate::i18n::MessageKey>,
     error: Option<String>,
     focus: Option<(egui::ViewportId, [egui::Id; 3], bool)>,
 }
@@ -159,13 +159,13 @@ impl Viewer {
                 let previous = ui
                     .add_enabled(
                         available && page.is_some_and(|page| page.text.index > 0),
-                        egui::Button::new(text("Предыдущая страница")),
+                        egui::Button::new(text!("Предыдущая страница")),
                     )
                     .clicked();
                 let next = ui
                     .add_enabled(
                         available && page.is_some_and(|page| page.text.has_next),
-                        egui::Button::new(text("Следующая страница")),
+                        egui::Button::new(text!("Следующая страница")),
                     )
                     .clicked();
                 if let Some(page) = page {
@@ -180,7 +180,7 @@ impl Viewer {
                 ui.add(
                     egui::TextEdit::singleline(&mut self.line)
                         .id(id)
-                        .hint_text(text("Номер строки"))
+                        .hint_text(text!("Номер строки"))
                         .desired_width(100.0)
                         .char_limit(20),
                 );
@@ -193,7 +193,7 @@ impl Viewer {
                 let go = ui
                     .add_enabled(
                         available && page.is_some() && number.is_some(),
-                        egui::Button::new(text("Перейти к строке")),
+                        egui::Button::new(text!("Перейти к строке")),
                     )
                     .clicked();
                 let page = page?;
@@ -233,7 +233,7 @@ impl Viewer {
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut self.query)
                         .id(id)
-                        .hint_text(text("Найти в файле"))
+                        .hint_text(text!("Найти в файле"))
                         .desired_width(165.0)
                         .char_limit(QUERY_CHARS),
                 );
@@ -252,7 +252,7 @@ impl Viewer {
                     self.pending.is_none() && self.page.is_some() && !self.query.is_empty();
                 let previous = ui
                     .add_enabled_ui(enabled, |ui| {
-                        icons::compact_button(ui, Icon::Up, text("Предыдущее совпадение"), false)
+                        icons::compact_button(ui, Icon::Up, text!("Предыдущее совпадение"), false)
                     })
                     .inner
                     .clicked();
@@ -261,7 +261,7 @@ impl Viewer {
                         icons::compact_button(
                             ui,
                             Icon::ChevronDown,
-                            text("Следующее совпадение"),
+                            text!("Следующее совпадение"),
                             false,
                         )
                     })
@@ -269,12 +269,12 @@ impl Viewer {
                     .clicked();
                 if self.pending.is_some() {
                     ui.spinner();
-                    ui.weak(text(if self.searching {
-                        "Поиск по файлу…"
+                    ui.weak(if self.searching {
+                        text!("Поиск по файлу…")
                     } else {
-                        "Чтение страницы…"
-                    }));
-                    if self.searching && ui.button(text("Отменить поиск")).clicked() {
+                        text!("Чтение страницы…")
+                    });
+                    if self.searching && ui.button(text!("Отменить поиск")).clicked() {
                         self.pending = None;
                         self.searching = false;
                     }
@@ -340,8 +340,10 @@ impl Viewer {
                         // visiting many pages of a long file.
                         self.reset_page = true;
                     }
-                    ResultPage::NoMatch => self.notice = Some("Совпадений нет."),
-                    ResultPage::NoLine => self.notice = Some("Такой строки нет."),
+                    ResultPage::NoMatch => self.notice = Some(crate::i18n::key!("Совпадений нет.")),
+                    ResultPage::NoLine => {
+                        self.notice = Some(crate::i18n::key!("Такой строки нет."))
+                    }
                 }
             }
             Err(error) => self.error = Some(error),

@@ -22,7 +22,7 @@ pub(in crate::preview) struct Document {
     offset: String,
     query: String,
     pattern: Option<Vec<u8>>,
-    notice: Option<&'static str>,
+    notice: Option<crate::i18n::MessageKey>,
     error: Option<String>,
     reset_scroll: bool,
     focus: Option<(egui::ViewportId, [egui::Id; 2], bool)>,
@@ -69,7 +69,7 @@ impl Document {
         }
         if let Some(page) = &self.page {
             if page.bytes.is_empty() {
-                ui.label(text("Пустой файл"));
+                ui.label(text!("Пустой файл"));
             } else {
                 let last = page.start + page.bytes.len() as u64 - 1;
                 ui.weak(crate::tr_format!(
@@ -94,16 +94,16 @@ impl Document {
                 let previous = ui
                     .add_enabled(
                         available && self.page.as_ref().is_some_and(|page| page.start > 0),
-                        egui::Button::new(text("Предыдущая страница")),
+                        egui::Button::new(text!("Предыдущая страница")),
                     )
                     .clicked();
                 let next = ui
                     .add_enabled(
                         available && self.page.as_ref().is_some_and(|page| page.has_next),
-                        egui::Button::new(text("Следующая страница")),
+                        egui::Button::new(text!("Следующая страница")),
                     )
                     .clicked();
-                let label = ui.label(text("Смещение (hex)"));
+                let label = ui.label(text!("Смещение (hex)"));
                 let enter = ui.memory(|memory| memory.has_focus(id))
                     && ui.input_mut(|input| {
                         input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
@@ -124,7 +124,7 @@ impl Document {
                 let go = ui
                     .add_enabled(
                         available && offset.is_some(),
-                        egui::Button::new(text("Перейти к смещению")),
+                        egui::Button::new(text!("Перейти к смещению")),
                     )
                     .clicked();
                 let page = self.page.as_ref()?;
@@ -134,7 +134,9 @@ impl Document {
                     page.start.checked_add(PAGE_BYTES)
                 } else if available && (go || enter) {
                     if offset.is_none() {
-                        self.notice = Some("Введите смещение в шестнадцатеричном виде.");
+                        self.notice = Some(crate::i18n::key!(
+                            "Введите смещение в шестнадцатеричном виде."
+                        ));
                     }
                     offset
                 } else {
@@ -164,7 +166,7 @@ impl Document {
                 let reply = ui.add(
                     egui::TextEdit::singleline(&mut self.query)
                         .id(id)
-                        .hint_text(text("Найти байты (DE AD)"))
+                        .hint_text(text!("Найти байты (DE AD)"))
                         .desired_width(165.0)
                         .char_limit(PATTERN_LIMIT * 3),
                 );
@@ -183,7 +185,7 @@ impl Document {
                     self.pending.is_none() && self.page.is_some() && self.pattern.is_some();
                 let back = ui
                     .add_enabled_ui(available, |ui| {
-                        icons::compact_button(ui, Icon::Up, text("Предыдущее совпадение"), false)
+                        icons::compact_button(ui, Icon::Up, text!("Предыдущее совпадение"), false)
                     })
                     .inner
                     .clicked();
@@ -192,7 +194,7 @@ impl Document {
                         icons::compact_button(
                             ui,
                             Icon::ChevronDown,
-                            text("Следующее совпадение"),
+                            text!("Следующее совпадение"),
                             false,
                         )
                     })
@@ -200,12 +202,12 @@ impl Document {
                     .clicked();
                 if self.pending.is_some() {
                     ui.spinner();
-                    ui.weak(text(if self.searching {
-                        "Поиск по файлу…"
+                    ui.weak(if self.searching {
+                        text!("Поиск по файлу…")
                     } else {
-                        "Чтение страницы…"
-                    }));
-                    if self.searching && ui.button(text("Отменить поиск")).clicked() {
+                        text!("Чтение страницы…")
+                    });
+                    if self.searching && ui.button(text!("Отменить поиск")).clicked() {
                         self.pending = None;
                         self.searching = false;
                     }
@@ -216,7 +218,7 @@ impl Document {
                         "Match at 0x{offset:X}",
                     ));
                 } else if self.pattern.is_none() && !self.query.trim().is_empty() {
-                    ui.weak(text("Введите пары hex-цифр, до 256 байтов."));
+                    ui.weak(text!("Введите пары hex-цифр, до 256 байтов."));
                 }
                 if available && (back || previous) {
                     Some(Direction::Backward)
@@ -274,8 +276,10 @@ impl Document {
                         self.page = Some(page);
                         self.reset_scroll = true;
                     }
-                    ResultPage::NoMatch => self.notice = Some("Совпадений нет."),
-                    ResultPage::OutsideFile => self.notice = Some("Смещение за пределами файла."),
+                    ResultPage::NoMatch => self.notice = Some(crate::i18n::key!("Совпадений нет.")),
+                    ResultPage::OutsideFile => {
+                        self.notice = Some(crate::i18n::key!("Смещение за пределами файла."))
+                    }
                 }
             }
             Err(error) => self.error = Some(error),

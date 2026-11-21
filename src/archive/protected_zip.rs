@@ -64,14 +64,14 @@ impl ProtectedZip {
                     || item.crc32() != expected.crc
                     || !item.encrypted()
                 {
-                    Err(invalid("Недопустимая запись архива"))
+                    Err(invalid(crate::i18n::key!("Недопустимая запись архива")))
                 } else if !matches!(
                     item.compression(),
                     CompressionMethod::Stored | CompressionMethod::Deflated
                 ) {
                     Err(io::Error::new(
                         io::ErrorKind::Unsupported,
-                        text("Метод сжатия ZIP не поддерживается"),
+                        text!("Метод сжатия ZIP не поддерживается"),
                     ))
                 } else {
                     Ok(item.into())
@@ -80,7 +80,7 @@ impl ProtectedZip {
             }
         }
         if !wanted.is_empty() {
-            return Err(invalid("Недопустимая запись архива"));
+            return Err(invalid(crate::i18n::key!("Недопустимая запись архива")));
         }
         Ok(archive)
     }
@@ -100,7 +100,7 @@ impl ProtectedZip {
         let entry = self
             .entries
             .get(&member.index)
-            .ok_or_else(|| invalid("Недопустимая запись архива"))?
+            .ok_or_else(|| invalid(crate::i18n::key!("Недопустимая запись архива")))?
             .as_ref()
             .map_err(clone_error)?;
         let options = ZipReadOptions::new().password(Some(password.as_bytes()));
@@ -109,7 +109,7 @@ impl ProtectedZip {
             .with_reader(input, options)
             .map_err(zip_error)?;
         if entry.data_start() != Some(member.data) {
-            return Err(invalid("Недопустимая запись архива"));
+            return Err(invalid(crate::i18n::key!("Недопустимая запись архива")));
         }
         Ok(entry)
     }
@@ -122,7 +122,7 @@ fn clone_error(error: &io::Error) -> io::Error {
 pub(super) fn password_required() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
-        text("Укажите пароль для распаковки ZIP"),
+        text!("Укажите пароль для распаковки ZIP"),
     )
 }
 
@@ -130,15 +130,15 @@ pub(super) fn zip_error(error: ZipError) -> io::Error {
     match error {
         ZipError::Io(error) => error,
         ZipError::InvalidPassword => {
-            io::Error::new(io::ErrorKind::InvalidInput, text("Неверный пароль ZIP"))
+            io::Error::new(io::ErrorKind::InvalidInput, text!("Неверный пароль ZIP"))
         }
         ZipError::UnsupportedArchive(_) | ZipError::CompressionMethodNotSupported(_) => {
             io::Error::new(
                 io::ErrorKind::Unsupported,
-                text("Шифрование или сжатие ZIP не поддерживается"),
+                text!("Шифрование или сжатие ZIP не поддерживается"),
             )
         }
-        _ => invalid("Недопустимая запись архива"),
+        _ => invalid(crate::i18n::key!("Недопустимая запись архива")),
     }
 }
 

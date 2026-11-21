@@ -50,8 +50,8 @@ pub(crate) enum Unavailable {
 impl Unavailable {
     pub(crate) fn message(&self) -> &str {
         match self {
-            Self::Missing => text("Объект отсутствует или том недоступен"),
-            Self::InTrash => text("Объект в Корзине"),
+            Self::Missing => text!("Объект отсутствует или том недоступен"),
+            Self::InTrash => text!("Объект в Корзине"),
             Self::Read(error) => error,
         }
     }
@@ -61,18 +61,18 @@ impl Reference {
     pub(super) fn capture(source: &Path) -> Result<Self, TransferError> {
         let before = fs::symlink_metadata(source)?;
         if !before.is_file() && !before.is_dir() {
-            return Err(text("Выберите обычные файлы или папки").into());
+            return Err(text!("Выберите обычные файлы или папки").into());
         }
         let path = fs::canonicalize(source)?;
         let volume = Volume::of(&path)?;
         if in_trash(&path, &volume.mount) {
-            return Err(text("Объект в Корзине").into());
+            return Err(text!("Объект в Корзине").into());
         }
         let identity = Identity::capture(&before, &volume);
         if !identity.matches_metadata(&fs::symlink_metadata(&path)?)
             || !identity.matches_metadata(&fs::symlink_metadata(source)?)
         {
-            return Err(text("Файл или папка изменились").into());
+            return Err(text!("Файл или папка изменились").into());
         }
         Ok(Self {
             path: path.as_path().into(),

@@ -336,7 +336,7 @@ impl Panel {
     pub(crate) fn poll(&mut self, ctx: &egui::Context) -> Option<ReadyAction> {
         self.poll_launch(ctx);
         let check = self.check.as_mut()?;
-        let timeout = text("Файловая система не ответила на проверку результатов поиска.");
+        let timeout = text!("Файловая система не ответила на проверку результатов поиска.");
         let validation = loop {
             match check.receiver.try_recv() {
                 Ok(CheckEvent::Progress(at)) => {
@@ -369,7 +369,7 @@ impl Panel {
                     break Some(Validation::Unavailable {
                         missing: Vec::new(),
                         error: Some(
-                            text("Проверка результатов поиска завершилась неожиданно.").into(),
+                            text!("Проверка результатов поиска завершилась неожиданно.").into(),
                         ),
                     })
                 }
@@ -440,10 +440,10 @@ impl Panel {
             .show(root_ui, |ui| {
                 ui.add_enabled_ui(enabled, |ui| {
                     ui.horizontal(|ui| {
-                        ui.strong(text("Результаты поиска"));
+                        ui.strong(text!("Результаты поиска"));
                         let count = snapshot.results.matches.len();
                         let limit = if snapshot.results.limited {
-                            text("+ · Уточните запрос, показаны первые 1000")
+                            text!("+ · Уточните запрос, показаны первые 1000")
                         } else {
                             ""
                         };
@@ -456,7 +456,7 @@ impl Panel {
                             crate::tr_format!("Найдено: {count}{limit}", "Found: {count}{limit}")
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let button = ui.button(text("Закрыть результаты поиска"));
+                            let button = ui.button(text!("Закрыть результаты поиска"));
                             if button.clicked() {
                                 button.surrender_focus();
                                 close = true;
@@ -485,7 +485,7 @@ impl Panel {
                         if ui
                             .add_enabled(
                                 action_enabled && single.is_some() && self.launch.is_none(),
-                                egui::Button::new(text("Открыть")),
+                                egui::Button::new(text!("Открыть")),
                             )
                             .clicked()
                             && let Some(path) = single
@@ -495,7 +495,7 @@ impl Panel {
                         if ui
                             .add_enabled(
                                 action_enabled && single.is_some(),
-                                egui::Button::new(text("Показать в активной панели")),
+                                egui::Button::new(text!("Показать в активной панели")),
                             )
                             .clicked()
                             && let Some(path) = single
@@ -507,7 +507,7 @@ impl Panel {
                                 && can_copy
                                 && !snapshot.selected.is_empty()
                                 && destination.is_some(),
-                            egui::Button::new(text("Копировать в соседнюю панель")),
+                            egui::Button::new(text!("Копировать в соседнюю панель")),
                         );
                         if let Some(destination) = destination {
                             let display = destination.display();
@@ -546,7 +546,7 @@ impl Panel {
                     {
                         ui.horizontal(|ui| {
                             ui.spinner();
-                            ui.label(text("Проверка результатов поиска…"));
+                            ui.label(text!("Проверка результатов поиска…"));
                         });
                     } else if self
                         .launch
@@ -555,7 +555,7 @@ impl Panel {
                     {
                         ui.horizontal(|ui| {
                             ui.spinner();
-                            ui.label(text("Открытие файла…"));
+                            ui.label(text!("Открытие файла…"));
                         });
                     } else if !snapshot.results.warning.is_empty() {
                         let warning = &snapshot.results.warning;

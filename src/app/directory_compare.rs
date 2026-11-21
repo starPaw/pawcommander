@@ -49,19 +49,26 @@ impl DirectoryComparison {
         let modal = egui::Modal::new(egui::Id::unique("directory_comparison")).show(ctx, |ui| {
             ui.set_width((ctx.content_rect().width() - 44.0).clamp(200.0, 740.0));
             ui.heading(Command::CompareFolders.label());
-            show_pair(ui, &self.folders, ["Левая панель", "Правая панель"]);
+            show_pair(
+                ui,
+                &self.folders,
+                [
+                    crate::i18n::key!("Левая панель"),
+                    crate::i18n::key!("Правая панель"),
+                ],
+            );
             let before = self.mode;
             ui.add_enabled_ui(!running, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.selectable_value(
                         &mut self.mode,
                         ComparisonMode::Metadata,
-                        text("Размер и время изменения"),
+                        text!("Размер и время изменения"),
                     );
                     ui.selectable_value(
                         &mut self.mode,
                         ComparisonMode::Contents,
-                        text("По содержимому"),
+                        text!("По содержимому"),
                     );
                 });
             });
@@ -71,7 +78,9 @@ impl DirectoryComparison {
             ui.separator();
             match &mut self.phase {
                 Phase::Ready => {}
-                Phase::Running(worker) => show_progress(ui, worker, "Сравниваем папки…"),
+                Phase::Running(worker) => {
+                    show_progress(ui, worker, crate::i18n::key!("Сравниваем папки…"))
+                }
                 Phase::Finished(result) => {
                     show_result(ui, result, &mut self.show_matches, self.run)
                 }
@@ -79,7 +88,7 @@ impl DirectoryComparison {
                     ui.colored_label(ui.visuals().error_fg_color, error);
                 }
                 Phase::Stopped => {
-                    ui.label(text("Сравнение остановлено"));
+                    ui.label(text!("Сравнение остановлено"));
                 }
             }
             ui.add_space(8.0);
@@ -88,12 +97,12 @@ impl DirectoryComparison {
                     stop = ui
                         .add_enabled(
                             !worker.progress.cancel.is_requested(),
-                            egui::Button::new(text("Остановить")),
+                            egui::Button::new(text!("Остановить")),
                         )
                         .clicked();
                 } else {
-                    start = ui.button(text("Сравнить")).clicked();
-                    close = ui.button(text("Закрыть")).clicked();
+                    start = ui.button(text!("Сравнить")).clicked();
+                    close = ui.button(text!("Закрыть")).clicked();
                 }
             });
         });
@@ -121,7 +130,7 @@ fn show_result(ui: &mut egui::Ui, result: &Comparison, show_matches: &mut bool, 
         result.same
     ));
     if result.same > 0 {
-        ui.checkbox(show_matches, text("Показывать совпадения"));
+        ui.checkbox(show_matches, text!("Показывать совпадения"));
     }
     let count = if *show_matches {
         result.rows.len()
@@ -129,7 +138,7 @@ fn show_result(ui: &mut egui::Ui, result: &Comparison, show_matches: &mut bool, 
         result.differences.len()
     };
     if count == 0 {
-        ui.label(text("Различий не найдено"));
+        ui.label(text!("Различий не найдено"));
         return;
     }
     let height = (ui.ctx().content_rect().height() * 0.48).clamp(65.0, 380.0);
@@ -149,12 +158,14 @@ fn show_result(ui: &mut egui::Ui, result: &Comparison, show_matches: &mut bool, 
                 };
                 let row = &result.rows[index];
                 let (label, detail) = match &row.status {
-                    ComparisonStatus::LeftOnly => ("Только слева", None),
-                    ComparisonStatus::RightOnly => ("Только справа", None),
-                    ComparisonStatus::Changed => ("Различаются", None),
-                    ComparisonStatus::TypeChanged => ("Разные типы", None),
-                    ComparisonStatus::Same => ("Совпали", None),
-                    ComparisonStatus::Unreadable(reason) => ("Ошибка чтения", Some(reason)),
+                    ComparisonStatus::LeftOnly => (crate::i18n::text!("Только слева"), None),
+                    ComparisonStatus::RightOnly => (crate::i18n::text!("Только справа"), None),
+                    ComparisonStatus::Changed => (crate::i18n::text!("Различаются"), None),
+                    ComparisonStatus::TypeChanged => (crate::i18n::text!("Разные типы"), None),
+                    ComparisonStatus::Same => (crate::i18n::text!("Совпали"), None),
+                    ComparisonStatus::Unreadable(reason) => {
+                        (crate::i18n::text!("Ошибка чтения"), Some(reason))
+                    }
                 };
                 ui.horizontal(|ui| {
                     let color = if detail.is_some() {
@@ -164,10 +175,10 @@ fn show_result(ui: &mut egui::Ui, result: &Comparison, show_matches: &mut bool, 
                     };
                     ui.add_sized(
                         [128.0, row_height],
-                        egui::Label::new(RichText::new(text(label)).color(color)).truncate(),
+                        egui::Label::new(RichText::new(label).color(color)).truncate(),
                     );
                     let path = if row.path.as_os_str().is_empty() {
-                        text("Корень сравнения").into()
+                        text!("Корень сравнения").into()
                     } else {
                         row.path.to_string_lossy().escape_debug().to_string()
                     };

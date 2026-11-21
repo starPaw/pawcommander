@@ -65,18 +65,26 @@ enum Problem {
 
 impl Problem {
     fn message(self) -> &'static str {
-        crate::i18n::text(match self {
-            Self::Invalid => "Не удалось открыть PDF. Возможно, документ повреждён.",
-            Self::Locked => "PDF защищён паролем.",
-            Self::TooLarge => "PDF больше 64 МиБ. Откройте его во внешнем приложении.",
-            Self::TooManyPages => {
-                "В PDF больше 10 000 страниц. Откройте его во внешнем приложении."
+        match self {
+            Self::Invalid => {
+                crate::i18n::text!("Не удалось открыть PDF. Возможно, документ повреждён.")
             }
-            Self::Page => "Не удалось показать страницу PDF.",
-            Self::Search => "Не удалось выполнить поиск по PDF.",
-            Self::Service => "Предпросмотр PDF прервался. Откройте документ снова.",
-            Self::Timeout => "PDF не ответил вовремя. Откройте документ снова.",
-        })
+            Self::Locked => crate::i18n::text!("PDF защищён паролем."),
+            Self::TooLarge => {
+                crate::i18n::text!("PDF больше 64 МиБ. Откройте его во внешнем приложении.")
+            }
+            Self::TooManyPages => {
+                crate::i18n::text!(
+                    "В PDF больше 10 000 страниц. Откройте его во внешнем приложении."
+                )
+            }
+            Self::Page => crate::i18n::text!("Не удалось показать страницу PDF."),
+            Self::Search => crate::i18n::text!("Не удалось выполнить поиск по PDF."),
+            Self::Service => {
+                crate::i18n::text!("Предпросмотр PDF прервался. Откройте документ снова.")
+            }
+            Self::Timeout => crate::i18n::text!("PDF не ответил вовремя. Откройте документ снова."),
+        }
     }
 }
 

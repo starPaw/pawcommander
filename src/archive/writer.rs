@@ -55,7 +55,7 @@ impl CreationLimits {
             || self.path_bytes > MAX_INDEX_BYTES
             || self.metadata_bytes + trailer > MAX_METADATA_BYTES
         {
-            return Err(io::Error::other(crate::i18n::text(
+            return Err(io::Error::other(crate::i18n::text!(
                 "Превышен лимит записей или путей в архиве",
             )));
         }
@@ -82,7 +82,9 @@ impl<'a, W: Write> ArchiveWriter<'a, W> {
             (Format::Zip, None) => Self::Zip(rawzip::ZipArchiveWriter::new(output)),
             (Format::Tar, None) => Self::Tar(tar::Builder::new(output)),
             (Format::Tar, Some(_)) => {
-                return Err(super::invalid("Пароль можно задать только для ZIP"))
+                return Err(super::invalid(crate::i18n::key!(
+                    "Пароль можно задать только для ZIP"
+                )))
             }
         })
     }

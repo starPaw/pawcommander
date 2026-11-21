@@ -94,13 +94,15 @@ fn checksum_commands_save_a_manifest_and_keep_distinct_results_in_history() {
     assert_eq!(operation["label"], Command::VerifyChecksumManifest.label());
     assert_eq!(operation["selected_items_only"], true);
     for (name, reason) in [
-        ("changed.txt", "Файл изменён (SHA-256 не совпала)"),
-        ("missing.txt", "Файл отсутствует"),
+        (
+            "changed.txt",
+            crate::i18n::text!("Файл изменён (SHA-256 не совпала)"),
+        ),
+        ("missing.txt", crate::i18n::text!("Файл отсутствует")),
     ] {
         assert!(
             operation["items"].as_array().unwrap().iter().any(|item| {
-                item["source"].as_str().unwrap().ends_with(name)
-                    && item["reason"] == crate::i18n::text(reason)
+                item["source"].as_str().unwrap().ends_with(name) && item["reason"] == reason
             }),
             "{operation:?}"
         );
@@ -132,7 +134,7 @@ fn history_retry_owns_one_queued_attempt_and_keeps_completed_files_untouched() {
         false,
     );
     poll_queue_until(&mut app, &ctx, PawCommander::conflict_open);
-    answer_queue_conflict(&mut app, &ctx, crate::i18n::text("Пропустить"));
+    answer_queue_conflict(&mut app, &ctx, crate::i18n::text!("Пропустить"));
     poll_queue_until(&mut app, &ctx, |app| app.job.is_none());
     assert_eq!(app.retry_jobs.len(), 1);
     let id = app.retry_jobs[0].id.clone();
@@ -162,7 +164,7 @@ fn history_retry_owns_one_queued_attempt_and_keeps_completed_files_untouched() {
     assert_eq!(app.pending_jobs.len(), 1);
     held.send(Ok("release".into())).unwrap();
     poll_queue_until(&mut app, &ctx, PawCommander::conflict_open);
-    answer_queue_conflict(&mut app, &ctx, crate::i18n::text("Сохранить обе версии"));
+    answer_queue_conflict(&mut app, &ctx, crate::i18n::text!("Сохранить обе версии"));
     poll_queue_until(&mut app, &ctx, |app| app.job.is_none());
     assert!(app.retry_jobs.is_empty());
     assert_eq!(std::fs::read(target.join("a")).unwrap(), b"existing target");
@@ -261,7 +263,7 @@ fn copy_verification_footer_distinguishes_reads_from_writes() {
     }
     let text = operation_footer_text(&output.unwrap());
     assert!(
-        text.contains(crate::i18n::text("Проверка SHA-256")),
+        text.contains(crate::i18n::text!("Проверка SHA-256")),
         "{text}"
     );
     assert!(text.contains("1.0 KB / 2.0 KB"), "{text}");
@@ -380,7 +382,7 @@ fn queue_spawn_failure_preserves_work_and_order_until_explicit_retry() {
         .iter()
         .find_map(|shape| match &shape.shape {
             egui::Shape::Text(text)
-                if text.galley.text() == crate::i18n::text("Повторить запуск очереди") =>
+                if text.galley.text() == crate::i18n::text!("Повторить запуск очереди") =>
             {
                 Some(text.pos + text.galley.size() * 0.5)
             }
@@ -416,7 +418,10 @@ fn queue_spawn_failure_preserves_work_and_order_until_explicit_retry() {
 
 #[test]
 fn queued_same_target_copies_revalidate_conflicts_capture_destination_and_save_ordered_history() {
-    for decision in ["Заменить", "Сохранить обе версии"] {
+    for (decision, keep_both) in [
+        (crate::i18n::text!("Заменить"), false),
+        (crate::i18n::text!("Сохранить обе версии"), true),
+    ] {
         let root = tempfile::tempdir().unwrap();
         let first = root.path().join("first");
         let second = root.path().join("second");
@@ -464,9 +469,8 @@ fn queued_same_target_copies_revalidate_conflicts_capture_destination_and_save_o
             "first result persisted before second conflict"
         );
         assert_eq!(saved["records"][0]["label"], "first");
-        answer_queue_conflict(&mut app, &ctx, crate::i18n::text(decision));
+        answer_queue_conflict(&mut app, &ctx, decision);
         poll_queue_until(&mut app, &ctx, |app| app.job.is_none());
-        let keep_both = decision == "Сохранить обе версии";
         assert_eq!(
             std::fs::read(target.join("same.txt")).unwrap(),
             if keep_both {
@@ -998,7 +1002,7 @@ fn transfer_pause_controls_resume_or_stop_the_active_job_before_the_queue_advanc
                 }
                 false
             });
-        answer_queue_conflict(&mut app, &ctx, crate::i18n::text("Заменить"));
+        answer_queue_conflict(&mut app, &ctx, crate::i18n::text!("Заменить"));
         boundary.recv_timeout(Duration::from_secs(5)).unwrap();
 
         let pause_state =

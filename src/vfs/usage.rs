@@ -83,13 +83,13 @@ pub(crate) fn analyze(
     progress: &mut Progress,
 ) -> Result<Analysis, TransferError> {
     if folder.local().is_none() {
-        return Err(text("Анализ места доступен в локальных папках").into());
+        return Err(text!("Анализ места доступен в локальных папках").into());
     }
     let scope = ReadScope::open(folder)?;
     Directory::from_scope(&scope)?;
     let root = scope
         .descriptor
-        .ok_or_else(|| text("Не удалось открыть папку анализа"))?;
+        .ok_or_else(|| text!("Не удалось открыть папку анализа"))?;
     let stat = fstat(&root).map_err(io::Error::from)?;
     let mut scan = Scan {
         result: Analysis {
@@ -155,10 +155,10 @@ impl Scan {
             nested.map_or_else(|| rustix::io::dup(&self.root).map_err(io::Error::from), Ok)?;
         let stat = fstat(&descriptor).map_err(io::Error::from)?;
         if identity(&stat) != expected {
-            return Err(text("Папка изменилась или недоступна").into());
+            return Err(text!("Папка изменилась или недоступна").into());
         }
         if !self.visited_folders.insert(expected) {
-            self.result.nodes[node].issue = Some(text("Эта папка уже учтена").into());
+            self.result.nodes[node].issue = Some(text!("Эта папка уже учтена").into());
             return Ok(());
         }
         let allocated = allocated_bytes(&stat);
@@ -173,7 +173,7 @@ impl Scan {
                 || relative.components().count() > MAX_TREE_DEPTH
             {
                 self.limit = true;
-                return Err(text("Достигнут предел анализа места").into());
+                return Err(text!("Достигнут предел анализа места").into());
             }
             let mut child = Node::new(relative, Kind::Other, Some(node));
             let id = self.result.nodes.len();
@@ -208,9 +208,9 @@ impl Scan {
 
     fn incomplete(&mut self, node: NodeId, finish: Finish) {
         self.result.finish = finish;
-        self.result.nodes[node].issue = Some(text("Папка проверена частично").into());
+        self.result.nodes[node].issue = Some(text!("Папка проверена частично").into());
         for (pending, _) in self.folders.drain(..) {
-            self.result.nodes[pending].issue = Some(text("Папка ещё не проверена").into());
+            self.result.nodes[pending].issue = Some(text!("Папка ещё не проверена").into());
         }
     }
 

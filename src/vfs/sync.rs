@@ -285,7 +285,7 @@ fn check_roots(
     destination: &Location,
     cancel: &Cancellation,
 ) -> Result<(), TransferError> {
-    let overlap = || text("Источник и назначение синхронизации пересекаются").into();
+    let overlap = || text!("Источник и назначение синхронизации пересекаются").into();
     if (source.might_share_filesystem(destination)
         || source
             .sftp_endpoint()
@@ -324,9 +324,10 @@ impl Budget {
         self.entries += 1;
         self.bytes += bytes;
         if self.entries > MAX_ENTRIES || self.bytes > MAX_PATH_BYTES {
-            return Err(
-                text("Достигнут предел плана: 100 000 объектов или 32 МиБ данных о путях").into(),
-            );
+            return Err(text!(
+                "Достигнут предел плана: 100 000 объектов или 32 МиБ данных о путях"
+            )
+            .into());
         }
         Ok(())
     }
@@ -400,7 +401,7 @@ impl Snapshot {
         let kind = match entry {
             scan::Entry::Directory if metadata.is_directory() => {
                 if relative.components().count() > MAX_TREE_DEPTH {
-                    return Err(text("Достигнут предел вложенности папок").into());
+                    return Err(text!("Достигнут предел вложенности папок").into());
                 }
                 progress.item(location.path());
                 let mut children = BTreeMap::new();
@@ -416,7 +417,7 @@ impl Snapshot {
                     }
                     budget.visit(path.as_os_str().len() + child.extra_path_bytes())?;
                     if children.insert(path, child).is_some() {
-                        return Err(text("Папка содержит повторяющиеся имена").into());
+                        return Err(text!("Папка содержит повторяющиеся имена").into());
                     }
                     Ok(())
                 })?;

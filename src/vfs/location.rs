@@ -296,7 +296,7 @@ pub(super) const ARCHIVE_ADDRESS_ESCAPE: &percent_encoding::AsciiSet =
 
 pub fn resolve(address: &str, current: &Location) -> Result<Location, String> {
     if let Some(address) = address.strip_prefix("archive:") {
-        let invalid = || crate::i18n::text("Недопустимый адрес архива").to_owned();
+        let invalid = || crate::i18n::text!("Недопустимый адрес архива").to_owned();
         let (file, member) = address.split_once("!/").ok_or_else(invalid)?;
         let file = percent_decode_str(file).collect::<Vec<_>>();
         if file.contains(&0) {
@@ -328,23 +328,24 @@ pub fn resolve(address: &str, current: &Location) -> Result<Location, String> {
             || url.query().is_some()
             || url.fragment().is_some()
         {
-            return Err(crate::i18n::text(
+            return Err(crate::i18n::text!(
                 "Используйте sftp://пользователь@сервер:22/путь без пароля, query и fragment",
             )
             .into());
         }
         let host = url
             .host_str()
-            .ok_or(crate::i18n::text("Укажите сервер SFTP"))?
+            .ok_or(crate::i18n::text!("Укажите сервер SFTP"))?
             .to_owned();
         let user = percent_decode_str(url.username())
             .decode_utf8()
-            .map_err(|_| crate::i18n::text("Имя пользователя должно быть UTF-8"))?
+            .map_err(|_| crate::i18n::text!("Имя пользователя должно быть UTF-8"))?
             .into_owned();
         if user.is_empty() {
-            return Err(
-                crate::i18n::text("Укажите пользователя: sftp://пользователь@сервер/путь").into(),
-            );
+            return Err(crate::i18n::text!(
+                "Укажите пользователя: sftp://пользователь@сервер/путь"
+            )
+            .into());
         }
         let mut endpoint = Endpoint {
             host,
@@ -367,9 +368,9 @@ pub fn resolve(address: &str, current: &Location) -> Result<Location, String> {
         }
         let path = percent_decode_str(url.path())
             .decode_utf8()
-            .map_err(|_| crate::i18n::text("Путь должен быть UTF-8"))?;
+            .map_err(|_| crate::i18n::text!("Путь должен быть UTF-8"))?;
         if path.contains('\0') {
-            return Err(crate::i18n::text("Недопустимый путь").into());
+            return Err(crate::i18n::text!("Недопустимый путь").into());
         }
         return Ok(Location::Sftp {
             endpoint,
@@ -378,7 +379,7 @@ pub fn resolve(address: &str, current: &Location) -> Result<Location, String> {
     }
     if current.remote() {
         if address == "~" || address.starts_with("~/") {
-            return Err(crate::i18n::text(
+            return Err(crate::i18n::text!(
                 "Для домашней папки сервера используйте кнопку SFTP и начальный путь «.»",
             )
             .into());
@@ -412,9 +413,9 @@ pub fn resolve(address: &str, current: &Location) -> Result<Location, String> {
 pub(super) fn normalize_remote(path: &Path) -> Result<PathBuf, String> {
     let text = path
         .to_str()
-        .ok_or(crate::i18n::text("Путь SFTP должен быть UTF-8"))?;
+        .ok_or(crate::i18n::text!("Путь SFTP должен быть UTF-8"))?;
     if !text.starts_with('/') || text.contains(['\0', '\\']) {
-        return Err(crate::i18n::text(
+        return Err(crate::i18n::text!(
             "Используйте абсолютный POSIX-путь SFTP без обратных слешей",
         )
         .into());

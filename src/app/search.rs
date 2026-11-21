@@ -60,7 +60,7 @@ impl PawCommander {
             return true;
         }
         self.search.panel.reject(
-            crate::i18n::text("Активная папка или вкладка изменилась. Повторите действие."),
+            crate::i18n::text!("Активная папка или вкладка изменилась. Повторите действие."),
             ctx,
         );
         false
@@ -69,7 +69,7 @@ impl PawCommander {
     pub(super) fn dispatch_search_result(&mut self, action: ReadyAction, ctx: &egui::Context) {
         if self.keyboard_blocked(ctx) {
             self.search.panel.reject(
-                crate::i18n::text("Закройте открытое окно или меню и повторите действие."),
+                crate::i18n::text!("Закройте открытое окно или меню и повторите действие."),
                 ctx,
             );
             return;
@@ -112,7 +112,7 @@ impl PawCommander {
             ReadyAction::Copy { paths, destination } => {
                 self.start_transfer(
                     ctx,
-                    crate::i18n::text("Копирование в соседнюю панель"),
+                    crate::i18n::text!("Копирование в соседнюю панель"),
                     paths,
                     destination,
                     TransferKind::Copy,

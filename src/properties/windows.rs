@@ -295,7 +295,7 @@ fn invalid_directory_data() -> io::Error {
 }
 
 fn changed_directory() -> io::Error {
-    io::Error::other(crate::i18n::text("Папка изменилась во время подсчёта"))
+    io::Error::other(crate::i18n::text!("Папка изменилась во время подсчёта"))
 }
 
 // Windows SDK winternl.h/ntdef.h layouts. Keep this private FFI here instead of

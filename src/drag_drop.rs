@@ -115,7 +115,7 @@ impl DropTargets {
                 {
                     Some(paths) => paths,
                     None => {
-                        return Some(Err(crate::i18n::text(
+                        return Some(Err(crate::i18n::text!(
                             "Перетащите файлы с диска: у части объектов нет локального пути",
                         )
                         .into()))
@@ -135,11 +135,11 @@ impl DropTargets {
         let target = pos.and_then(|p| self.at(p, ctx.layer_id_at(p)));
         let error = match target {
             None => {
-                Some(crate::i18n::text("Перетащите на папку или в область файлов панели").into())
+                Some(crate::i18n::text!("Перетащите на папку или в область файлов панели").into())
             }
             Some(t) if t.destination.is_archive() => Some(crate::archive::readonly().into()),
             Some(t) if !t.ready => {
-                Some(crate::i18n::text("Дождитесь окончания чтения папки").into())
+                Some(crate::i18n::text!("Дождитесь окончания чтения папки").into())
             }
             Some(t) => validate(&sources, &t.destination, kind).err(),
         };
@@ -150,9 +150,9 @@ impl DropTargets {
             format!(
                 "{}: {} → {}{}",
                 if kind == TransferKind::Move {
-                    crate::i18n::text("Переместить")
+                    crate::i18n::text!("Переместить")
                 } else {
-                    crate::i18n::text("Копировать")
+                    crate::i18n::text!("Копировать")
                 },
                 if sources.is_empty() {
                     hovered.len()
@@ -163,7 +163,7 @@ impl DropTargets {
                 if external {
                     ""
                 } else {
-                    crate::i18n::text(" · Shift: переместить · Esc: отмена")
+                    crate::i18n::text!(" · Shift: переместить · Esc: отмена")
                 }
             )
         };
@@ -267,20 +267,20 @@ fn validate(
     }
     for source in sources {
         if kind == TransferKind::Move && !source.same_backend(destination) {
-            return Err(crate::i18n::text(
+            return Err(crate::i18n::text!(
                 "Между подключениями используйте копирование: отпустите Shift",
             )
             .into());
         }
         if source.same_backend(destination) {
             if destination.path().starts_with(source.path()) {
-                return Err(crate::i18n::text(
+                return Err(crate::i18n::text!(
                     "Нельзя переносить элемент в себя или вложенную папку",
                 )
                 .into());
             }
             if source.parent().as_ref() == Some(destination) {
-                return Err(crate::i18n::text("Элементы уже находятся в этой папке").into());
+                return Err(crate::i18n::text!("Элементы уже находятся в этой папке").into());
             }
         }
     }

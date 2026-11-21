@@ -130,7 +130,7 @@ pub fn visit_directory(
         return Ok(());
     }
     let mut directory = fs::read_dir(path)
-        .map_err(|e| at(crate::i18n::text("Не удалось прочитать папку"), path, e))?;
+        .map_err(|e| at(crate::i18n::text!("Не удалось прочитать папку"), path, e))?;
     while !cancelled() {
         let Some(item) = directory.next() else {
             break;
@@ -140,7 +140,7 @@ pub fn visit_directory(
         }
         let item = item.map_err(|e| {
             at(
-                crate::i18n::text("Не удалось прочитать элемент папки"),
+                crate::i18n::text!("Не удалось прочитать элемент папки"),
                 path,
                 e,
             )
@@ -152,7 +152,7 @@ pub fn visit_directory(
             Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
             Err(e) => {
                 return Err(at(
-                    crate::i18n::text("Не удалось получить сведения об элементе"),
+                    crate::i18n::text!("Не удалось получить сведения об элементе"),
                     &path,
                     e,
                 ));
@@ -192,7 +192,7 @@ pub fn create_directory(parent: &Path, name: &str) -> Result<PathBuf, String> {
     let destination = parent.join(name);
     fs::create_dir(&destination).map_err(|e| {
         at(
-            crate::i18n::text("Не удалось создать папку"),
+            crate::i18n::text!("Не удалось создать папку"),
             &destination,
             e,
         )
@@ -205,14 +205,14 @@ pub fn rename_entry(source: &Path, name: &str) -> Result<PathBuf, String> {
     let source = entry_path(source)?;
     fs::symlink_metadata(&source).map_err(|e| {
         at(
-            crate::i18n::text("Не удалось получить сведения об элементе"),
+            crate::i18n::text!("Не удалось получить сведения об элементе"),
             &source,
             e,
         )
     })?;
     let destination = source
         .parent()
-        .ok_or(crate::i18n::text(
+        .ok_or(crate::i18n::text!(
             "Нельзя переименовать корень файловой системы",
         ))?
         .join(name);
@@ -254,7 +254,7 @@ pub(crate) fn plan_transfer(
         progress.item(&original);
         let current = fs::symlink_metadata(&source).map_err(|e| {
             at(
-                crate::i18n::text("Не удалось получить сведения об элементе"),
+                crate::i18n::text!("Не удалось получить сведения об элементе"),
                 &source,
                 e,
             )
@@ -267,7 +267,7 @@ pub(crate) fn plan_transfer(
             )
             .into());
         }
-        let name = source.file_name().ok_or(crate::i18n::text(
+        let name = source.file_name().ok_or(crate::i18n::text!(
             "Нельзя скопировать или переместить корень файловой системы",
         ))?;
         if !names.insert(name.to_os_string()) {
@@ -652,7 +652,7 @@ pub(crate) fn copy_atomically_cancellable(
     .map_err(|e| {
         TransferError::io(e, |e| {
             at(
-                crate::i18n::text("Не удалось проверить источник"),
+                crate::i18n::text!("Не удалось проверить источник"),
                 source,
                 e,
             )
@@ -709,7 +709,7 @@ pub(crate) fn copy_atomically_cancellable(
         .map_err(|e| {
             TransferError::io(e, |e| {
                 copy_space_error(parent, &e)
-                    .unwrap_or_else(|| at(crate::i18n::text("Не удалось скопировать"), source, e))
+                    .unwrap_or_else(|| at(crate::i18n::text!("Не удалось скопировать"), source, e))
             })
         })
         .and_then(|()| check_staging())

@@ -140,7 +140,7 @@ fn retained_copy_restarts_from_checked_offset_and_never_retries_changed_data() {
                 let (mut progress, mut view) = Progress::tracked_transfer();
                 assert_eq!(
                     resume(&recovery, &offers[0].id, &mut progress).unwrap(),
-                    text("В назначении подтверждена полная копия.")
+                    text!("В назначении подтверждена полная копия.")
                 );
                 assert_eq!(view.snapshot().total_written, 0);
                 assert_eq!(fs::read(&target).unwrap(), bytes);
@@ -332,7 +332,7 @@ fn older_folder_moves_warn_and_a_damaged_access_time_section_preserves_the_sourc
         let mut progress = Progress::default();
         let result = resume(&recovery, &offer.id, &mut progress);
         if legacy {
-            assert!(result.unwrap().contains(text(
+            assert!(result.unwrap().contains(text!(
                 "Даты или права доступа сохранены частично. Подробности указаны в строках журнала."
             )));
             assert!(progress.results.items.iter().all(|row| {
@@ -340,14 +340,14 @@ fn older_folder_moves_warn_and_a_damaged_access_time_section_preserves_the_sourc
                     && row
                         .metadata_warning
                         .as_deref()
-                        .is_some_and(|warning| warning.contains(text("время доступа")))
+                        .is_some_and(|warning| warning.contains(text!("время доступа")))
             }));
             assert!(!source.path().exists());
             assert!(!path.exists());
         } else {
             assert!(result
                 .unwrap_err()
-                .contains(text("Некорректная запись времени доступа для переноса")));
+                .contains(text!("Некорректная запись времени доступа для переноса")));
             assert_eq!(
                 fs::read(source.path().join("child")).unwrap(),
                 b"source bytes"

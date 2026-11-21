@@ -264,13 +264,15 @@ impl<'a> Extraction<'a> {
                 // In AES ZIP, the reader authenticates the data at EOF.
                 copy_exact(path, size, &mut input, output, progress).map_err(|error| {
                     if error.kind() == io::ErrorKind::InvalidData {
-                        invalid("Неверный пароль или повреждены данные ZIP")
+                        invalid(crate::i18n::key!(
+                            "Неверный пароль или повреждены данные ZIP"
+                        ))
                     } else {
                         error
                     }
                 })
             }
-            _ => Err(invalid("Недопустимая запись архива")),
+            _ => Err(invalid(crate::i18n::key!("Недопустимая запись архива"))),
         }
     }
 }
@@ -309,20 +311,20 @@ impl Selection<'_> {
             }
             Contents::Tar { .. } | Contents::Zip { .. } | Contents::Encrypted(_) => member.size,
             contents => {
-                let reason = text(match contents {
+                let reason = match contents {
                     Contents::UnsupportedEncryption => {
-                        "Шифрование или сжатие ZIP не поддерживается"
+                        text!("Шифрование или сжатие ZIP не поддерживается")
                     }
-                    Contents::UnsupportedCompression => "Метод сжатия ZIP не поддерживается",
-                    _ => "Распаковка поддерживает только обычные файлы и папки",
-                });
+                    Contents::UnsupportedCompression => text!("Метод сжатия ZIP не поддерживается"),
+                    _ => text!("Распаковка поддерживает только обычные файлы и папки"),
+                };
                 return Err(format!("{}: {reason}", self.source.with_path(path)).into());
             }
         };
         *self.budget = self
             .budget
             .checked_sub(size)
-            .ok_or_else(|| text("Выбрано больше 32 ГиБ для распаковки"))?;
+            .ok_or_else(|| text!("Выбрано больше 32 ГиБ для распаковки"))?;
         if member.is_dir {
             self.entries.push(SelectedEntry {
                 relative: relative.clone(),
@@ -358,7 +360,7 @@ fn safe_component(name: &std::ffi::OsStr) -> bool {
 }
 
 fn selection_required() -> &'static str {
-    text("Выберите записи из одной папки архива")
+    text!("Выберите записи из одной папки архива")
 }
 
 fn archive_read_error(path: &Path, error: io::Error) -> TransferError {
@@ -372,7 +374,7 @@ fn archive_read_error(path: &Path, error: io::Error) -> TransferError {
 }
 
 fn bad_data() -> io::Error {
-    invalid("Повреждены данные записи архива")
+    invalid(crate::i18n::key!("Повреждены данные записи архива"))
 }
 
 pub(super) fn copy_exact(
@@ -396,7 +398,9 @@ pub(super) fn copy_exact(
     };
     progress.check_cancelled()?;
     if copied != size || input.read(&mut [0])? != 0 {
-        return Err(invalid("Размер данных записи архива не совпадает"));
+        return Err(invalid(crate::i18n::key!(
+            "Размер данных записи архива не совпадает"
+        )));
     }
     Ok(())
 }
@@ -412,7 +416,9 @@ fn copy_zip(
     let mut input = CrcReader::new(input);
     copy_exact(path, size, &mut input, output, progress)?;
     if input.crc().sum() != crc {
-        return Err(invalid("Контрольная сумма ZIP не совпадает"));
+        return Err(invalid(crate::i18n::key!(
+            "Контрольная сумма ZIP не совпадает"
+        )));
     }
     Ok(())
 }

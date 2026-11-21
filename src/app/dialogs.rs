@@ -120,7 +120,11 @@ pub(super) enum Dialog {
     },
 }
 
-fn archive_password_field(ui: &mut egui::Ui, password: &mut String, label: &'static str) {
+fn archive_password_field(
+    ui: &mut egui::Ui,
+    password: &mut String,
+    label: crate::i18n::MessageKey,
+) {
     let label = ui.label(crate::i18n::text(label));
     let mut edit = egui::TextEdit::singleline(password)
         .id_salt("archive_password")
@@ -146,7 +150,7 @@ fn extraction_destination(
     other: Option<&Location>,
 ) -> Result<Location, String> {
     if address.trim().is_empty() {
-        return Err(crate::i18n::text("Укажите папку для распаковки").into());
+        return Err(crate::i18n::text!("Укажите папку для распаковки").into());
     }
     if address == archive_directory.display() {
         return Ok(archive_directory.clone());
@@ -270,10 +274,10 @@ impl PawCommander {
         }
         let response = egui::Modal::new(egui::Id::unique("accessibility")).show(ctx, |ui| {
             ui.set_width(300.0);
-            ui.heading(crate::i18n::text("Доступность"));
+            ui.heading(crate::i18n::text!("Доступность"));
             let contrast = ui.checkbox(
                 &mut self.settings.high_contrast,
-                crate::i18n::text("Высокая контрастность"),
+                crate::i18n::text!("Высокая контрастность"),
             );
             if self.accessibility_focus && !ui.is_sizing_pass() {
                 contrast.request_focus();
@@ -283,7 +287,7 @@ impl PawCommander {
                 self.settings.theme.apply(ctx, self.settings.high_contrast);
             }
             ui.add_space(6.0);
-            ui.label(crate::i18n::text("Масштаб интерфейса"));
+            ui.label(crate::i18n::text!("Масштаб интерфейса"));
             for scale in Settings::UI_SCALES {
                 let response = ui.radio(self.settings.ui_scale == scale, format!("{scale}%"));
                 if response.clicked() {
@@ -291,7 +295,7 @@ impl PawCommander {
                 }
             }
             ui.add_space(6.0);
-            ui.button(crate::i18n::text("Закрыть")).clicked()
+            ui.button(crate::i18n::text!("Закрыть")).clicked()
         });
         if response.inner || response.should_close() {
             self.show_accessibility = false;
@@ -318,7 +322,7 @@ impl PawCommander {
         let mut load_config = false;
         egui::Modal::new(egui::Id::unique("sftp_connect")).show(ctx, |ui| {
             ui.set_width(470.0);
-            ui.heading(crate::i18n::text("Подключение SFTP"));
+            ui.heading(crate::i18n::text!("Подключение SFTP"));
             ui.add_space(10.0);
             #[cfg(target_os = "macos")]
             {
@@ -334,7 +338,7 @@ impl PawCommander {
                 }
             }
             let fields = |ui: &mut egui::Ui| ui.add_enabled_ui(!busy && !loading_config, |ui| {
-                egui::ComboBox::from_id_salt("saved_sftp_profiles").selected_text(crate::i18n::text("Сохранённые подключения")).show_ui(ui, |ui| {
+                egui::ComboBox::from_id_salt("saved_sftp_profiles").selected_text(crate::i18n::text!("Сохранённые подключения")).show_ui(ui, |ui| {
                     for profile in &self.settings.sftp_profiles {
                         let label = profile.display();
                         #[cfg(target_os = "macos")]
@@ -356,52 +360,52 @@ impl PawCommander {
                     }
                 });
                 egui::Grid::new("sftp_fields").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-                    let label = ui.label(crate::i18n::text("Сервер"));
+                    let label = ui.label(crate::i18n::text!("Сервер"));
                     ui.horizontal(|ui| {
                         let host = ui.add(egui::TextEdit::singleline(&mut form.host)
                             .desired_width(145.0)
-                            .hint_text(crate::i18n::text("Имя или SSH-алиас"))).labelled_by(label.id);
+                            .hint_text(crate::i18n::text!("Имя или SSH-алиас"))).labelled_by(label.id);
                         if host.changed() {
                             form.clear_ssh_config();
                         }
                         load_config = ui.add_enabled(
                             !form.host.trim().is_empty(),
-                            egui::Button::new(crate::i18n::text("Загрузить SSH-алиас")),
+                            egui::Button::new(crate::i18n::text!("Загрузить SSH-алиас")),
                         ).clicked();
                     });
                     ui.end_row();
-                    let label = ui.label(crate::i18n::text("Порт"));
+                    let label = ui.label(crate::i18n::text!("Порт"));
                     ui.add(egui::DragValue::new(&mut form.port).range(1..=65535)).labelled_by(label.id);
                     ui.end_row();
-                    let label = ui.label(crate::i18n::text("Пользователь"));
+                    let label = ui.label(crate::i18n::text!("Пользователь"));
                     ui.text_edit_singleline(&mut form.user).labelled_by(label.id);
                     ui.end_row();
-                    let label = ui.label(crate::i18n::text("Начальная папка"));
+                    let label = ui.label(crate::i18n::text!("Начальная папка"));
                     ui.text_edit_singleline(&mut form.path).labelled_by(label.id);
                     ui.end_row();
-                    let label = ui.label(crate::i18n::text("Пароль"));
+                    let label = ui.label(crate::i18n::text!("Пароль"));
                     interactive_ssh::answer_field(ui, &mut form.password, false).labelled_by(label.id);
                     ui.end_row();
-                    let label = ui.label(crate::i18n::text("Приватный ключ"));
-                    ui.add(egui::TextEdit::singleline(&mut form.key).hint_text(crate::i18n::text("Путь к ключу (необязательно)"))).labelled_by(label.id);
+                    let label = ui.label(crate::i18n::text!("Приватный ключ"));
+                    ui.add(egui::TextEdit::singleline(&mut form.key).hint_text(crate::i18n::text!("Путь к ключу (необязательно)"))).labelled_by(label.id);
                     ui.end_row();
-                    let label = ui.label(crate::i18n::text("Пароль ключа"));
+                    let label = ui.label(crate::i18n::text!("Пароль ключа"));
                     interactive_ssh::answer_field(ui, &mut form.passphrase, false).labelled_by(label.id);
                     ui.end_row();
                     #[cfg(target_os = "macos")]
                     if form.jump.as_ref().is_some_and(|jump| jump.key.is_some()) {
-                        let label = ui.label(crate::i18n::text("Пароль ключа промежуточного сервера"));
+                        let label = ui.label(crate::i18n::text!("Пароль ключа промежуточного сервера"));
                         interactive_ssh::answer_field(ui, &mut form.jump_passphrase, false).labelled_by(label.id);
                         ui.end_row();
                     }
                 });
                 form.show_identity_files(ui);
                 ui.add_space(10.0);
-                ui.checkbox(&mut form.use_saved, crate::i18n::text("Использовать сохранённый ключ и фразу"));
-                ui.checkbox(&mut form.save_key, crate::i18n::text("Сохранить ключ и фразу после подключения"));
-                ui.weak(crate::i18n::text("Ключ и его фраза сохраняются в системном хранилище секретов. Пароль аккаунта не сохраняется. При сохранении читается выбранный файл ключа."));
-                forget = ui.button(crate::i18n::text("Удалить сохранённый секрет")).clicked();
-                ui.weak(crate::i18n::text("При первом подключении сравните отпечаток ключа SSH с данными администратора."));
+                ui.checkbox(&mut form.use_saved, crate::i18n::text!("Использовать сохранённый ключ и фразу"));
+                ui.checkbox(&mut form.save_key, crate::i18n::text!("Сохранить ключ и фразу после подключения"));
+                ui.weak(crate::i18n::text!("Ключ и его фраза сохраняются в системном хранилище секретов. Пароль аккаунта не сохраняется. При сохранении читается выбранный файл ключа."));
+                forget = ui.button(crate::i18n::text!("Удалить сохранённый секрет")).clicked();
+                ui.weak(crate::i18n::text!("При первом подключении сравните отпечаток ключа SSH с данными администратора."));
             });
             #[cfg(target_os = "macos")]
             {
@@ -422,21 +426,21 @@ impl PawCommander {
                 if let Some(error) = &form.error { ui.colored_label(colors.error, error); }
             }
             ui.horizontal(|ui| {
-                cancel = ui.add_enabled(!busy, egui::Button::new(crate::i18n::text("Отмена"))).clicked();
+                cancel = ui.add_enabled(!busy, egui::Button::new(crate::i18n::text!("Отмена"))).clicked();
                 let label = if form.jump.is_some() {
-                    "Подключиться через ProxyJump"
+                    crate::i18n::text!("Подключиться через ProxyJump")
                 } else if form.ssh_config.as_ref().is_some_and(|config| config.matched && !config.unsupported.is_empty()) {
-                    "Подключиться напрямую"
+                    crate::i18n::text!("Подключиться напрямую")
                 } else {
-                    "Подключиться"
+                    crate::i18n::text!("Подключиться")
                 };
                 let ready = !busy && !loading_config && !form.host.trim().is_empty() && !form.user.trim().is_empty();
                 #[cfg(target_os = "macos")]
                 let ready = ready && !form.ssh_config_failed;
-                submit = ui.add_enabled(ready, egui::Button::new(crate::i18n::text(label))).clicked();
+                submit = ui.add_enabled(ready, egui::Button::new(label)).clicked();
             });
-            if busy { ui.horizontal(|ui| { ui.spinner(); ui.label(crate::i18n::text("Подключение…")); }); }
-            if loading_config { ui.horizontal(|ui| { ui.spinner(); ui.label(crate::i18n::text("Читаем SSH config…")); }); }
+            if busy { ui.horizontal(|ui| { ui.spinner(); ui.label(crate::i18n::text!("Подключение…")); }); }
+            if loading_config { ui.horizontal(|ui| { ui.spinner(); ui.label(crate::i18n::text!("Читаем SSH config…")); }); }
         });
         if load_config {
             form.start_ssh_config(ctx, crate::ssh_config::load_user_config);
@@ -464,9 +468,9 @@ impl PawCommander {
             let endpoint = form.endpoint();
             form.passphrase.clear();
             self.sftp_form = None;
-            self.start_job(ctx, crate::i18n::text("Удаление сохранённого секрета"), move || {
+            self.start_job(ctx, crate::i18n::text!("Удаление сохранённого секрета"), move || {
                 crate::credentials::forget(&endpoint)?;
-                Ok(crate::i18n::text("Сохранённый ключ и фраза удалены. Исходный файл ключа и открытое SSH-соединение сохранены.").into())
+                Ok(crate::i18n::text!("Сохранённый ключ и фраза удалены. Исходный файл ключа и открытое SSH-соединение сохранены.").into())
             });
         }
     }
@@ -474,23 +478,23 @@ impl PawCommander {
     pub(super) fn dialogs(&mut self, ctx: &egui::Context) {
         let colors = Palette::from_ctx(ctx);
         if self.show_help {
-            egui::Window::new(crate::i18n::text("О PawCommander")).collapsible(false).resizable(false)
+            egui::Window::new(crate::i18n::text!("О PawCommander")).collapsible(false).resizable(false)
                 .vscroll(true).max_height((ctx.content_rect().height() - 64.0).max(100.0))
                 .open(&mut self.show_help).show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.add(icons::logo(96.0));
                     ui.add_space(8.0);
                     ui.vertical(|ui| {
-                        ui.heading(crate::i18n::text("Ваши файлы. Две панели."));
-                        ui.label(crate::i18n::text("Файловый менеджер на Rust, вдохновлённый Dolphin."));
+                        ui.heading(crate::i18n::text!("Ваши файлы. Две панели."));
+                        ui.label(crate::i18n::text!("Файловый менеджер на Rust, вдохновлённый Dolphin."));
                     });
                 });
                 ui.add_space(12.0);
-                ui.label(crate::i18n::text("Действующие сочетания показаны в разделе Настройки → Горячие клавиши."));
-                ui.add_space(14.0); ui.label(crate::i18n::text("Для локальных файлов используется системный буфер, если он доступен. Для SFTP используется буфер PawCommander."));
+                ui.label(crate::i18n::text!("Действующие сочетания показаны в разделе Настройки → Горячие клавиши."));
+                ui.add_space(14.0); ui.label(crate::i18n::text!("Для локальных файлов используется системный буфер, если он доступен. Для SFTP используется буфер PawCommander."));
                 #[cfg(target_os = "macos")]
-                ui.label(crate::i18n::text("Вставка файлов срабатывает при нажатии V. Отпускайте Cmd и Option в любом порядке. В текстовых полях работают обычные Cmd+C, Cmd+X и Cmd+V."));
-                ui.label(crate::i18n::text("При совпадении имён выберите действие в диалоге. Удаление SFTP — навсегда с подтверждением; локальные файлы отправляются в корзину."));
+                ui.label(crate::i18n::text!("Вставка файлов срабатывает при нажатии V. Отпускайте Cmd и Option в любом порядке. В текстовых полях работают обычные Cmd+C, Cmd+X и Cmd+V."));
+                ui.label(crate::i18n::text!("При совпадении имён выберите действие в диалоге. Удаление SFTP — навсегда с подтверждением; локальные файлы отправляются в корзину."));
             });
         }
         let Some(mut dialog) = self.dialog.take() else {
@@ -499,22 +503,22 @@ impl PawCommander {
         let mut cancel = false;
         let mut confirm = false;
         let title = match &dialog {
-            Dialog::TransferLimits { .. } => crate::i18n::text("Скорость передачи"),
+            Dialog::TransferLimits { .. } => crate::i18n::text!("Скорость передачи"),
             Dialog::SelectionRule { command, .. } => command.label(),
-            Dialog::NewFolder { .. } => crate::i18n::text("Новая папка"),
+            Dialog::NewFolder { .. } => crate::i18n::text!("Новая папка"),
             #[cfg(target_os = "macos")]
             Dialog::CreateLink(_) => Command::CreateLink.label(),
-            Dialog::Rename { .. } => crate::i18n::text("Переименовать"),
-            Dialog::BatchRename(_) => crate::i18n::text("Массовое переименование"),
+            Dialog::Rename { .. } => crate::i18n::text!("Переименовать"),
+            Dialog::BatchRename(_) => crate::i18n::text!("Массовое переименование"),
             Dialog::ChangePermissions(_) => Command::ChangePermissions.label(),
             #[cfg(target_os = "macos")]
             Dialog::EditCustomActions(_) => Command::CustomActions.label(),
             #[cfg(target_os = "macos")]
-            Dialog::RunCustomAction(_) => crate::i18n::text("Предпросмотр запуска"),
+            Dialog::RunCustomAction(_) => crate::i18n::text!("Предпросмотр запуска"),
             #[cfg(target_os = "macos")]
-            Dialog::ExternalEditors(_) => crate::i18n::text("Внешние редакторы"),
+            Dialog::ExternalEditors(_) => crate::i18n::text!("Внешние редакторы"),
             #[cfg(target_os = "macos")]
-            Dialog::ConnectSmb(_) => crate::i18n::text("Подключение SMB"),
+            Dialog::ConnectSmb(_) => crate::i18n::text!("Подключение SMB"),
             Dialog::CreateArchive { .. } => Command::CreateArchive.label(),
             Dialog::ExtractArchive { .. } => Command::ExtractArchive.label(),
             Dialog::VerifyArchive { .. } => Command::VerifyArchive.label(),
@@ -522,16 +526,16 @@ impl PawCommander {
             Dialog::ArchiveEdit { edit, .. } => archive_edit_command(edit).label(),
             Dialog::WorkspaceName { editing, .. } => {
                 if editing.is_some() {
-                    crate::i18n::text("Переименовать рабочее пространство")
+                    crate::i18n::text!("Переименовать рабочее пространство")
                 } else {
-                    crate::i18n::text("Сохранить пару папок")
+                    crate::i18n::text!("Сохранить пару папок")
                 }
             }
             Dialog::Trash { paths } => {
                 if paths.iter().any(Location::remote) {
-                    crate::i18n::text("Удалить с сервера навсегда?")
+                    crate::i18n::text!("Удалить с сервера навсегда?")
                 } else {
-                    crate::i18n::text("Отправить в корзину?")
+                    crate::i18n::text!("Отправить в корзину?")
                 }
             }
         };
@@ -552,8 +556,8 @@ impl PawCommander {
                 }
                 Dialog::SelectionRule { kind, input, scan, .. } => {
                     let (field, hint) = match kind {
-                        RuleKind::Mask => (crate::i18n::text("Маска имени файла"), "photo-?.jpg"),
-                        RuleKind::Extension => (crate::i18n::text("Расширение"), "txt"),
+                        RuleKind::Mask => (crate::i18n::text!("Маска имени файла"), "photo-?.jpg"),
+                        RuleKind::Extension => (crate::i18n::text!("Расширение"), "txt"),
                     };
                     let label = ui.label(field);
                     let response = ui
@@ -569,28 +573,28 @@ impl PawCommander {
                         response.request_focus();
                     }
                     if matches!(kind, RuleKind::Mask) {
-                        ui.weak(crate::i18n::text("Звёздочка * заменяет любое число символов, знак ? — один символ."));
+                        ui.weak(crate::i18n::text!("Звёздочка * заменяет любое число символов, знак ? — один символ."));
                     }
                     if let Some(scan) = scan {
                         let progress = scan.next as f32 / scan.rows.len().max(1) as f32;
                         ui.add(egui::ProgressBar::new(progress)
-                            .text(crate::i18n::text("Поиск подходящих объектов…")));
+                            .text(crate::i18n::text!("Поиск подходящих объектов…")));
                     } else if !input.is_empty() && kind.pattern(input).is_none() {
                         let error = match kind {
-                            RuleKind::Mask => "Длина маски не должна превышать 1024 байта.",
-                            RuleKind::Extension => "Введите одно расширение, например txt или .txt.",
+                            RuleKind::Mask => crate::i18n::text!("Длина маски не должна превышать 1024 байта."),
+                            RuleKind::Extension => crate::i18n::text!("Введите одно расширение, например txt или .txt."),
                         };
-                        ui.colored_label(colors.error, crate::i18n::text(error));
+                        ui.colored_label(colors.error, error);
                     }
                 }
                 Dialog::NewFolder { parent, name } => {
                     ui.label(RichText::new(parent.display().to_string()).color(colors.muted));
                     let response = ui.add(
                         egui::TextEdit::singleline(name)
-                            .hint_text(crate::i18n::text("Имя папки"))
+                            .hint_text(crate::i18n::text!("Имя папки"))
                             .desired_width(f32::INFINITY),
                     );
-                    ctx.accesskit_node_builder(response.id, |node| node.set_label(crate::i18n::text("Имя папки")));
+                    ctx.accesskit_node_builder(response.id, |node| node.set_label(crate::i18n::text!("Имя папки")));
                     if self.dialog_focus {
                         response.request_focus();
                     }
@@ -599,7 +603,7 @@ impl PawCommander {
                     ui.label(RichText::new(source.display().to_string()).color(colors.muted));
                     let response =
                         ui.add(egui::TextEdit::singleline(name).desired_width(f32::INFINITY));
-                    ctx.accesskit_node_builder(response.id, |node| node.set_label(crate::i18n::text("Имя файла")));
+                    ctx.accesskit_node_builder(response.id, |node| node.set_label(crate::i18n::text!("Имя файла")));
                     if self.dialog_focus {
                         response.request_focus();
                     }
@@ -618,7 +622,7 @@ impl PawCommander {
                 Dialog::ConnectSmb(form) => form.show(ui, self.dialog_focus),
                 Dialog::CreateChecksumManifest { sources, directory, name } => {
                     ui.label(crate::tr_format!("Выбрано файлов: {}", "Selected files: {}", sources.len()));
-                    let label = ui.label(crate::i18n::text("Имя манифеста"));
+                    let label = ui.label(crate::i18n::text!("Имя манифеста"));
                     let edit = ui.add(egui::TextEdit::singleline(name).desired_width(f32::INFINITY));
                     if self.dialog_focus {
                         edit.request_focus();
@@ -631,19 +635,19 @@ impl PawCommander {
                 }
                 Dialog::CreateArchive { sources, directory, name, format, password } => {
                     ui.label(crate::tr_format!("Выбрано объектов: {}", "Selected items: {}", sources.len()));
-                    let label = ui.label(crate::i18n::text("Имя архива"));
+                    let label = ui.label(crate::i18n::text!("Имя архива"));
                     let edit = ui.add(egui::TextEdit::singleline(name).desired_width(f32::INFINITY));
                     edit.clone().labelled_by(label.id);
                     if self.dialog_focus {
                         edit.request_focus();
                     }
                     ui.horizontal(|ui| {
-                        ui.label(crate::i18n::text("Формат архива"));
+                        ui.label(crate::i18n::text!("Формат архива"));
                         ui.selectable_value(format, Format::Zip, "ZIP");
                         ui.selectable_value(format, Format::Tar, "TAR");
                     });
                     if *format == Format::Zip {
-                        archive_password_field(ui, password, "Пароль ZIP (необязательно)");
+                        archive_password_field(ui, password, crate::i18n::key!("Пароль ZIP (необязательно)"));
                     } else {
                         password.zeroize();
                     }
@@ -654,17 +658,17 @@ impl PawCommander {
                 }
                 Dialog::ExtractArchive { sources, archive_directory, other, address, password } => {
                     ui.label(crate::tr_format!("Выбрано объектов: {}", "Selected items: {}", sources.len()));
-                    let label = ui.label(crate::i18n::text("Папка для распаковки"));
+                    let label = ui.label(crate::i18n::text!("Папка для распаковки"));
                     let response = ui.add(egui::TextEdit::singleline(address).desired_width(f32::INFINITY)).labelled_by(label.id);
                     if self.dialog_focus {
                         response.request_focus();
                     }
                     if let Some(other) = other {
                         ui.horizontal_wrapped(|ui| {
-                            if ui.button(crate::i18n::text("Папка с архивом")).clicked() {
+                            if ui.button(crate::i18n::text!("Папка с архивом")).clicked() {
                                 *address = archive_directory.display();
                             }
-                            if ui.button(crate::i18n::text("Папка в соседней панели")).clicked() {
+                            if ui.button(crate::i18n::text!("Папка в соседней панели")).clicked() {
                                 *address = other.display();
                             }
                         });
@@ -673,13 +677,13 @@ impl PawCommander {
                         ui.colored_label(colors.error, error);
                     }
                     if sources.first().and_then(Location::archive_source).and_then(Format::from_path) == Some(Format::Zip) {
-                        archive_password_field(ui, password, "Пароль ZIP (необязательно)");
+                        archive_password_field(ui, password, crate::i18n::key!("Пароль ZIP (необязательно)"));
                     }
                 }
                 Dialog::VerifyArchive { archive, password } => {
                     ui.label(archive.to_string_lossy());
                     if Format::from_path(archive) == Some(Format::Zip) {
-                        archive_password_field(ui, password, "Пароль ZIP (необязательно)");
+                        archive_password_field(ui, password, crate::i18n::key!("Пароль ZIP (необязательно)"));
                     }
                 }
                 Dialog::ArchiveEdit { archive, edit, password } => {
@@ -701,20 +705,20 @@ impl PawCommander {
                                 ui.label(crate::tr_format!("…и ещё {}", "…and {} more", sources.len() - 6));
                             }
                             if Format::from_path(archive) == Some(Format::Zip) {
-                                archive_password_field(ui, password, "Пароль добавляемых файлов ZIP");
-                                ui.weak(crate::i18n::text("Для защищённого ZIP задайте пароль добавляемых файлов."));
+                                archive_password_field(ui, password, crate::i18n::key!("Пароль добавляемых файлов ZIP"));
+                                ui.weak(crate::i18n::text!("Для защищённого ZIP задайте пароль добавляемых файлов."));
                             }
                         }
                         ArchiveEdit::Rename { entry, name } => {
                             ui.label(entry.to_string_lossy());
-                            let label = ui.label(crate::i18n::text("Новое имя"));
+                            let label = ui.label(crate::i18n::text!("Новое имя"));
                             let response = ui.add(egui::TextEdit::singleline(name).desired_width(f32::INFINITY)).labelled_by(label.id);
                             if self.dialog_focus {
                                 response.request_focus();
                             }
                         }
                         ArchiveEdit::Remove(paths) => {
-                            ui.label(crate::i18n::text("Удалить выбранные записи из архива?"));
+                            ui.label(crate::i18n::text!("Удалить выбранные записи из архива?"));
                             for path in paths.iter().take(6) {
                                 ui.label(path.to_string_lossy());
                             }
@@ -727,8 +731,8 @@ impl PawCommander {
                 Dialog::WorkspaceName { editing, name } => {
                     if editing.is_none() {
                         for (label, pane) in [
-                            (crate::i18n::text("Левая папка"), &self.panes[0]),
-                            (crate::i18n::text("Правая папка"), &self.panes[1]),
+                            (crate::i18n::text!("Левая папка"), &self.panes[0]),
+                            (crate::i18n::text!("Правая папка"), &self.panes[1]),
                         ] {
                             ui.label(crate::tr_format!(
                                 "{label}: {}",
@@ -737,7 +741,7 @@ impl PawCommander {
                             ));
                         }
                     }
-                    let label = ui.label(crate::i18n::text("Имя рабочего пространства"));
+                    let label = ui.label(crate::i18n::text!("Имя рабочего пространства"));
                     let response = ui
                         .add(egui::TextEdit::singleline(name).desired_width(f32::INFINITY))
                         .labelled_by(label.id);
@@ -747,7 +751,7 @@ impl PawCommander {
                     if self.workspace_name_taken(name, *editing) {
                         ui.colored_label(
                             colors.error,
-                            crate::i18n::text("Это имя уже используется."),
+                            crate::i18n::text!("Это имя уже используется."),
                         );
                     }
                 }
@@ -760,7 +764,7 @@ impl PawCommander {
                         ui.label(crate::tr_format!("…и ещё {}", "…and {} more", paths.len() - 6));
                     }
                     ui.add_space(8.0);
-                    ui.label(if paths.iter().any(Location::remote) { crate::i18n::text("Файлы и содержимое папок будут удалены с сервера без возможности восстановления из корзины.") } else { crate::i18n::text("Их можно будет восстановить из системной корзины.") });
+                    ui.label(if paths.iter().any(Location::remote) { crate::i18n::text!("Файлы и содержимое папок будут удалены с сервера без возможности восстановления из корзины.") } else { crate::i18n::text!("Их можно будет восстановить из системной корзины.") });
                 }
             }
             ui.add_space(16.0);
@@ -795,7 +799,7 @@ impl PawCommander {
                 Dialog::TransferLimits { .. } | Dialog::Trash { .. } | Dialog::VerifyArchive { .. } | Dialog::ArchiveEdit { .. } => true,
             };
             ui.horizontal(|ui| {
-                let cancel_button = ui.button(crate::i18n::text("Отмена"));
+                let cancel_button = ui.button(crate::i18n::text!("Отмена"));
                 if self.dialog_focus && matches!(dialog, Dialog::Trash { .. }) {
                     cancel_button.request_focus();
                 }
@@ -805,35 +809,35 @@ impl PawCommander {
                 }
                 cancel = cancel_button.clicked();
                 let label = if matches!(dialog, Dialog::Trash { .. }) {
-                    if matches!(&dialog, Dialog::Trash { paths } if paths.iter().any(Location::remote)) { crate::i18n::text("Удалить навсегда") } else { crate::i18n::text("В корзину") }
+                    if matches!(&dialog, Dialog::Trash { paths } if paths.iter().any(Location::remote)) { crate::i18n::text!("Удалить навсегда") } else { crate::i18n::text!("В корзину") }
                 } else if matches!(dialog, Dialog::SelectionRule { .. }) {
-                    crate::i18n::text("Выделить")
+                    crate::i18n::text!("Выделить")
                 } else if matches!(dialog, Dialog::BatchRename(_)) {
-                    crate::i18n::text("Переименовать")
+                    crate::i18n::text!("Переименовать")
                 } else if matches!(dialog, Dialog::ChangePermissions(_)) {
-                    crate::i18n::text("Применить")
+                    crate::i18n::text!("Применить")
                 } else if matches!(dialog, Dialog::CreateArchive { .. } | Dialog::CreateChecksumManifest { .. }) {
-                    crate::i18n::text("Создать")
+                    crate::i18n::text!("Создать")
                 } else if matches!(dialog, Dialog::ExtractArchive { .. }) {
-                    crate::i18n::text("Распаковать")
+                    crate::i18n::text!("Распаковать")
                 } else if matches!(dialog, Dialog::VerifyArchive { .. }) {
-                    crate::i18n::text("Проверить")
+                    crate::i18n::text!("Проверить")
                 } else if let Dialog::ArchiveEdit { edit, .. } = &dialog {
-                    crate::i18n::text(match edit {
-                        ArchiveEdit::Add { .. } => "Добавить",
-                        ArchiveEdit::Rename { .. } => "Переименовать",
-                        ArchiveEdit::Remove(_) => "Удалить",
-                    })
+                    match edit {
+                        ArchiveEdit::Add { .. } => crate::i18n::text!("Добавить"),
+                        ArchiveEdit::Rename { .. } => crate::i18n::text!("Переименовать"),
+                        ArchiveEdit::Remove(_) => crate::i18n::text!("Удалить"),
+                    }
                 } else {
-                    crate::i18n::text(match &dialog {
+                    match &dialog {
                         #[cfg(target_os = "macos")]
-                        Dialog::RunCustomAction(_) => "Запустить",
+                        Dialog::RunCustomAction(_) => crate::i18n::text!("Запустить"),
                         #[cfg(target_os = "macos")]
-                        Dialog::ConnectSmb(_) => "Подключиться",
+                        Dialog::ConnectSmb(_) => crate::i18n::text!("Подключиться"),
                         #[cfg(target_os = "macos")]
-                        Dialog::CreateLink(_) => "Создать",
-                        _ => "Сохранить",
-                    })
+                        Dialog::CreateLink(_) => crate::i18n::text!("Создать"),
+                        _ => crate::i18n::text!("Сохранить"),
+                    }
                 };
                 let button = if self.settings.high_contrast {
                     egui::Button::new(label)
@@ -904,7 +908,7 @@ impl PawCommander {
                     .is_some_and(|scan| !Rc::ptr_eq(&scan.rows, &rows))
             {
                 self.notice = Some((
-                    crate::i18n::text("Папка или список изменились. Повторите выделение.").into(),
+                    crate::i18n::text!("Папка или список изменились. Повторите выделение.").into(),
                     false,
                 ));
                 ctx.request_repaint();
@@ -950,10 +954,10 @@ impl PawCommander {
                 Dialog::CreateLink(form) => form.submit(self, ctx),
                 Dialog::NewFolder { parent, name } => self.start_described_job(
                     ctx,
-                    crate::i18n::text("Создание папки"),
+                    crate::i18n::text!("Создание папки"),
                     format!(
                         "{}: {}",
-                        crate::i18n::text("Создание папки"),
+                        crate::i18n::text!("Создание папки"),
                         parent.join(&name)
                     ),
                     move |progress| {
@@ -975,10 +979,10 @@ impl PawCommander {
                 ),
                 Dialog::Rename { source, name } => self.start_described_job(
                     ctx,
-                    crate::i18n::text("Переименование"),
+                    crate::i18n::text!("Переименование"),
                     format!(
                         "{}: {} → {}",
-                        crate::i18n::text("Переименование"),
+                        crate::i18n::text!("Переименование"),
                         source,
                         name
                     ),
@@ -1089,10 +1093,10 @@ impl PawCommander {
                 }
                 Dialog::Trash { paths } => self.start_described_job(
                     ctx,
-                    crate::i18n::text("Удаление файлов"),
+                    crate::i18n::text!("Удаление файлов"),
                     format!(
                         "{} ({}): {}",
-                        crate::i18n::text("Удаление файлов"),
+                        crate::i18n::text!("Удаление файлов"),
                         paths.len(),
                         paths.first().map(Location::display).unwrap_or_default()
                     ),

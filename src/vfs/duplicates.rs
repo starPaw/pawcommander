@@ -86,7 +86,7 @@ pub(crate) fn find(
     progress: &mut Progress,
 ) -> Result<SearchResult, TransferError> {
     if folder.local().is_none() {
-        return Err(text("Поиск дубликатов доступен в локальных папках").into());
+        return Err(text!("Поиск дубликатов доступен в локальных папках").into());
     }
     let scope = ReadScope::open(folder)?;
     if scope
@@ -96,7 +96,7 @@ pub(crate) fn find(
         .iter()
         .any(is_staging_directory)
     {
-        return Err(text("Выберите папку вне временных папок PawCommander").into());
+        return Err(text!("Выберите папку вне временных папок PawCommander").into());
     }
     Directory::from_scope(&scope)?;
     let mut result = SearchResult {
@@ -161,7 +161,7 @@ fn collect_sizes(
                 || path.components().count() > MAX_TREE_DEPTH
             {
                 limited = true;
-                return Err(text("Достигнут предел поиска дубликатов: 100 000 объектов, 32 МиБ путей или 128 уровней папок").into());
+                return Err(text!("Достигнут предел поиска дубликатов: 100 000 объектов, 32 МиБ путей или 128 уровней папок").into());
             }
             match entry {
                 scan::Entry::Directory if !path.file_name().is_some_and(is_staging_directory) => {
@@ -170,7 +170,7 @@ fn collect_sizes(
                 scan::Entry::Directory => {}
                 scan::Entry::File(info) => match info.size {
                     Some(size) => sizes.entry(size).or_default().push(path),
-                    None => result.skip(&path, text("Размер файла недоступен")),
+                    None => result.skip(&path, text!("Размер файла недоступен")),
                 },
                 scan::Entry::Link(_) => {}
                 scan::Entry::Unreadable(error) => result.skip(&path, error),

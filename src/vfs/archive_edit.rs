@@ -70,7 +70,7 @@ pub(crate) fn edit_archive(
         )),
         Err(TransferError::Cancelled) => {
             progress.results.cancelled = true;
-            Ok(text("Редактирование архива остановлено").into())
+            Ok(text!("Редактирование архива остановлено").into())
         }
         Err(error) => Err(error.to_string()),
     }
@@ -86,7 +86,7 @@ fn rebuild(
     let cancel = progress.cancellation();
     cancel.check()?;
     let format =
-        Format::from_path(source.path()).ok_or_else(|| text("Поддерживаются архивы ZIP и TAR"))?;
+        Format::from_path(source.path()).ok_or_else(|| text!("Поддерживаются архивы ZIP и TAR"))?;
     let directory = source.parent().ok_or_else(|| changed_source(source))?;
     let parent = Parent::capture(&directory)?;
     let target = parent.location.join(
@@ -110,7 +110,7 @@ fn rebuild(
             validate_name(name)?;
             moved_to = entry.with_file_name(name);
             if moved_to == *entry {
-                return Err(text("Имя записи архива не изменилось").into());
+                return Err(text!("Имя записи архива не изменилось").into());
             }
             MemberEdit::Rename {
                 from: entry,
@@ -130,17 +130,17 @@ fn rebuild(
                         .iter()
                         .all(|source| source.parent().as_ref() == Some(origin))
             })
-            .ok_or_else(|| text("Выберите файлы или папки в соседней панели"))?;
+            .ok_or_else(|| text!("Выберите файлы или папки в соседней панели"))?;
         let origin_parent = Parent::capture(&origin)?;
         additions.capture_sources(sources, &origin_parent.location, folder, progress, &cancel)?;
         if additions.contains_file(&expected) {
-            return Err(text("Архив нельзя добавить в него самого").into());
+            return Err(text!("Архив нельзя добавить в него самого").into());
         }
         if archive.has_protected_entries()
             && password.is_none()
             && additions.names().any(|(_, dir)| !dir)
         {
-            return Err(text("Задайте пароль для добавляемых файлов ZIP").into());
+            return Err(text!("Задайте пароль для добавляемых файлов ZIP").into());
         }
         Some((origin, origin_parent))
     } else {

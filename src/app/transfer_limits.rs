@@ -53,11 +53,11 @@ impl PawCommander {
 }
 
 pub(super) fn show_fields(ui: &mut egui::Ui, draft: &mut TransferLimits, endpoints: &[Endpoint]) {
-    rate_field(ui, text("Общий лимит"), &mut draft.global_kib);
-    ui.weak(text("0 — без ограничения"));
+    rate_field(ui, text!("Общий лимит"), &mut draft.global_kib);
+    ui.weak(text!("0 — без ограничения"));
     if !endpoints.is_empty() {
         ui.separator();
-        ui.label(text("Подключения SFTP"));
+        ui.label(text!("Подключения SFTP"));
         egui::ScrollArea::vertical()
             .max_height(240.0)
             .show(ui, |ui| {
@@ -90,7 +90,7 @@ fn rate_field(ui: &mut egui::Ui, caption: &str, kib: &mut u32) -> egui::Response
                 egui::DragValue::new(kib)
                     .speed(1)
                     .range(0..=u32::MAX)
-                    .suffix(format!(" {}", text("КиБ/с"))),
+                    .suffix(format!(" {}", text!("КиБ/с"))),
             );
             let caption = ui
                 .add(egui::Label::new(caption).truncate())

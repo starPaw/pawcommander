@@ -62,17 +62,17 @@ pub(crate) fn build(
             .any(|path| path.local().is_none())
     {
         return Err(
-            text("Для совместимого переноса выберите объекты в двух локальных папках").into(),
+            text!("Для совместимого переноса выберите объекты в двух локальных папках").into(),
         );
     }
     if sources.iter().chain([destination]).any(mounted_smb) {
-        return Err(text("Совместимый перенос недоступен на томах SMB").into());
+        return Err(text!("Совместимый перенос недоступен на томах SMB").into());
     }
     let scope = ReadScope::open(destination)?;
     let destination = Directory::from_scope(&scope)?;
     let limits = Limits::read(destination.location.path())?;
     if limits.read_only {
-        return Err(text("Том назначения доступен только для чтения").into());
+        return Err(text!("Том назначения доступен только для чтения").into());
     }
     let direct = limits.exfat;
     let staging = destination.location.path().as_os_str().len() + STAGED_ROOT;
@@ -112,7 +112,7 @@ pub(crate) fn build(
         if kind == TransferKind::Move {
             let volume = Limits::read(item.source.path())?;
             if volume.apple_double || volume.read_only {
-                return Err(text(
+                return Err(text!(
                     "Для этого исходного тома выберите копирование с совместимыми именами",
                 )
                 .into());
@@ -135,7 +135,7 @@ pub(crate) fn build(
             .any(|entry| root_metadata.same_local_volume(&entry.metadata) != Some(true))
         {
             return Err(
-                text("Совместимый перенос не пересекает точки монтирования внутри папки").into(),
+                text!("Совместимый перенос не пересекает точки монтирования внутри папки").into(),
             );
         }
         preview.entries += manifest.entries.len();
@@ -331,5 +331,5 @@ impl Limits {
 }
 
 fn limit() -> TransferError {
-    text("План совместимых имён превышает допустимый размер").into()
+    text!("План совместимых имён превышает допустимый размер").into()
 }

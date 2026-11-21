@@ -40,7 +40,7 @@ impl SftpForm {
             Ok(result) => result,
             Err(mpsc::TryRecvError::Empty) => return,
             Err(mpsc::TryRecvError::Disconnected) => {
-                Err(text("Чтение SSH config завершилось неожиданно").into())
+                Err(text!("Чтение SSH config завершилось неожиданно").into())
             }
         };
         self.ssh_config_job = None;
@@ -136,7 +136,7 @@ impl SftpForm {
         if config.identities.len() < 2 {
             return;
         }
-        let title = text("Файлы ключей из SSH config");
+        let title = text!("Файлы ключей из SSH config");
         #[cfg(target_os = "macos")]
         {
             if ui
@@ -205,7 +205,7 @@ impl SftpForm {
         }
         ui.colored_label(
             ui.visuals().warn_fg_color,
-            text("Неподдерживаемые директивы SSH config"),
+            text!("Неподдерживаемые директивы SSH config"),
         );
         let row_height = ui
             .text_style_height(&egui::TextStyle::Body)

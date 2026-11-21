@@ -46,7 +46,7 @@ pub(super) fn parse(bytes: &[u8], cancel: &Cancellation) -> Result<Vec<Entry>, T
         entries.push(entry);
     }
     if entries.is_empty() {
-        return Err(crate::i18n::text("Манифест SHA-256 пуст").into());
+        return Err(crate::i18n::text!("Манифест SHA-256 пуст").into());
     }
     Ok(entries)
 }
@@ -91,7 +91,7 @@ pub(super) fn append(
 }
 
 pub(super) fn too_large() -> TransferError {
-    crate::i18n::text("Манифест SHA-256 превышает 16 МиБ или 50 000 записей").into()
+    crate::i18n::text!("Манифест SHA-256 превышает 16 МиБ или 50 000 записей").into()
 }
 
 fn parse_line(line: &[u8]) -> Option<Entry> {

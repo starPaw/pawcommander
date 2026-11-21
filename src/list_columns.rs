@@ -34,16 +34,16 @@ impl Column {
     ];
 
     pub(crate) fn label(self) -> &'static str {
-        text(match self {
-            Self::Name => "Имя",
-            Self::Size => "Размер",
-            Self::Modified => "Изменён",
-            Self::Extension => "Расширение",
-            Self::Permissions => "Права",
-            Self::Owner => "Владелец",
-            Self::Created => "Создан",
-            Self::Accessed => "Последний доступ",
-        })
+        match self {
+            Self::Name => text!("Имя"),
+            Self::Size => text!("Размер"),
+            Self::Modified => text!("Изменён"),
+            Self::Extension => text!("Расширение"),
+            Self::Permissions => text!("Права"),
+            Self::Owner => text!("Владелец"),
+            Self::Created => text!("Создан"),
+            Self::Accessed => text!("Последний доступ"),
+        }
     }
 
     fn default_width(self) -> u16 {
@@ -169,12 +169,12 @@ impl ListColumns {
     pub(crate) fn dialog(&mut self, ctx: &egui::Context, focus: &mut bool) -> bool {
         let response = egui::Modal::new(egui::Id::unique("list_columns")).show(ctx, |ui| {
             ui.set_width((ctx.content_rect().width() - 28.0).clamp(1.0, 340.0));
-            ui.heading(text("Столбцы списка"));
+            ui.heading(text!("Столбцы списка"));
             egui::ScrollArea::both()
                 .max_height((ctx.content_rect().height() - 125.0).max(40.0))
                 .show(ui, |ui| self.controls(ui, focus));
             ui.separator();
-            let close = ui.button(text("Закрыть"));
+            let close = ui.button(text!("Закрыть"));
             paint_focus(ui, &close, 4);
             close.clicked()
         });
@@ -187,7 +187,7 @@ impl ListColumns {
         egui::Grid::new("list_column_settings")
             .num_columns(4)
             .show(ui, |ui| {
-                ui.label(text("Имя"));
+                ui.label(text!("Имя"));
                 let width = width_control(ui, Column::Name, &mut self.name_width, Self::NAME_WIDTH);
                 if *focus && !ui.is_sizing_pass() {
                     width.request_focus();
@@ -221,12 +221,12 @@ impl ListColumns {
                         (
                             index.checked_sub(1),
                             Icon::ChevronUp,
-                            text("Переместить выше"),
+                            text!("Переместить выше"),
                         ),
                         (
                             (index + 1 < count).then_some(index + 1),
                             Icon::ChevronDown,
-                            text("Переместить ниже"),
+                            text!("Переместить ниже"),
                         ),
                     ]
                     .into_iter()
@@ -253,7 +253,7 @@ impl ListColumns {
             changed = true;
         }
         self.custom |= changed;
-        let reset = ui.add_enabled(self.custom, egui::Button::new(text("Сбросить столбцы")));
+        let reset = ui.add_enabled(self.custom, egui::Button::new(text!("Сбросить столбцы")));
         paint_focus(ui, &reset, 4);
         if reset.clicked() {
             *self = Self::default();
@@ -267,7 +267,7 @@ fn width_control(
     width: &mut u16,
     range: std::ops::RangeInclusive<u16>,
 ) -> egui::Response {
-    let title = format!("{} · {}", text("Ширина столбца"), column.label());
+    let title = format!("{} · {}", text!("Ширина столбца"), column.label());
     let response = ui
         .add(egui::DragValue::new(width).range(range))
         .on_hover_text(&title);

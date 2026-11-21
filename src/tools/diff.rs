@@ -41,11 +41,13 @@ pub(crate) fn launch_diff(
 
 fn spawn(tool: &Path, files: &[PathBuf; 2]) -> Result<Child, String> {
     if !tool.is_absolute() || !super::executable(tool) {
-        return Err(crate::i18n::text("Внешний инструмент сравнения недоступен").into());
+        return Err(crate::i18n::text!("Внешний инструмент сравнения недоступен").into());
     }
     for path in files {
         if !path.is_absolute() {
-            return Err(crate::i18n::text("Внешнему инструменту нужны два локальных файла").into());
+            return Err(
+                crate::i18n::text!("Внешнему инструменту нужны два локальных файла").into(),
+            );
         }
         crate::fs_ops::open_regular_source(path).map_err(|error| {
             crate::tr_format!(

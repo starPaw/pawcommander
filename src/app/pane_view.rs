@@ -144,9 +144,9 @@ pub(super) fn list_notice(ui: &mut egui::Ui, tab: &Tab, empty: bool, compact: bo
         ui.horizontal(|ui| {
             ui.spinner();
             ui.label(if tab.path.is_archive() {
-                crate::i18n::text("Чтение архива…")
+                crate::i18n::text!("Чтение архива…")
             } else {
-                crate::i18n::text("Чтение папки…")
+                crate::i18n::text!("Чтение папки…")
             });
         });
     }
@@ -157,9 +157,9 @@ pub(super) fn list_notice(ui: &mut egui::Ui, tab: &Tab, empty: bool, compact: bo
         ui.vertical_centered(|ui| {
             ui.label(
                 RichText::new(if tab.filter.is_empty() {
-                    crate::i18n::text("Папка пуста")
+                    crate::i18n::text!("Папка пуста")
                 } else {
-                    crate::i18n::text("Ничего не найдено")
+                    crate::i18n::text!("Ничего не найдено")
                 })
                 .size(if compact { 13.0 } else { 20.0 })
                 .color(colors.muted),
@@ -167,9 +167,9 @@ pub(super) fn list_notice(ui: &mut egui::Ui, tab: &Tab, empty: bool, compact: bo
             if !compact && (!tab.path.is_archive() || !tab.filter.is_empty()) {
                 ui.label(
                     RichText::new(if tab.filter.is_empty() {
-                        crate::i18n::text("Создайте папку или вставьте файлы")
+                        crate::i18n::text!("Создайте папку или вставьте файлы")
                     } else {
-                        crate::i18n::text("Попробуйте другое имя")
+                        crate::i18n::text!("Попробуйте другое имя")
                     })
                     .size(12.0)
                     .color(colors.muted),
@@ -199,7 +199,7 @@ pub(super) fn render_pane(
     let colors = Palette::from_ctx(ui.ctx());
     // Below this height the regular pane chrome can obscure a grid tile's name.
     let compact = ui.available_height() < 280.0;
-    let sort_label = crate::i18n::text("Сортировка");
+    let sort_label = crate::i18n::text!("Сортировка");
     ui.push_id(pane_index, |ui| {
         if compact {
             ui.spacing_mut().item_spacing.y = 1.0;
@@ -258,7 +258,7 @@ pub(super) fn render_pane(
                         egui::TextEdit::singleline(&mut tab.filter)
                             .align(egui::Align2::LEFT_CENTER)
                             .margin(egui::Margin::symmetric(5, 0))
-                            .hint_text(crate::i18n::text("Фильтр по имени…")),
+                            .hint_text(crate::i18n::text!("Фильтр по имени…")),
                     );
                     for choice in [FolderMode::Grid, FolderMode::List, FolderMode::Columns] {
                         if icons::compact_button(ui, choice.icon(), choice.label(), mode == choice)
@@ -289,7 +289,7 @@ pub(super) fn render_pane(
                 })
                 .inner;
             ui.ctx().accesskit_node_builder(response.id, |node| {
-                node.set_label(crate::i18n::text("Фильтр по имени"));
+                node.set_label(crate::i18n::text!("Фильтр по имени"));
             });
             if tab.focus_filter {
                 response.request_focus();
@@ -419,21 +419,19 @@ pub(super) fn render_pane(
                 }
                 let files_id = tab.file_list_id();
                 let files_label = {
-                    let pane = crate::i18n::text(
-                        match (
-                            settings.split.then_some(settings.pane_layout.orientation),
-                            pane_index,
-                        ) {
-                            (Some(PaneOrientation::Stacked), 0) => "Верхняя панель",
-                            (Some(PaneOrientation::Stacked), _) => "Нижняя панель",
-                            (_, 0) => "Левая панель",
-                            _ => "Правая панель",
-                        },
-                    );
+                    let pane = match (
+                        settings.split.then_some(settings.pane_layout.orientation),
+                        pane_index,
+                    ) {
+                        (Some(PaneOrientation::Stacked), 0) => crate::i18n::text!("Верхняя панель"),
+                        (Some(PaneOrientation::Stacked), _) => crate::i18n::text!("Нижняя панель"),
+                        (_, 0) => crate::i18n::text!("Левая панель"),
+                        _ => crate::i18n::text!("Правая панель"),
+                    };
                     let view = if grid {
-                        crate::i18n::text("Сетка")
+                        crate::i18n::text!("Сетка")
                     } else {
-                        crate::i18n::text("Список")
+                        crate::i18n::text!("Список")
                     };
                     format!("{pane}, {view}, {}", tab.path.display())
                 };

@@ -42,9 +42,9 @@ impl LinkStatus {
     pub(crate) fn problem(self) -> Option<&'static str> {
         match self {
             Self::Available => None,
-            Self::Missing => Some(text("Цель ссылки отсутствует")),
-            Self::Loop => Some(text("Цикл или слишком длинная цепочка ссылок")),
-            Self::Unavailable => Some(text("Цель ссылки недоступна")),
+            Self::Missing => Some(text!("Цель ссылки отсутствует")),
+            Self::Loop => Some(text!("Цикл или слишком длинная цепочка ссылок")),
+            Self::Unavailable => Some(text!("Цель ссылки недоступна")),
         }
     }
 }
@@ -56,15 +56,15 @@ pub(crate) fn describe_target(path: &Path) -> String {
             let status = LinkStatus::from_stat(&fs::metadata(path));
             format!(
                 "{}: {}\n{}: {}",
-                text("Цель ссылки"),
+                text!("Цель ссылки"),
                 target.display(),
-                text("Состояние цели ссылки"),
+                text!("Состояние цели ссылки"),
                 status
                     .problem()
-                    .unwrap_or_else(|| text("Цель ссылки доступна")),
+                    .unwrap_or_else(|| text!("Цель ссылки доступна")),
             )
         }
-        Err(error) => at(text("Не удалось прочитать цель ссылки"), path, error),
+        Err(error) => at(text!("Не удалось прочитать цель ссылки"), path, error),
     }
 }
 
@@ -76,9 +76,9 @@ pub(crate) fn create(
     progress: &mut Progress,
 ) -> Result<String, String> {
     validate_name(name)
-        .map_err(|_| text("Введите один компонент имени ссылки без / и \\").to_owned())?;
+        .map_err(|_| text!("Введите один компонент имени ссылки без / и \\").to_owned())?;
     if target.as_os_str().is_empty() {
-        return Err(text("Введите путь к цели ссылки").into());
+        return Err(text!("Введите путь к цели ссылки").into());
     }
     let directory = directory_path(directory)?;
     let destination = directory.join(name);
@@ -111,18 +111,18 @@ fn create_hard_link(
 ) -> Result<Option<String>, String> {
     let parent = fs::symlink_metadata(directory).map_err(|error| {
         at(
-            text("Не удалось проверить папку назначения"),
+            text!("Не удалось проверить папку назначения"),
             directory,
             error,
         )
     })?;
     let expected = fs::symlink_metadata(source)
-        .map_err(|error| at(text("Не удалось проверить цель ссылки"), source, error))?;
+        .map_err(|error| at(text!("Не удалось проверить цель ссылки"), source, error))?;
     if !expected.is_file() {
-        return Err(text("Для жёсткой ссылки выберите обычный файл").into());
+        return Err(text!("Для жёсткой ссылки выберите обычный файл").into());
     }
     if expected.dev() != parent.dev() {
-        return Err(text("Жёсткие ссылки требуют целевой файл на том же томе").into());
+        return Err(text!("Жёсткие ссылки требуют целевой файл на том же томе").into());
     }
     match fs::symlink_metadata(destination) {
         Ok(_) => {
@@ -148,12 +148,12 @@ fn create_hard_link(
         let made =
             fs::symlink_metadata(&payload).map_err(|error| create_error(destination, error))?;
         if !made.is_file() || !same_file(&made, &expected) {
-            return Err(text("Цель изменилась до создания жёсткой ссылки").into());
+            return Err(text!("Цель изменилась до создания жёсткой ссылки").into());
         }
         if !fs::symlink_metadata(directory)
             .is_ok_and(|current| current.is_dir() && same_file(&current, &parent))
         {
-            return Err(text("Папка назначения изменилась до создания ссылки").into());
+            return Err(text!("Папка назначения изменилась до создания ссылки").into());
         }
         staging.ensure_owned().map_err(|error| error.to_string())?;
         progress.checkpoint().map_err(|error| error.to_string())?;
@@ -181,9 +181,9 @@ fn create_error(destination: &Path, error: io::Error) -> String {
             destination.display()
         ),
         io::ErrorKind::CrossesDevices => {
-            text("Жёсткие ссылки требуют целевой файл на том же томе").into()
+            text!("Жёсткие ссылки требуют целевой файл на том же томе").into()
         }
-        _ => at(text("Не удалось создать ссылку"), destination, error),
+        _ => at(text!("Не удалось создать ссылку"), destination, error),
     }
 }
 

@@ -105,7 +105,7 @@ fn prepare(
 
 fn helper_error(error: io::Error) -> String {
     match error.kind() {
-        io::ErrorKind::TimedOut => crate::i18n::text("Медиаплеер не ответил вовремя.").into(),
+        io::ErrorKind::TimedOut => crate::i18n::text!("Медиаплеер не ответил вовремя.").into(),
         _ => media_error(),
     }
 }

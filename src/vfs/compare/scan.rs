@@ -148,10 +148,10 @@ fn visit_remote(
         }
         let mut parts = name.components();
         let (Some(Component::Normal(segment)), None) = (parts.next(), parts.next()) else {
-            return Err(text("Папка содержит недопустимое имя").into());
+            return Err(text!("Папка содержит недопустимое имя").into());
         };
         if name.as_os_str() != segment {
-            return Err(text("Папка содержит недопустимое имя").into());
+            return Err(text!("Папка содержит недопустимое имя").into());
         }
         let entry = if stat.is_dir() {
             Entry::Directory
@@ -216,9 +216,9 @@ fn visit_path(path: &Path, cancel: &Cancellation, visit: Visitor<'_>) -> Result<
 }
 
 pub(super) fn folder_changed() -> TransferError {
-    text("Папка изменилась или недоступна").into()
+    text!("Папка изменилась или недоступна").into()
 }
 
 fn unsupported() -> Entry {
-    Entry::Unreadable(text("Тип объекта недоступен для сравнения").into())
+    Entry::Unreadable(text!("Тип объекта недоступен для сравнения").into())
 }

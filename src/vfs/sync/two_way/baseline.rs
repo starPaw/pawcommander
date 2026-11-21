@@ -69,10 +69,10 @@ impl RootId {
                     .map_err(err)?
                     .get(endpoint)
                     .cloned()
-                    .ok_or_else(|| text("Не удалось подтвердить сервер для общего состояния"))?;
+                    .ok_or_else(|| text!("Не удалось подтвердить сервер для общего состояния"))?;
                 let (key, _) = session
                     .host_key()
-                    .ok_or_else(|| text("Не удалось подтвердить сервер для общего состояния"))?;
+                    .ok_or_else(|| text!("Не удалось подтвердить сервер для общего состояния"))?;
                 Ok(Self::Sftp {
                     path,
                     host: endpoint.host_name().to_owned(),
@@ -160,7 +160,7 @@ impl BaselineStore {
     pub(super) fn check_roots(&self, observed: &[Snapshot; 2]) -> Result<(), TransferError> {
         let (pair, panes) = capture_pair(observed)?;
         if pair != self.pair || panes != self.panes {
-            return Err(text("Пара папок изменилась. Постройте план заново.").into());
+            return Err(text!("Пара папок изменилась. Постройте план заново.").into());
         }
         Ok(())
     }
@@ -244,7 +244,7 @@ impl BaselineStore {
             }),
             Ok(()) => Err(invalid()),
             Err(TryLockError::WouldBlock) => {
-                Err(text("Синхронизация этой пары уже выполняется.").into())
+                Err(text!("Синхронизация этой пары уже выполняется.").into())
             }
             Err(error) => Err(err(error).into()),
         }
@@ -351,7 +351,7 @@ fn check_storage_location(directory: &Path, pair: &[RootId; 2]) -> Result<(), Tr
             matches!(root, RootId::Local { device, inode, .. }
                 if (*device, *inode) == (metadata.dev(), metadata.ino()))
         }) {
-            return Err(text("Одна из папок содержит данные синхронизации приложения.").into());
+            return Err(text!("Одна из папок содержит данные синхронизации приложения.").into());
         }
     }
     Ok(())
@@ -380,5 +380,5 @@ pub(super) fn decode_path(value: &str) -> Result<PathBuf, TransferError> {
 }
 
 pub(super) fn invalid() -> TransferError {
-    text("Сохранённое общее состояние повреждено или имеет неподдерживаемый формат.").into()
+    text!("Сохранённое общее состояние повреждено или имеет неподдерживаемый формат.").into()
 }

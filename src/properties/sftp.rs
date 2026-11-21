@@ -31,11 +31,11 @@ pub(super) fn scan(
                             summary.bytes = summary.bytes.saturating_add(size);
                         } else {
                             summary
-                                .read_error(location, text("Сервер SFTP не сообщил размер файла"));
+                                .read_error(location, text!("Сервер SFTP не сообщил размер файла"));
                         }
                     }
                     FileType::Other(0) => {
-                        summary.read_error(location, text("Сервер SFTP не сообщил тип объекта"));
+                        summary.read_error(location, text!("Сервер SFTP не сообщил тип объекта"));
                     }
                     _ => summary.other += 1,
                 }
@@ -53,7 +53,7 @@ pub(super) fn scan(
 }
 
 fn details(stat: &FileStat) -> String {
-    let unavailable = || text("недоступно").to_owned();
+    let unavailable = || text!("недоступно").to_owned();
     let mode = stat
         .perm
         .map_or_else(unavailable, |mode| format!("{:04o}", mode & 0o7777));
@@ -67,7 +67,7 @@ fn details(stat: &FileStat) -> String {
         "Права: {permissions}\nИзменён: {}\nСоздан: {}\nДоступ: {}",
         "Permissions: {permissions}\nModified: {}\nCreated: {}\nAccessed: {}",
         remote_date(stat.mtime),
-        text("недоступно"),
+        text!("недоступно"),
         remote_date(stat.atime)
     )
 }
@@ -139,7 +139,7 @@ pub(crate) fn check_sftp_properties(remote: &Location) {
     )));
     assert!(details.contains(&date(Some(modified))));
     assert!(details.contains(&date(Some(accessed))));
-    assert!(details.contains(text("недоступно")));
+    assert!(details.contains(text!("недоступно")));
 
     let cancel_root = root.join("cancellation");
     let queued = cancel_root.join("child");

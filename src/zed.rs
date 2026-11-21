@@ -10,7 +10,7 @@ const TEXT_SAMPLE: usize = 8 * 1024;
 
 pub fn open(location: &Location, text_only: bool) -> Result<String, String> {
     let argument = argument(location)?;
-    let cli = crate::tools::zed_cli().ok_or(crate::i18n::text("Zed не найден. Установите Zed; при нестандартной установке выполните в Zed команду «cli: install cli binary» и обновите проверку в настройках PawCommander."))?;
+    let cli = crate::tools::zed_cli().ok_or(crate::i18n::text!("Zed не найден. Установите Zed; при нестандартной установке выполните в Zed команду «cli: install cli binary» и обновите проверку в настройках PawCommander."))?;
     if text_only && location.remote() {
         let (stat, bytes) = vfs::preview_data(location, TEXT_SAMPLE).map_err(|e| {
             crate::tr_format!(
@@ -24,17 +24,17 @@ pub fn open(location: &Location, text_only: bool) -> Result<String, String> {
                 bytes.len() > TEXT_SAMPLE,
             )
         {
-            return Err(crate::i18n::text("SFTP-файл не распознан как текстовый. Используйте «Открыть в Zed» в контекстном меню для явного открытия или скопируйте файл локально.").into());
+            return Err(crate::i18n::text!("SFTP-файл не распознан как текстовый. Используйте «Открыть в Zed» в контекстном меню для явного открытия или скопируйте файл локально.").into());
         }
     }
     launch(&cli, &argument)?;
     Ok(if location.remote() {
-        crate::i18n::text(
+        crate::i18n::text!(
             "Запрос открытия передан Zed. Подключение и SSH-аутентификация выполняются в Zed.",
         )
         .into()
     } else {
-        crate::i18n::text("Запрос открытия передан Zed.").into()
+        crate::i18n::text!("Запрос открытия передан Zed.").into()
     })
 }
 
@@ -51,16 +51,16 @@ fn argument(location: &Location) -> Result<std::ffi::OsString, String> {
         .into_os_string());
     };
     if endpoint.jump.is_some() {
-        return Err(crate::i18n::text(
+        return Err(crate::i18n::text!(
             "Для этого подключения нужен маршрут ProxyJump. Откройте SSH-алиас в Terminal или Zed.",
         )
         .into());
     }
     let path = path
         .to_str()
-        .ok_or(crate::i18n::text("Путь SFTP должен быть UTF-8"))?;
+        .ok_or(crate::i18n::text!("Путь SFTP должен быть UTF-8"))?;
     if !path.starts_with('/') || path.contains(['\0', '\\']) {
-        return Err(crate::i18n::text("Для Zed нужен абсолютный POSIX-путь SFTP").into());
+        return Err(crate::i18n::text!("Для Zed нужен абсолютный POSIX-путь SFTP").into());
     }
     let host = endpoint.host.trim_matches(['[', ']']);
     if host.is_empty()
@@ -69,14 +69,14 @@ fn argument(location: &Location) -> Result<std::ffi::OsString, String> {
             .chars()
             .all(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '%'))
     {
-        return Err(crate::i18n::text("Некорректный сервер SSH для Zed").into());
+        return Err(crate::i18n::text!("Некорректный сервер SSH для Zed").into());
     }
     if endpoint.user.is_empty()
         || endpoint.user.starts_with('-')
         || endpoint.user.chars().any(char::is_control)
         || endpoint.port == 0
     {
-        return Err(crate::i18n::text("Укажите пользователя и порт SSH 1–65535").into());
+        return Err(crate::i18n::text!("Укажите пользователя и порт SSH 1–65535").into());
     }
     let mut url = url::Url::parse("ssh://localhost/").map_err(|e| e.to_string())?;
     let host = if host.contains(':') {
@@ -85,14 +85,14 @@ fn argument(location: &Location) -> Result<std::ffi::OsString, String> {
         host.into()
     };
     url.set_host(Some(&host))
-        .map_err(|_| crate::i18n::text("Некорректный сервер SSH для Zed"))?;
+        .map_err(|_| crate::i18n::text!("Некорректный сервер SSH для Zed"))?;
     let user =
         percent_encoding::utf8_percent_encode(&endpoint.user, percent_encoding::NON_ALPHANUMERIC)
             .to_string();
     url.set_username(&user)
-        .map_err(|_| crate::i18n::text("Некорректный пользователь SSH для Zed"))?;
+        .map_err(|_| crate::i18n::text!("Некорректный пользователь SSH для Zed"))?;
     url.set_port(Some(endpoint.port))
-        .map_err(|_| crate::i18n::text("Некорректный порт SSH для Zed"))?;
+        .map_err(|_| crate::i18n::text!("Некорректный порт SSH для Zed"))?;
     // Zed percent-decodes the URL path before opening it. Encode '%' literally
     // once; do not repurpose query parameters as SSH options or carry secrets.
     // Zed interprets a numeric ':line[:column]' suffix after URL decoding.
@@ -108,7 +108,7 @@ fn argument(location: &Location) -> Result<std::ffi::OsString, String> {
         path
     };
     url.path_segments_mut()
-        .map_err(|_| crate::i18n::text("Некорректный адрес SSH для Zed"))?
+        .map_err(|_| crate::i18n::text!("Некорректный адрес SSH для Zed"))?
         .clear()
         .extend(path.split('/').skip(1));
     Ok(url.to_string().into())

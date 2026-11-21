@@ -12,11 +12,11 @@ pub(super) fn operation_details(ui: &mut egui::Ui, progress: &Snapshot, paused: 
             |name| name.to_string_lossy().into_owned(),
         );
         let phase = if progress.waiting_for_conflict {
-            crate::i18n::text("Ожидается решение")
+            crate::i18n::text!("Ожидается решение")
         } else if progress.verification.is_some() {
-            crate::i18n::text("Проверка SHA-256")
+            crate::i18n::text!("Проверка SHA-256")
         } else {
-            crate::i18n::text("Текущий объект")
+            crate::i18n::text!("Текущий объект")
         };
         ui.add(egui::Label::new(format!("{phase}: {name}")).truncate())
             .on_hover_text(item.display().to_string());
@@ -79,7 +79,7 @@ pub(super) fn operation_details(ui: &mut egui::Ui, progress: &Snapshot, paused: 
                 ));
             }
             if !paused && transfer.stream_finished {
-                ui.label(crate::i18n::text("Завершение записи…"));
+                ui.label(crate::i18n::text!("Завершение записи…"));
             }
         });
     }
@@ -123,10 +123,10 @@ impl PawCommander {
         let mut archive_add_requested = false;
         let history_error = self.history.error.is_some();
         let history_button = |ui: &mut egui::Ui| {
-            let response = ui.button(crate::i18n::text("Журнал результатов"));
+            let response = ui.button(crate::i18n::text!("Журнал результатов"));
             paint_focus(ui, &response, 5);
             if history_error {
-                ui.colored_label(colors.error, crate::i18n::text("История не сохранена"));
+                ui.colored_label(colors.error, crate::i18n::text!("История не сохранена"));
             }
             response.clicked()
         };
@@ -156,11 +156,11 @@ impl PawCommander {
                             let running = pause == PauseState::Running;
                             let response = ui.add_enabled(
                                 !conflict_open,
-                                egui::Button::new(crate::i18n::text(if running {
-                                    "Пауза"
+                                egui::Button::new(if running {
+                                    crate::i18n::text!("Пауза")
                                 } else {
-                                    "Продолжить"
-                                })),
+                                    crate::i18n::text!("Продолжить")
+                                }),
                             );
                             paint_focus(ui, &response, 5);
                             if response.clicked() {
@@ -168,7 +168,7 @@ impl PawCommander {
                             }
                             let speed = ui.add_enabled(
                                 !conflict_open,
-                                egui::Button::new(crate::i18n::text("Скорость…")),
+                                egui::Button::new(crate::i18n::text!("Скорость…")),
                             );
                             paint_focus(ui, &speed, 5);
                             speed_requested = speed.clicked();
@@ -178,12 +178,12 @@ impl PawCommander {
                                 .add_enabled(
                                     !stopping,
                                     egui::Button::new(if stopping {
-                                        crate::i18n::text("Остановка…")
+                                        crate::i18n::text!("Остановка…")
                                     } else {
-                                        crate::i18n::text("Остановить")
+                                        crate::i18n::text!("Остановить")
                                     }),
                                 )
-                                .on_hover_text(crate::i18n::text(
+                                .on_hover_text(crate::i18n::text!(
                                     "Остановить операцию · Shift+Esc",
                                 ));
                             paint_focus(ui, &response, 5);
@@ -192,10 +192,10 @@ impl PawCommander {
                         if !stopping {
                             match pause {
                                 Some(PauseState::Requested) => {
-                                    ui.label(crate::i18n::text("Приостанавливаем передачу…"));
+                                    ui.label(crate::i18n::text!("Приостанавливаем передачу…"));
                                 }
                                 Some(PauseState::Paused) => {
-                                    ui.label(crate::i18n::text("Передача приостановлена"));
+                                    ui.label(crate::i18n::text!("Передача приостановлена"));
                                 }
                                 _ => {}
                             }
@@ -258,18 +258,18 @@ impl PawCommander {
                                 let add = ui
                                     .add_enabled(
                                         !self.archive_add_sources().is_empty(),
-                                        egui::Button::new(crate::i18n::text(
+                                        egui::Button::new(crate::i18n::text!(
                                             "Добавить из соседней панели…",
                                         )),
                                     )
-                                    .on_disabled_hover_text(crate::i18n::text(
+                                    .on_disabled_hover_text(crate::i18n::text!(
                                         "Выберите файлы или папки в соседней панели",
                                     ));
                                 paint_focus(ui, &add, 5);
                                 archive_add_requested = add.clicked();
                             } else if !self.tab().path.is_archive() {
                                 ui.label(
-                                    RichText::new(crate::i18n::text("Двойной щелчок — открыть"))
+                                    RichText::new(crate::i18n::text!("Двойной щелчок — открыть"))
                                         .size(11.0)
                                         .color(colors.muted),
                                 );
@@ -298,7 +298,7 @@ impl PawCommander {
             return;
         }
         if self.queue_start_failed {
-            let retry = ui.button(crate::i18n::text("Повторить запуск очереди"));
+            let retry = ui.button(crate::i18n::text!("Повторить запуск очереди"));
             paint_focus(ui, &retry, 5);
             if retry.clicked() {
                 self.queue_start_failed = false;
@@ -314,18 +314,18 @@ impl PawCommander {
         ))
         .id_salt("pending_file_jobs")
         .show(ui, |ui| {
-            ui.label(crate::i18n::text("Остановка действует только на текущее задание. Ожидающие задания хранятся до закрытия приложения."));
+            ui.label(crate::i18n::text!("Остановка действует только на текущее задание. Ожидающие задания хранятся до закрытия приложения."));
             egui::ScrollArea::vertical().id_salt("pending_jobs_scroll").max_height(120.0).show(ui, |ui| {
                 for (index, job) in self.pending_jobs.iter().enumerate() {
                     ui.push_id(index, |ui| {
                         ui.horizontal(|ui| {
-                            let up = ui.add_enabled(index > 0, egui::Button::new("↑")).on_hover_text(crate::i18n::text("Раньше"));
+                            let up = ui.add_enabled(index > 0, egui::Button::new("↑")).on_hover_text(crate::i18n::text!("Раньше"));
                             paint_focus(ui, &up, 5);
                             if up.clicked() { reorder = Some((index, -1)); }
-                            let down = ui.add_enabled(index + 1 < self.pending_jobs.len(), egui::Button::new("↓")).on_hover_text(crate::i18n::text("Позже"));
+                            let down = ui.add_enabled(index + 1 < self.pending_jobs.len(), egui::Button::new("↓")).on_hover_text(crate::i18n::text!("Позже"));
                             paint_focus(ui, &down, 5);
                             if down.clicked() { reorder = Some((index, 1)); }
-                            let cancel = ui.button(crate::i18n::text("Удалить из очереди"));
+                            let cancel = ui.button(crate::i18n::text!("Удалить из очереди"));
                             paint_focus(ui, &cancel, 5);
                             if cancel.clicked() { remove = Some(index); }
                             ui.add(egui::Label::new(format!("{}. {}", index + 1, job.description)).truncate()).on_hover_text(&job.description);

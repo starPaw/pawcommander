@@ -97,7 +97,7 @@ impl RetryTransfer {
         if self.checking {
             if self.needs_inspection() {
                 return Err(
-                    crate::i18n::text("Сначала проверьте прерванную операцию SFTP.").into(),
+                    crate::i18n::text!("Сначала проверьте прерванную операцию SFTP.").into(),
                 );
             }
             self.verify_target()?;

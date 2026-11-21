@@ -30,7 +30,7 @@ enum Permissions {
 impl ModeRule {
     pub(crate) fn parse(input: &str) -> Result<Self, &'static str> {
         parse(input.trim()).map_err(|()| {
-            crate::i18n::text(
+            crate::i18n::text!(
                 "Введите восьмеричные или символьные права, например 0644 или u+rw,go-w.",
             )
         })

@@ -155,7 +155,7 @@ impl Compare<'_> {
         if depth > MAX_TREE_DEPTH {
             return self.result.add(
                 relative,
-                ComparisonStatus::Unreadable(text("Достигнут предел вложенности папок").into()),
+                ComparisonStatus::Unreadable(text!("Достигнут предел вложенности папок").into()),
             );
         }
         let mut children: BTreeMap<OsString, [Option<Entry>; 2]> = BTreeMap::new();
@@ -171,7 +171,7 @@ impl Compare<'_> {
                 self.budget.visit(name.len() + entry.extra_path_bytes())?;
                 let slot = &mut children.entry(name).or_default()[side];
                 if slot.is_some() {
-                    return Err(text("Папка содержит повторяющиеся имена").into());
+                    return Err(text!("Папка содержит повторяющиеся имена").into());
                 }
                 *slot = Some(entry);
                 Ok(())
@@ -258,7 +258,7 @@ impl Compare<'_> {
             return match left.modified.as_ref().zip(right.modified.as_ref()) {
                 Some((left, right)) if !left.matches(right) => Ok(false),
                 Some(_) if sizes.is_some() => Ok(true),
-                _ => Err(text("Не удалось получить размер или время изменения").into()),
+                _ => Err(text!("Не удалось получить размер или время изменения").into()),
             };
         }
         let mut digest = |side: usize| {
@@ -276,13 +276,13 @@ fn side_error(side: usize, error: TransferError) -> TransferError {
         return error;
     }
     let pane = if side == 0 {
-        text("Левая панель")
+        text!("Левая панель")
     } else {
-        text("Правая панель")
+        text!("Правая панель")
     };
     format!("{pane} · {error}").into()
 }
 
 fn limit() -> TransferError {
-    text("Достигнут предел сравнения: 100 000 объектов или 32 МиБ данных о путях").into()
+    text!("Достигнут предел сравнения: 100 000 объектов или 32 МиБ данных о путях").into()
 }

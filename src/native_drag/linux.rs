@@ -99,7 +99,7 @@ fn uri_list(paths: &[PathBuf]) -> Result<Vec<u8>, String> {
     let mut data = Vec::new();
     for path in paths {
         let url = url::Url::from_file_path(path)
-            .map_err(|_| crate::i18n::text("Недопустимый путь файла"))?;
+            .map_err(|_| crate::i18n::text!("Недопустимый путь файла"))?;
         data.extend_from_slice(url.as_str().as_bytes());
         data.extend_from_slice(b"\r\n");
         if data.len() > 4 * 1024 * 1024 {

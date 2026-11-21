@@ -36,11 +36,11 @@ enum Abort {
 
 impl Abort {
     fn message(self) -> &'static str {
-        text(match self {
-            Self::Cancelled => "Подключение отменено",
-            Self::TimedOut => "Время интерактивной SSH-аутентификации истекло",
-            Self::HostKeyTimedOut => "Время проверки ключа сервера SSH истекло",
-        })
+        match self {
+            Self::Cancelled => text!("Подключение отменено"),
+            Self::TimedOut => text!("Время интерактивной SSH-аутентификации истекло"),
+            Self::HostKeyTimedOut => text!("Время проверки ключа сервера SSH истекло"),
+        }
     }
 }
 
@@ -150,7 +150,7 @@ pub(crate) struct InteractiveAuth {
     exchange_deadline: Option<Instant>,
     server: String,
     #[cfg(target_os = "macos")]
-    host_key_title: Option<&'static str>,
+    host_key_title: Option<crate::i18n::MessageKey>,
 }
 
 impl InteractiveAuth {
@@ -178,14 +178,14 @@ impl InteractiveAuth {
     }
 
     #[cfg(target_os = "macos")]
-    pub(super) fn set_host_key_title(&mut self, title: &'static str) {
+    pub(super) fn set_host_key_title(&mut self, title: crate::i18n::MessageKey) {
         self.host_key_title = Some(title);
     }
 
     pub(crate) fn confirm_host_key(&self, key: HostKey) -> Result<(), String> {
         let (reply, receive) = mpsc::channel();
         let deadline = Instant::now() + HOST_KEY_TIMEOUT;
-        let title = "Проверка ключа сервера";
+        let title = crate::i18n::key!("Проверка ключа сервера");
         #[cfg(target_os = "macos")]
         let title = self.host_key_title.unwrap_or(title);
         self.send(ConnectionPrompt::HostKey(HostKeyRequest {

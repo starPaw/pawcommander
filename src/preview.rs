@@ -224,7 +224,7 @@ impl Preview {
         let muted = Palette::from_ctx(ui.ctx()).muted;
         ui.horizontal(|ui| {
             ui.label(
-                RichText::new(crate::i18n::text("СВЕДЕНИЯ"))
+                RichText::new(crate::i18n::text!("СВЕДЕНИЯ"))
                     .size(11.0)
                     .strong()
                     .color(muted),
@@ -235,7 +235,7 @@ impl Preview {
                         icons::compact_button(
                             ui,
                             Icon::Refresh,
-                            crate::i18n::text("Обновить предпросмотр"),
+                            crate::i18n::text!("Обновить предпросмотр"),
                             false,
                         )
                     })
@@ -256,10 +256,10 @@ impl Preview {
             draw_icon(ui, false, "");
             ui.add_space(18.0);
             ui.vertical_centered(|ui| {
-                ui.label(RichText::new(crate::i18n::text("Ничего не выбрано")).strong());
+                ui.label(RichText::new(crate::i18n::text!("Ничего не выбрано")).strong());
                 ui.add_space(6.0);
                 ui.label(
-                    RichText::new(crate::i18n::text(
+                    RichText::new(crate::i18n::text!(
                         "Выберите файл или папку,\nчтобы увидеть подробности.",
                     ))
                     .color(muted),
@@ -279,7 +279,11 @@ impl Preview {
         if !path.is_archive() {
             let previous = self.hex_mode;
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.hex_mode, false, crate::i18n::text("Предпросмотр"));
+                ui.selectable_value(
+                    &mut self.hex_mode,
+                    false,
+                    crate::i18n::text!("Предпросмотр"),
+                );
                 ui.selectable_value(&mut self.hex_mode, true, "Hex");
             });
             if self.hex_mode != previous {
@@ -473,7 +477,7 @@ impl Preview {
                     .is_err()
                 {
                     self.result = Some(Err(
-                        crate::i18n::text("Служба предпросмотра недоступна").into()
+                        crate::i18n::text!("Служба предпросмотра недоступна").into()
                     ));
                 }
             }
@@ -501,11 +505,11 @@ impl Preview {
             |codec| codec.name().to_owned(),
         );
         ui.horizontal_wrapped(|ui| {
-            let label = ui.label(crate::i18n::text("Кодировка"));
+            let label = ui.label(crate::i18n::text!("Кодировка"));
             egui::ComboBox::from_id_salt("preview-text-encoding")
                 .selected_text(caption)
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.encoding, None, crate::i18n::text("Авто"));
+                    ui.selectable_value(&mut self.encoding, None, crate::i18n::text!("Авто"));
                     for encoding in Codec::ALL {
                         ui.selectable_value(&mut self.encoding, Some(encoding), encoding.name());
                     }
@@ -580,19 +584,19 @@ impl Preview {
                         ui.separator();
                         ui.add_space(10.0);
                         if let Some(size) = loaded.size {
-                            detail(ui, crate::i18n::text("Размер"), &format_size(size));
+                            detail(ui, crate::i18n::text!("Размер"), &format_size(size));
                         }
-                        detail(ui, crate::i18n::text("Изменён"), &loaded.modified);
+                        detail(ui, crate::i18n::text!("Изменён"), &loaded.modified);
                         if let Content::Image { original_size, .. } = &loaded.content {
                             detail(
                                 ui,
-                                crate::i18n::text("Разрешение"),
+                                crate::i18n::text!("Разрешение"),
                                 &format!("{} × {}", original_size[0], original_size[1]),
                             );
                         }
                     }
                 }
-                detail(ui, crate::i18n::text("Расположение"), &path.display());
+                detail(ui, crate::i18n::text!("Расположение"), &path.display());
                 if self.encoding_picker(ui) {
                     return;
                 }
@@ -610,7 +614,7 @@ impl Preview {
                             ui.separator();
                             ui.add_space(12.0);
                             ui.label(
-                                RichText::new(crate::i18n::text("ПРЕДПРОСМОТР"))
+                                RichText::new(crate::i18n::text!("ПРЕДПРОСМОТР"))
                                     .size(11.0)
                                     .strong()
                                     .color(muted),
@@ -647,7 +651,7 @@ impl Preview {
                             ui.add_space(12.0);
                             ui.colored_label(
                                 muted,
-                                crate::i18n::text(
+                                crate::i18n::text!(
                                     "Откройте быстрый просмотр, чтобы воспроизвести файл.",
                                 ),
                             );
@@ -675,7 +679,7 @@ fn draw_loading(ui: &mut egui::Ui) {
     let muted = Palette::from_ctx(ui.ctx()).muted;
     ui.horizontal(|ui| {
         ui.spinner();
-        ui.colored_label(muted, crate::i18n::text("Загрузка сведений…"));
+        ui.colored_label(muted, crate::i18n::text!("Загрузка сведений…"));
     });
 }
 
@@ -722,15 +726,15 @@ fn draw_text(
 
 fn source_controls(ui: &mut egui::Ui, source: &mut bool) {
     ui.horizontal_wrapped(|ui| {
-        ui.selectable_value(source, false, crate::i18n::text("Форматированный"));
-        ui.selectable_value(source, true, crate::i18n::text("Исходный текст"));
+        ui.selectable_value(source, false, crate::i18n::text!("Форматированный"));
+        ui.selectable_value(source, true, crate::i18n::text!("Исходный текст"));
     });
 }
 
 fn draw_text_limit(ui: &mut egui::Ui) {
     ui.colored_label(
         Palette::from_ctx(ui.ctx()).muted,
-        crate::i18n::text("Показано начало файла: до 32 КиБ, 1000 строк и 8 КиБ на строку."),
+        crate::i18n::text!("Показано начало файла: до 32 КиБ, 1000 строк и 8 КиБ на строку."),
     );
 }
 
@@ -814,9 +818,9 @@ fn load_location(
     };
     Ok(Loaded {
         kind: if stat.is_dir() {
-            crate::i18n::text("Папка SFTP")
+            crate::i18n::text!("Папка SFTP")
         } else {
-            crate::i18n::text("Файл SFTP")
+            crate::i18n::text!("Файл SFTP")
         }
         .into(),
         size: if stat.is_dir() { None } else { stat.size },
@@ -828,7 +832,7 @@ fn load_location(
                     .format("%d.%m.%Y, %H:%M")
                     .to_string()
             })
-            .unwrap_or_else(|| crate::i18n::text("Недоступно").into()),
+            .unwrap_or_else(|| crate::i18n::text!("Недоступно").into()),
         is_dir: stat.is_dir(),
         content,
     })
@@ -880,16 +884,16 @@ fn load(
     let is_dir = metadata.is_dir();
     let kind = if is_link {
         if is_dir {
-            crate::i18n::text("Ссылка на папку")
+            crate::i18n::text!("Ссылка на папку")
         } else {
-            crate::i18n::text("Ссылка на файл")
+            crate::i18n::text!("Ссылка на файл")
         }
     } else if is_dir {
-        crate::i18n::text("Папка")
+        crate::i18n::text!("Папка")
     } else if metadata.is_file() {
-        crate::i18n::text("Файл")
+        crate::i18n::text!("Файл")
     } else {
-        crate::i18n::text("Специальный файл")
+        crate::i18n::text!("Специальный файл")
     };
     let modified = metadata
         .modified()
@@ -898,12 +902,12 @@ fn load(
                 .format("%d.%m.%Y, %H:%M")
                 .to_string()
         })
-        .unwrap_or_else(|_| crate::i18n::text("Недоступно").into());
+        .unwrap_or_else(|_| crate::i18n::text!("Недоступно").into());
     let content = if is_dir {
         Content::Directory
     } else if !metadata.is_file() {
         // Do not open sockets, devices or named pipes: a read may never finish.
-        Content::Message(crate::i18n::text("Предпросмотр специальных файлов недоступен.").into())
+        Content::Message(crate::i18n::text!("Предпросмотр специальных файлов недоступен.").into())
     } else if quick_look && let Some(separator) = table::Separator::from_path(path) {
         match read_bounded(path, 3) {
             Ok(prefix) => Content::Table(Box::new(table::Document::new(
@@ -982,12 +986,12 @@ fn load_content(
 }
 
 fn image_too_large() -> String {
-    crate::i18n::text("Изображение больше 20 МиБ. Откройте его во внешнем приложении.").into()
+    crate::i18n::text!("Изображение больше 20 МиБ. Откройте его во внешнем приложении.").into()
 }
 
 fn image_content(bytes: &[u8], cancel: &Cancellation) -> Result<Content, String> {
     if bytes.len() > IMAGE_LIMIT as usize {
-        return Err(crate::i18n::text("Изображение больше 20 МиБ.").into());
+        return Err(crate::i18n::text!("Изображение больше 20 МиБ.").into());
     }
     cancel.check().map_err(|error| error.to_string())?;
     let mut reader = image::ImageReader::new(Cursor::new(bytes))
@@ -1065,7 +1069,7 @@ fn pdf_content(bytes: Vec<u8>, length: u64, cancel: &Cancellation) -> Result<Con
 
 #[cfg(target_os = "macos")]
 fn pdf_too_large() -> String {
-    crate::i18n::text("PDF больше 64 МиБ. Откройте его во внешнем приложении.").into()
+    crate::i18n::text!("PDF больше 64 МиБ. Откройте его во внешнем приложении.").into()
 }
 
 fn open_regular(path: &Path) -> Result<File, String> {
@@ -1084,7 +1088,7 @@ fn open_regular(path: &Path) -> Result<File, String> {
         .map_err(|error| error.to_string())?
         .is_file()
     {
-        return Err(crate::i18n::text("Предпросмотр специальных файлов недоступен.").into());
+        return Err(crate::i18n::text!("Предпросмотр специальных файлов недоступен.").into());
     }
     Ok(file)
 }
@@ -1115,11 +1119,11 @@ pub(crate) fn decode_comparison_text(bytes: &[u8], truncated: bool) -> Option<St
 
 fn format_size(bytes: u64) -> String {
     let units: [&str; 5] = [
-        crate::i18n::text("Б"),
-        crate::i18n::text("КиБ"),
-        crate::i18n::text("МиБ"),
-        crate::i18n::text("ГиБ"),
-        crate::i18n::text("ТиБ"),
+        crate::i18n::text!("Б"),
+        crate::i18n::text!("КиБ"),
+        crate::i18n::text!("МиБ"),
+        crate::i18n::text!("ГиБ"),
+        crate::i18n::text!("ТиБ"),
     ];
     let mut value = bytes as f64;
     let mut unit = 0;
@@ -1600,7 +1604,7 @@ mod tests {
             panic!("Quick Look did not show {value}");
         };
 
-        let section = crate::i18n::text("Метаданные");
+        let section = crate::i18n::text!("Метаданные");
         let labels = wait(&mut preview, &photo_location, section);
         let pos = labels.iter().find(|(label, _)| label == section).unwrap().1;
         draw(
@@ -1625,7 +1629,7 @@ mod tests {
             "31 × 19",
             "Paw Labs PC-70",
             "2026:01:02 03:04:05",
-            crate::i18n::text("Недоступно"),
+            crate::i18n::text!("Недоступно"),
         ] {
             assert!(
                 labels.iter().any(|(label, _)| label == expected),
@@ -1637,7 +1641,7 @@ mod tests {
         assert!(labels.iter().any(|(label, _)| label == "EXIF"));
         assert!(labels
             .iter()
-            .any(|(label, _)| label == crate::i18n::text("Недоступно")));
+            .any(|(label, _)| label == crate::i18n::text!("Недоступно")));
         assert!(labels.iter().all(|(label, _)| label != "Paw Labs PC-70"));
         assert_eq!(fs::read(photo).unwrap(), fixture);
     }

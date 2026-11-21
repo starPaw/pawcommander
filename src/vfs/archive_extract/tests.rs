@@ -122,7 +122,7 @@ fn password_zip_uses_aes_and_keeps_secrets_out_of_results() {
         unexpected_conflict,
     );
     assert!(missing.as_ref().is_err_and(
-        |message| message.contains(crate::i18n::text("Укажите пароль для распаковки ZIP"))
+        |message| message.contains(crate::i18n::text!("Укажите пароль для распаковки ZIP"))
     ));
     assert_eq!(fs::read_dir(dest.path()).unwrap().count(), 0);
 
@@ -149,7 +149,7 @@ fn password_zip_uses_aes_and_keeps_secrets_out_of_results() {
     );
     assert!(wrong_result
         .as_ref()
-        .is_err_and(|message| message.contains(crate::i18n::text("Неверный пароль ZIP"))));
+        .is_err_and(|message| message.contains(crate::i18n::text!("Неверный пароль ZIP"))));
     let failed_record = std::mem::take(&mut progress.results)
         .finish("Extract".into(), 0, &wrong_result)
         .unwrap();
@@ -228,7 +228,7 @@ fn a_bad_aes_authenticator_blocks_replacement_even_for_an_empty_member() {
     assert!(saw_conflict);
     assert!(result
         .as_ref()
-        .is_err_and(|message| message.contains(crate::i18n::text(
+        .is_err_and(|message| message.contains(crate::i18n::text!(
             "Неверный пароль или повреждены данные ZIP"
         ))));
     assert_eq!(progress.results.items[0].outcome, Outcome::Failed);

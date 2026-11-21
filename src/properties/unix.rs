@@ -222,5 +222,5 @@ fn count_entry(summary: &mut Summary, stat: &libc::stat) {
 }
 
 fn changed_directory() -> io::Error {
-    io::Error::other(crate::i18n::text("Папка изменилась во время подсчёта"))
+    io::Error::other(crate::i18n::text!("Папка изменилась во время подсчёта"))
 }

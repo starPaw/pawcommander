@@ -110,7 +110,7 @@ fn file_comparison_propagates_cancellation_and_names_the_missing_side() {
         .to_string();
     assert_eq!(
         error,
-        format!("{} · {}", text("Правая панель"), text("Файл отсутствует"))
+        format!("{} · {}", text!("Правая панель"), text!("Файл отсутствует"))
     );
 
     fs::write(paths[1].path(), b"xyz").unwrap();

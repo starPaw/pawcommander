@@ -170,9 +170,9 @@ impl PawCommander {
         self.start_transfer(
             ctx,
             if kind == TransferKind::Move {
-                crate::i18n::text("Перемещение файлов")
+                crate::i18n::text!("Перемещение файлов")
             } else {
-                crate::i18n::text("Копирование файлов")
+                crate::i18n::text!("Копирование файлов")
             },
             sources,
             destination,
@@ -191,7 +191,7 @@ impl PawCommander {
         }
         self.launch_application(
             ctx,
-            crate::i18n::text("Открытие файла в Zed…"),
+            crate::i18n::text!("Открытие файла в Zed…"),
             move |report| report(crate::zed::open(&path, text_only)),
         );
     }
@@ -237,7 +237,7 @@ impl PawCommander {
     ) {
         self.launch_application(
             ctx,
-            crate::i18n::text("Запуск пользовательского действия…"),
+            crate::i18n::text!("Запуск пользовательского действия…"),
             move |report| invocation.launch(report),
         );
     }
@@ -415,7 +415,7 @@ impl PawCommander {
                 #[cfg(target_os = "macos")]
                 self.launch_application(
                     ctx,
-                    crate::i18n::text("Открытие терминала…"),
+                    crate::i18n::text!("Открытие терминала…"),
                     move |report| report(crate::terminal::open(&folder)),
                 );
             }
@@ -589,9 +589,9 @@ impl PawCommander {
                 self.start_transfer(
                     ctx,
                     if kind == TransferKind::Move {
-                        crate::i18n::text("Перемещение в соседнюю панель")
+                        crate::i18n::text!("Перемещение в соседнюю панель")
                     } else {
-                        crate::i18n::text("Копирование в соседнюю панель")
+                        crate::i18n::text!("Копирование в соседнюю панель")
                     },
                     sources,
                     destination,
@@ -613,7 +613,7 @@ impl PawCommander {
             Action::CreateLink if !self.conflict_open() => {
                 let Some(directory) = self.tab().path.local().map(Path::to_owned) else {
                     self.notice = Some((
-                        crate::i18n::text("Создание ссылок доступно в локальных папках").into(),
+                        crate::i18n::text!("Создание ссылок доступно в локальных папках").into(),
                         true,
                     ));
                     return;
@@ -673,7 +673,7 @@ impl PawCommander {
                     self.dialog = Some(Dialog::CreateArchive {
                         sources,
                         directory: self.tab().path.clone(),
-                        name: crate::i18n::text("Архив").into(),
+                        name: crate::i18n::text!("Архив").into(),
                         format: crate::archive::Format::Zip,
                         password: zeroize::Zeroizing::new(String::new()),
                     });
@@ -770,7 +770,7 @@ impl PawCommander {
                 let sources = self.archive_add_sources();
                 if sources.is_empty() {
                     self.notice = Some((
-                        crate::i18n::text("Выберите файлы или папки в соседней панели").into(),
+                        crate::i18n::text!("Выберите файлы или папки в соседней панели").into(),
                         true,
                     ));
                 } else {
@@ -811,7 +811,7 @@ impl PawCommander {
                     .unwrap_or_else(|| self.tab().path.clone());
                 let Some(path) = location.local() else {
                     self.notice = Some((
-                        crate::i18n::text("SFTP нельзя показать в системном файловом менеджере")
+                        crate::i18n::text!("SFTP нельзя показать в системном файловом менеджере")
                             .into(),
                         true,
                     ));
@@ -986,7 +986,7 @@ impl PawCommander {
         if rule {
             self.notice = self.tab().selected.is_empty().then(|| {
                 (
-                    crate::i18n::text("Нет подходящих видимых объектов").into(),
+                    crate::i18n::text!("Нет подходящих видимых объектов").into(),
                     false,
                 )
             });

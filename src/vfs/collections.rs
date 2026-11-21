@@ -120,7 +120,7 @@ impl Catalog {
             .enumerate()
             .any(|(i, group)| Some(i) != except && group.name.to_lowercase() == name)
         {
-            return Err(text("Коллекция с таким названием уже есть").into());
+            return Err(text!("Коллекция с таким названием уже есть").into());
         }
         Ok(())
     }
@@ -128,7 +128,7 @@ impl Catalog {
     fn insert(&mut self, collection: Collection) -> Result<usize, String> {
         let index = self.collections.len();
         if index >= MAX_GROUPS || collection.members.len() > self.capacity_for(index) {
-            return Err(text("Достигнут предел коллекций или объектов").into());
+            return Err(text!("Достигнут предел коллекций или объектов").into());
         }
         self.collections.push(collection);
         Ok(index)
@@ -144,7 +144,7 @@ impl Collection {
         progress: &mut Progress,
     ) -> Result<(), TransferError> {
         if paths.len() > MAX_MEMBERS {
-            return Err(text("Достигнут предел коллекций или объектов").into());
+            return Err(text!("Достигнут предел коллекций или объектов").into());
         }
         let mut members = self.members.clone();
         for path in paths {
@@ -161,7 +161,7 @@ impl Collection {
             } else if members.len() < capacity {
                 members.push(incoming);
             } else {
-                return Err(text("Достигнут предел коллекций или объектов").into());
+                return Err(text!("Достигнут предел коллекций или объектов").into());
             }
         }
         progress.check_cancelled()?;
@@ -172,7 +172,7 @@ impl Collection {
     pub(crate) fn relink(&mut self, index: usize, path: &Location) -> Result<(), TransferError> {
         let reference = capture(local(path)?)?;
         if reference.is_folder() != self.members[index].is_folder() {
-            return Err(text("Выберите объект того же типа").into());
+            return Err(text!("Выберите объект того же типа").into());
         }
         if self
             .members
@@ -180,7 +180,7 @@ impl Collection {
             .enumerate()
             .any(|(i, member)| i != index && member.reference.same_item(&reference))
         {
-            return Err(text("Этот объект уже есть в коллекции").into());
+            return Err(text!("Этот объект уже есть в коллекции").into());
         }
         self.members[index].reference = reference;
         Ok(())
@@ -244,7 +244,7 @@ pub(crate) fn export(
     let name = file_name.trim();
     validate_name(name)?;
     if !name.ends_with(PORTABLE_SUFFIX) || name == PORTABLE_SUFFIX {
-        return Err(text("Имя файла должно оканчиваться на .pawcollection.json").into());
+        return Err(text!("Имя файла должно оканчиваться на .pawcollection.json").into());
     }
     let scope = ReadScope::open(directory)?;
     let destination = Directory::from_scope(&scope)?;
@@ -262,7 +262,7 @@ pub(crate) fn export(
             .strip_prefix(destination.location.path())
             .ok()
             .filter(|path| !path.as_os_str().is_empty())
-            .ok_or_else(|| member_error(item, text("Объект вне папки экспорта")))?;
+            .ok_or_else(|| member_error(item, text!("Объект вне папки экспорта")))?;
         members.push(PortableMember {
             path: relative.into(),
             folder: item.is_folder(),
@@ -298,17 +298,17 @@ pub(crate) fn import(
 ) -> Result<Collection, TransferError> {
     local(directory)?;
     if source.parent().as_ref() != Some(directory) || !is_portable(local(source)?) {
-        return Err(text("Выберите файл .pawcollection.json в активной папке").into());
+        return Err(text!("Выберите файл .pawcollection.json в активной папке").into());
     }
     let cancel = progress.cancellation();
     let scope = ReadScope::open(directory)?;
     let name = source
         .path()
         .file_name()
-        .ok_or_else(|| text("Выберите файл .pawcollection.json в активной папке"))?;
+        .ok_or_else(|| text!("Выберите файл .pawcollection.json в активной папке"))?;
     let mut file = scope
         .open_file(Path::new(name), &cancel)?
-        .ok_or_else(|| text("Файл коллекции отсутствует"))?;
+        .ok_or_else(|| text!("Файл коллекции отсутствует"))?;
     let mut bytes = Vec::new();
     {
         let (_, length, input) = file.stream();
@@ -325,7 +325,7 @@ pub(crate) fn import(
     file.verify(&cancel)?;
     let document: Portable = serde_json::from_slice(&bytes).map_err(io_error)?;
     if document.version != PORTABLE_VERSION {
-        return Err(text("Версия переносимой коллекции не поддерживается").into());
+        return Err(text!("Версия переносимой коллекции не поддерживается").into());
     }
     if document.members.len() > MAX_MEMBERS {
         return Err(portable_limit());
@@ -338,7 +338,7 @@ pub(crate) fn import(
             .path
             .into_path()
             .filter(|path| safe_relative(path))
-            .ok_or_else(|| text("Недопустимый путь в файле коллекции"))?;
+            .ok_or_else(|| text!("Недопустимый путь в файле коллекции"))?;
         let path = root.join(&relative);
         progress.item(&path);
         let tags = normalize_tags(item.tags.iter().map(String::as_str))?;
@@ -350,7 +350,7 @@ pub(crate) fn import(
         {
             return Err(member_error(
                 &member,
-                text("Объект вне папки импорта или другого типа"),
+                text!("Объект вне папки импорта или другого типа"),
             ));
         }
         if members
@@ -359,7 +359,7 @@ pub(crate) fn import(
         {
             return Err(member_error(
                 &member,
-                text("В файле коллекции повторяется объект"),
+                text!("В файле коллекции повторяется объект"),
             ));
         }
         members.push(member);
@@ -382,7 +382,7 @@ fn safe_relative(path: &Path) -> bool {
 fn checked_name(name: &str) -> Result<&str, String> {
     let name = name.trim();
     if name.is_empty() || name.chars().count() > MAX_NAME || name.chars().any(char::is_control) {
-        return Err(text("Введите название коллекции до 80 символов").into());
+        return Err(text!("Введите название коллекции до 80 символов").into());
     }
     Ok(name)
 }
@@ -392,11 +392,11 @@ fn normalize_tags<'a>(tags: impl Iterator<Item = &'a str>) -> Result<Vec<String>
     let mut result = Vec::new();
     for name in tags.map(str::trim).filter(|name| !name.is_empty()) {
         if name.chars().count() > MAX_TAG || name.chars().any(|c| c == ',' || c.is_control()) {
-            return Err(text("Тег должен содержать до 48 символов без запятых").into());
+            return Err(text!("Тег должен содержать до 48 символов без запятых").into());
         }
         if unique.insert(name.to_lowercase()) {
             if result.len() == MAX_TAGS {
-                return Err(text("Для объекта доступно до 16 тегов").into());
+                return Err(text!("Для объекта доступно до 16 тегов").into());
             }
             result.push(name.to_owned());
         }
@@ -407,7 +407,7 @@ fn normalize_tags<'a>(tags: impl Iterator<Item = &'a str>) -> Result<Vec<String>
 fn local(location: &Location) -> Result<&Path, TransferError> {
     location
         .local()
-        .ok_or_else(|| text("Выберите локальные файлы или папку").into())
+        .ok_or_else(|| text!("Выберите локальные файлы или папку").into())
 }
 
 fn capture(path: &Path) -> Result<Reference, TransferError> {
@@ -421,7 +421,7 @@ fn member_error(member: &Member, error: &str) -> TransferError {
 }
 
 fn portable_limit() -> TransferError {
-    text("Файл коллекции превышает допустимый размер").into()
+    text!("Файл коллекции превышает допустимый размер").into()
 }
 
 fn io_error(error: serde_json::Error) -> TransferError {

@@ -43,15 +43,15 @@ impl CompatibleNamesDialog {
                 "Выбрано объектов: {count}",
                 "Selected items: {count}"
             ));
-            ui.small(text(
+            ui.small(text!(
                 "Имена будут подготовлены для Windows и FAT с учётом ограничений тома назначения.",
             ));
             let running = matches!(self.preview, Phase::Running(_));
             let before = self.kind;
             ui.add_enabled_ui(!running, |ui| {
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.kind, TransferKind::Copy, text("Копировать"));
-                    ui.selectable_value(&mut self.kind, TransferKind::Move, text("Переместить"));
+                    ui.selectable_value(&mut self.kind, TransferKind::Copy, text!("Копировать"));
+                    ui.selectable_value(&mut self.kind, TransferKind::Move, text!("Переместить"));
                 });
             });
             if before != self.kind {
@@ -64,10 +64,15 @@ impl CompatibleNamesDialog {
                     ui.colored_label(ui.visuals().error_fg_color, error);
                 }
                 Phase::Stopped => {
-                    ui.label(text("Предпросмотр остановлен"));
+                    ui.label(text!("Предпросмотр остановлен"));
                 }
                 Phase::Running(worker) => {
-                    show_progress_with_stop(ui, worker, "Проверяем имена…", "Остановка…");
+                    show_progress_with_stop(
+                        ui,
+                        worker,
+                        crate::i18n::key!("Проверяем имена…"),
+                        crate::i18n::key!("Остановка…"),
+                    );
                 }
                 Phase::Finished(plan) => show_plan(ui, plan),
             }
@@ -77,19 +82,19 @@ impl CompatibleNamesDialog {
                     stop = ui
                         .add_enabled(
                             !worker.progress.cancel.is_requested(),
-                            egui::Button::new(text("Остановить")),
+                            egui::Button::new(text!("Остановить")),
                         )
                         .clicked();
                 } else {
-                    preview = ui.button(text("Предпросмотр имён")).clicked();
+                    preview = ui.button(text!("Предпросмотр имён")).clicked();
                     if matches!(self.preview, Phase::Finished(_)) {
                         let label = match self.kind {
-                            TransferKind::Copy => text("Копировать с этими именами"),
-                            TransferKind::Move => text("Переместить с этими именами"),
+                            TransferKind::Copy => text!("Копировать с этими именами"),
+                            TransferKind::Move => text!("Переместить с этими именами"),
                         };
                         apply = ui.button(label).clicked();
                     }
-                    close = ui.button(text("Отмена")).clicked();
+                    close = ui.button(text!("Отмена")).clicked();
                 }
             });
         });
@@ -123,12 +128,12 @@ fn show_plan(ui: &mut egui::Ui, plan: &Plan) {
         "Items checked: {entries} · name changes: {changes}"
     ));
     if plan.direct {
-        ui.small(text(
+        ui.small(text!(
             "На exFAT файлы появляются в папке назначения по мере копирования.",
         ));
     }
     if plan.changes.is_empty() {
-        ui.label(text("Все имена уже совместимы"));
+        ui.label(text!("Все имена уже совместимы"));
         return;
     }
 
@@ -136,9 +141,9 @@ fn show_plan(ui: &mut egui::Ui, plan: &Plan) {
     let height = line + ui.text_style_height(&egui::TextStyle::Small) + ui.spacing().item_spacing.y;
     ui.columns_const(|[source, target]| {
         source
-            .add(egui::Label::new(egui::RichText::new(text("Исходный путь")).strong()).truncate());
+            .add(egui::Label::new(egui::RichText::new(text!("Исходный путь")).strong()).truncate());
         target.add(
-            egui::Label::new(egui::RichText::new(text("Путь назначения")).strong()).truncate(),
+            egui::Label::new(egui::RichText::new(text!("Путь назначения")).strong()).truncate(),
         );
     });
     let viewport = (ui.ctx().content_rect().height() * 0.46).clamp(72.0, 385.0);

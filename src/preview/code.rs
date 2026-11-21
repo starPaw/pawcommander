@@ -93,7 +93,7 @@ impl Code {
     }
     pub(super) fn name(&self) -> &'static str {
         match self.language {
-            Language::Plain => text("Текст"),
+            Language::Plain => text!("Текст"),
             Language::Rust => "Rust",
             Language::JavaScript => "JavaScript / TypeScript",
             Language::Python => "Python",
@@ -169,7 +169,7 @@ impl Code {
         reset: bool,
     ) -> Option<egui::Response> {
         if body.is_empty() {
-            ui.label(text("Пустой файл"));
+            ui.label(text!("Пустой файл"));
             return None;
         }
         let palette = Palette::from_ctx(ui.ctx());
@@ -314,19 +314,19 @@ impl Find {
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut self.query)
                         .id(id)
-                        .hint_text(text("Найти в предпросмотре"))
+                        .hint_text(text!("Найти в предпросмотре"))
                         .desired_width(150.0)
                         .char_limit(256),
                 );
                 ui.ctx().accesskit_node_builder(response.id, |node| {
-                    node.set_label(text("Найти в предпросмотре"));
+                    node.set_label(text!("Найти в предпросмотре"));
                 });
                 if response.changed() {
                     self.update(body);
                 }
                 if ui
                     .add_enabled_ui(!self.matches.is_empty(), |ui| {
-                        icons::compact_button(ui, Icon::Up, text("Предыдущее совпадение"), false)
+                        icons::compact_button(ui, Icon::Up, text!("Предыдущее совпадение"), false)
                     })
                     .inner
                     .clicked()
@@ -339,7 +339,7 @@ impl Find {
                         icons::compact_button(
                             ui,
                             Icon::ChevronDown,
-                            text("Следующее совпадение"),
+                            text!("Следующее совпадение"),
                             false,
                         )
                     })

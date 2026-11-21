@@ -99,7 +99,7 @@ pub(crate) struct Index {
 impl Index {
     pub(crate) fn load(file: &Path, cancelled: &impl Fn() -> bool) -> Result<Self, String> {
         let format =
-            Format::from_path(file).ok_or_else(|| text("Поддерживаются архивы ZIP и TAR"))?;
+            Format::from_path(file).ok_or_else(|| text!("Поддерживаются архивы ZIP и TAR"))?;
         if cancelled() {
             return Err(cancelled_read().to_string());
         }
@@ -145,7 +145,7 @@ impl Index {
         let members = self
             .folders
             .get(location.path())
-            .ok_or_else(|| text("Папка отсутствует в архиве").to_owned())?;
+            .ok_or_else(|| text!("Папка отсутствует в архиве").to_owned())?;
         Ok(members
             .iter()
             .take_while(|_| !cancelled())
@@ -194,7 +194,9 @@ impl Index {
                 *existing = member;
                 return Ok(());
             }
-            return Err(invalid("Путь в архиве занят и папкой, и файлом"));
+            return Err(invalid(crate::i18n::key!(
+                "Путь в архиве занят и папкой, и файлом"
+            )));
         }
         self.nodes += 1;
         self.path_bytes += path.as_os_str().len();
@@ -218,7 +220,7 @@ impl Index {
     fn read_tar(&mut self, input: MetadataReader<'_>) -> io::Result<()> {
         let cancelled = input.cancelled;
         if input.length < 512 {
-            return Err(invalid("Недопустимая запись архива"));
+            return Err(invalid(crate::i18n::key!("Недопустимая запись архива")));
         }
         let mut archive = tar::Archive::new(input);
         for (index, entry) in archive.entries_with_seek()?.enumerate() {
@@ -325,14 +327,14 @@ fn scan_zip(
                 !is_symlink && (mode.value() & 0o170000 == 0o040000 || name.ends_with(['/', '\\']));
             let directory = archive.directory_offset();
             if entry.local_header_offset() >= directory {
-                return Err(invalid("Недопустимая запись архива"));
+                return Err(invalid(crate::i18n::key!("Недопустимая запись архива")));
             }
             let local = archive
                 .get_entry(entry.wayfinder())
                 .map_err(io::Error::other)?;
             let (offset, end) = local.compressed_data_range();
             if end > directory {
-                return Err(invalid("Недопустимая запись архива"));
+                return Err(invalid(crate::i18n::key!("Недопустимая запись архива")));
             }
             let mut record_end = end;
             if let Some(buffer) = &mut headers {
@@ -341,7 +343,9 @@ fn scan_zip(
                     || local_header.flags() != entry.flags()
                     || local_header.compression_method() != entry.compression_method()
                 {
-                    return Err(invalid("Локальный заголовок ZIP отличается от каталога"));
+                    return Err(invalid(crate::i18n::key!(
+                        "Локальный заголовок ZIP отличается от каталога"
+                    )));
                 }
                 if entry.flags().has_data_descriptor() {
                     record_end = check_zip_descriptor(
@@ -360,9 +364,9 @@ fn scan_zip(
                     entry.compressed_size_hint(),
                     entry.uncompressed_size_hint(),
                 ) {
-                    return Err(invalid(
-                        "Размер или контрольная сумма ZIP отличаются в заголовках",
-                    ));
+                    return Err(invalid(crate::i18n::key!(
+                        "Размер или контрольная сумма ZIP отличаются в заголовках"
+                    )));
                 }
             }
             let payload = zip_payload(&entry, count - 1, offset, end - offset);
@@ -395,7 +399,7 @@ fn scan_zip(
         visit(count, &shown, record)?;
     }
     if count as u64 != archive.entries_hint() {
-        return Err(invalid("Недопустимая запись архива"));
+        return Err(invalid(crate::i18n::key!("Недопустимая запись архива")));
     }
     Ok(())
 }
@@ -441,9 +445,9 @@ fn check_zip_descriptor(
     } else if actual.starts_with(body) {
         Ok(end + width as u64)
     } else {
-        Err(invalid(
-            "Размер или контрольная сумма ZIP отличаются в заголовках",
-        ))
+        Err(invalid(crate::i18n::key!(
+            "Размер или контрольная сумма ZIP отличаются в заголовках"
+        )))
     }
 }
 
@@ -581,23 +585,25 @@ pub(crate) fn member_path(raw: &[u8]) -> io::Result<PathBuf> {
 }
 
 pub(crate) fn readonly() -> &'static str {
-    text("Эта операция недоступна внутри архива")
+    text!("Эта операция недоступна внутри архива")
 }
 
-fn invalid(message: &'static str) -> io::Error {
+fn invalid(message: crate::i18n::MessageKey) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, text(message))
 }
 
 fn invalid_path() -> io::Error {
-    invalid("Недопустимый путь внутри архива")
+    invalid(crate::i18n::key!("Недопустимый путь внутри архива"))
 }
 
 fn too_large() -> io::Error {
-    invalid("Слишком много данных для просмотра архива")
+    invalid(crate::i18n::key!(
+        "Слишком много данных для просмотра архива"
+    ))
 }
 
 fn cancelled_read() -> io::Error {
-    io::Error::other(text("Чтение архива отменено"))
+    io::Error::other(text!("Чтение архива отменено"))
 }
 
 fn open_regular(path: &Path) -> io::Result<(File, fs::Metadata)> {
@@ -609,12 +615,16 @@ fn open_regular(path: &Path) -> io::Result<(File, fs::Metadata)> {
         options.custom_flags(libc::O_NONBLOCK);
     }
     if !fs::metadata(path)?.is_file() {
-        return Err(invalid("Архив должен быть обычным файлом"));
+        return Err(invalid(crate::i18n::key!(
+            "Архив должен быть обычным файлом"
+        )));
     }
     let file = options.open(path)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
-        return Err(invalid("Архив должен быть обычным файлом"));
+        return Err(invalid(crate::i18n::key!(
+            "Архив должен быть обычным файлом"
+        )));
     }
     Ok((file, metadata))
 }
@@ -652,7 +662,7 @@ impl Read for MetadataReader<'_> {
         }
         let read = self.file.read(&mut buf[..count])?;
         if read == 0 {
-            return Err(invalid("Недопустимая запись архива"));
+            return Err(invalid(crate::i18n::key!("Недопустимая запись архива")));
         }
         self.position += read as u64;
         if charge_metadata {
@@ -674,7 +684,7 @@ impl Seek for MetadataReader<'_> {
         };
         let offset = offset
             .filter(|offset| *offset <= self.length)
-            .ok_or_else(|| invalid("Недопустимая запись архива"))?;
+            .ok_or_else(|| invalid(crate::i18n::key!("Недопустимая запись архива")))?;
         if offset != self.position {
             self.file.seek(SeekFrom::Start(offset))?;
             self.position = offset;

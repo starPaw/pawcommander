@@ -201,13 +201,17 @@ impl<T: Send + 'static> Phase<T> {
             Ok(Err(error)) => Self::Failed(error.to_string()),
             Err(mpsc::TryRecvError::Empty) => return,
             Err(mpsc::TryRecvError::Disconnected) => {
-                Self::Failed(text("Сравнение неожиданно завершилось").into())
+                Self::Failed(text!("Сравнение неожиданно завершилось").into())
             }
         };
     }
 }
 
-pub(super) fn show_pair(ui: &mut egui::Ui, pair: &[Location; 2], titles: [&'static str; 2]) {
+pub(super) fn show_pair(
+    ui: &mut egui::Ui,
+    pair: &[Location; 2],
+    titles: [crate::i18n::MessageKey; 2],
+) {
     for (title, location) in titles.into_iter().zip(pair) {
         ui.label(RichText::new(text(title)).weak());
         let path = location.display().escape_debug().to_string();
@@ -217,15 +221,24 @@ pub(super) fn show_pair(ui: &mut egui::Ui, pair: &[Location; 2], titles: [&'stat
     ui.add_space(8.0);
 }
 
-pub(super) fn show_progress<T>(ui: &mut egui::Ui, worker: &mut Worker<T>, message: &'static str) {
-    show_progress_with_stop(ui, worker, message, "Останавливаем сравнение…");
+pub(super) fn show_progress<T>(
+    ui: &mut egui::Ui,
+    worker: &mut Worker<T>,
+    message: crate::i18n::MessageKey,
+) {
+    show_progress_with_stop(
+        ui,
+        worker,
+        message,
+        crate::i18n::key!("Останавливаем сравнение…"),
+    );
 }
 
 pub(super) fn show_progress_with_stop<T>(
     ui: &mut egui::Ui,
     worker: &mut Worker<T>,
-    running: &'static str,
-    stopping: &'static str,
+    running: crate::i18n::MessageKey,
+    stopping: crate::i18n::MessageKey,
 ) {
     let message = if worker.progress.cancel.is_requested() {
         stopping

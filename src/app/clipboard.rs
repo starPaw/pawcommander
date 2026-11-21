@@ -198,7 +198,7 @@ impl PawCommander {
             .filter(|clipboard| !clipboard.paths.is_empty())
         else {
             self.notice = Some((
-                crate::i18n::text("В файловом буфере нет объектов для вставки").into(),
+                crate::i18n::text!("В файловом буфере нет объектов для вставки").into(),
                 false,
             ));
             return;
@@ -210,9 +210,9 @@ impl PawCommander {
             TransferKind::Copy
         };
         let label = if cut {
-            crate::i18n::text("Перемещение файлов")
+            crate::i18n::text!("Перемещение файлов")
         } else {
-            crate::i18n::text("Копирование файлов")
+            crate::i18n::text!("Копирование файлов")
         };
         self.start_transfer(
             ctx,

@@ -60,7 +60,7 @@ impl FileComparisonDialog {
             Ok(Err(error)) => External::Failed(error),
             Err(mpsc::TryRecvError::Empty) => return,
             Err(mpsc::TryRecvError::Disconnected) => {
-                External::Failed(text("Не удалось запустить внешний инструмент сравнения").into())
+                External::Failed(text!("Не удалось запустить внешний инструмент сравнения").into())
             }
         };
     }
@@ -100,11 +100,20 @@ impl FileComparisonDialog {
         let modal = egui::Modal::new(egui::Id::unique("file_comparison")).show(ctx, |ui| {
             ui.set_width((ctx.content_rect().width() - 44.0).clamp(200.0, 820.0));
             ui.heading(Command::CompareFiles.label());
-            show_pair(ui, &self.files, ["Левая панель", "Правая панель"]);
+            show_pair(
+                ui,
+                &self.files,
+                [
+                    crate::i18n::key!("Левая панель"),
+                    crate::i18n::key!("Правая панель"),
+                ],
+            );
             ui.separator();
             match &mut self.phase {
                 Phase::Ready => {}
-                Phase::Running(worker) => show_progress(ui, worker, "Сравниваем файлы…"),
+                Phase::Running(worker) => {
+                    show_progress(ui, worker, crate::i18n::key!("Сравниваем файлы…"))
+                }
                 Phase::Finished(result) => {
                     show_result(ui, result, &mut self.show_matches, self.run)
                 }
@@ -112,18 +121,18 @@ impl FileComparisonDialog {
                     ui.colored_label(ui.visuals().error_fg_color, error);
                 }
                 Phase::Stopped => {
-                    ui.label(text("Сравнение остановлено"));
+                    ui.label(text!("Сравнение остановлено"));
                 }
             }
             match &self.external {
                 External::Opening(_) => {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label(text("Открываем внешний инструмент…"));
+                        ui.label(text!("Открываем внешний инструмент…"));
                     });
                 }
                 External::HandedOff => {
-                    ui.label(text("Сравнение передано внешнему инструменту"));
+                    ui.label(text!("Сравнение передано внешнему инструменту"));
                 }
                 External::Failed(error) => {
                     ui.colored_label(ui.visuals().error_fg_color, error);
@@ -136,29 +145,29 @@ impl FileComparisonDialog {
                     stop = ui
                         .add_enabled(
                             !worker.progress.cancel.is_requested(),
-                            egui::Button::new(text("Остановить")),
+                            egui::Button::new(text!("Остановить")),
                         )
                         .clicked();
                 } else {
-                    start = ui.button(text("Сравнить снова")).clicked();
-                    close = ui.button(text("Закрыть")).clicked();
+                    start = ui.button(text!("Сравнить снова")).clicked();
+                    close = ui.button(text!("Закрыть")).clicked();
                 }
                 let local = self.files.iter().all(|file| file.local().is_some());
                 let available =
                     local && self.tool.is_some() && !matches!(self.external, External::Opening(_));
                 let response = ui.add_enabled(
                     available,
-                    egui::Button::new(text("Открыть во внешнем инструменте")),
+                    egui::Button::new(text!("Открыть во внешнем инструменте")),
                 );
                 let response = if !local {
-                    response.on_disabled_hover_text(text(
+                    response.on_disabled_hover_text(text!(
                         "Внешнему инструменту нужны два локальных файла",
                     ))
                 } else if let Some(tool) = &self.tool {
                     response.on_hover_text(tool.display().to_string())
                 } else {
                     response
-                        .on_disabled_hover_text(text("Укажите инструмент сравнения в настройках"))
+                        .on_disabled_hover_text(text!("Укажите инструмент сравнения в настройках"))
                 };
                 external = response.clicked();
             });
@@ -193,16 +202,16 @@ fn show_result(ui: &mut egui::Ui, result: &FileComparison, show_matches: &mut bo
     }
     match &result.difference {
         FileDifference::Equal => {
-            ui.label(text("Файлы совпадают побайтно"));
+            ui.label(text!("Файлы совпадают побайтно"));
         }
         FileDifference::Binary => {
-            ui.label(text("Бинарное сравнение"));
+            ui.label(text!("Бинарное сравнение"));
         }
         FileDifference::TextSizeLimit => {
-            ui.label(text("Построчное сравнение доступно для файлов до 2 МиБ"));
+            ui.label(text!("Построчное сравнение доступно для файлов до 2 МиБ"));
         }
         FileDifference::TextLineLimit => {
-            ui.label(text(
+            ui.label(text!(
                 "Построчное сравнение доступно для файлов до 30 000 строк",
             ));
         }
@@ -219,12 +228,12 @@ fn show_text(ui: &mut egui::Ui, diff: &TextDifference, show_matches: &mut bool, 
             "Added {added} · removed {removed}"
         ));
     } else {
-        ui.label(text("Строки текста совпадают"));
+        ui.label(text!("Строки текста совпадают"));
     }
     if diff.grouped {
-        ui.label(text("Большое изменение показано одним блоком"));
+        ui.label(text!("Большое изменение показано одним блоком"));
     }
-    ui.checkbox(show_matches, text("Показывать совпадения"));
+    ui.checkbox(show_matches, text!("Показывать совпадения"));
     if !has_changes && !*show_matches {
         return;
     }

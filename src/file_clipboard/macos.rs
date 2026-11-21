@@ -39,8 +39,9 @@ impl SystemClipboard {
             let urls = paths
                 .iter()
                 .map(|path| {
-                    let bytes = CString::new(path.as_os_str().as_bytes())
-                        .map_err(|_| crate::i18n::text("Путь содержит нулевой байт").to_string())?;
+                    let bytes = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+                        crate::i18n::text!("Путь содержит нулевой байт").to_string()
+                    })?;
                     let is_dir = path.symlink_metadata().is_ok_and(|meta| meta.is_dir());
                     // The file-system representation preserves symlinks and non-UTF-8 path bytes.
                     let url = unsafe {
@@ -58,7 +59,7 @@ impl SystemClipboard {
             let pasteboard = NSPasteboard::generalPasteboard();
             pasteboard.clearContents();
             if !pasteboard.writeObjects(&objects) {
-                return Err(crate::i18n::text("Не удалось записать файлы в буфер Finder").into());
+                return Err(crate::i18n::text!("Не удалось записать файлы в буфер Finder").into());
             }
             self.cut_revision = cut.then(|| pasteboard.changeCount());
             Ok(())
@@ -99,7 +100,7 @@ impl SystemClipboard {
             }
         }
         if revision != current_revision() {
-            return Err(crate::i18n::text("Системный буфер изменился. Повторите вставку.").into());
+            return Err(crate::i18n::text!("Системный буфер изменился. Повторите вставку.").into());
         }
         let files = FileList::new(
             paths.iter().map(|(_, path)| path.clone()).collect(),
@@ -141,14 +142,14 @@ fn clipboard_path(value: &NSString) -> Result<PathBuf, String> {
     let path = local_file_url(&value.to_string())?;
     // Foundation copies/parses the live NSString. A Finder file-reference
     // URL identifies a resource, rather than a literal `/.file/id=...` path.
-    let url = NSURL::URLWithString(value).ok_or(crate::i18n::text(
+    let url = NSURL::URLWithString(value).ok_or(crate::i18n::text!(
         "Файловый буфер содержит недопустимый URL",
     ))?;
     if !url.isFileReferenceURL() {
         // Ordinary paths must retain symlinks and need not currently exist.
         return Ok(path);
     }
-    let resolved = url.filePathURL().ok_or(crate::i18n::text(
+    let resolved = url.filePathURL().ok_or(crate::i18n::text!(
         "Не удалось найти файл из буфера Finder: ссылка устарела или файл недоступен",
     ))?;
     // SAFETY: the filesystem representation belongs to the live resolved NSURL;

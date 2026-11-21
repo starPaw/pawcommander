@@ -110,5 +110,5 @@ fn frame_size([width, height]: [u32; 2]) -> Option<usize> {
 }
 
 fn media_error() -> String {
-    crate::i18n::text("Не удалось воспроизвести медиафайл.").to_owned()
+    crate::i18n::text!("Не удалось воспроизвести медиафайл.").to_owned()
 }

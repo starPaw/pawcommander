@@ -168,15 +168,15 @@ impl EntryMetadata {
     }
 }
 
-pub(super) fn entry_kind(file: bool, dir: bool, symlink: bool) -> &'static str {
+pub(super) fn entry_kind(file: bool, dir: bool, symlink: bool) -> crate::i18n::MessageKey {
     if file {
-        "Файл"
+        crate::i18n::key!("Файл")
     } else if dir {
-        "Папка"
+        crate::i18n::key!("Папка")
     } else if symlink {
-        "Ссылка"
+        crate::i18n::key!("Ссылка")
     } else {
-        "Специальный объект"
+        crate::i18n::key!("Специальный объект")
     }
 }
 
@@ -238,7 +238,7 @@ pub(super) fn transfer_plan(
         for item in &plan {
             progress.checkpoint()?;
             if kind == TransferKind::Move && item.source == item.target {
-                return Err(crate::i18n::text("Элементы уже находятся в этой папке").into());
+                return Err(crate::i18n::text!("Элементы уже находятся в этой папке").into());
             }
         }
         return Ok(plan
@@ -280,7 +280,7 @@ pub(super) fn transfer_plan(
             if kind == TransferKind::Move {
                 let parent = source.parent().ok_or("Недопустимый источник")?;
                 if canonical(&parent)? == actual_dest {
-                    return Err(crate::i18n::text("Элементы уже находятся в этой папке").into());
+                    return Err(crate::i18n::text!("Элементы уже находятся в этой папке").into());
                 }
             }
             if actual_dest.starts_with(&actual_source) {
@@ -416,7 +416,7 @@ pub(super) fn transfer_run(
             progress.checkpoint()?;
             progress.item(item.original.path());
             if kind == TransferKind::Move && item.source == item.target {
-                return Err(crate::i18n::text("Элементы уже находятся в этой папке").into());
+                return Err(crate::i18n::text!("Элементы уже находятся в этой папке").into());
             }
             entry_metadata(&item.target).map_err(Into::into)
         })
@@ -694,7 +694,7 @@ pub(super) fn transfer_run(
             })
         });
         if metadata_warning {
-            let warning = crate::i18n::text(
+            let warning = crate::i18n::text!(
                 "Даты или права доступа сохранены частично. Подробности указаны в строках журнала.",
             );
             reason = Some(
@@ -798,7 +798,7 @@ pub(crate) fn copy_sftp_for_drop(
     let result = (|| {
         progress.checkpoint()?;
         if !source.remote() || !destination.is_absolute() || destination.file_name().is_none() {
-            return Err(text("Недопустимый путь файла").into());
+            return Err(text!("Недопустимый путь файла").into());
         }
         if !entry_metadata(source)?.is_some_and(|metadata| {
             if directory {
@@ -835,7 +835,7 @@ pub(crate) fn copy_sftp_for_drop(
     };
     let reason = result.as_ref().err().map(ToString::to_string).or_else(|| {
         warning.then(|| {
-            text(
+            text!(
                 "Даты или права доступа сохранены частично. Подробности указаны в строках журнала.",
             )
             .into()
@@ -843,15 +843,15 @@ pub(crate) fn copy_sftp_for_drop(
     });
     progress.results.record(source, None, outcome, reason);
     if committed {
-        Ok(text(if warning {
-            "Файл передан. Подробности о предупреждениях в журнале результатов."
+        Ok(if warning {
+            text!("Файл передан. Подробности о предупреждениях в журнале результатов.")
         } else {
-            "Файлы переданы принимающему приложению"
-        })
+            text!("Файлы переданы принимающему приложению")
+        }
         .into())
     } else {
         result
-            .map(|()| text("Файлы переданы принимающему приложению").into())
+            .map(|()| text!("Файлы переданы принимающему приложению").into())
             .map_err(|error| error.to_string())
     }
 }
@@ -927,7 +927,7 @@ fn copy_to_smb(
     progress.checkpoint()?;
     let metadata = entry_metadata(&item.source)?.ok_or_else(|| changed_source(&item.source))?;
     if !metadata.is_file() {
-        return Err(crate::i18n::text(
+        return Err(crate::i18n::text!(
             "В SMB можно скопировать обычные файлы со свободными именами.",
         )
         .into());

@@ -36,18 +36,20 @@ pub(crate) enum Outcome {
 
 impl Outcome {
     fn label(self) -> &'static str {
-        crate::i18n::text(match self {
-            Self::Completed => "Завершено",
-            Self::CompletedWithWarning => "Завершено с предупреждением",
-            Self::CopiedSourceRemaining => "Копия создана, перенос не завершён",
-            Self::Skipped => "Пропущено",
-            Self::Failed => "Ошибка",
-            Self::Cancelled => "Отменено",
-            Self::PublicationUnconfirmed => "Публикация не подтверждена",
-            Self::PartialCopyRetained => "Доступна проверка прерванного копирования",
-            Self::RetryReady => "Готово к повтору",
-            Self::NotStarted => "Не начато",
-        })
+        match self {
+            Self::Completed => crate::i18n::text!("Завершено"),
+            Self::CompletedWithWarning => crate::i18n::text!("Завершено с предупреждением"),
+            Self::CopiedSourceRemaining => crate::i18n::text!("Копия создана, перенос не завершён"),
+            Self::Skipped => crate::i18n::text!("Пропущено"),
+            Self::Failed => crate::i18n::text!("Ошибка"),
+            Self::Cancelled => crate::i18n::text!("Отменено"),
+            Self::PublicationUnconfirmed => crate::i18n::text!("Публикация не подтверждена"),
+            Self::PartialCopyRetained => {
+                crate::i18n::text!("Доступна проверка прерванного копирования")
+            }
+            Self::RetryReady => crate::i18n::text!("Готово к повтору"),
+            Self::NotStarted => crate::i18n::text!("Не начато"),
+        }
     }
 }
 
@@ -490,7 +492,7 @@ impl Results {
                     self.items[index].outcome = Outcome::Skipped;
                     self.reason(
                         index,
-                        Some(crate::i18n::text(
+                        Some(crate::i18n::text!(
                             "Пропущено вместе с выбранным элементом; отдельный перенос не начинался",
                         )),
                     );
@@ -501,7 +503,7 @@ impl Results {
             source,
             Some(target),
             Outcome::Skipped,
-            Some(crate::i18n::text("Пропущено при разрешении конфликта").into()),
+            Some(crate::i18n::text!("Пропущено при разрешении конфликта").into()),
         );
     }
 
@@ -534,7 +536,7 @@ impl Results {
         }
         let reason = result.as_ref().err().map(String::as_str).or_else(|| {
             self.cancelled
-                .then(|| crate::i18n::text("Операция остановлена пользователем"))
+                .then(|| crate::i18n::text!("Операция остановлена пользователем"))
         });
         if let Some(index) = self.active {
             let outcome = if result.is_err() {
@@ -551,7 +553,7 @@ impl Results {
         for index in 0..self.items.len() {
             if self.items[index].outcome == Outcome::NotStarted {
                 let reason = if result.is_err() {
-                    Some(crate::i18n::text(
+                    Some(crate::i18n::text!(
                         "Не начато после ошибки; причина указана в итоге операции",
                     ))
                 } else if self.cancelled {
@@ -877,7 +879,7 @@ impl History {
 
     pub fn show(&mut self, ctx: &egui::Context, open: &mut bool) {
         let mut selected = None;
-        egui::Window::new(crate::i18n::text("Журнал результатов"))
+        egui::Window::new(crate::i18n::text!("Журнал результатов"))
             .id(egui::Id::unique("result_history"))
             .open(open)
             .default_size([780.0, 560.0])
@@ -886,7 +888,7 @@ impl History {
                     "Копии раскрываются по манифесту, SFTP-удаление — по посещённым элементам. Неполный обход отмечен.",
                     "Copies expand from their manifest; SFTP removal lists visited entries. Incomplete traversal is marked."
                 ));
-                ui.label(crate::i18n::text(
+                ui.label(crate::i18n::text!(
                     "До 100 операций и 100 000 строк; объём истории ограничен. Неполные записи помечены.",
                 ));
                 ui.label(crate::tr_format!(
@@ -907,18 +909,18 @@ impl History {
                 if let Some(error) = &self.error {
                     ui.colored_label(
                         ui.visuals().error_fg_color,
-                        crate::i18n::text(
+                        crate::i18n::text!(
                             "История не сохранена. Проверьте файл журнала и доступ к нему.",
                         ),
                     );
                     ui.add(egui::Label::new(error).selectable(true));
                 }
                 if self.records.is_empty() {
-                    ui.label(crate::i18n::text(if self.loaded {
-                        "Журнал пуст"
+                    ui.label(if self.loaded {
+                        crate::i18n::text!("Журнал пуст")
                     } else {
-                        "Загрузка журнала…"
-                    }));
+                        crate::i18n::text!("Загрузка журнала…")
+                    });
                 }
                 egui::ScrollArea::vertical()
                     .id_salt("result_operations")
@@ -946,13 +948,13 @@ impl History {
                                         self.undo_requested = Some(record.id.clone());
                                     }
                                 } else {
-                                    ui.label(crate::i18n::text("Undo недоступен для этой операции"));
+                                    ui.label(crate::i18n::text!("Undo недоступен для этой операции"));
                                 }
                                 if self.retryable.contains(&record.id) && ui.button(crate::tr_format!("Проверить и повторить незавершённое", "Check and retry unfinished items")).clicked() {
                                     self.retry_requested = Some(record.id.clone());
                                 }
                                 if self.inspectable.contains(&record.id)
-                                    && ui.button(crate::i18n::text("Проверить прерванную операцию SFTP")).clicked()
+                                    && ui.button(crate::i18n::text!("Проверить прерванную операцию SFTP")).clicked()
                                 {
                                     self.retry_requested = Some(record.id.clone());
                                 }
@@ -962,7 +964,7 @@ impl History {
                                         "Rows omitted by history limits: {}. This does not change the transfer outcome.", record.omitted));
                                 }
                                 if record.details_truncated {
-                                    ui.colored_label(ui.visuals().warn_fg_color, crate::i18n::text("Длинные пути или сообщения сокращены из-за лимита журнала."));
+                                    ui.colored_label(ui.visuals().warn_fg_color, crate::i18n::text!("Длинные пути или сообщения сокращены из-за лимита журнала."));
                                 }
                                 // Use the laid-out three-line height: fractional font metrics
                                 // can otherwise underestimate each virtual row and clip the end.
@@ -1358,7 +1360,7 @@ mod tests {
         for clipped in output.shapes {
             if let egui::Shape::Text(label) = clipped.shape {
                 assert_ne!(label.galley.text(), "Check and retry unfinished items");
-                if label.galley.text() == crate::i18n::text("Проверить прерванную операцию SFTP")
+                if label.galley.text() == crate::i18n::text!("Проверить прерванную операцию SFTP")
                 {
                     check_button = Some(label.pos + label.galley.size() * 0.5);
                 }
@@ -1582,7 +1584,7 @@ mod tests {
         );
         assert_eq!(
             record.items[3].reason.as_deref(),
-            Some(crate::i18n::text(
+            Some(crate::i18n::text!(
                 "Не начато после ошибки; причина указана в итоге операции"
             ))
         );

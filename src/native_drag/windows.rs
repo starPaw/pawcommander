@@ -56,9 +56,10 @@ impl Platform {
             OleInitialize(None).map_err(|e| e.to_string())?;
             let _ole = OleGuard;
             if GetAsyncKeyState(i32::from(VK_LBUTTON.0)) >= 0 {
-                return Err(
-                    crate::i18n::text("Перетаскивание отменено: кнопка мыши уже отпущена").into(),
-                );
+                return Err(crate::i18n::text!(
+                    "Перетаскивание отменено: кнопка мыши уже отпущена"
+                )
+                .into());
             }
             let preferred = RegisterClipboardFormatW(w!("Preferred DropEffect")) as u16;
             if preferred == 0 {

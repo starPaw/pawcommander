@@ -174,7 +174,7 @@ fn markdown(body: &str) -> Document {
                     Tag::Strikethrough => b.style.strike = true,
                     Tag::Link { .. } => b.style.link = true,
                     Tag::Image { .. } => {
-                        b.append(text("[Изображение: "));
+                        b.append(text!("[Изображение: "));
                     }
                     Tag::Table(_) | Tag::TableRow => b.flush(),
                     Tag::TableHead => {
@@ -412,7 +412,7 @@ impl TokenSink for HtmlSink {
                         "br" => b.append("\n"),
                         "hr" => b.rule(),
                         "img" => {
-                            b.append(text("[Изображение: "));
+                            b.append(text!("[Изображение: "));
                             if let Some(alt) = tag.attrs.iter().find(|a| &*a.name.local == "alt") {
                                 b.append(&alt.value);
                             }
@@ -518,9 +518,9 @@ fn html(body: &str) -> Document {
 impl Document {
     pub(super) fn show(&self, ui: &mut egui::Ui, font_size: f32) {
         let p = Palette::from_ctx(ui.ctx());
-        ui.colored_label(p.muted, text("Пассивный просмотр: ссылки неактивны, изображения заменены текстом. Скрипты, стили и внешние ресурсы отключены."));
+        ui.colored_label(p.muted, text!("Пассивный просмотр: ссылки неактивны, изображения заменены текстом. Скрипты, стили и внешние ресурсы отключены."));
         if self.limited {
-            ui.colored_label(p.muted, text("Форматированный просмотр сокращён из-за ограничения сложности. Исходный текст доступен отдельно."));
+            ui.colored_label(p.muted, text!("Форматированный просмотр сокращён из-за ограничения сложности. Исходный текст доступен отдельно."));
         }
         ui.add_space(8.0);
         for block in &self.blocks {

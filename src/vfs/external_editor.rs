@@ -121,11 +121,11 @@ impl RemoteEdit {
         let name = self.copy.file_name().map(Path::new).ok_or_else(conflict)?;
         let digest = scope
             .digest(name, progress, &cancel)?
-            .ok_or_else(|| text("Рабочая копия отсутствует."))?;
+            .ok_or_else(|| text!("Рабочая копия отсутствует."))?;
         let current = Revision::read(&self.target, progress)?;
         if current.digest == digest {
             self.revision = current;
-            return Ok(text("На сервере уже сохранена эта версия.").into());
+            return Ok(text!("На сервере уже сохранена эта версия.").into());
         }
         if !self.revision.matches(&current) {
             return Err(conflict());
@@ -173,7 +173,7 @@ impl RemoteEdit {
             Ok(())
         })?;
         self.revision = new_revision.expect("successful publication captures its revision");
-        Ok(text("Правка сохранена на сервере.").into())
+        Ok(text!("Правка сохранена на сервере.").into())
     }
 }
 
@@ -210,7 +210,7 @@ fn basename(file: &Location) -> Result<&Path, TransferError> {
 }
 
 fn conflict() -> TransferError {
-    text("Файл на сервере изменился или недоступен. Рабочая копия сохранена.").into()
+    text!("Файл на сервере изменился или недоступен. Рабочая копия сохранена.").into()
 }
 
 fn preserve_access(
@@ -227,7 +227,7 @@ fn preserve_access(
     if access(&staged) == access(expected) {
         return Ok(EntryMetadata::Remote(staged));
     }
-    let refused = || text("Не удалось сохранить владельца или права доступа файла.");
+    let refused = || text!("Не удалось сохранить владельца или права доступа файла.");
     let mut changes = ssh2::FileStat {
         size: None,
         uid: None,

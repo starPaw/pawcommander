@@ -138,9 +138,9 @@ pub(super) fn partially_preserved(local: &Location, remote: &Location) {
     let row = &progress.results.items[0];
     assert_eq!(row.outcome, Outcome::CompletedWithWarning);
     let warning = row.metadata_warning.as_deref().unwrap();
-    assert!(warning.contains(crate::i18n::text("время доступа")));
-    assert!(!warning.contains(crate::i18n::text("время изменения")));
-    assert!(!warning.contains(crate::i18n::text("права доступа")));
+    assert!(warning.contains(crate::i18n::text!("время доступа")));
+    assert!(!warning.contains(crate::i18n::text!("время изменения")));
+    assert!(!warning.contains(crate::i18n::text!("права доступа")));
     let target = remote.join("partial-date");
     let stat = fs::metadata(target.path()).unwrap();
     assert_eq!(stat.modified().unwrap(), modified());
@@ -214,9 +214,9 @@ pub(super) fn server_rejected(local: &Location, remote: &Location) {
     for row in progress.results.items {
         assert_eq!(row.outcome, Outcome::CompletedWithWarning);
         let warning = row.metadata_warning.unwrap();
-        assert!(warning.contains(crate::i18n::text("права доступа")));
-        assert!(warning.contains(crate::i18n::text("время доступа")));
-        assert!(warning.contains(crate::i18n::text("время изменения")));
+        assert!(warning.contains(crate::i18n::text!("права доступа")));
+        assert!(warning.contains(crate::i18n::text!("время доступа")));
+        assert!(warning.contains(crate::i18n::text!("время изменения")));
     }
     let target = remote.join(source.name()).join("payload");
     assert_eq!(fs::read(target.path()).unwrap(), DATA);

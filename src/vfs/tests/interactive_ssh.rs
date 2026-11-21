@@ -126,7 +126,7 @@ fn ssh_interactive_round_trip() {
     drop(offered);
     assert_eq!(
         unverified.finish().err().unwrap(),
-        crate::i18n::text("Подключение отменено")
+        crate::i18n::text!("Подключение отменено")
     );
     assert!(unverified.prompts.try_recv().is_err());
     assert!(!pins.exists());
@@ -174,14 +174,14 @@ fn ssh_interactive_round_trip() {
     assert!(cancelled.control.cancel());
     assert_eq!(
         cancelled.finish().err().unwrap(),
-        crate::i18n::text("Подключение отменено")
+        crate::i18n::text!("Подключение отменено")
     );
 
     let expired = fixture.start("timeout-fixture", true, Duration::from_millis(180));
     let _prompt = expired.prompt();
     assert_eq!(
         expired.finish().err().unwrap(),
-        crate::i18n::text("Время интерактивной SSH-аутентификации истекло")
+        crate::i18n::text!("Время интерактивной SSH-аутентификации истекло")
     );
 
     let rejected = fixture.start("reject-fixture", true, timeout);
@@ -192,7 +192,7 @@ fn ssh_interactive_round_trip() {
     let error = rejected.finish().err().unwrap();
     assert_eq!(
         error,
-        crate::i18n::text("Сервер не подтвердил интерактивную аутентификацию")
+        crate::i18n::text!("Сервер не подтвердил интерактивную аутентификацию")
     );
     assert!(!error.contains("fixture-rejected-answer"));
     assert!(!fixture.root.join("legacy-pins").exists());
@@ -204,7 +204,7 @@ fn ssh_interactive_round_trip() {
     let before = fs::read(&record).unwrap();
     let changed = fixture.start("changed-host", false, timeout);
     let error = changed.finish().err().unwrap();
-    assert!(error.starts_with(crate::i18n::text("Ключ сервера SSH изменился.")));
+    assert!(error.starts_with(crate::i18n::text!("Ключ сервера SSH изменился.")));
     assert!(error.contains(fingerprints[0]) && error.contains(fingerprints[1]));
     assert!(changed.prompts.try_recv().is_err());
     assert_eq!(fs::read(&record).unwrap(), before);

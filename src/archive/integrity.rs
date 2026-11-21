@@ -20,7 +20,7 @@ pub(crate) fn verify_archive(
     progress.results.plan([(source.clone(), None)]);
     progress.results.begin(&source);
     progress.item(path);
-    let format = Format::from_path(path).ok_or_else(|| text("Поддерживаются архивы ZIP и TAR"))?;
+    let format = Format::from_path(path).ok_or_else(|| text!("Поддерживаются архивы ZIP и TAR"))?;
     let mut report = Report {
         source: &source,
         progress,
@@ -46,7 +46,7 @@ pub(crate) fn verify_archive(
         .err()
         .filter(|_| !cancelled)
         .map(ToString::to_string);
-    let details = text("Подробности в журнале результатов.");
+    let details = text!("Подробности в журнале результатов.");
     let (outcome, message) = if cancelled {
         report.progress.results.cancelled = true;
         (
@@ -73,8 +73,8 @@ pub(crate) fn verify_archive(
         )
     } else {
         let scope = match format {
-            Format::Zip => text("Структура и данные ZIP проверены."),
-            Format::Tar => text("Заголовки TAR проверены, данные прочитаны."),
+            Format::Zip => text!("Структура и данные ZIP проверены."),
+            Format::Tar => text!("Заголовки TAR проверены, данные прочитаны."),
         };
         (Outcome::Completed, format!("{scope} {summary}"))
     };
@@ -110,7 +110,9 @@ impl Report<'_> {
         }
         self.progress.check_cancelled()?;
         if !archive.source_unchanged() {
-            return Err(invalid("Архив изменился во время проверки"));
+            return Err(invalid(crate::i18n::key!(
+                "Архив изменился во время проверки"
+            )));
         }
         Ok(())
     }
@@ -175,20 +177,22 @@ impl Report<'_> {
                 self.member_result(
                     index,
                     &record.path.to_string_lossy(),
-                    Err(invalid("Данные записей ZIP перекрываются")),
+                    Err(invalid(crate::i18n::key!(
+                        "Данные записей ZIP перекрываются"
+                    ))),
                 )?;
                 continue;
             }
             let result = match record.payload {
-                Contents::UnsupportedEncryption => {
-                    Err(unsupported("Шифрование или сжатие ZIP не поддерживается"))
-                }
-                Contents::UnsupportedCompression => {
-                    Err(unsupported("Метод сжатия ZIP не поддерживается"))
-                }
-                Contents::Encrypted(_) if !has_password => {
-                    Err(unsupported("Укажите пароль для проверки ZIP"))
-                }
+                Contents::UnsupportedEncryption => Err(unsupported(crate::i18n::key!(
+                    "Шифрование или сжатие ZIP не поддерживается"
+                ))),
+                Contents::UnsupportedCompression => Err(unsupported(crate::i18n::key!(
+                    "Метод сжатия ZIP не поддерживается"
+                ))),
+                Contents::Encrypted(_) if !has_password => Err(unsupported(crate::i18n::key!(
+                    "Укажите пароль для проверки ZIP"
+                ))),
                 Contents::Encrypted(_) if let Some(ref error) = protected_error => Err(
                     io::Error::new(io::ErrorKind::Unsupported, error.to_string()),
                 ),
@@ -209,7 +213,7 @@ impl Report<'_> {
         let cancel = self.progress.cancellation();
         let (file, length) = archive.input();
         if length < BLOCK {
-            return Err(invalid("Некорректная длина TAR"));
+            return Err(invalid(crate::i18n::key!("Некорректная длина TAR")));
         }
         let reading_payload = Cell::new(false);
         let cancelled = || cancel.is_requested();
@@ -231,7 +235,7 @@ impl Report<'_> {
                 Err(error) => {
                     self.member_result(
                         index + 1,
-                        text("Заголовок TAR"),
+                        text!("Заголовок TAR"),
                         Err(io::Error::new(error.kind(), error.to_string())),
                     )?;
                     return Err(error);
@@ -252,12 +256,14 @@ impl Report<'_> {
             }
             let result = path.and_then(|path| {
                 if bad_pax {
-                    return Err(invalid("Повреждён расширенный заголовок TAR"));
+                    return Err(invalid(crate::i18n::key!(
+                        "Повреждён расширенный заголовок TAR"
+                    )));
                 }
                 if sparse_pax {
-                    return Err(unsupported(
-                        "Разреженная запись TAR требует другой проверки",
-                    ));
+                    return Err(unsupported(crate::i18n::key!(
+                        "Разреженная запись TAR требует другой проверки"
+                    )));
                 }
                 if global_pax {
                     // Reading the global PAX records already consumed this payload.
@@ -315,7 +321,9 @@ pub(super) fn check_tar_trailer(
     // zero block and may have additional zero padding.
     let remaining = input.length - input.position;
     if remaining < BLOCK || !input.length.is_multiple_of(BLOCK) {
-        return Err(invalid("Отсутствуют завершающие блоки TAR"));
+        return Err(invalid(crate::i18n::key!(
+            "Отсутствуют завершающие блоки TAR"
+        )));
     }
     let reading_payload = Cell::new(true);
     let trailer = MetadataReader {
@@ -330,17 +338,21 @@ pub(super) fn check_tar_trailer(
                 return Ok(());
             }
             if buffer[..count].iter().any(|&byte| byte != 0) {
-                return Err(invalid("Неожиданные данные после конца TAR"));
+                return Err(invalid(crate::i18n::key!(
+                    "Неожиданные данные после конца TAR"
+                )));
             }
         }
     })?;
     if read != remaining {
-        return Err(invalid("Отсутствуют завершающие блоки TAR"));
+        return Err(invalid(crate::i18n::key!(
+            "Отсутствуют завершающие блоки TAR"
+        )));
     }
     Ok(())
 }
 
-fn unsupported(message: &'static str) -> io::Error {
+fn unsupported(message: crate::i18n::MessageKey) -> io::Error {
     io::Error::new(io::ErrorKind::Unsupported, text(message))
 }
 

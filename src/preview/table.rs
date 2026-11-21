@@ -35,11 +35,11 @@ impl Separator {
     }
 
     fn label(self) -> &'static str {
-        crate::i18n::text(match self {
-            Self::Comma => "Запятая",
-            Self::Semicolon => "Точка с запятой",
-            Self::Tab => "Табуляция",
-        })
+        match self {
+            Self::Comma => crate::i18n::text!("Запятая"),
+            Self::Semicolon => crate::i18n::text!("Точка с запятой"),
+            Self::Tab => crate::i18n::text!("Табуляция"),
+        }
     }
 }
 

@@ -83,13 +83,13 @@ impl CommandPalette {
             let query = ui.add(
                 egui::TextEdit::singleline(&mut self.query)
                     .id(query_id)
-                    .hint_text(text("Поиск команд…"))
+                    .hint_text(text!("Поиск команд…"))
                     .desired_width(ui.available_width())
                     .lock_focus(true)
                     .return_key(None),
             );
             ctx.accesskit_node_builder(query.id, |node| {
-                node.set_label(text("Поиск команд…"));
+                node.set_label(text!("Поиск команд…"));
             });
 
             let matches = matching_commands(&self.query);
@@ -130,7 +130,7 @@ impl CommandPalette {
             }
             self.highlighted = index.map(|index| available[index]);
             if matches.is_empty() {
-                ui.label(text("Команды не найдены"));
+                ui.label(text!("Команды не найдены"));
             }
             egui::ScrollArea::vertical()
                 .max_height((ctx.content_rect().height() - 140.0).clamp(60.0, 300.0))
@@ -170,7 +170,7 @@ impl CommandPalette {
                         }
                     }
                 });
-            ui.small(text(
+            ui.small(text!(
                 "Вверх/вниз — выбрать · Enter — выполнить · Esc — закрыть",
             ));
             outcome

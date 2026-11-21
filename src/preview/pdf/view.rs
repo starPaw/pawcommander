@@ -130,14 +130,14 @@ impl Document {
             if ui
                 .add_enabled(
                     self.page > 0,
-                    egui::Button::new(text("Предыдущая страница")),
+                    egui::Button::new(text!("Предыдущая страница")),
                 )
                 .clicked()
             {
                 self.go(self.page - 1);
             }
             let mut number = self.page + 1;
-            let label = ui.label(text("Страница"));
+            let label = ui.label(text!("Страница"));
             let page_field = ui
                 .add(egui::DragValue::new(&mut number).range(1..=self.pages))
                 .labelled_by(label.id);
@@ -149,7 +149,7 @@ impl Document {
             if ui
                 .add_enabled(
                     self.page + 1 < self.pages,
-                    egui::Button::new(text("Следующая страница")),
+                    egui::Button::new(text!("Следующая страница")),
                 )
                 .clicked()
             {
@@ -157,11 +157,11 @@ impl Document {
             }
             egui::ComboBox::from_id_salt("pdf-zoom")
                 .selected_text(self.zoom.map_or_else(
-                    || text("Вписать страницу").into(),
+                    || text!("Вписать страницу").into(),
                     |percent| format!("{percent}%"),
                 ))
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.zoom, None, text("Вписать страницу"));
+                    ui.selectable_value(&mut self.zoom, None, text!("Вписать страницу"));
                     for percent in [25, 50, 75, 100, 125, 150, 200, 250, 300] {
                         ui.selectable_value(&mut self.zoom, Some(percent), format!("{percent}%"));
                     }
@@ -175,7 +175,7 @@ impl Document {
             self.search.field = Some(id);
             let focus_search =
                 ui.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::F));
-            let label = ui.label(text("Поиск по PDF"));
+            let label = ui.label(text!("Поиск по PDF"));
             let input = ui
                 .add(
                     egui::TextEdit::singleline(&mut self.search.draft)
@@ -190,12 +190,12 @@ impl Document {
             let enter = input.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
             let can_search = self.stopped.is_none() && !self.search.draft.trim().is_empty();
             let find = ui
-                .add_enabled(can_search, egui::Button::new(text("Найти")))
+                .add_enabled(can_search, egui::Button::new(text!("Найти")))
                 .clicked();
             if can_search && (enter || find) {
                 self.find(ui.ctx());
             }
-            if !self.search.query.is_empty() && ui.button(text("Очистить поиск")).clicked()
+            if !self.search.query.is_empty() && ui.button(text!("Очистить поиск")).clicked()
             {
                 let field = self.search.field;
                 self.search = Search {
@@ -209,10 +209,10 @@ impl Document {
                 .as_ref()
                 .is_some_and(|pages| !pages.is_empty());
             let previous = ui
-                .add_enabled(matches, egui::Button::new(text("Предыдущее совпадение")))
+                .add_enabled(matches, egui::Button::new(text!("Предыдущее совпадение")))
                 .clicked();
             let next = ui
-                .add_enabled(matches, egui::Button::new(text("Следующее совпадение")))
+                .add_enabled(matches, egui::Button::new(text!("Следующее совпадение")))
                 .clicked();
             if (previous || next)
                 && let Some(pages) = &self.search.matches
@@ -221,12 +221,12 @@ impl Document {
             }
         });
         if self.search.ticket.is_some() {
-            ui.label(text("Поиск по PDF…"));
+            ui.label(text!("Поиск по PDF…"));
         } else if let Some(reason) = self.search.error {
             ui.colored_label(ui.visuals().error_fg_color, reason.message());
         } else if let Some(pages) = &self.search.matches {
             if pages.is_empty() {
-                ui.label(text("Совпадений нет"));
+                ui.label(text!("Совпадений нет"));
             } else {
                 ui.label(crate::tr_format!(
                     "Страниц с совпадениями: {}",

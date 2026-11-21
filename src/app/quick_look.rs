@@ -33,7 +33,7 @@ impl QuickLook {
 
     fn window_builder() -> egui::ViewportBuilder {
         egui::ViewportBuilder::default()
-            .with_title(text("Быстрый просмотр"))
+            .with_title(text!("Быстрый просмотр"))
             .with_inner_size([760.0, 540.0])
             .with_min_inner_size([360.0, 240.0])
     }
@@ -129,7 +129,7 @@ impl QuickLook {
                 let size = ctx.content_rect().size() * 0.8;
                 ui.set_width(size.x.min(760.0));
                 ui.set_height(size.y.min(540.0));
-                ui.heading(text("Быстрый просмотр"));
+                ui.heading(text!("Быстрый просмотр"));
                 Self::show_content(ui, preview, entry, has_previous, has_next)
             });
             let action = if modal.backdrop_response.clicked() {
@@ -203,18 +203,18 @@ impl QuickLook {
         let action = ui
             .horizontal(|ui| {
                 let previous = ui
-                    .add_enabled(has_previous, egui::Button::new(text("Предыдущий файл")))
+                    .add_enabled(has_previous, egui::Button::new(text!("Предыдущий файл")))
                     .on_hover_text(ui.ctx().format_shortcut(&egui::KeyboardShortcut::new(
                         Modifiers::NONE,
                         Key::ArrowLeft,
                     )));
                 let next = ui
-                    .add_enabled(has_next, egui::Button::new(text("Следующий файл")))
+                    .add_enabled(has_next, egui::Button::new(text!("Следующий файл")))
                     .on_hover_text(ui.ctx().format_shortcut(&egui::KeyboardShortcut::new(
                         Modifiers::NONE,
                         Key::ArrowRight,
                     )));
-                let close = ui.button(text("Закрыть"));
+                let close = ui.button(text!("Закрыть"));
                 for button in [&previous, &next, &close] {
                     paint_focus(ui, button, 5);
                     if button.has_focus() {

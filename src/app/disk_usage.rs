@@ -71,20 +71,25 @@ impl DiskUsage {
             match &mut self.phase {
                 Phase::Ready => {}
                 Phase::Running(worker) => {
-                    show_progress_with_stop(ui, worker, "Проверяем занятое место…", "Остановка…");
+                    show_progress_with_stop(
+                        ui,
+                        worker,
+                        crate::i18n::key!("Проверяем занятое место…"),
+                        crate::i18n::key!("Остановка…"),
+                    );
                 }
                 Phase::Failed(error) => {
                     ui.colored_label(ui.visuals().error_fg_color, error);
                 }
                 Phase::Stopped => {
-                    ui.label(text("Анализ места остановлен"));
+                    ui.label(text!("Анализ места остановлен"));
                 }
                 Phase::Finished(analysis) => {
                     show_summary(ui, analysis);
                     ui.horizontal_wrapped(|ui| {
-                        ui.selectable_value(&mut self.view, View::Tree, text("Дерево размеров"));
-                        ui.selectable_value(&mut self.view, View::Files, text("Крупнейшие файлы"));
-                        ui.selectable_value(&mut self.view, View::Map, text("Карта места"));
+                        ui.selectable_value(&mut self.view, View::Tree, text!("Дерево размеров"));
+                        ui.selectable_value(&mut self.view, View::Files, text!("Крупнейшие файлы"));
+                        ui.selectable_value(&mut self.view, View::Map, text!("Карта места"));
                     });
                     match self.view {
                         View::Tree => {
@@ -110,17 +115,17 @@ impl DiskUsage {
                     stop = ui
                         .add_enabled(
                             !worker.progress.cancel.is_requested(),
-                            egui::Button::new(text("Остановить")),
+                            egui::Button::new(text!("Остановить")),
                         )
                         .clicked();
                 } else {
-                    let response = ui.button(text("Начать анализ"));
+                    let response = ui.button(text!("Начать анализ"));
                     if self.focus_start && !ui.is_sizing_pass() {
                         response.request_focus();
                         self.focus_start = false;
                     }
                     start = response.clicked();
-                    close = ui.button(text("Закрыть")).clicked();
+                    close = ui.button(text!("Закрыть")).clicked();
                 }
             });
         });
@@ -148,11 +153,11 @@ fn show_summary(ui: &mut egui::Ui, analysis: &Analysis) {
         "Allocated space counted: {size}"
     ));
     let status = match analysis.finish {
-        Finish::Stopped => Some(text("Анализ остановлен. Показаны частичные размеры.")),
-        Finish::Limit => Some(text(
+        Finish::Stopped => Some(text!("Анализ остановлен. Показаны частичные размеры.")),
+        Finish::Limit => Some(text!(
             "Достигнут предел анализа. Показаны частичные размеры.",
         )),
-        Finish::Complete if analysis.issues != 0 => Some(text(
+        Finish::Complete if analysis.issues != 0 => Some(text!(
             "Некоторые объекты недоступны. Показаны частичные размеры.",
         )),
         Finish::Complete => None,
@@ -165,7 +170,7 @@ fn show_summary(ui: &mut egui::Ui, analysis: &Analysis) {
         "Files: {} · symbolic links skipped: {} · extra hard links excluded: {} · read errors: {}",
         analysis.files.len(), analysis.symlinks, analysis.hard_links, analysis.issues,
     ));
-    ui.small(text(
+    ui.small(text!(
         "Размеры по выделенным блокам. Клоны APFS могут использовать общие блоки.",
     ));
 }
@@ -215,9 +220,9 @@ fn show_tree(
                             let button =
                                 ui.add_sized([24.0, row_height], egui::Button::new(symbol));
                             let title = if opened {
-                                text("Свернуть папку")
+                                text!("Свернуть папку")
                             } else {
-                                text("Развернуть папку")
+                                text!("Развернуть папку")
                             };
                             ui.ctx().accesskit_node_builder(button.id, |access| {
                                 access.set_label(format!("{title} · {label}"))
@@ -247,7 +252,7 @@ fn show_tree(
 
 fn show_files(ui: &mut egui::Ui, analysis: &Analysis, run: u64) {
     if analysis.files.is_empty() {
-        ui.label(text("Обычные файлы не найдены"));
+        ui.label(text!("Обычные файлы не найдены"));
         return;
     }
     let row_height = row_height(ui);
@@ -292,11 +297,11 @@ fn node_name(analysis: &Analysis, node: &Node) -> String {
 
 fn row_size(node: &Node) -> String {
     match node.kind {
-        Kind::Symlink => text("Символическая ссылка").into(),
-        Kind::Other if node.issue.is_some() => text("Недоступно").into(),
-        Kind::Other => text("Специальный объект").into(),
-        Kind::File if node.hard_link => text("Уже учтён").into(),
-        Kind::Folder if node.issue.is_some() && node.allocated == 0 => text("Нет данных").into(),
+        Kind::Symlink => text!("Символическая ссылка").into(),
+        Kind::Other if node.issue.is_some() => text!("Недоступно").into(),
+        Kind::Other => text!("Специальный объект").into(),
+        Kind::File if node.hard_link => text!("Уже учтён").into(),
+        Kind::Folder if node.issue.is_some() && node.allocated == 0 => text!("Нет данных").into(),
         _ => human_size(node.allocated),
     }
 }
@@ -312,7 +317,7 @@ fn node_detail(analysis: &Analysis, node: &Node) -> String {
     let mut detail = if node.hard_link {
         format!(
             "{path}\n{}",
-            text("Выделенные блоки учтены по другой жёсткой ссылке")
+            text!("Выделенные блоки учтены по другой жёсткой ссылке")
         )
     } else {
         crate::tr_format!(
