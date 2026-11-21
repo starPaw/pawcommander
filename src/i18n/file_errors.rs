@@ -1,9 +1,10 @@
 use super::text;
 use crate::file_error::{
-    AccessAction, AccessCause, AccessError, ArchiveMemberError, ConnectionError, Failure,
-    HostKeyError, KnownHostEntryError, KnownHostsError, ListingError, ListingErrorKind,
-    LocalPathAction, MutationError, PathError, PermissionError, PinError, PreviewError,
-    PublicationError, RecoveryNotice, ScanError, SearchError, SshStage, StagingCleanupError,
+    AccessAction, AccessCause, AccessError, ArchiveMemberError, ChecksumError, ConnectionError,
+    Failure, HostKeyError, KnownHostEntryError, KnownHostsError, ListingError, ListingErrorKind,
+    LocalPathAction, ManifestLineError, MutationError, PathError, PermissionError, PinError,
+    PreviewError, PublicationError, RecoveryNotice, ScanError, SearchError, SshStage,
+    StagingCleanupError,
 };
 use crate::operations::TransferError;
 use crate::vfs::{DeletionFailure, TransferFailure};
@@ -18,6 +19,7 @@ pub(crate) fn file_error(error: &TransferError) -> String {
                 Failure::Preview(error) => preview_error(error),
                 Failure::Search(error) => search_error(error),
                 Failure::Scan(error) => scan_error(error),
+                Failure::Checksum(error) => checksum_error(error),
                 Failure::Permissions(reason) => permission_error(
                     reason,
                     matches!(error, TransferError::PublicationUnconfirmed(_)),
@@ -188,6 +190,7 @@ fn access_error(error: &AccessError) -> String {
         AccessAction::ReadChildren => text!("Не удалось прочитать папку"),
         AccessAction::ReadFile => text!("Не удалось прочитать файл"),
         AccessAction::ReadLink => text!("Не удалось прочитать символическую ссылку"),
+        AccessAction::WriteFile => text!("Не удалось записать файл"),
         AccessAction::CheckSearchResult => {
             return crate::tr_format!(
                 "Could not check search result {path}: {error}",
@@ -284,6 +287,51 @@ fn scan_error(error: &ScanError) -> String {
         }
         #[cfg(target_os = "macos")]
         ScanError::DiskUsageLimit => return text!("Достигнут предел анализа места").into(),
+    };
+    format!("{message} · {location}")
+}
+
+fn checksum_error(error: &ChecksumError) -> String {
+    use ChecksumError::*;
+    let (message, location) = match error {
+        InvalidName(_) => return text!("Введите допустимое имя манифеста").into(),
+        InvalidSelection(location) => (text!("Выберите обычные файлы из текущей папки"), location),
+        UnsupportedFilename(location) => {
+            return crate::tr_format!("Filename cannot be used in the manifest: {}", location);
+        }
+        SourceMissing(source) => {
+            return crate::tr_format!("File is missing: {source}", source = source);
+        }
+        RequiresManifest(location) => (text!("Нужен файл манифеста SHA-256"), location),
+        ManifestMissing(location) => (text!("Файл манифеста отсутствует"), location),
+        InvalidLine {
+            manifest,
+            row,
+            source,
+        } => {
+            let line = crate::tr_format!("Invalid SHA-256 manifest line {row}", row = row);
+            let reason = match source {
+                ManifestLineError::Format => text!("Ожидались контрольная сумма и имя файла"),
+                ManifestLineError::Digest => text!("Ожидались 64 шестнадцатеричные цифры"),
+                ManifestLineError::Escape => text!("Недопустимое экранирование имени файла"),
+                ManifestLineError::Path => text!("Недопустимый относительный путь к файлу"),
+            };
+            return format!("{line} · {manifest} · {reason}");
+        }
+        DuplicatePath {
+            manifest,
+            row,
+            path,
+        } => {
+            let line = crate::tr_format!("Duplicate path in manifest line {row}", row = row);
+            return format!("{line} · {manifest} · {path:?}");
+        }
+        EmptyManifest(location) => (text!("Манифест SHA-256 пуст"), location),
+        TooLarge(location) => (
+            text!("Манифест SHA-256 превышает 16 МиБ или 50 000 записей"),
+            location,
+        ),
+        DirectoryChanged(location) => (text!("Папка манифеста изменилась"), location),
     };
     format!("{message} · {location}")
 }

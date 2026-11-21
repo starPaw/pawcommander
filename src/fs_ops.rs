@@ -439,7 +439,7 @@ fn normalize_selection(
 
 fn ensure_absent(path: &Path) -> Result<(), TransferError> {
     match fs::symlink_metadata(path) {
-        Ok(_) => Err(MutationError::DestinationExists(path.to_owned()).into()),
+        Ok(_) => Err(MutationError::DestinationExists(path.to_owned().into()).into()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => {
             Err(MutationError::local(path, LocalPathAction::CheckDestination, error).into())

@@ -717,7 +717,7 @@ impl PawCommander {
                     edit.labelled_by(label.id);
                     match fs_ops::checksum_manifest_name(name) {
                         Ok(file) => { ui.label(directory.join(file).display()); }
-                        Err(error) => { ui.label(error); }
+                        Err(error) => { ui.label(crate::i18n::file_error(&error)); }
                     }
                 }
                 Dialog::CreateArchive { sources, directory, name, format, password } => {
@@ -1088,7 +1088,18 @@ impl PawCommander {
                     let label = Command::CreateChecksumManifest.label();
                     let description = format!("{label} · {}", directory.join(file));
                     self.start_stoppable_job(ctx, label, description, move |progress| {
-                        fs_ops::create_checksum_manifest(&directory, &name, &sources, progress)
+                        match fs_ops::create_checksum_manifest(
+                            &directory, &name, &sources, progress,
+                        ) {
+                            Ok(target) => Ok(crate::tr_format!(
+                                "SHA-256 manifest created: {target}",
+                                target = target
+                            )),
+                            Err(crate::operations::TransferError::Cancelled) => {
+                                Ok(crate::i18n::text!("Создание манифеста остановлено").into())
+                            }
+                            Err(error) => Err(crate::i18n::file_error(&error)),
+                        }
                     });
                 }
             }

@@ -6,21 +6,21 @@ pub(super) use tests::checksum_round_trip;
 
 use super::{
     location::validate_name,
-    read_scope::{changed_during_read, ReadScope},
+    read_scope::ReadScope,
     staged_file::StagedFile,
     transfer::{canonical, entry_metadata, rename_for_publication, with_staging_typed},
     Location,
 };
 use crate::{
-    i18n::text,
+    file_error::{AccessError, ChecksumError, MutationError, ScanError},
     operations::{Progress, TransferError},
-    result_history::Outcome,
+    result_history::{ChecksumOutcome, Outcome},
 };
 use std::{io::Write, path::Path};
 
-pub(crate) fn checksum_manifest_name(name: &str) -> Result<&str, String> {
+pub(crate) fn checksum_manifest_name(name: &str) -> Result<&str, TransferError> {
     let name = name.trim();
-    validate_name(name).map_err(|_| text!("Введите допустимое имя манифеста").to_owned())?;
+    validate_name(name).map_err(ChecksumError::InvalidName)?;
     Ok(name)
 }
 
@@ -37,20 +37,22 @@ pub(crate) fn create_checksum_manifest(
     name: &str,
     sources: &[Location],
     progress: &mut Progress,
-) -> Result<String, String> {
+) -> Result<Location, TransferError> {
     let name = checksum_manifest_name(name)?;
     let target = directory.join(name);
     progress.results.plan_selected_items([target.clone()]);
     progress.results.begin(&target);
     let mut published = false;
     match write_manifest(directory, name, sources, progress, &mut published) {
-        Ok(()) => Ok(crate::tr_format!(
-            "SHA-256 manifest created: {target}",
-            target = target
-        )),
-        Err(TransferError::Cancelled) => {
+        Ok(()) => {
+            progress
+                .results
+                .record(&target, None, Outcome::Completed, None);
+            Ok(target)
+        }
+        Err(error @ TransferError::Cancelled) => {
             progress.results.cancelled = true;
-            Ok(text!("Создание манифеста остановлено").into())
+            Err(error)
         }
         Err(error) => {
             let outcome = if published {
@@ -60,11 +62,10 @@ pub(crate) fn create_checksum_manifest(
             } else {
                 Outcome::Failed
             };
-            let message = crate::i18n::file_error(&error);
             progress
                 .results
-                .record(&target, None, outcome, Some(message.clone()));
-            Err(message)
+                .record_with_error(&target, outcome, Some(&error));
+            Err(error)
         }
     }
 }
@@ -81,10 +82,10 @@ fn write_manifest(
             .iter()
             .any(|source| source.parent().as_ref() != Some(directory))
     {
-        return Err(text!("Выберите обычные файлы из текущей папки").into());
+        return Err(ChecksumError::InvalidSelection(directory.clone()).into());
     }
     if sources.len() > manifest::MAX_ENTRIES {
-        return Err(manifest::too_large());
+        return Err(ChecksumError::TooLarge(directory.join(name)).into());
     }
     let cancel = progress.cancellation();
     cancel.check()?;
@@ -98,13 +99,12 @@ fn write_manifest(
             source
                 .path()
                 .file_name()
-                .ok_or_else(|| text!("Выберите обычные файлы из текущей папки"))?,
+                .ok_or_else(|| ChecksumError::InvalidSelection(directory.clone()))?,
         );
         let digest = scope
-            .digest(relative, progress, &cancel)
-            .map_err(|error| file_error(source, error))?
-            .ok_or_else(|| crate::tr_format!("File is missing: {source}", source = source))?;
-        manifest::append(&mut body, relative, digest)?;
+            .digest(relative, progress, &cancel)?
+            .ok_or_else(|| ChecksumError::SourceMissing(source.clone()))?;
+        manifest::append(&mut body, &target, source, relative, digest)?;
     }
 
     progress.item(target.path());
@@ -112,12 +112,14 @@ fn write_manifest(
         let payload = staging.join("payload");
         let mut output = StagedFile::open(&payload, cancel.clone())?;
         for bytes in body.chunks(64 * 1024) {
-            output.write_all(bytes)?;
+            output
+                .write_all(bytes)
+                .map_err(|error| AccessError::write(&payload, error))?;
         }
         output.close()?;
-        scope.parent.verify()?;
+        scope.verify_root()?;
         if canonical(directory)? != scope.parent.location.path() {
-            return Err(text!("Папка манифеста изменилась").into());
+            return Err(ChecksumError::DirectoryChanged(directory.clone()).into());
         }
         ensure_absent(&target)?;
         cancel.check()?;
@@ -130,59 +132,62 @@ fn write_manifest(
 pub(crate) fn verify_checksum_manifest(
     manifest: &Location,
     progress: &mut Progress,
-) -> Result<String, String> {
+) -> Result<ChecksumVerification, TransferError> {
     progress.results.plan_selected_items([manifest.clone()]);
     progress.results.begin(manifest);
-    let mut totals = Totals::default();
-    match verify_manifest(manifest, progress, &mut totals) {
+    let mut report = ChecksumVerification::default();
+    match verify_manifest(manifest, progress, &mut report) {
         Err(TransferError::Cancelled) => {
             progress.results.cancelled = true;
-            Ok(format!(
-                "{}\n{}",
-                text!("Проверка манифеста остановлена"),
-                totals.message()
-            ))
+            report.cancelled = true;
         }
-        Err(error) => Err(crate::i18n::file_error(&error)),
-        Ok(()) if totals.changed + totals.missing + totals.errors > 0 => Err(totals.message()),
-        Ok(()) => Ok(totals.message()),
+        Err(error) => {
+            progress
+                .results
+                .record_with_error(manifest, Outcome::Failed, Some(&error));
+            return Err(error);
+        }
+        Ok(()) => {}
     }
+    Ok(report)
 }
 
 fn verify_manifest(
     path: &Location,
     progress: &mut Progress,
-    totals: &mut Totals,
+    report: &mut ChecksumVerification,
 ) -> Result<(), TransferError> {
     let directory = path
         .parent()
-        .ok_or_else(|| text!("Нужен файл манифеста SHA-256"))?;
+        .ok_or_else(|| ChecksumError::RequiresManifest(path.clone()))?;
     let name = path
         .path()
         .file_name()
-        .ok_or_else(|| text!("Нужен файл манифеста SHA-256"))?;
+        .ok_or_else(|| ChecksumError::RequiresManifest(path.clone()))?;
     let cancel = progress.cancellation();
     cancel.check()?;
     if path.is_archive() {
-        return Err(crate::archive::readonly().into());
+        return Err(MutationError::ReadOnlyArchive(path.clone()).into());
     }
     let scope = ReadScope::open(&directory)?;
     let entries = scope
         .read_checked(Path::new(name), &cancel, |source, size, input| {
             if size > manifest::MAX_BYTES as u64 {
-                return Err(manifest::too_large());
+                return Err(ChecksumError::TooLarge(source.clone()).into());
             }
             let mut bytes = Vec::with_capacity(size as usize);
-            let count = progress.read_stream(source.path(), size, input, |input| {
-                input.read_to_end(&mut bytes)?;
-                Ok(())
-            })?;
+            let count = progress
+                .read_stream(source.path(), size, input, |input| {
+                    input.read_to_end(&mut bytes)?;
+                    Ok(())
+                })
+                .map_err(|error| AccessError::read(source, error))?;
             if count != size {
-                return Err(changed_during_read());
+                return Err(ScanError::FileChanged(source.clone()).into());
             }
-            manifest::parse(&bytes, &cancel)
+            manifest::parse(&bytes, source, &cancel)
         })?
-        .ok_or_else(|| text!("Файл манифеста отсутствует"))?;
+        .ok_or_else(|| ChecksumError::ManifestMissing(path.clone()))?;
 
     progress
         .results
@@ -192,72 +197,42 @@ fn verify_manifest(
         let source = directory.join(&entry.path);
         progress.results.begin(&source);
         progress.item(source.path());
-        let (outcome, reason) = match scope.digest(&entry.path, progress, &cancel) {
+        let outcome = match scope.digest(&entry.path, progress, &cancel) {
             Ok(Some(actual)) if actual == entry.digest => {
-                totals.matched += 1;
-                (Outcome::Completed, text!("SHA-256 совпала").into())
+                report.matched += 1;
+                ChecksumOutcome::Matched
             }
             Ok(Some(_)) => {
-                totals.changed += 1;
-                (
-                    Outcome::Failed,
-                    text!("Файл изменён (SHA-256 не совпала)").into(),
-                )
+                report.changed += 1;
+                ChecksumOutcome::Changed
             }
             Ok(None) => {
-                totals.missing += 1;
-                (Outcome::Failed, text!("Файл отсутствует").into())
+                report.missing += 1;
+                ChecksumOutcome::Missing
             }
             Err(TransferError::Cancelled) => return Err(TransferError::Cancelled),
             Err(error) => {
-                totals.errors += 1;
-                (Outcome::Failed, crate::i18n::file_error(&error))
+                report.errors += 1;
+                ChecksumOutcome::Unreadable(error)
             }
         };
-        progress
-            .results
-            .record(&source, None, outcome, Some(reason));
+        progress.results.record_checksum(&source, outcome);
     }
     Ok(())
 }
 
-#[derive(Default)]
-struct Totals {
-    matched: usize,
-    changed: usize,
-    missing: usize,
-    errors: usize,
-}
-
-impl Totals {
-    fn message(&self) -> String {
-        crate::tr_format!(
-            "Matched: {} · changed: {} · missing: {} · read errors: {}",
-            self.matched,
-            self.changed,
-            self.missing,
-            self.errors
-        )
-    }
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct ChecksumVerification {
+    pub(crate) matched: usize,
+    pub(crate) changed: usize,
+    pub(crate) missing: usize,
+    pub(crate) errors: usize,
+    pub(crate) cancelled: bool,
 }
 
 fn ensure_absent(target: &Location) -> Result<(), TransferError> {
     if entry_metadata(target)?.is_some() {
-        return Err(
-            crate::tr_format!("File or folder already exists: {target}", target = target).into(),
-        );
+        return Err(MutationError::DestinationExists(target.clone()).into());
     }
     Ok(())
-}
-
-fn file_error(source: &Location, error: TransferError) -> TransferError {
-    match error {
-        error @ TransferError::Failed(_) => crate::tr_format!(
-            "Could not read {source}: {error}",
-            error = crate::i18n::file_error(&error),
-            source = source
-        )
-        .into(),
-        _ => error,
-    }
 }

@@ -3,7 +3,9 @@ use crate::vfs::Location;
 use std::net::SocketAddr;
 use std::{error::Error, fmt, io, path::PathBuf, str::Utf8Error};
 
+mod checksum;
 mod host_key;
+pub(crate) use checksum::{ChecksumError, ManifestLineError};
 pub(crate) use host_key::{HostKeyError, KnownHostEntryError, KnownHostsError, PinError};
 
 #[derive(Debug)]
@@ -20,6 +22,7 @@ pub(crate) enum Failure {
     Search(Box<SearchError>),
     Scan(Box<ScanError>),
     Permissions(Box<PermissionError>),
+    Checksum(Box<ChecksumError>),
     ComparisonPane {
         right: bool,
         cause: Box<TransferError>,
@@ -55,6 +58,7 @@ impl Failure {
             Self::Search(error) => Some(error.as_ref()),
             Self::Scan(error) => Some(error.as_ref()),
             Self::Permissions(error) => Some(error.as_ref()),
+            Self::Checksum(error) => Some(error.as_ref()),
             Self::ComparisonPane { cause, .. } => Some(cause.as_ref()),
             Self::Listing(error) => Some(error.as_ref()),
             Self::Mutation(error) => Some(error.as_ref()),
@@ -75,6 +79,7 @@ impl fmt::Display for Failure {
             Self::Search(error) => fmt::Display::fmt(error, f),
             Self::Scan(error) => fmt::Display::fmt(error, f),
             Self::Permissions(error) => fmt::Display::fmt(error, f),
+            Self::Checksum(error) => fmt::Display::fmt(error, f),
             Self::ComparisonPane { right, cause } => {
                 let pane = if *right { "Right pane" } else { "Left pane" };
                 write!(f, "{pane} · {cause}")
@@ -199,6 +204,7 @@ pub(crate) enum AccessAction {
     ReadChildren,
     ReadFile,
     ReadLink,
+    WriteFile,
     CheckSearchResult,
     #[cfg(target_os = "macos")]
     WritePreviewCache,
@@ -286,12 +292,20 @@ impl AccessError {
     }
 
     pub(crate) fn read(location: &Location, source: io::Error) -> Self {
+        Self::stream(location, AccessAction::ReadFile, source)
+    }
+
+    pub(crate) fn write(location: &Location, source: io::Error) -> Self {
+        Self::stream(location, AccessAction::WriteFile, source)
+    }
+
+    fn stream(location: &Location, action: AccessAction, source: io::Error) -> Self {
         let cause = if location.remote() {
             AccessCause::SftpStream(source)
         } else {
             AccessCause::Local(source)
         };
-        Self::new(location, AccessAction::ReadFile, cause)
+        Self::new(location, action, cause)
     }
 }
 
@@ -713,7 +727,7 @@ pub(crate) enum MutationError {
     ModifyRoot(PathBuf),
     RenameRoot(Location),
     UndoUnavailable(Location),
-    DestinationExists(PathBuf),
+    DestinationExists(Location),
     ReadOnlyArchive(Location),
     RenameLocal {
         from: PathBuf,
@@ -785,7 +799,7 @@ impl fmt::Display for MutationError {
             Self::UndoUnavailable(path) => {
                 write!(f, "Undo unavailable for {}", path.path().display())
             }
-            Self::DestinationExists(path) => write!(f, "Destination {path:?} already exists"),
+            Self::DestinationExists(location) => write!(f, "Destination {location} already exists"),
             Self::ReadOnlyArchive(path) => write!(f, "Archive location {path} is read-only"),
             Self::RenameLocal { from, to, source } => {
                 write!(

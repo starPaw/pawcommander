@@ -1,4 +1,5 @@
-use super::{err, sftp::remote, Location};
+use super::{sftp::remote, Location};
+use crate::file_error::{AccessAction, AccessError};
 use crate::operations::{Cancellation, TransferError};
 use ssh2::{OpenFlags, OpenType};
 use std::{
@@ -28,6 +29,7 @@ impl Write for OutputFile {
 }
 
 pub(super) struct StagedFile {
+    path: Location,
     file: BufWriter<OutputFile>,
     cancel: Cancellation,
 }
@@ -35,21 +37,28 @@ pub(super) struct StagedFile {
 impl StagedFile {
     pub(super) fn open(path: &Location, cancel: Cancellation) -> Result<Self, TransferError> {
         cancel.check()?;
-        let file = if let Some(path) = path.local() {
+        let action = AccessAction::OpenFile;
+        let file = if let Some(local) = path.local() {
             let mut options = fs::OpenOptions::new();
             options.write(true).create_new(true);
             #[cfg(unix)]
             std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-            OutputFile::Local(options.open(path)?)
+            OutputFile::Local(
+                options
+                    .open(local)
+                    .map_err(|error| AccessError::new(path, action, error))?,
+            )
         } else {
             let flags = OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCLUSIVE;
             OutputFile::Remote(
-                remote(path)?
+                remote(path)
+                    .map_err(|error| AccessError::new(path, action, error))?
                     .open_mode(path.path(), flags, 0o600, OpenType::File)
-                    .map_err(err)?,
+                    .map_err(|error| AccessError::new(path, action, error))?,
             )
         };
         Ok(Self {
+            path: path.clone(),
             file: BufWriter::with_capacity(64 * 1024, file),
             cancel,
         })
@@ -62,6 +71,7 @@ impl StagedFile {
         expected: &super::transfer::EntryMetadata,
         cancel: Cancellation,
     ) -> Result<Self, TransferError> {
+        use super::err;
         use super::transfer::{EntryMetadata, LocalEntryMetadata};
         use std::io::{Seek, SeekFrom};
         use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -93,16 +103,26 @@ impl StagedFile {
             OutputFile::Remote(file)
         };
         Ok(Self {
+            path: path.clone(),
             file: BufWriter::with_capacity(64 * 1024, file),
             cancel,
         })
     }
 
     pub(super) fn close(mut self) -> Result<(), TransferError> {
-        self.flush()?;
-        match self.file.into_inner().map_err(|error| error.into_error())? {
-            OutputFile::Local(file) => file.sync_all()?,
-            OutputFile::Remote(mut file) => file.close().map_err(err)?,
+        self.flush()
+            .map_err(|error| AccessError::write(&self.path, error))?;
+        let output = self
+            .file
+            .into_inner()
+            .map_err(|error| AccessError::write(&self.path, error.into_error()))?;
+        match output {
+            OutputFile::Local(file) => file
+                .sync_all()
+                .map_err(|error| AccessError::write(&self.path, error))?,
+            OutputFile::Remote(mut file) => file
+                .close()
+                .map_err(|error| AccessError::new(&self.path, AccessAction::WriteFile, error))?,
         }
         Ok(())
     }

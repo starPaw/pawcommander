@@ -1,4 +1,8 @@
-use crate::operations::{Cancellation, TransferError};
+use crate::{
+    file_error::{ChecksumError, ManifestLineError},
+    operations::{Cancellation, TransferError},
+    vfs::Location,
+};
 use std::{
     collections::HashSet,
     io::Write,
@@ -10,12 +14,20 @@ pub(super) const MAX_ENTRIES: usize = 50_000;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_DEPTH: usize = 128;
 
+#[derive(Debug)]
 pub(super) struct Entry {
     pub(super) path: PathBuf,
     pub(super) digest: [u8; 32],
 }
 
-pub(super) fn parse(bytes: &[u8], cancel: &Cancellation) -> Result<Vec<Entry>, TransferError> {
+pub(super) fn parse(
+    bytes: &[u8],
+    manifest: &Location,
+    cancel: &Cancellation,
+) -> Result<Vec<Entry>, TransferError> {
+    if bytes.len() > MAX_BYTES {
+        return Err(ChecksumError::TooLarge(manifest.clone()).into());
+    }
     let mut entries = Vec::new();
     let mut paths = HashSet::new();
     let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
@@ -26,38 +38,40 @@ pub(super) fn parse(bytes: &[u8], cancel: &Cancellation) -> Result<Vec<Entry>, T
             continue;
         }
         if entries.len() == MAX_ENTRIES {
-            return Err(too_large());
+            return Err(ChecksumError::TooLarge(manifest.clone()).into());
         }
-        let entry = parse_line(line).ok_or_else(|| {
-            let row = index + 1;
-            crate::tr_format!("Invalid SHA-256 manifest line {row}", row = row)
+        let row = index + 1;
+        let entry = parse_line(line).map_err(|source| ChecksumError::InvalidLine {
+            manifest: manifest.clone(),
+            row,
+            source,
         })?;
         if !paths.insert(entry.path.clone()) {
-            let row = index + 1;
-            return Err(
-                crate::tr_format!("Duplicate path in manifest line {row}", row = row).into(),
-            );
+            return Err(ChecksumError::DuplicatePath {
+                manifest: manifest.clone(),
+                row,
+                path: entry.path,
+            }
+            .into());
         }
         entries.push(entry);
     }
     if entries.is_empty() {
-        return Err(crate::i18n::text!("Манифест SHA-256 пуст").into());
+        return Err(ChecksumError::EmptyManifest(manifest.clone()).into());
     }
     Ok(entries)
 }
 
 pub(super) fn append(
     bytes: &mut Vec<u8>,
+    manifest: &Location,
+    source: &Location,
     path: &Path,
     digest: [u8; 32],
 ) -> Result<(), TransferError> {
     let name = path.as_os_str().as_encoded_bytes();
     if relative_path(name).as_deref() != Some(path) {
-        return Err(crate::tr_format!(
-            "Filename cannot be used in the manifest: {}",
-            path.display()
-        )
-        .into());
+        return Err(ChecksumError::UnsupportedFilename(source.clone()).into());
     }
     let escaped = name
         .iter()
@@ -79,41 +93,41 @@ pub(super) fn append(
     }
     bytes.push(b'\n');
     if bytes.len() > MAX_BYTES {
-        return Err(too_large());
+        return Err(ChecksumError::TooLarge(manifest.clone()).into());
     }
     Ok(())
 }
 
-pub(super) fn too_large() -> TransferError {
-    crate::i18n::text!("Манифест SHA-256 превышает 16 МиБ или 50 000 записей").into()
-}
+fn parse_line(line: &[u8]) -> Result<Entry, ManifestLineError> {
+    use ManifestLineError::{Digest, Escape, Format, Path};
 
-fn parse_line(line: &[u8]) -> Option<Entry> {
     let escaped = line.starts_with(b"\\");
     let line = if escaped { &line[1..] } else { line };
     let (hex, name) = if let Some(tagged) = line.strip_prefix(b"SHA256 (") {
-        let (name, hex) = tagged.split_at_checked(tagged.len().checked_sub(68)?)?;
-        (hex.strip_prefix(b") = ")?, name)
+        let split = tagged.len().checked_sub(68).ok_or(Format)?;
+        let (name, hex) = tagged.split_at(split);
+        (hex.strip_prefix(b") = ").ok_or(Format)?, name)
     } else {
-        let (hex, tail) = line.split_at_checked(64)?;
+        let (hex, tail) = line.split_at_checked(64).ok_or(Digest)?;
         let name = tail
             .strip_prefix(b"  ")
-            .or_else(|| tail.strip_prefix(b" *"))?;
+            .or_else(|| tail.strip_prefix(b" *"))
+            .ok_or(Format)?;
         (hex, name)
     };
-    let hex: &[u8; 64] = hex.try_into().ok()?;
+    let hex: &[u8; 64] = hex.try_into().map_err(|_| Digest)?;
     let mut digest = [0; 32];
     for (out, [high, low]) in digest.iter_mut().zip(hex.as_chunks::<2>().0) {
-        let high = char::from(*high).to_digit(16)?;
-        let low = char::from(*low).to_digit(16)?;
+        let high = char::from(*high).to_digit(16).ok_or(Digest)?;
+        let low = char::from(*low).to_digit(16).ok_or(Digest)?;
         *out = (high * 16 + low) as u8;
     }
     let path = if escaped {
-        relative_path(&unescape(name)?)?
+        relative_path(&unescape(name).ok_or(Escape)?).ok_or(Path)?
     } else {
-        relative_path(name)?
+        relative_path(name).ok_or(Path)?
     };
-    Some(Entry { path, digest })
+    Ok(Entry { path, digest })
 }
 
 fn unescape(name: &[u8]) -> Option<Vec<u8>> {
