@@ -2,6 +2,9 @@
 //!
 //! All I/O belongs on background workers. Legacy operation records are descriptions.
 //! A separate copy receipt can be selected after its previous worker releases it.
+use crate::file_error::{StagingError, StagingRecordAction};
+use crate::operations::TransferError;
+use crate::vfs::Location;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -99,25 +102,45 @@ thread_local! {
 
 /// Persist a candidate before mkdir. A crash can then report the location,
 /// without claiming the directory was created or belongs to this operation.
-pub(crate) fn plan_staging(location: &crate::vfs::Location) -> io::Result<()> {
+pub(crate) fn plan_staging(location: &Location) -> Result<(), TransferError> {
     append_staging_event(&StagingEvent::Planned {
         planned: location.display(),
     })
+    .map_err(|source| staging_journal_error(location, StagingRecordAction::Plan, source))
 }
 
-pub(crate) fn abandon_staging(location: &crate::vfs::Location) -> io::Result<()> {
+pub(crate) fn abandon_staging(location: &Location) -> Result<(), TransferError> {
     append_staging_event(&StagingEvent::Abandoned {
         abandoned: location.display(),
     })
+    .map_err(|source| staging_journal_error(location, StagingRecordAction::Abandon, source))
 }
 
 /// Confirm a directory created by the current worker before writing payload.
-pub(crate) fn register_staging(location: &crate::vfs::Location) -> io::Result<()> {
+pub(crate) fn register_staging(location: &Location) -> Result<(), TransferError> {
+    let error = |source| staging_journal_error(location, StagingRecordAction::Register, source);
     let receipt = StagingRecord {
         location: location.display(),
-        identity: location.local().map(LocalIdentity::of).transpose()?,
+        identity: location
+            .local()
+            .map(LocalIdentity::of)
+            .transpose()
+            .map_err(error)?,
     };
-    append_staging_event(&StagingEvent::Created(receipt))
+    append_staging_event(&StagingEvent::Created(receipt)).map_err(error)
+}
+
+fn staging_journal_error(
+    location: &Location,
+    action: StagingRecordAction,
+    source: io::Error,
+) -> TransferError {
+    StagingError::Journal {
+        staging: location.clone(),
+        action,
+        source,
+    }
+    .into()
 }
 
 /// A partial final line after a crash is reported while complete earlier

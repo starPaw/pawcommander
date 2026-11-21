@@ -137,7 +137,8 @@ fn create_hard_link(
     let payload = staging.path.join("link");
     let result = (|| {
         let location = Location::Local(staging.path.clone());
-        crate::recovery::register_staging(&location).map_err(|error| error.to_string())?;
+        crate::recovery::register_staging(&location)
+            .map_err(|error| crate::i18n::file_error(&error))?;
         staging.ensure_owned().map_err(|error| error.to_string())?;
         // Validate the hard link that the OS actually made in private staging.
         // The source path may have changed since the initial lstat.

@@ -7,7 +7,7 @@ use crate::file_error::{
     ListingErrorKind, LocalPathAction, ManifestLineError, MetadataError, MetadataField,
     MetadataWarning, MutationError, PathError, PermissionError, PinError, PreviewError,
     ProbeAction, PublicationError, RecoveryNotice, ScanError, SearchError, SpaceError, SshStage,
-    StagingCleanupError,
+    StagingCleanupError, StagingError, StagingRecordAction,
 };
 use crate::operations::TransferError;
 use crate::vfs::{DeletionFailure, TransferFailure};
@@ -47,6 +47,7 @@ pub(crate) fn file_error(error: &TransferError) -> String {
                     matches!(error, TransferError::PublicationUnconfirmed(_)),
                 ),
                 Failure::Publication(reason) => publication_error(reason),
+                Failure::Staging(error) => staging_error(error),
                 Failure::StagingCleanup(error) => staging_cleanup_error(error),
                 _ => error.to_string(),
             }
@@ -402,6 +403,10 @@ fn access_error(error: &AccessError) -> String {
             return crate::tr_format!("Could not open {}: {error}", error.location, error = cause);
         }
         AccessAction::CreateFile => text!("Не удалось создать файл"),
+        AccessAction::CreateStagingDirectory => {
+            text!("Не удалось создать временную папку для копирования")
+        }
+        AccessAction::RemoveStagingDirectory => text!("Не удалось удалить временную папку"),
         AccessAction::ReadChildren => text!("Не удалось прочитать папку"),
         AccessAction::ReadFile => text!("Не удалось прочитать файл"),
         AccessAction::ReadLink => text!("Не удалось прочитать символическую ссылку"),
@@ -877,6 +882,20 @@ fn publication_error(error: &PublicationError) -> String {
             "Source item {payload} is no longer a regular file",
             payload = payload
         ),
+        PublicationError::StagingCreation { staging, create, inspect } => {
+            let message = crate::tr_format!(
+                "Temporary folder creation at {staging} is unconfirmed: {e}. Inspect this location before retrying.",
+                e = create, staging = staging
+            );
+            if let Some(inspect) = inspect {
+                let verification = crate::tr_format!(
+                    "Could not check whether the temporary folder exists: {error}", error = inspect
+                );
+                format!("{message}\n{verification}")
+            } else {
+                message
+            }
+        }
         #[cfg(target_os = "macos")]
         PublicationError::SmbUpload { target, cause } => crate::tr_format!(
             "SMB copy is unconfirmed. Check {target} for an incomplete copy before retrying ({error})",
@@ -939,6 +958,70 @@ fn publication_error(error: &PublicationError) -> String {
                 ),
             }
         }
+    }
+}
+
+fn staging_error(error: &StagingError) -> String {
+    match error {
+        StagingError::MissingParent(target) => {
+            format!("{} · {target}", text!("Недопустимое назначение"))
+        }
+        StagingError::NamesExhausted(parent) => format!(
+            "{} · {parent}",
+            text!("Не удалось создать временную папку для копирования; повторите попытку")
+        ),
+        StagingError::IdentityChanged(staging) => crate::tr_format!(
+            "Staging directory identity changed at {staging}. Its contents were preserved.",
+            staging = staging
+        ),
+        #[cfg(windows)]
+        StagingError::IdentityUnavailable(staging) => crate::tr_format!(
+            "Could not verify the identity of temporary folder {staging}",
+            staging = staging
+        ),
+        StagingError::Journal {
+            staging,
+            action,
+            source,
+        } => match action {
+            StagingRecordAction::Plan => crate::tr_format!(
+                "Could not record temporary copy plan “{}”: {error}",
+                staging,
+                error = source
+            ),
+            StagingRecordAction::Abandon => crate::tr_format!(
+                "Could not discard temporary copy plan “{}”: {error}",
+                staging,
+                error = source
+            ),
+            StagingRecordAction::Register => crate::tr_format!(
+                "Could not register temporary copy “{}”: {error}",
+                staging,
+                error = source
+            ),
+        },
+        #[cfg(target_os = "macos")]
+        StagingError::ResumeReceipt {
+            staging,
+            directory,
+            source,
+        } => crate::tr_format!(
+            "Could not save the resume record for {staging} in {directory}: {error}",
+            staging = staging,
+            directory = directory.display(),
+            error = source
+        ),
+        #[cfg(target_os = "macos")]
+        StagingError::ResumeReceiptCleanup {
+            receipt,
+            cause,
+            source,
+        } => crate::tr_format!(
+            "{cause}\nCould not confirm removal of resume record {receipt}: {error}",
+            cause = file_error(cause),
+            receipt = receipt.display(),
+            error = source
+        ),
     }
 }
 

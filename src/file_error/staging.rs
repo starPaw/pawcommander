@@ -1,0 +1,106 @@
+use crate::vfs::Location;
+use std::{error::Error, fmt, io};
+
+#[cfg(target_os = "macos")]
+use {crate::operations::TransferError, std::path::PathBuf};
+
+#[derive(Debug)]
+pub(crate) enum StagingRecordAction {
+    Plan,
+    Abandon,
+    Register,
+}
+
+#[derive(Debug)]
+pub(crate) enum StagingError {
+    MissingParent(Location),
+    NamesExhausted(Location),
+    IdentityChanged(Location),
+    #[cfg(windows)]
+    IdentityUnavailable(Location),
+    Journal {
+        staging: Location,
+        action: StagingRecordAction,
+        source: io::Error,
+    },
+    #[cfg(target_os = "macos")]
+    ResumeReceipt {
+        staging: Location,
+        directory: PathBuf,
+        source: io::Error,
+    },
+    #[cfg(target_os = "macos")]
+    ResumeReceiptCleanup {
+        receipt: PathBuf,
+        cause: TransferError,
+        source: io::Error,
+    },
+}
+
+impl fmt::Display for StagingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingParent(target) => write!(f, "Invalid staging destination {target}"),
+            Self::NamesExhausted(parent) => {
+                write!(f, "Could not reserve a staging name in {parent}")
+            }
+            Self::IdentityChanged(staging) => {
+                write!(f, "Staging directory identity changed at {staging}")
+            }
+            #[cfg(windows)]
+            Self::IdentityUnavailable(staging) => {
+                write!(f, "Staging directory identity unavailable at {staging}")
+            }
+            Self::Journal {
+                staging,
+                action,
+                source,
+            } => {
+                write!(f, "Staging journal {action:?} for {staging}: {source}")
+            }
+            #[cfg(target_os = "macos")]
+            Self::ResumeReceipt {
+                staging,
+                directory,
+                source,
+            } => {
+                write!(
+                    f,
+                    "Could not save resume receipt for {staging} in {}: {source}",
+                    directory.display()
+                )
+            }
+            #[cfg(target_os = "macos")]
+            Self::ResumeReceiptCleanup {
+                receipt,
+                cause,
+                source,
+            } => {
+                write!(
+                    f,
+                    "{cause}. Could not confirm removal of resume receipt {}: {source}",
+                    receipt.display()
+                )
+            }
+        }
+    }
+}
+
+impl Error for StagingError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Journal { source, .. } => Some(source),
+            #[cfg(target_os = "macos")]
+            Self::ResumeReceipt { source, .. } => Some(source),
+            #[cfg(target_os = "macos")]
+            Self::ResumeReceiptCleanup { cause, source, .. } => {
+                if matches!(cause, TransferError::Cancelled) {
+                    Some(source)
+                } else {
+                    Some(cause)
+                }
+            }
+            _ => None,
+        }
+    }
+}

@@ -8,6 +8,7 @@ mod checksum;
 mod host_key;
 mod metadata;
 mod space;
+mod staging;
 #[cfg(target_os = "macos")]
 mod sync;
 pub(crate) use archive::ArchiveError;
@@ -15,6 +16,7 @@ pub(crate) use checksum::{ChecksumError, ManifestLineError};
 pub(crate) use host_key::{HostKeyError, KnownHostEntryError, KnownHostsError, PinError};
 pub(crate) use metadata::{MetadataError, MetadataField, MetadataWarning};
 pub(crate) use space::{ProbeAction, SftpSpaceFailure, SpaceError};
+pub(crate) use staging::{StagingError, StagingRecordAction};
 #[cfg(target_os = "macos")]
 pub(crate) use sync::SyncError;
 
@@ -46,6 +48,7 @@ pub(crate) enum Failure {
     ConflictClosed,
     Mutation(Box<MutationError>),
     Publication(Box<PublicationError>),
+    Staging(Box<StagingError>),
     StagingCleanup(Box<StagingCleanupError>),
 }
 
@@ -83,6 +86,7 @@ impl Failure {
             Self::Listing(error) => Some(error.as_ref()),
             Self::Mutation(error) => Some(error.as_ref()),
             Self::Publication(error) => Some(error.as_ref()),
+            Self::Staging(error) => Some(error.as_ref()),
             Self::StagingCleanup(error) => Some(error.as_ref()),
         }
     }
@@ -113,6 +117,7 @@ impl fmt::Display for Failure {
             Self::ConflictClosed => f.write_str("Conflict dialog closed"),
             Self::Mutation(error) => fmt::Display::fmt(error, f),
             Self::Publication(error) => fmt::Display::fmt(error, f),
+            Self::Staging(error) => fmt::Display::fmt(error, f),
             Self::StagingCleanup(error) => fmt::Display::fmt(error, f),
         }
     }
@@ -226,6 +231,8 @@ pub(crate) enum AccessAction {
     ReadMetadata,
     OpenFile,
     CreateFile,
+    CreateStagingDirectory,
+    RemoveStagingDirectory,
     ReadOpenMetadata,
     ReadChildren,
     ReadFile,
@@ -592,6 +599,11 @@ pub(crate) enum RecoveryNotice {
 pub(crate) enum PublicationError {
     DestinationChanged(Location),
     PayloadNotRegular(Location),
+    StagingCreation {
+        staging: Location,
+        create: ssh2::Error,
+        inspect: Option<ssh2::Error>,
+    },
     #[cfg(target_os = "macos")]
     SmbUpload {
         target: Location,
@@ -632,6 +644,20 @@ impl fmt::Display for PublicationError {
             ),
             Self::PayloadNotRegular(payload) => {
                 write!(f, "Source item {payload} is no longer a regular file")
+            }
+            Self::StagingCreation {
+                staging,
+                create,
+                inspect,
+            } => {
+                write!(
+                    f,
+                    "Temporary folder creation at {staging} is unconfirmed: {create}"
+                )?;
+                if let Some(inspect) = inspect {
+                    write!(f, ". Inspection failed: {inspect}")?;
+                }
+                Ok(())
             }
             #[cfg(target_os = "macos")]
             Self::SmbUpload { target, cause } => {
@@ -684,6 +710,7 @@ impl fmt::Display for PublicationError {
 impl Error for PublicationError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::StagingCreation { create, .. } => Some(create),
             #[cfg(target_os = "macos")]
             Self::SmbUpload { cause, .. } => Some(cause),
             #[cfg(target_os = "macos")]

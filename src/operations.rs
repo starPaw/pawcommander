@@ -356,6 +356,12 @@ impl From<crate::file_error::SyncError> for TransferError {
     }
 }
 
+impl From<crate::file_error::StagingError> for TransferError {
+    fn from(error: crate::file_error::StagingError) -> Self {
+        Self::Failed(Failure::Staging(Box::new(error)))
+    }
+}
+
 impl From<ConnectionError> for TransferError {
     fn from(error: ConnectionError) -> Self {
         Self::Failed(Failure::Connection(Box::new(error)))

@@ -5,15 +5,15 @@ use super::sftp::remote;
 use super::{err, TransferFailure, TransferSummary, MAX_TREE_DEPTH};
 use crate::conflict::{Answer, Conflict, Decision, EntryDetails};
 use crate::file_error::{
-    AccessAction, AccessCause, AccessError, MutationError, ProbeAction, PublicationError,
-    RecoveryNotice, SftpSpaceFailure, SpaceError, StagingCleanupError,
+    AccessAction, AccessCause, AccessError, Failure, MutationError, ProbeAction, PublicationError,
+    RecoveryNotice, SftpSpaceFailure, SpaceError, StagingCleanupError, StagingError,
 };
 use crate::fs_ops::TransferKind;
 use crate::operations::{
     access_io, AccessStream, Cancellation, CopyReader, Progress, TransferError,
 };
 use crate::{archive, fs_ops};
-use ssh2::{FileStat, OpenFlags, OpenType, RenameFlags};
+use ssh2::{ErrorCode, FileStat, OpenFlags, OpenType, RenameFlags};
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
@@ -615,11 +615,17 @@ pub(super) fn transfer_run(
             moved(&item.original, &item.covered);
         }
         if !committed
-            && !copy_move
-            && matches!(&result, Err(TransferError::PublicationUnconfirmed(_)))
+            && let Err(TransferError::PublicationUnconfirmed(reason)) = &result
             && let Some(retry) = &mut progress.retry
         {
-            retry.note_source_manifest(&item.original, move_manifest.take());
+            if let Failure::Publication(publication) = reason
+                && let PublicationError::StagingCreation { staging, .. } = publication.as_ref()
+            {
+                retry.note_staging(&item.original, staging);
+            }
+            if !copy_move {
+                retry.note_source_manifest(&item.original, move_manifest.take());
+            }
         }
         let undo_entry = if committed
             && result.is_ok()
@@ -1467,14 +1473,16 @@ impl LocalStaging {
             };
             match builder.create(&path) {
                 Ok(()) => {
-                    let original = fs::symlink_metadata(&path).map_err(err)?;
+                    let inspect =
+                        |error| AccessError::new(&location, AccessAction::ReadMetadata, error);
+                    let original = fs::symlink_metadata(&path).map_err(inspect)?;
                     if !original.is_dir() || original.file_type().is_symlink() {
-                        return Err("Temporary transfer folder changed before copying".into());
+                        return Err(StagingError::IdentityChanged(location).into());
                     }
                     #[cfg(windows)]
                     let original_id = crate::windows_file_id::from_path(&path)
-                        .map_err(err)?
-                        .ok_or("Temporary transfer folder identity unavailable")?;
+                        .map_err(inspect)?
+                        .ok_or_else(|| StagingError::IdentityUnavailable(location))?;
                     return Ok(Self {
                         path,
                         #[cfg(unix)]
@@ -1485,18 +1493,18 @@ impl LocalStaging {
                     });
                 }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    crate::recovery::abandon_staging(&location).map_err(err)?;
+                    crate::recovery::abandon_staging(&location)?;
                 }
                 Err(error) => {
                     return Err(fs_ops::local_copy_error(
                         Some(parent),
-                        error,
+                        access_io(&location, AccessAction::CreateStagingDirectory, error),
                         ToString::to_string,
                     ));
                 }
             }
         }
-        Err(crate::i18n::text!("Не удалось создать временную папку для копирования").into())
+        Err(StagingError::NamesExhausted(Location::Local(parent.to_owned())).into())
     }
 
     fn path(&self) -> &Path {
@@ -1527,14 +1535,18 @@ impl LocalStaging {
         self.remove_on_drop = false;
     }
 
-    fn close(mut self) -> io::Result<()> {
+    fn close(mut self) -> Result<(), TransferError> {
         self.remove_on_drop = false;
-        if !self.same_owned()? {
-            return Err(io::Error::other(
-                "Staging directory identity changed; data preserved",
-            ));
+        let staging = Location::Local(self.path.clone());
+        if !self
+            .same_owned()
+            .map_err(|error| AccessError::new(&staging, AccessAction::ReadMetadata, error))?
+        {
+            return Err(StagingError::IdentityChanged(staging).into());
         }
-        fs::remove_dir_all(&self.path)
+        fs::remove_dir_all(&self.path).map_err(|error| {
+            AccessError::new(&staging, AccessAction::RemoveStagingDirectory, error).into()
+        })
     }
 }
 
@@ -1605,7 +1617,7 @@ fn staging_typed(
     }
     let parent = target
         .parent()
-        .ok_or(crate::i18n::text!("Недопустимое назначение"))?;
+        .ok_or_else(|| StagingError::MissingParent(target.clone()))?;
     // A tracked job keeps one current location in its own durable record.
     // The generic append-only recovery record is bounded independently.
     let use_operation_marker = notice.is_none();
@@ -1620,7 +1632,7 @@ fn staging_typed(
         if let Some(notice) = notice.as_deref_mut() {
             notice(location)?;
         } else {
-            crate::recovery::plan_staging(location).map_err(err)?;
+            crate::recovery::plan_staging(location)?;
         }
         Ok(())
     };
@@ -1628,8 +1640,7 @@ fn staging_typed(
         let mut staging = LocalStaging::create(parent, prefix, proposed)?;
         let location = Location::Local(staging.path().into());
         if use_operation_marker && let Err(error) = crate::recovery::register_staging(&location) {
-            let cleanup = staging.close().map_err(Into::into);
-            return StagingCleanupError::combine(Err(error.into()), cleanup, &location, target);
+            return StagingCleanupError::combine(Err(error), staging.close(), &location, target);
         }
         if preserve {
             staging.keep();
@@ -1639,12 +1650,7 @@ fn staging_typed(
             staging.keep();
             return result;
         }
-        return StagingCleanupError::combine(
-            result,
-            staging.close().map_err(Into::into),
-            &location,
-            target,
-        );
+        return StagingCleanupError::combine(result, staging.close(), &location, target);
     }
 
     let sftp = remote(target)?;
@@ -1658,18 +1664,13 @@ fn staging_typed(
     let counter = LOCAL_STAGING_COUNTER.fetch_add(1, Ordering::Relaxed);
     let staging = parent.join(format!("{prefix}{}-{nonce}-{counter}", std::process::id()));
     proposed(&staging)?;
-    match sftp.mkdir(staging.path(), 0o700) {
-        Ok(()) => {}
-        Err(e) if sftp.lstat(staging.path()).is_err() => return Err(err(e).into()),
-        Err(e) => {
-            return Err(TransferError::publication_unconfirmed(crate::tr_format!(
-                "Temporary folder creation at {staging} is unconfirmed: {e}. Inspect the registered location before retrying.", e = e, staging = staging
-            )));
-        }
+    if let Err(create) = sftp.mkdir(staging.path(), 0o700) {
+        let inspect = sftp.lstat(staging.path()).err();
+        return Err(sftp_staging_create_failure(staging, create, inspect));
     }
     if use_operation_marker && let Err(error) = crate::recovery::register_staging(&staging) {
         let cleanup = remove_remote_tree(&sftp, &staging, MAX_TREE_DEPTH + 1);
-        return StagingCleanupError::combine(Err(error.into()), cleanup, &staging, target);
+        return StagingCleanupError::combine(Err(error), cleanup, &staging, target);
     }
     let result = work(&staging, &mut preserve);
     if preserve {
@@ -1679,6 +1680,28 @@ fn staging_typed(
     // source tree may already use all 128 supported descendant levels.
     let cleanup = remove_remote_tree(&sftp, &staging, MAX_TREE_DEPTH + 1);
     StagingCleanupError::combine(result, cleanup, &staging, target)
+}
+
+fn sftp_staging_create_failure(
+    staging: Location,
+    create: ssh2::Error,
+    inspect: Option<ssh2::Error>,
+) -> TransferError {
+    // A failed inspection does not prove that mkdir did not create the directory.
+    if inspect
+        .as_ref()
+        .is_some_and(|error| error.code() == ErrorCode::SFTP(libssh2_sys::LIBSSH2_FX_NO_SUCH_FILE))
+    {
+        return AccessError::new(&staging, AccessAction::CreateStagingDirectory, create).into();
+    }
+    TransferError::PublicationUnconfirmed(
+        PublicationError::StagingCreation {
+            staging,
+            create,
+            inspect,
+        }
+        .into(),
+    )
 }
 
 #[cfg(test)]
@@ -2248,4 +2271,51 @@ pub(super) fn copy_tree_entry(
             .map_err(TransferError::from)?;
     }
     observe(source, CopyPhase::EntryCopied).map_err(Into::into)
+}
+
+#[cfg(test)]
+mod staging_tests {
+    use super::*;
+    use libssh2_sys::{LIBSSH2_FX_FAILURE, LIBSSH2_FX_NO_SUCH_FILE, LIBSSH2_FX_PERMISSION_DENIED};
+
+    #[test]
+    fn failed_sftp_staging_creation_requires_confirmed_absence_to_be_definite() {
+        let staging = Location::Sftp {
+            endpoint: crate::vfs::Endpoint {
+                host: "fixture".into(),
+                port: 22,
+                user: "fixture".into(),
+                key: None,
+                jump: None,
+            },
+            path: "/fixture/.pawcommander-sftp-stage".into(),
+        };
+        let create = ErrorCode::SFTP(LIBSSH2_FX_FAILURE);
+        let absent = ErrorCode::SFTP(LIBSSH2_FX_NO_SUCH_FILE);
+        let denied = ErrorCode::SFTP(LIBSSH2_FX_PERMISSION_DENIED);
+        let error = sftp_staging_create_failure(
+            staging.clone(),
+            ssh2::Error::from_errno(create),
+            Some(ssh2::Error::from_errno(absent)),
+        );
+        assert!(matches!(error,
+            TransferError::Failed(Failure::Access(reason))
+                if reason.location == staging && reason.action == AccessAction::CreateStagingDirectory
+                    && matches!(&reason.cause, AccessCause::Sftp(source) if source.code() == create)));
+
+        for inspection in [Some(denied), None] {
+            let error = sftp_staging_create_failure(
+                staging.clone(),
+                ssh2::Error::from_errno(create),
+                inspection.map(ssh2::Error::from_errno),
+            );
+            let TransferError::PublicationUnconfirmed(Failure::Publication(reason)) = error else {
+                panic!("expected unconfirmed staging creation");
+            };
+            assert!(
+                matches!(reason.as_ref(), PublicationError::StagingCreation { staging: path, create: source, inspect }
+                if path == &staging && source.code() == create && inspect.as_ref().map(ssh2::Error::code) == inspection)
+            );
+        }
+    }
 }
