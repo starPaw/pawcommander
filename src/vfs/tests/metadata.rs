@@ -77,6 +77,11 @@ pub(super) fn round_trip(local: &Location, remote: &Location) {
         }
         let mut progress = Progress::default();
         progress.set_copy_verification(true);
+        #[cfg(target_os = "macos")]
+        if kind == TransferKind::Move {
+            progress.resume_directory =
+                Some(local.path().join(format!("metadata-{name}-recovery")));
+        }
         let report = transfer_with_conflicts(
             std::slice::from_ref(&source),
             &target,

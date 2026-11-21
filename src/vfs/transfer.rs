@@ -978,7 +978,7 @@ fn copy_to_smb(
         source.verify(&item.source, &cancel, true)?;
         let warning = copy_metadata::finish_file(
             &item.target,
-            &source.metadata,
+            &copy_metadata::Attributes::from_entry(&source.metadata),
             &mut SourceReader::Local(file),
         )?;
         progress
@@ -1838,7 +1838,7 @@ enum ManifestMode {
     Move,
 }
 
-const MAX_MOVE_JOURNAL_ENTRIES: usize = 100_000;
+pub(super) const MAX_MOVE_JOURNAL_ENTRIES: usize = 100_000;
 
 impl TransferSourceManifest {
     #[cfg(test)]

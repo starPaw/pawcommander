@@ -1,17 +1,17 @@
-//! A folder receipt is constant-sized. Recover the original per-entry evidence
-//! by capturing the tree again and matching its stored fingerprint.
+//! Folder recovery verifies a fresh snapshot against the recorded fingerprint.
+//! Moves retain original access times separately because reading changes them.
 use super::{
     changed_copy, changed_source, copy_metadata, copy_suffix, discard_stage, entry_metadata,
     file_scope, register_copy, rename_for_publication, retained_error, stage_contents,
     stage_identity, verify_stamp, verify_target, Cancellation, Completion, EntryMetadata,
-    FileProof, Intent, Location, Original, Paths, Progress, Receipt, RenamedIdentity, Ticket,
-    TransferError,
+    FileProof, Intent, Location, Original, Paths, Progress, Receipt, RenamedIdentity, SavedTime,
+    Ticket, TransferError,
 };
 use crate::vfs::{
     sftp::remote,
     transfer::{
         check_copy_space, source_children, with_preserved_staging, TransferSourceEntry,
-        TransferSourceManifest,
+        TransferSourceManifest, MAX_MOVE_JOURNAL_ENTRIES,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -21,6 +21,7 @@ use std::fs;
 use std::io::Read;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 #[derive(Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
 pub(super) struct Proof {
@@ -293,21 +294,25 @@ impl Snapshot {
         paths: &Paths,
         payload: &Location,
         mode: copy_metadata::Mode,
+        original_access_times: Option<&[Option<SystemTime>]>,
         progress: &mut Progress,
     ) -> Result<(), TransferError> {
-        for (relative, node) in self.entries.iter().rev() {
+        if original_access_times.is_some_and(|times| times.len() != self.entries.len()) {
+            return Err(changed_source());
+        }
+        for (index, (relative, node)) in self.entries.iter().enumerate().rev() {
             progress.checkpoint()?;
             if !matches!(node.content, Content::Link(_)) {
                 let source = at(&paths.source, relative);
                 let copy = at(payload, relative);
                 let metadata = &node.entry.metadata;
+                let accessed = if mode == copy_metadata::Mode::KeepReadableForMove {
+                    original_access_times.and_then(|times| times[index])
+                } else {
+                    copy_metadata::access_time(metadata)
+                };
                 copy_metadata::stage_resumed_entry(
-                    &source,
-                    &copy,
-                    metadata,
-                    copy_metadata::access_time(metadata),
-                    mode,
-                    progress,
+                    &source, &copy, metadata, accessed, mode, progress,
                 )?;
             }
         }
@@ -370,6 +375,20 @@ pub(super) fn start(
     let local_names = !source.remote() && !target.remote();
     verify_target(None, &target, false, progress)?;
     let snapshot = Snapshot::capture(&source, local_names, progress)?;
+    let original_access_times = if intent == Intent::Move {
+        if snapshot.entries.len() > MAX_MOVE_JOURNAL_ENTRIES {
+            return Err("Пофайловый журнал переноса превысил лимит 100000 элементов".into());
+        }
+        Some(
+            snapshot
+                .entries
+                .values()
+                .map(|node| copy_metadata::access_time(&node.entry.metadata).map(SavedTime::from))
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        None
+    };
     let cancel = progress.cancellation();
     with_preserved_staging(&target, &cancel, |stage, preserve| {
         *preserve = false;
@@ -383,9 +402,16 @@ pub(super) fn start(
             stage_identity: stage_identity(stage)?,
             original: Original::Folder(snapshot.proof),
             source_accessed: None,
+            folder_access_times: None,
             previous: None,
         };
-        let ticket = register_copy(directory, stage, record, &cancel)?;
+        let ticket = register_copy(
+            directory,
+            stage,
+            record,
+            original_access_times.as_deref(),
+            &cancel,
+        )?;
         *preserve = true;
         let paths = ticket.receipt.paths()?;
         finish(&ticket, &paths, Some(snapshot), progress, published)?;
@@ -458,7 +484,14 @@ fn finish(
         let complete = snapshot.inventory(&payload, true, &cancel)?;
         snapshot.verify_bytes(paths, &payload, &complete, true, progress)?;
         snapshot.verify_source(&paths.source, &cancel)?;
-        snapshot.apply_metadata(paths, &payload, receipt.intent.metadata(), progress)?;
+        let original_access_times = ticket.folder_access_times()?;
+        snapshot.apply_metadata(
+            paths,
+            &payload,
+            receipt.intent.metadata(),
+            original_access_times.as_deref(),
+            progress,
+        )?;
         stage_contents(&paths.stage, receipt.stage_identity, owner, &["payload"])?;
         snapshot.verify_source(&paths.source, &cancel)?;
         if receipt.intent == Intent::Move {

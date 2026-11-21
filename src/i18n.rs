@@ -1189,6 +1189,7 @@ fn translate(english: bool, russian: &'static str) -> &'static str {
         "Даты или права доступа сохранены частично. Подробности указаны в строках журнала." => "Dates or permissions were partially preserved. See the individual result rows.",
         "права доступа" => "permissions",
         "время доступа" => "access time",
+        "Некорректная запись времени доступа для переноса" => "Invalid saved access times for this move",
         "время изменения" => "modification time",
         "Временная папка изменилась перед очисткой" => "The temporary folder changed before cleanup",
         "Готово к повтору" => "Ready to retry",

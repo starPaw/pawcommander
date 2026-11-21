@@ -446,18 +446,17 @@ fn preserve_attributes(
             .get(&relative.join(suffix))
             .ok_or_else(changed_during_read)?;
         let target = staged.root.join(path);
+        let attributes = copy_metadata::Attributes::from_entry(&source_entry.version.metadata);
         let issue = match source_entry.kind {
-            Kind::Directory => copy_metadata::finish_directory(
-                &target,
-                &source_entry.version.metadata,
-                &target_entry.version,
-            )?,
+            Kind::Directory => {
+                copy_metadata::finish_directory(&target, &attributes, &target_entry.version)?
+            }
             Kind::File(_) => {
                 let mut file = SourceReader::open(&target)?;
                 target_entry
                     .version
                     .verify_metadata(&target, &file.metadata()?)?;
-                copy_metadata::finish_file(&target, &source_entry.version.metadata, &mut file)?
+                copy_metadata::finish_file(&target, &attributes, &mut file)?
             }
             Kind::Link(_) => None,
         };
