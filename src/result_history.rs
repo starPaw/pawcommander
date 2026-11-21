@@ -92,6 +92,7 @@ pub(crate) struct Results {
     observed_group: bool,
     confirming_move: bool,
     unrecorded_metadata_warning: bool,
+    selected_items_only: bool,
     weight: usize,
     omitted: usize,
     details_truncated: bool,
@@ -112,6 +113,7 @@ impl Results {
         self.group = None;
         self.observed_group = false;
         self.confirming_move = false;
+        self.selected_items_only = false;
         self.cancelled = false;
         self.weight = 0;
         self.omitted = 0;
@@ -122,6 +124,12 @@ impl Results {
             }
         }
         self.clear_active();
+    }
+
+    /// Record an operation whose scope is exactly the selected paths.
+    pub(crate) fn plan_selected_items(&mut self, items: impl IntoIterator<Item = Location>) {
+        self.plan(items.into_iter().map(|source| (source, None)));
+        self.selected_items_only = true;
     }
 
     pub fn begin(&mut self, source: &Location) {
@@ -562,6 +570,7 @@ impl Results {
                 &mut self.details_truncated,
             ),
             items: self.items,
+            selected_items_only: self.selected_items_only,
             omitted: self.omitted,
             details_truncated: self.details_truncated,
         })
@@ -600,6 +609,8 @@ pub(crate) struct Record {
     cancelled: bool,
     message: String,
     pub items: Vec<ItemResult>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    selected_items_only: bool,
     #[serde(default)]
     omitted: usize,
     #[serde(default)]
@@ -617,6 +628,17 @@ impl ItemResult {
 }
 
 impl Record {
+    fn selected_items_only(&self) -> bool {
+        // Older permission records stored only the translated command label.
+        self.selected_items_only
+            || (matches!(
+                self.label.as_str(),
+                "Change permissions" | "Изменить права доступа"
+            ) && self.items.iter().all(|row| {
+                row.parent.is_none() && row.target.is_none() && row.source.starts_with("sftp://")
+            }))
+    }
+
     fn weight(&self) -> usize {
         4096 + json_weight(&self.id)
             + json_weight(&self.label)
@@ -890,6 +912,7 @@ impl History {
                     .id_salt("result_operations")
                     .show(ui, |ui| {
                         for (index, record) in self.records.iter().enumerate().rev() {
+                            let show_descendant_coverage = !record.selected_items_only();
                             let time = chrono::DateTime::from_timestamp(record.started as i64, 0)
                                 .map(|time| {
                                     time.with_timezone(&chrono::Local)
@@ -960,7 +983,7 @@ impl History {
                                                 ui.add(
                                                     egui::Label::new(format!(
                                                         "{}\n{paths}\n{}",
-                                                        if row.parent.is_none() && !row.descendants_enumerated { format!("{} · {}", row.outcome.label(), crate::tr_format!("Потомки не перечислены полностью", "Descendants were not fully listed")) } else { row.outcome.label().to_owned() },
+                                                        if show_descendant_coverage && row.parent.is_none() && !row.descendants_enumerated { format!("{} · {}", row.outcome.label(), crate::tr_format!("Потомки не перечислены полностью", "Descendants were not fully listed")) } else { row.outcome.label().to_owned() },
                                                         single_line(
                                                             row.reason.as_deref().or(row.metadata_warning.as_deref()).unwrap_or("—")
                                                         )
@@ -1118,6 +1141,45 @@ mod tests {
 
     fn local(path: &str) -> Location {
         Location::Local(PathBuf::from(path))
+    }
+
+    #[test]
+    fn permission_history_reports_only_selected_items_in_new_and_legacy_records() {
+        let source = crate::vfs::resolve("sftp://user@example.test/folder", &local("/")).unwrap();
+        let mut results = Results::default();
+        results.plan_selected_items([source.clone()]);
+        results.record(
+            &source,
+            None,
+            Outcome::Failed,
+            Some("permission denied".into()),
+        );
+        let current = results
+            .finish(
+                "Current command label".into(),
+                0,
+                &Err("permission denied".into()),
+            )
+            .unwrap();
+        let value = serde_json::to_value(&current).unwrap();
+        let restored: Record = serde_json::from_value(value.clone()).unwrap();
+        assert!(restored.selected_items_only());
+        assert!(!restored.items[0].descendants_enumerated);
+        assert_eq!(restored.items[0].outcome, Outcome::Failed);
+
+        for label in ["Change permissions", "Изменить права доступа"] {
+            let mut legacy = value.clone();
+            legacy
+                .as_object_mut()
+                .unwrap()
+                .remove("selected_items_only");
+            legacy["label"] = label.into();
+            let restored: Record = serde_json::from_value(legacy).unwrap();
+            assert!(restored.selected_items_only());
+        }
+        let mut copy = record();
+        copy.label = "Change permissions".into();
+        assert!(!copy.selected_items_only());
     }
 
     #[test]

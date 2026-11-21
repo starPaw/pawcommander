@@ -122,7 +122,7 @@ impl PermissionsPreview {
     pub(crate) fn apply(self, progress: &mut Progress) -> Result<String, String> {
         progress
             .results
-            .plan(self.rows.iter().map(|row| (row.source.clone(), None)));
+            .plan_selected_items(self.rows.iter().map(|row| row.source.clone()));
         let cancel = progress.cancellation();
         if cancel.check().is_err() {
             progress.results.cancelled = true;
