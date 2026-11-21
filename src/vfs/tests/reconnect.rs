@@ -1,4 +1,5 @@
 use super::*;
+use crate::file_error::{Failure, RetryProblem};
 use crate::result_history::Outcome;
 use crate::vfs::RetryTransfer;
 use std::net::{Shutdown, TcpStream};
@@ -432,7 +433,12 @@ fn sftp_reconnect_checks_lost_publication_replies() {
                     |_| panic!("refuse the changed target before asking about a conflict"),
                     |_, _| {},
                 );
-                assert!(result.is_err());
+                let failure =
+                    result.expect_err("retry must preserve the independently edited target");
+                assert!(
+                    matches!(failure.error, TransferError::Failed(Failure::Retry(reason))
+                    if reason.problem == RetryProblem::TargetChanged && reason.location == target)
+                );
                 assert_eq!(
                     fs::read(target.path()).unwrap(),
                     b"changed after inspection"

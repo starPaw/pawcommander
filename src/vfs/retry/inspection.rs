@@ -91,7 +91,7 @@ fn inspect_source(
 ) -> Result<(Disposition, Outcome, String), TransferError> {
     let current_source = entry_metadata(&source.resolved)?;
     let may_retry =
-        source.replay_allowed && destination_matches && source.matches(current_source.as_ref());
+        source.replay_allowed && destination_matches && source.matches(current_source.as_ref())?;
     let Some(attempt) = &source.attempt else {
         return Ok(if may_retry {
             (
@@ -158,7 +158,7 @@ fn inspect_source(
     }
 
     if attempt.copied
-        && source.matches(current_source.as_ref())
+        && source.matches(current_source.as_ref())?
         && let (Some(left), Some(right)) = (&current_source, &current_target)
         && copied_contents_match(source, attempt, left, right, progress, cancel)?
     {
@@ -247,7 +247,7 @@ fn copied_contents_match(
         false
     };
     cancel.check()?;
-    Ok(result && source.matches(entry_metadata(&source.resolved)?.as_ref()))
+    Ok(result && source.matches(entry_metadata(&source.resolved)?.as_ref())?)
 }
 
 fn moved_tree_matches(

@@ -1,4 +1,5 @@
 use super::*;
+use crate::file_error::{Failure, RetryProblem};
 use crate::vfs::{RetryTransfer, TransferFailure};
 
 fn retry_progress(retry: RetryTransfer) -> Progress {
@@ -27,6 +28,24 @@ fn run(
         },
         |_, _| {},
     )
+}
+
+fn assert_retry_stopped(
+    result: Result<TransferSummary, TransferFailure>,
+    problem: RetryProblem,
+    location: &Location,
+) {
+    let failure = result.expect_err("retry must stop");
+    assert_eq!(failure.summary.completed, 0);
+    assert!(
+        matches!(
+            failure.error,
+            TransferError::Failed(Failure::Retry(ref reason))
+                if reason.problem == problem && &reason.location == location
+        ),
+        "{:?}",
+        failure.error
+    );
 }
 
 #[test]
@@ -121,14 +140,14 @@ fn retry_rejects_replaced_source_and_does_not_adopt_new_evidence() {
     fs::write(source.path(), "original").unwrap();
     let mut progress = retry_progress(retry);
     for _ in 0..2 {
-        assert!(run(
+        let result = run(
             &mut progress,
             std::slice::from_ref(&source),
             &target,
             TransferKind::Copy,
-            Decision::KeepBoth
-        )
-        .is_err());
+            Decision::KeepBoth,
+        );
+        assert_retry_stopped(result, RetryProblem::SourceChanged, &source);
         assert_eq!(
             fs::read(target.join("source").path()).unwrap(),
             b"old target"
@@ -157,7 +176,7 @@ fn retry_rechecks_source_after_waiting_for_a_conflict_answer() {
         },
         |_, _| {},
     );
-    assert!(result.is_err());
+    assert_retry_stopped(result, RetryProblem::SourceChanged, &source);
     assert_eq!(
         fs::read(target.join("source").path()).unwrap(),
         b"old target"
@@ -172,17 +191,45 @@ fn retry_rejects_a_replaced_destination_directory() {
     fs::rename(target.path(), root.path().join("old-directory")).unwrap();
     fs::create_dir(target.path()).unwrap();
     let mut progress = retry_progress(retry);
-    assert!(run(
+    let result = run(
         &mut progress,
         std::slice::from_ref(&source),
         &target,
         TransferKind::Copy,
-        Decision::KeepBoth
-    )
-    .is_err());
+        Decision::KeepBoth,
+    );
+    assert_retry_stopped(result, RetryProblem::DestinationChanged, &target);
     assert_eq!(fs::read_dir(target.path()).unwrap().count(), 0);
     assert_eq!(
         fs::read(root.path().join("old-directory/source")).unwrap(),
+        b"old target"
+    );
+    assert_eq!(fs::read(source.path()).unwrap(), b"original");
+}
+
+#[test]
+fn retry_uses_the_original_operation_and_destination() {
+    let (root, source, target, retry) = skipped_file();
+    let other: Location = root.path().join("other-target").into();
+    fs::create_dir(other.path()).unwrap();
+    for (destination, kind, problem) in [
+        (&other, TransferKind::Copy, RetryProblem::DestinationChanged),
+        (&target, TransferKind::Move, RetryProblem::RequestChanged),
+    ] {
+        let mut progress = retry_progress(retry.clone());
+        let result = run(
+            &mut progress,
+            std::slice::from_ref(&source),
+            destination,
+            kind,
+            Decision::KeepBoth,
+        );
+        assert_retry_stopped(result, problem, destination);
+    }
+    assert_eq!(fs::read_dir(other.path()).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(target.path()).unwrap().count(), 1);
+    assert_eq!(
+        fs::read(target.join("source").path()).unwrap(),
         b"old target"
     );
     assert_eq!(fs::read(source.path()).unwrap(), b"original");
