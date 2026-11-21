@@ -15,7 +15,7 @@ use crate::file_error::{
     ResumeCheckError, ResumeCheckProblem, ResumeRecordEvent, ResumeRole, SyncError,
 };
 use crate::operations::TransferError;
-use crate::result_history::HistoryError;
+use crate::result_history::{HistoryError, HistoryOpenProblem};
 use crate::vfs::{DeletionFailure, TransferFailure};
 
 pub(crate) fn file_error(error: &TransferError) -> String {
@@ -262,15 +262,69 @@ pub(crate) fn history_error(error: &HistoryError) -> String {
             path = path.display(),
             error = source
         ),
-        HistoryError::Open { path, source } => crate::tr_format!(
-            "Could not open result history {path} ({error}).",
-            path = path.display(),
-            error = source
-        ),
+        HistoryError::Open { path, problem } => history_open_problem(path, problem),
         HistoryError::Save { path, source } => crate::tr_format!(
             "Could not save result history {path} ({error}).",
             path = path.display(),
             error = source
+        ),
+    }
+}
+
+fn history_open_problem(path: &std::path::Path, problem: &HistoryOpenProblem) -> String {
+    let path = path.display();
+    match problem {
+        HistoryOpenProblem::MissingParent => {
+            crate::tr_format!(
+                "Result history {path} has no containing directory.",
+                path = path
+            )
+        }
+        HistoryOpenProblem::CreateDirectory(source) => crate::tr_format!(
+            "Could not create the result history directory {path} ({error}).",
+            path = path,
+            error = source
+        ),
+        HistoryOpenProblem::OpenLock(source) => crate::tr_format!(
+            "Could not open the result history lock file {path} ({error}).",
+            path = path,
+            error = source
+        ),
+        HistoryOpenProblem::Locked => {
+            crate::tr_format!("Result history is in use. Lock file {path}.", path = path)
+        }
+        HistoryOpenProblem::Lock(source) => crate::tr_format!(
+            "Could not lock result history at {path} ({error}).",
+            path = path,
+            error = source
+        ),
+        HistoryOpenProblem::Read(source) => crate::tr_format!(
+            "Could not read result history {path} ({error}).",
+            path = path,
+            error = source
+        ),
+        HistoryOpenProblem::InvalidType => crate::tr_format!(
+            "Result history requires a regular file at {path}.",
+            path = path
+        ),
+        HistoryOpenProblem::IdentityChanged => crate::tr_format!(
+            "The file {path} changed while opening result history.",
+            path = path
+        ),
+        HistoryOpenProblem::SizeLimit(limit) => crate::tr_format!(
+            "Result history {path} exceeds the {limit}-byte limit.",
+            path = path,
+            limit = limit
+        ),
+        HistoryOpenProblem::Json(source) => crate::tr_format!(
+            "Invalid result history data in {path} ({error}).",
+            path = path,
+            error = source
+        ),
+        HistoryOpenProblem::UnsupportedVersion(version) => crate::tr_format!(
+            "Unsupported version {version} of result history {path}.",
+            version = version,
+            path = path
         ),
     }
 }
