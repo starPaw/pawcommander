@@ -396,6 +396,9 @@ impl Snapshot {
     ) -> Result<(), TransferError> {
         let cancel = progress.cancellation();
         cancel.check()?;
+        if let scan::Entry::Unreadable(error) = entry {
+            return Err(error);
+        }
         let location = self.root.join(&relative);
         let metadata = entry_metadata(&location)?.ok_or_else(changed_during_read)?;
         let kind = match entry {
@@ -432,7 +435,6 @@ impl Snapshot {
                     .ok_or_else(changed_during_read)?,
             ),
             scan::Entry::Link(target) if is_link(&metadata) => Kind::Link(target.into_os_string()),
-            scan::Entry::Unreadable(reason) => return Err(format!("{location}: {reason}").into()),
             _ => return Err(changed_during_read()),
         };
         let version = TransferSourceEntry {

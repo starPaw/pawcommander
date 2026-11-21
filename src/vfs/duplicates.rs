@@ -11,6 +11,7 @@ use super::{
     Location, MAX_TREE_DEPTH,
 };
 use crate::{
+    file_error::ScanError,
     i18n::text,
     operations::{Cancellation, Progress, TransferError},
 };
@@ -39,15 +40,14 @@ pub(crate) struct SearchResult {
     root: Parent,
     pub(crate) groups: Vec<Group>,
     pub(crate) skipped: usize,
-    pub(crate) examples: Vec<String>,
+    pub(crate) examples: Vec<(PathBuf, TransferError)>,
 }
 
 impl SearchResult {
-    fn skip(&mut self, path: &Path, message: impl std::fmt::Display) {
+    fn skip(&mut self, path: &Path, error: TransferError) {
         self.skipped += 1;
         if self.examples.len() < 4 {
-            self.examples
-                .push(format!("{} · {message}", path.display()));
+            self.examples.push((path.to_owned(), error));
         }
     }
 
@@ -170,7 +170,7 @@ fn collect_sizes(
                 scan::Entry::Directory => {}
                 scan::Entry::File(info) => match info.size {
                     Some(size) => sizes.entry(size).or_default().push(path),
-                    None => result.skip(&path, text!("Размер файла недоступен")),
+                    None => result.skip(&path, ScanError::MissingLocalFileSize.into()),
                 },
                 scan::Entry::Link(_) => {}
                 scan::Entry::Unreadable(error) => result.skip(&path, error),

@@ -393,6 +393,7 @@ catalog! {
     "Папка изменилась или недоступна" => ("The folder changed or is unavailable", "Složka se změnila nebo není dostupná"),
     "Папка содержит недопустимое имя" => ("The folder contains an invalid name", "Složka obsahuje neplatný název"),
     "Папка содержит повторяющиеся имена" => ("The folder contains duplicate names", "Složka obsahuje duplicitní názvy"),
+    "Не удалось прочитать символическую ссылку" => ("Could not read symbolic link", "Symbolický odkaz se nepodařilo přečíst"),
     "Тип объекта недоступен для сравнения" => ("This item type cannot be compared", "Tento typ položky nelze porovnat"),
     "Не удалось получить размер или время изменения" => ("Size or modified time is unavailable", "Velikost nebo čas změny nejsou dostupné"),
     "Достигнут предел вложенности папок" => ("Folder nesting limit reached", "Byl dosažen limit vnoření složek"),

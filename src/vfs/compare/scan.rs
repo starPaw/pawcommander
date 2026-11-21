@@ -1,7 +1,10 @@
 use crate::{
-    i18n::text,
+    file_error::{AccessAction, AccessError, ListingError, ListingErrorKind, ScanError},
     operations::{Cancellation, TransferError},
-    vfs::{err, read_scope::ReadScope, sftp::remote, transfer::remote_source_matches, Location},
+    vfs::{
+        listing::next_sftp_entry, read_scope::ReadScope, sftp::remote,
+        transfer::remote_source_matches, Location,
+    },
 };
 use std::{
     ffi::{OsStr, OsString},
@@ -14,7 +17,7 @@ pub(in crate::vfs) enum Entry {
     Directory,
     File(FileInfo),
     Link(PathBuf),
-    Unreadable(String),
+    Unreadable(TransferError),
 }
 
 pub(in crate::vfs) struct FileInfo {
@@ -57,7 +60,7 @@ impl Entry {
     pub(in crate::vfs) fn extra_path_bytes(&self) -> usize {
         match self {
             Self::Link(path) => path.as_os_str().len(),
-            Self::Unreadable(message) => message.len(),
+            Self::Unreadable(error) => super::diagnostic_bytes(error),
             _ => 0,
         }
     }
@@ -74,11 +77,17 @@ pub(in crate::vfs) fn visit(
     cancel.check()?;
     #[cfg(unix)]
     if let Some(root) = &scope.descriptor {
-        return visit_local(root, relative, cancel, visitor);
+        return visit_local(
+            &scope.parent.location.join(relative),
+            root,
+            relative,
+            cancel,
+            visitor,
+        );
     }
     let folder = scope
         .checked_directory(relative, cancel)?
-        .ok_or_else(folder_changed)?;
+        .ok_or_else(|| ScanError::FolderUnavailable(scope.parent.location.join(relative)))?;
     if let Some(path) = folder.local() {
         visit_path(path, cancel, visitor)
     } else {
@@ -88,6 +97,7 @@ pub(in crate::vfs) fn visit(
 
 #[cfg(unix)]
 fn visit_local(
+    folder: &Location,
     root: &std::os::fd::OwnedFd,
     relative: &Path,
     cancel: &Cancellation,
@@ -97,9 +107,10 @@ fn visit_local(
     use rustix::fs::{readlinkat, FileType};
     use std::os::unix::ffi::OsStrExt;
 
-    let nested = local_subdirectory(root, relative, cancel)?;
+    let nested = local_subdirectory(root, relative, cancel)
+        .map_err(|error| AccessError::new(folder, AccessAction::ReadChildren, error))?;
     let descriptor = nested.as_ref().unwrap_or(root);
-    visit_local_entries(descriptor, cancel, folder_changed, |name, stat| {
+    visit_local_entries(folder, descriptor, cancel, |name, stat| {
         let entry = match stat {
             Ok(stat) => match FileType::from_raw_mode(stat.st_mode) {
                 FileType::Directory => Entry::Directory,
@@ -112,11 +123,25 @@ fn visit_local(
                 }),
                 FileType::Symlink => match readlinkat(descriptor, name, Vec::new()) {
                     Ok(target) => Entry::Link(PathBuf::from(OsStr::from_bytes(target.to_bytes()))),
-                    Err(error) => Entry::Unreadable(error.to_string()),
+                    Err(error) => Entry::Unreadable(
+                        AccessError::new(
+                            &folder.join(name),
+                            AccessAction::ReadLink,
+                            std::io::Error::from(error),
+                        )
+                        .into(),
+                    ),
                 },
-                _ => unsupported(),
+                _ => unsupported(folder.join(name)),
             },
-            Err(error) => Entry::Unreadable(error.to_string()),
+            Err(error) => Entry::Unreadable(
+                AccessError::new(
+                    &folder.join(name),
+                    AccessAction::ReadMetadata,
+                    std::io::Error::from(error),
+                )
+                .into(),
+            ),
         };
         visit(name.to_owned(), entry)
     })
@@ -127,31 +152,44 @@ fn visit_remote(
     cancel: &Cancellation,
     visit: Visitor<'_>,
 ) -> Result<(), TransferError> {
-    use ssh2::ErrorCode;
-
-    let sftp = remote(folder)?;
-    let before = sftp.lstat(folder.path()).map_err(err)?;
+    let sftp = remote(folder)
+        .map_err(|error| AccessError::new(folder, AccessAction::ReadChildren, error))?;
+    let metadata = || -> Result<_, TransferError> {
+        sftp.lstat(folder.path())
+            .map_err(|error| AccessError::new(folder, AccessAction::ReadMetadata, error).into())
+    };
+    let before = metadata()?;
     if !before.is_dir() {
-        return Err(folder_changed());
+        return Err(ScanError::FolderUnavailable(folder.clone()).into());
     }
-    let mut reader = sftp.opendir(folder.path()).map_err(err)?;
+    let mut reader = sftp
+        .opendir(folder.path())
+        .map_err(|error| ListingError::new(folder.clone(), ListingErrorKind::OpenSftp(error)))?;
     loop {
         cancel.check()?;
-        let (name, stat) = match reader.readdir() {
-            Ok(entry) => entry,
-            // ssh2::File::readdir reports EOF as LIBSSH2_ERROR_FILE.
-            Err(error) if error.code() == ErrorCode::Session(-16) => break,
-            Err(error) => return Err(error.to_string().into()),
+        let Some((name, stat)) = next_sftp_entry(&mut reader).map_err(|error| {
+            ListingError::new(folder.clone(), ListingErrorKind::ReadSftp(error))
+        })?
+        else {
+            break;
         };
         if name == Path::new(".") || name == Path::new("..") {
             continue;
         }
         let mut parts = name.components();
         let (Some(Component::Normal(segment)), None) = (parts.next(), parts.next()) else {
-            return Err(text!("Папка содержит недопустимое имя").into());
+            return Err(ScanError::InvalidSftpEntry {
+                directory: folder.clone(),
+                name,
+            }
+            .into());
         };
         if name.as_os_str() != segment {
-            return Err(text!("Папка содержит недопустимое имя").into());
+            return Err(ScanError::InvalidSftpEntry {
+                directory: folder.clone(),
+                name,
+            }
+            .into());
         }
         let entry = if stat.is_dir() {
             Entry::Directory
@@ -167,30 +205,38 @@ fn visit_remote(
             let location = folder.join(segment);
             match sftp.readlink(location.path()) {
                 Ok(target) => Entry::Link(target),
-                Err(error) => Entry::Unreadable(error.to_string()),
+                Err(error) => Entry::Unreadable(
+                    AccessError::new(&location, AccessAction::ReadLink, error).into(),
+                ),
             }
         } else {
-            unsupported()
+            unsupported(folder.join(segment))
         };
         visit(segment.to_owned(), entry)?;
     }
     drop(reader);
     cancel.check()?;
-    let after = sftp.lstat(folder.path()).map_err(err)?;
+    let after = metadata()?;
     if !remote_source_matches(&before, &after) {
-        return Err(folder_changed());
+        return Err(ScanError::FolderUnavailable(folder.clone()).into());
     }
     Ok(())
 }
 
 fn visit_path(path: &Path, cancel: &Cancellation, visit: Visitor<'_>) -> Result<(), TransferError> {
-    let before = fs::symlink_metadata(path)?;
+    let folder = Location::Local(path.to_owned());
+    let metadata_error = |error| AccessError::new(&folder, AccessAction::ReadMetadata, error);
+    let before = fs::symlink_metadata(path).map_err(metadata_error)?;
     if !before.is_dir() {
-        return Err(folder_changed());
+        return Err(ScanError::FolderUnavailable(folder).into());
     }
-    for item in fs::read_dir(path)? {
+    for item in fs::read_dir(path)
+        .map_err(|error| ListingError::new(folder.clone(), ListingErrorKind::OpenLocal(error)))?
+    {
         cancel.check()?;
-        let item = item?;
+        let item = item.map_err(|error| {
+            ListingError::new(folder.clone(), ListingErrorKind::ReadLocalEntry(error))
+        })?;
         let path = item.path();
         let entry = match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.is_dir() => Entry::Directory,
@@ -198,27 +244,27 @@ fn visit_path(path: &Path, cancel: &Cancellation, visit: Visitor<'_>) -> Result<
                 size: Some(metadata.len()),
                 modified: metadata.modified().ok().map(Modified::from_time),
             }),
-            Ok(metadata) if metadata.is_symlink() => match fs::read_link(path) {
+            Ok(metadata) if metadata.is_symlink() => match fs::read_link(&path) {
                 Ok(target) => Entry::Link(target),
-                Err(error) => Entry::Unreadable(error.to_string()),
+                Err(error) => Entry::Unreadable(
+                    AccessError::new(&Location::Local(path), AccessAction::ReadLink, error).into(),
+                ),
             },
-            Ok(_) => unsupported(),
-            Err(error) => Entry::Unreadable(error.to_string()),
+            Ok(_) => unsupported(Location::Local(path)),
+            Err(error) => Entry::Unreadable(
+                AccessError::new(&Location::Local(path), AccessAction::ReadMetadata, error).into(),
+            ),
         };
         visit(item.file_name(), entry)?;
     }
     cancel.check()?;
-    let after = fs::symlink_metadata(path)?;
-    if !crate::fs_ops::source_metadata_matches(&before, &after)? {
-        return Err(folder_changed());
+    let after = fs::symlink_metadata(path).map_err(metadata_error)?;
+    if !crate::fs_ops::source_metadata_matches(&before, &after).map_err(metadata_error)? {
+        return Err(ScanError::FolderUnavailable(folder).into());
     }
     Ok(())
 }
 
-pub(super) fn folder_changed() -> TransferError {
-    text!("Папка изменилась или недоступна").into()
-}
-
-fn unsupported() -> Entry {
-    Entry::Unreadable(text!("Тип объекта недоступен для сравнения").into())
+fn unsupported(location: Location) -> Entry {
+    Entry::Unreadable(ScanError::UnsupportedComparisonType(location).into())
 }

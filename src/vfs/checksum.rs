@@ -143,7 +143,7 @@ pub(crate) fn verify_checksum_manifest(
                 totals.message()
             ))
         }
-        Err(error) => Err(error.to_string()),
+        Err(error) => Err(crate::i18n::file_error(&error)),
         Ok(()) if totals.changed + totals.missing + totals.errors > 0 => Err(totals.message()),
         Ok(()) => Ok(totals.message()),
     }
@@ -211,7 +211,7 @@ fn verify_manifest(
             Err(TransferError::Cancelled) => return Err(TransferError::Cancelled),
             Err(error) => {
                 totals.errors += 1;
-                (Outcome::Failed, error.to_string())
+                (Outcome::Failed, crate::i18n::file_error(&error))
             }
         };
         progress

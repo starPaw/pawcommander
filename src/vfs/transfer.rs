@@ -1678,19 +1678,22 @@ impl TransferSourceEntry {
         source: &Location,
         actual: &EntryMetadata,
     ) -> Result<(), String> {
-        let matches = match (&self.metadata, actual) {
-            (EntryMetadata::Local(expected), EntryMetadata::Local(actual)) => {
-                fs_ops::source_metadata_matches(expected, actual).map_err(err)?
-            }
-            (EntryMetadata::Remote(expected), EntryMetadata::Remote(actual)) => {
-                remote_source_matches(expected, actual)
-            }
-            _ => false,
-        };
-        if matches {
+        if self.matches_metadata(actual).map_err(err)? {
             Ok(())
         } else {
             Err(changed_source(source))
+        }
+    }
+
+    pub(super) fn matches_metadata(&self, actual: &EntryMetadata) -> io::Result<bool> {
+        match (&self.metadata, actual) {
+            (EntryMetadata::Local(expected), EntryMetadata::Local(actual)) => {
+                fs_ops::source_metadata_matches(expected, actual)
+            }
+            (EntryMetadata::Remote(expected), EntryMetadata::Remote(actual)) => {
+                Ok(remote_source_matches(expected, actual))
+            }
+            _ => Ok(false),
         }
     }
 

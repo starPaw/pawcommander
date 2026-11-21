@@ -172,11 +172,17 @@ fn show_results(
 ) {
     if result.skipped > 0 {
         let skipped = result.skipped;
+        let detail = result
+            .examples
+            .iter()
+            .map(|(path, error)| format!("{} · {}", path.display(), crate::i18n::file_error(error)))
+            .collect::<Vec<_>>()
+            .join("\n");
         ui.label(crate::tr_format!(
             "Skipped unavailable or changed entries: {skipped}",
             skipped = skipped
         ))
-        .on_hover_text(result.examples.join("\n"));
+        .on_hover_text(detail);
     }
     if result.groups.is_empty() {
         ui.label(text!("Дубликаты не найдены"));

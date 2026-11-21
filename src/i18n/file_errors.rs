@@ -187,6 +187,7 @@ fn access_error(error: &AccessError) -> String {
         }
         AccessAction::ReadChildren => text!("Не удалось прочитать папку"),
         AccessAction::ReadFile => text!("Не удалось прочитать файл"),
+        AccessAction::ReadLink => text!("Не удалось прочитать символическую ссылку"),
         AccessAction::CheckSearchResult => {
             return crate::tr_format!(
                 "Could not check search result {path}: {error}",
@@ -232,15 +233,44 @@ fn scan_error(error: &ScanError) -> String {
         ScanError::DirectoryChanged(location) => {
             (text!("Папка изменилась во время подсчёта"), location)
         }
-        #[cfg(target_os = "macos")]
         ScanError::InvalidSftpEntry { directory, name } => {
             return format!(
                 "{} · {directory}/{name:?}",
                 text!("Папка содержит недопустимое имя")
             );
         }
-        #[cfg(target_os = "macos")]
         ScanError::DepthLimit(location) => (text!("Достигнут предел вложенности папок"), location),
+        ScanError::FolderUnavailable(location) => {
+            (text!("Папка изменилась или недоступна"), location)
+        }
+        ScanError::DuplicateEntry { directory, name } => {
+            return format!(
+                "{} · {directory}/{name:?}",
+                text!("Папка содержит повторяющиеся имена")
+            );
+        }
+        ScanError::UnsupportedComparisonType(location) => {
+            (text!("Тип объекта недоступен для сравнения"), location)
+        }
+        ScanError::MissingComparisonMetadata(location) => (
+            text!("Не удалось получить размер или время изменения"),
+            location,
+        ),
+        ScanError::ComparisonLimit => {
+            return text!("Достигнут предел сравнения: 100 000 объектов или 32 МиБ данных о путях",)
+                .into()
+        }
+        ScanError::FileChanged(location) => (text!("Файл изменился во время чтения"), location),
+        ScanError::ExpectedRegularFile(location) => (
+            text!("Для проверки подходят только обычные файлы без ссылок"),
+            location,
+        ),
+        ScanError::MissingFileVersion(location) => (
+            text!("Сервер не передал размер или время изменения файла"),
+            location,
+        ),
+        #[cfg(target_os = "macos")]
+        ScanError::MissingLocalFileSize => return text!("Размер файла недоступен").into(),
         #[cfg(target_os = "macos")]
         ScanError::MissingSftpFileSize(location) => {
             (text!("Сервер SFTP не сообщил размер файла"), location)
@@ -251,10 +281,6 @@ fn scan_error(error: &ScanError) -> String {
         #[cfg(target_os = "macos")]
         ScanError::DiskUsageRequiresLocalFolder => {
             return text!("Анализ места доступен в локальных папках").into();
-        }
-        #[cfg(target_os = "macos")]
-        ScanError::DiskUsageFolderUnavailable(location) => {
-            (text!("Папка изменилась или недоступна"), location)
         }
         #[cfg(target_os = "macos")]
         ScanError::DiskUsageLimit => return text!("Достигнут предел анализа места").into(),

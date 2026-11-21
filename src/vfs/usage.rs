@@ -96,7 +96,7 @@ pub(crate) fn analyze(
     Directory::from_scope(&scope).map_err(|error| folder_error(location, error))?;
     let root = scope
         .descriptor
-        .ok_or_else(|| ScanError::DiskUsageFolderUnavailable(location.clone()))?;
+        .ok_or_else(|| ScanError::FolderUnavailable(location.clone()))?;
     let stat = fstat(&root).map_err(|error| {
         AccessError::new(
             location,
@@ -164,7 +164,7 @@ impl Scan {
         cancel.check()?;
         let path = self.result.nodes[node].path.clone();
         let location = self.result.folder.join(&path);
-        let unavailable = || ScanError::DiskUsageFolderUnavailable(location.clone());
+        let unavailable = || ScanError::FolderUnavailable(location.clone());
         let read_children = |error| AccessError::new(&location, AccessAction::ReadChildren, error);
         let nested = local_subdirectory(&self.root, &path, cancel).map_err(read_children)?;
         // Own this descriptor so the visitor can accumulate rows without borrowing self.root.
@@ -189,55 +189,49 @@ impl Scan {
         self.result.nodes[node].allocated = allocated;
         self.result.nodes[node].own_blocks = allocated;
 
-        visit_local_entries(
-            &descriptor,
-            cancel,
-            || unavailable().into(),
-            |name, stat| {
-                let relative = path.join(name);
-                self.path_bytes += relative.as_os_str().len();
-                if self.result.nodes.len() >= MAX_ENTRIES
-                    || self.path_bytes > MAX_PATH_BYTES
-                    || relative.components().count() > MAX_TREE_DEPTH
-                {
-                    return Err(ScanError::DiskUsageLimit.into());
-                }
-                let mut child = Node::new(relative, Kind::Other, Some(node));
-                let id = self.result.nodes.len();
-                match stat {
-                    Ok(stat) => match FileType::from_raw_mode(stat.st_mode) {
-                        FileType::Directory => {
-                            child.kind = Kind::Folder;
-                            self.folders.push((id, identity(&stat)));
-                        }
-                        FileType::RegularFile => {
-                            child.kind = Kind::File;
-                            child.allocated = allocated_bytes(&stat);
-                            child.logical = u64::try_from(stat.st_size).unwrap_or_default();
-                            self.files.push((id, identity(&stat)));
-                        }
-                        FileType::Symlink => {
-                            child.kind = Kind::Symlink;
-                            self.result.symlinks += 1;
-                        }
-                        _ => {}
-                    },
-                    Err(error) => {
-                        self.result.issues += 1;
-                        let error = AccessError::new(
-                            &location.join(name),
-                            AccessAction::ReadMetadata,
-                            io::Error::from(error),
-                        );
-                        child.issue = Some(Issue::Failure(Box::new(error.into())));
+        visit_local_entries(&location, &descriptor, cancel, |name, stat| {
+            let relative = path.join(name);
+            self.path_bytes += relative.as_os_str().len();
+            if self.result.nodes.len() >= MAX_ENTRIES
+                || self.path_bytes > MAX_PATH_BYTES
+                || relative.components().count() > MAX_TREE_DEPTH
+            {
+                return Err(ScanError::DiskUsageLimit.into());
+            }
+            let mut child = Node::new(relative, Kind::Other, Some(node));
+            let id = self.result.nodes.len();
+            match stat {
+                Ok(stat) => match FileType::from_raw_mode(stat.st_mode) {
+                    FileType::Directory => {
+                        child.kind = Kind::Folder;
+                        self.folders.push((id, identity(&stat)));
                     }
+                    FileType::RegularFile => {
+                        child.kind = Kind::File;
+                        child.allocated = allocated_bytes(&stat);
+                        child.logical = u64::try_from(stat.st_size).unwrap_or_default();
+                        self.files.push((id, identity(&stat)));
+                    }
+                    FileType::Symlink => {
+                        child.kind = Kind::Symlink;
+                        self.result.symlinks += 1;
+                    }
+                    _ => {}
+                },
+                Err(error) => {
+                    self.result.issues += 1;
+                    let error = AccessError::new(
+                        &location.join(name),
+                        AccessAction::ReadMetadata,
+                        io::Error::from(error),
+                    );
+                    child.issue = Some(Issue::Failure(Box::new(error.into())));
                 }
-                self.result.nodes[node].children.push(id);
-                self.result.nodes.push(child);
-                Ok(())
-            },
-        )
-        .map_err(|error| folder_error(&location, error))
+            }
+            self.result.nodes[node].children.push(id);
+            self.result.nodes.push(child);
+            Ok(())
+        })
     }
 
     fn incomplete(&mut self, node: NodeId, finish: Finish) {
@@ -287,7 +281,7 @@ fn folder_error(location: &Location, error: TransferError) -> TransferError {
         TransferError::Failed(Failure::Mutation(error))
             if matches!(*error, MutationError::UndoUnavailable(_)) =>
         {
-            ScanError::DiskUsageFolderUnavailable(location.clone()).into()
+            ScanError::FolderUnavailable(location.clone()).into()
         }
         error => error,
     }
