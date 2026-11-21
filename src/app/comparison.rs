@@ -72,7 +72,7 @@ pub(super) enum ComparisonResponse {
     #[cfg(target_os = "macos")]
     CreateFile(
         crate::vfs::file_templates::NewFile,
-        mpsc::Sender<Result<(), String>>,
+        mpsc::Sender<Result<(), crate::operations::TransferError>>,
     ),
 }
 

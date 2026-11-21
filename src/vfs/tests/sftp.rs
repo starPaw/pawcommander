@@ -262,8 +262,9 @@ fn check_sftp_deletion_results(remote_root: &Location) {
 #[cfg(target_os = "macos")]
 fn check_promised_sftp_download(local_root: &Location, remote_root: &Location) {
     use crate::{
+        file_error::{Failure, FilePromiseError, MutationError},
         result_history::Outcome,
-        vfs::{copy_sftp_for_drop, resume_copy},
+        vfs::{copy_sftp_for_drop, resume_copy, DropDelivery},
     };
 
     let output = local_root.join("receiving app");
@@ -276,20 +277,53 @@ fn check_promised_sftp_download(local_root: &Location, remote_root: &Location) {
     fs::write(output.join("drag source.txt").path(), b"existing file").unwrap();
     let mut progress = Progress::default();
     progress.resume_directory = Some(recovery.clone());
-    copy_sftp_for_drop(&source, target.path(), false, &mut progress).unwrap();
+    assert_eq!(
+        copy_sftp_for_drop(&source, target.path(), false, &mut progress).unwrap(),
+        DropDelivery::Completed
+    );
     assert_eq!(fs::read(target.path()).unwrap(), bytes);
     assert_eq!(fs::read(source.path()).unwrap(), bytes);
     assert_eq!(
         fs::read(output.join("drag source.txt").path()).unwrap(),
         b"existing file"
     );
-    assert!(copy_sftp_for_drop(&source, target.path(), false, &mut Progress::default()).is_err());
+    let error =
+        copy_sftp_for_drop(&source, target.path(), false, &mut Progress::default()).unwrap_err();
+    assert!(
+        matches!(error, TransferError::Failed(Failure::Mutation(reason))
+        if matches!(reason.as_ref(), MutationError::DestinationExists(path) if path == &target))
+    );
     assert_eq!(fs::read(target.path()).unwrap(), bytes);
 
     let source_folder = remote_root.join("drag folder");
     let target_folder = output.join("drag folder");
     fs::create_dir_all(source_folder.join("nested/empty").path()).unwrap();
     fs::write(source_folder.join("nested/child.txt").path(), bytes).unwrap();
+    let missing = remote_root.join("missing drag source.txt");
+    let mut progress = Progress::default();
+    let error =
+        copy_sftp_for_drop(&missing, target_folder.path(), false, &mut progress).unwrap_err();
+    assert!(
+        matches!(error, TransferError::Failed(Failure::FilePromise(reason))
+        if matches!(reason.as_ref(), FilePromiseError::SourceMissing(path) if path == &missing))
+    );
+    assert_eq!(
+        progress.results.root_outcomes(),
+        [(missing, Outcome::Failed)]
+    );
+    let mut progress = Progress::default();
+    let error =
+        copy_sftp_for_drop(&source_folder, target_folder.path(), false, &mut progress).unwrap_err();
+    assert!(
+        matches!(error, TransferError::Failed(Failure::FilePromise(reason))
+        if matches!(reason.as_ref(), FilePromiseError::SourceTypeChanged(path) if path == &source_folder))
+    );
+    assert_eq!(
+        progress.results.root_outcomes(),
+        [(source_folder.clone(), Outcome::Failed)]
+    );
+    assert!(!target_folder.path().exists());
+
     let mut progress = Progress::default();
     progress.resume_directory = Some(recovery.clone());
     copy_sftp_for_drop(&source_folder, target_folder.path(), true, &mut progress).unwrap();
@@ -322,7 +356,10 @@ fn check_promised_sftp_download(local_root: &Location, remote_root: &Location) {
                     && fs::metadata(entry.path().join("payload")).is_ok_and(|meta| meta.len() != 0)
             })
     });
-    assert!(copy_sftp_for_drop(&source, target.path(), false, &mut progress).is_err());
+    assert!(matches!(
+        copy_sftp_for_drop(&source, target.path(), false, &mut progress),
+        Err(TransferError::Cancelled)
+    ));
     assert_eq!(
         progress.results.root_outcomes(),
         [(source.clone(), Outcome::Cancelled)]
@@ -332,7 +369,7 @@ fn check_promised_sftp_download(local_root: &Location, remote_root: &Location) {
     let (offers, errors) = resume_copy::scan(&recovery);
     assert!(offers.is_empty() && errors.is_empty());
     assert_eq!(fs::read_dir(output.path()).unwrap().count(), 3);
-    println!("SFTP file and folder delivery honored the requested names, preserved originals, and cleaned staging on Stop");
+    println!("SFTP file and folder delivery honored exact names and preserved originals. Occupied destinations, vanished or changed items, and Stop returned distinct typed errors");
 }
 
 #[cfg(target_os = "macos")]

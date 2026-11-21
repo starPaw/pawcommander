@@ -89,11 +89,11 @@ pub(crate) use sftp_properties::{visit_properties, PropertyEvent};
 pub(crate) use sync::{Exclusions, Reconcile, ReconcileConflict, TwoWayPlan};
 #[cfg(target_os = "macos")]
 pub(crate) use sync::{SyncChange, SyncPlan, SyncReport};
-#[cfg(target_os = "macos")]
-pub(crate) use transfer::copy_sftp_for_drop;
 #[cfg(test)]
 pub use transfer::transfer;
 pub use transfer::transfer_with_conflicts;
+#[cfg(target_os = "macos")]
+pub(crate) use transfer::{copy_sftp_for_drop, DropDelivery};
 pub(crate) use undo::{rename_with_undo, UndoBatch};
 
 #[derive(Debug, Default)]

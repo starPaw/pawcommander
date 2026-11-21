@@ -1,5 +1,63 @@
 use super::*;
 
+#[cfg(target_os = "macos")]
+#[test]
+fn file_promise_completion_preserves_worker_failure_and_queue_cancellation() {
+    use crate::{
+        file_error::{Failure, FilePromiseError},
+        native_drag::{PromiseKind, PromiseRequest},
+        operations::TransferError,
+    };
+
+    let root = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+    let mut app = PawCommander::new(&cc, Some(root.path().to_owned()));
+    let source: crate::vfs::Location = root.path().join("local source").into();
+    let target = root.path().join("receiver file");
+    let enqueue = |app: &mut PawCommander| {
+        let (completion, result) = mpsc::channel();
+        app.enqueue_file_promise(
+            PromiseRequest {
+                source: source.clone(),
+                kind: PromiseKind::File,
+                target: target.clone(),
+                completion,
+            },
+            &ctx,
+        );
+        result
+    };
+
+    app.jobs.start_failed = true;
+    assert!(matches!(enqueue(&mut app).try_recv().unwrap(),
+        Err(TransferError::Failed(Failure::FilePromise(reason)))
+            if matches!(reason.as_ref(), FilePromiseError::QueueUnavailable)));
+    app.jobs.start_failed = false;
+
+    let held = hold_queue(&mut app);
+    let queued = enqueue(&mut app);
+    assert!(matches!(queued.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    app.remove_pending_job(0);
+    assert!(matches!(
+        queued.try_recv(),
+        Ok(Err(TransferError::Cancelled))
+    ));
+    held.send(Ok("release".into())).unwrap();
+    poll_queue_until(&mut app, &ctx, |app| !app.jobs.is_busy());
+
+    let error = enqueue(&mut app)
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        matches!(error, TransferError::Failed(Failure::FilePromise(reason))
+        if matches!(reason.as_ref(), FilePromiseError::RemoteSourceRequired(path) if path == &source))
+    );
+    poll_queue_until(&mut app, &ctx, |app| !app.jobs.is_busy());
+    assert!(!target.exists());
+}
+
 #[test]
 fn checksum_commands_save_a_manifest_and_keep_distinct_results_in_history() {
     use std::fs;

@@ -859,13 +859,20 @@ pub(super) fn copy_item(
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum DropDelivery {
+    Completed,
+    CompletedWithWarning,
+}
+
+#[cfg(target_os = "macos")]
 pub(crate) fn copy_sftp_for_drop(
     source: &Location,
     destination: &Path,
     directory: bool,
     progress: &mut Progress,
-) -> Result<String, String> {
-    use crate::{i18n::text, result_history::Outcome};
+) -> Result<DropDelivery, TransferError> {
+    use crate::{file_error::FilePromiseError, i18n::text, result_history::Outcome};
 
     let target = Location::Local(destination.to_owned());
     progress
@@ -875,24 +882,24 @@ pub(crate) fn copy_sftp_for_drop(
     let mut committed = false;
     let result = (|| {
         progress.checkpoint()?;
-        if !source.remote() || !destination.is_absolute() || destination.file_name().is_none() {
-            return Err(text!("Недопустимый путь файла").into());
+        if !source.remote() {
+            return Err(FilePromiseError::RemoteSourceRequired(source.clone()).into());
         }
-        if !entry_metadata(source)?.is_some_and(|metadata| {
-            if directory {
-                metadata.is_directory()
-            } else {
-                metadata.is_file()
-            }
-        }) {
-            return Err(changed_source(source).into());
+        if !destination.is_absolute() || destination.file_name().is_none() {
+            return Err(FilePromiseError::InvalidDestination(destination.into()).into());
+        }
+        let metadata = entry_metadata(source)?
+            .ok_or_else(|| FilePromiseError::SourceMissing(source.clone()))?;
+        let expected_type = if directory {
+            metadata.is_directory()
+        } else {
+            metadata.is_file()
+        };
+        if !expected_type {
+            return Err(FilePromiseError::SourceTypeChanged(source.clone()).into());
         }
         if entry_metadata(&target)?.is_some() {
-            return Err(crate::tr_format!(
-                "The destination path is already occupied: {target}",
-                target = target
-            )
-            .into());
+            return Err(MutationError::DestinationExists(target).into());
         }
         let item = TransferItem::new(source.clone(), source.clone(), target);
         copy_item_cancellable(&item, None, progress, MetadataMode::Final, || {
@@ -911,30 +918,26 @@ pub(crate) fn copy_sftp_for_drop(
         (_, false) if progress.partial_copy_retained => Outcome::PartialCopyRetained,
         _ => Outcome::Failed,
     };
-    let reason = result
-        .as_ref()
-        .err()
-        .map(crate::i18n::file_error)
-        .or_else(|| {
-            warning.then(|| {
-                text!(
-                "Даты или права доступа сохранены частично. Подробности указаны в строках журнала.",
-            )
-                .into()
-            })
-        });
-    progress.results.record(source, None, outcome, reason);
+    if warning && result.is_ok() {
+        let reason = text!(
+            "Даты или права доступа сохранены частично. Подробности указаны в строках журнала."
+        );
+        progress
+            .results
+            .record(source, None, outcome, Some(reason.into()));
+    } else {
+        progress
+            .results
+            .record_with_error(source, outcome, result.as_ref().err());
+    }
     if committed {
         Ok(if warning {
-            text!("Файл передан. Подробности о предупреждениях в журнале результатов.")
+            DropDelivery::CompletedWithWarning
         } else {
-            text!("Файлы переданы принимающему приложению")
-        }
-        .into())
+            DropDelivery::Completed
+        })
     } else {
-        result
-            .map(|()| text!("Файлы переданы принимающему приложению").into())
-            .map_err(|error| crate::i18n::file_error(&error))
+        result.map(|()| DropDelivery::Completed)
     }
 }
 

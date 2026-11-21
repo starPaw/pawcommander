@@ -1,5 +1,10 @@
 //! AppKit resolves SFTP items on a background queue after a receiver accepts the drop.
-use crate::{i18n::text, vfs::Location};
+use crate::{
+    file_error::{FilePromiseError, TransferPlanError},
+    i18n::text,
+    operations::TransferError,
+    vfs::Location,
+};
 use eframe::egui;
 use objc2::{
     define_class, msg_send,
@@ -9,14 +14,14 @@ use objc2::{
 };
 use objc2_app_kit::{NSFilePromiseProvider, NSFilePromiseProviderDelegate};
 use objc2_foundation::{
-    NSDictionary, NSError, NSLocalizedDescriptionKey, NSObject, NSObjectProtocol, NSOperationQueue,
-    NSString, NSURL,
+    NSCocoaErrorDomain, NSDictionary, NSError, NSLocalizedDescriptionKey, NSObject,
+    NSObjectProtocol, NSOperationQueue, NSString, NSUserCancelledError, NSURL,
 };
 use std::{
     ffi::{CStr, OsStr},
     os::unix::ffi::OsStrExt,
     path::PathBuf,
-    ptr,
+    ptr::{self, NonNull},
     sync::{
         atomic::{AtomicU8, Ordering},
         mpsc::{self, Receiver, Sender},
@@ -43,7 +48,7 @@ pub(crate) struct PromiseRequest {
     pub source: Location,
     pub kind: PromiseKind,
     pub target: PathBuf,
-    pub completion: Sender<Result<(), String>>,
+    pub completion: Sender<Result<(), TransferError>>,
 }
 
 struct PromiseState {
@@ -57,9 +62,9 @@ struct PromiseState {
 }
 
 impl PromiseState {
-    fn request(&self, url: &NSURL) -> Result<(), String> {
+    fn request(&self, url: &NSURL) -> Result<(), TransferError> {
         if self.drag_result.load(Ordering::Acquire) == super::macos::DRAG_CANCELLED {
-            return Err(text!("Передача принимающему приложению отменена.").into());
+            return Err(TransferError::Cancelled);
         }
         let target = destination_path(url)?;
         let (completion, result) = mpsc::channel();
@@ -70,9 +75,11 @@ impl PromiseState {
                 target,
                 completion,
             })
-            .map_err(|_| cancelled())?;
+            .map_err(|_| FilePromiseError::QueueDisconnected)?;
         self.ctx.request_repaint();
-        result.recv().map_err(|_| cancelled())?
+        result
+            .recv()
+            .map_err(|_| FilePromiseError::QueueDisconnected)?
     }
 }
 
@@ -140,12 +147,14 @@ impl FilePromises {
         kind: PromiseKind,
         ctx: &egui::Context,
         drag_result: &Arc<AtomicU8>,
-    ) -> Result<Retained<NSFilePromiseProvider>, String> {
+    ) -> Result<Retained<NSFilePromiseProvider>, TransferError> {
         let name = source
             .path()
             .file_name()
-            .and_then(OsStr::to_str)
-            .ok_or_else(|| text!("Недопустимый путь файла").to_owned())?;
+            .ok_or_else(|| TransferPlanError::MissingName(source.clone()))?;
+        let name = name
+            .to_str()
+            .ok_or_else(|| TransferPlanError::NonUtf8Name(source.clone()))?;
         let queue = self.queue.get_or_insert_with(|| {
             let queue = NSOperationQueue::new();
             queue.setMaxConcurrentOperationCount(1);
@@ -173,37 +182,87 @@ impl FilePromises {
     }
 }
 
-fn destination_path(url: &NSURL) -> Result<PathBuf, String> {
+fn destination_path(url: &NSURL) -> Result<PathBuf, FilePromiseError> {
     if !url.isFileURL() {
-        return Err(invalid_destination());
+        return Err(FilePromiseError::InvalidReceiverUrl);
     }
-    // SAFETY: Foundation supplies a NUL-terminated filesystem representation.
-    let bytes = unsafe { CStr::from_ptr(url.fileSystemRepresentation().as_ptr()) }.to_bytes();
-    let path = PathBuf::from(OsStr::from_bytes(bytes));
+    let mut bytes = [0u8; libc::PATH_MAX as usize];
+    let buffer = NonNull::from(&mut bytes[0]).cast();
+    // SAFETY: the buffer is writable for the supplied length during the call.
+    if !unsafe { url.getFileSystemRepresentation_maxLength(buffer, bytes.len()) } {
+        return Err(FilePromiseError::InvalidReceiverUrl);
+    }
+    let encoded =
+        CStr::from_bytes_until_nul(&bytes).map_err(|_| FilePromiseError::InvalidReceiverUrl)?;
+    let path = PathBuf::from(OsStr::from_bytes(encoded.to_bytes()));
     if !path.is_absolute() || path.file_name().is_none() {
-        return Err(invalid_destination());
+        return Err(FilePromiseError::InvalidDestination(path));
     }
     Ok(path)
 }
 
-fn invalid_destination() -> String {
-    text!("Принимающее приложение не указало путь к файлу.").into()
-}
-
-fn cancelled() -> String {
-    text!("Передача принимающему приложению отменена.").into()
-}
-
-fn promise_error(reason: String) -> Retained<NSError> {
+fn promise_error(error: TransferError) -> Retained<NSError> {
+    let custom_domain = NSString::from_str("dev.pawcommander.file-promise");
+    let (domain, code, reason) = if matches!(error, TransferError::Cancelled) {
+        // SAFETY: Foundation keeps the error domain constant alive.
+        (
+            unsafe { NSCocoaErrorDomain },
+            NSUserCancelledError,
+            text!("Передача принимающему приложению отменена.").into(),
+        )
+    } else {
+        (&*custom_domain, 1, crate::i18n::file_error(&error))
+    };
     let description = NSString::from_str(&reason);
     let description: &AnyObject = &description;
     // SAFETY: NSError keeps the description object under its documented key.
     let info = unsafe { NSDictionary::from_slices(&[NSLocalizedDescriptionKey], &[description]) };
-    unsafe {
-        NSError::errorWithDomain_code_userInfo(
-            &NSString::from_str("dev.pawcommander.file-promise"),
-            1,
-            Some(&info),
-        )
+    unsafe { NSError::errorWithDomain_code_userInfo(domain, code, Some(&info)) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn file_promise_uses_the_receivers_exact_file_url() {
+        let file = NSURL::fileURLWithPath(&NSString::from_str("/private/tmp/a file (2).txt"));
+        assert_eq!(
+            destination_path(&file).unwrap(),
+            Path::new("/private/tmp/a file (2).txt")
+        );
+
+        let root = NSURL::fileURLWithPath(&NSString::from_str("/"));
+        assert!(matches!(
+            destination_path(&root),
+            Err(FilePromiseError::InvalidDestination(path)) if path == Path::new("/")
+        ));
+        let web =
+            NSURL::URLWithString(&NSString::from_str("https://example.invalid/file")).unwrap();
+        assert!(matches!(
+            destination_path(&web),
+            Err(FilePromiseError::InvalidReceiverUrl)
+        ));
+    }
+
+    #[test]
+    fn file_promise_distinguishes_user_cancellation_from_delivery_failure() {
+        let cancelled = promise_error(TransferError::Cancelled);
+        assert_eq!(cancelled.domain().to_string(), "NSCocoaErrorDomain");
+        assert_eq!(cancelled.code(), NSUserCancelledError);
+
+        let failure = promise_error(
+            FilePromiseError::SourceMissing(PathBuf::from("/tmp/dragged.txt").into()).into(),
+        );
+        assert_eq!(
+            failure.domain().to_string(),
+            "dev.pawcommander.file-promise"
+        );
+        assert_eq!(failure.code(), 1);
+        assert!(failure
+            .localizedDescription()
+            .to_string()
+            .contains("/tmp/dragged.txt"));
     }
 }
