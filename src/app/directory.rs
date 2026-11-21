@@ -1,4 +1,5 @@
 use super::state::Sort;
+use crate::operations::TransferError;
 use crate::vfs::FileEntry;
 use std::cell::{Cell, RefCell};
 use std::ops::Deref;
@@ -31,8 +32,8 @@ pub(super) enum FolderVisit {
 
 pub(super) enum DirectoryRead {
     Batch(Vec<FileEntry>),
-    Finished(Result<Option<Vec<FileEntry>>, String>),
-    Archive(Result<(Arc<crate::archive::Index>, Vec<FileEntry>), String>),
+    Finished(Result<Option<Vec<FileEntry>>, TransferError>),
+    Archive(Result<(Arc<crate::archive::Index>, Vec<FileEntry>), TransferError>),
 }
 
 pub(super) struct DirectoryLoad {
@@ -61,7 +62,7 @@ impl Drop for DirectoryLoad {
 }
 
 pub(super) fn send_progressive_listing(
-    read: impl FnOnce(&mut dyn FnMut(FileEntry)) -> Result<(), String>,
+    read: impl FnOnce(&mut dyn FnMut(FileEntry)) -> Result<(), TransferError>,
     send: impl Fn(DirectoryRead) -> bool,
 ) {
     const BATCH_SIZE: usize = 1024;

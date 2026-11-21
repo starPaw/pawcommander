@@ -289,7 +289,7 @@ pub(crate) fn rename_with_undo(
     name: &str,
     progress: &mut Progress,
 ) -> Result<Location, String> {
-    super::location::validate_name(name).map_err(|error| crate::i18n::file_error(&error))?;
+    super::location::validate_name(name).map_err(|error| crate::i18n::path_error(&error))?;
     let target = source.parent().ok_or_else(unavailable)?.join(name);
     progress
         .results

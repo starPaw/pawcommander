@@ -5,6 +5,7 @@ pub(crate) enum Failure {
     Message(String),
     Io { source: io::Error, message: String },
     Path(PathError),
+    Listing(Box<ListingError>),
 }
 
 impl Failure {
@@ -13,6 +14,7 @@ impl Failure {
             Self::Message(_) => None,
             Self::Io { source, .. } => Some(source),
             Self::Path(error) => Some(error),
+            Self::Listing(error) => Some(error.as_ref()),
         }
     }
 }
@@ -22,6 +24,72 @@ impl fmt::Display for Failure {
         match self {
             Self::Message(message) | Self::Io { message, .. } => f.write_str(message),
             Self::Path(error) => fmt::Display::fmt(error, f),
+            Self::Listing(error) => fmt::Display::fmt(error, f),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum ListingErrorKind {
+    OpenLocal(io::Error),
+    ReadLocalEntry(io::Error),
+    LocalMetadata(io::Error),
+    ArchiveFormat,
+    ReadArchive(io::Error),
+    MissingArchiveFolder,
+    OpenSftp(ssh2::Error),
+    ReadSftp(ssh2::Error),
+    SftpNameEncoding(PathBuf),
+    InvalidSftpName(PathError),
+    RequiresSftpConnection,
+}
+
+#[derive(Debug)]
+pub(crate) struct ListingError {
+    pub(crate) location: Location,
+    pub(crate) kind: ListingErrorKind,
+}
+
+impl ListingError {
+    pub(crate) fn new(location: impl Into<Location>, kind: ListingErrorKind) -> Self {
+        Self {
+            location: location.into(),
+            kind,
+        }
+    }
+}
+
+impl fmt::Display for ListingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use ListingErrorKind::*;
+        write!(f, "{:?}: ", self.location.path())?;
+        match &self.kind {
+            OpenLocal(source) => write!(f, "Could not open folder: {source}"),
+            ReadLocalEntry(source) => write!(f, "Could not read folder entry: {source}"),
+            LocalMetadata(source) => write!(f, "Could not read entry metadata: {source}"),
+            ArchiveFormat => f.write_str("Unsupported archive format"),
+            ReadArchive(source) => write!(f, "Could not read archive: {source}"),
+            MissingArchiveFolder => f.write_str("Folder missing from archive"),
+            OpenSftp(source) => write!(f, "Could not open SFTP folder: {source}"),
+            ReadSftp(source) => write!(f, "Could not read SFTP folder entry: {source}"),
+            SftpNameEncoding(name) => write!(f, "SFTP entry name {name:?} is not UTF-8"),
+            InvalidSftpName(source) => fmt::Display::fmt(source, f),
+            RequiresSftpConnection => f.write_str("Folder listing requires an open SFTP session"),
+        }
+    }
+}
+
+impl Error for ListingError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        use ListingErrorKind::*;
+        match &self.kind {
+            OpenLocal(source)
+            | ReadLocalEntry(source)
+            | LocalMetadata(source)
+            | ReadArchive(source) => Some(source),
+            OpenSftp(source) | ReadSftp(source) => Some(source),
+            InvalidSftpName(source) => Some(source),
+            _ => None,
         }
     }
 }
@@ -101,3 +169,4 @@ impl Error for PathError {
         }
     }
 }
+use crate::vfs::Location;

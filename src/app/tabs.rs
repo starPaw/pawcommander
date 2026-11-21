@@ -9,6 +9,7 @@ use super::state::{
     is_dot_file, Density, FileOrder, FolderMode, FolderView, FolderViewChange, FolderViews,
     PaneSession, SavedLocation, Settings, Sort, TabSession,
 };
+use crate::operations::TransferError;
 use crate::tab_drag::{clamp_tab_slot, TabDrop};
 use crate::vfs as fs_ops;
 use crate::vfs::{FileEntry, Location};
@@ -222,7 +223,8 @@ impl Tab {
             self.finish_load(Err(crate::tr_format!(
                 "Could not start reading folder: {error}",
                 error = error
-            )));
+            )
+            .into()));
         }
     }
     pub(super) fn auto_refresh(&mut self, ctx: &egui::Context, now: Instant) {
@@ -244,7 +246,7 @@ impl Tab {
             .as_ref()
             .is_some_and(|load| load.mode == DirectoryLoadMode::Automatic)
     }
-    pub(super) fn finish_load(&mut self, result: Result<Option<Vec<FileEntry>>, String>) {
+    pub(super) fn finish_load(&mut self, result: Result<Option<Vec<FileEntry>>, TransferError>) {
         let mode = self.loading.take().expect("active directory load").mode;
         match result {
             Ok(None) if mode != DirectoryLoadMode::Progressive => {}
@@ -301,6 +303,7 @@ impl Tab {
                 }
             }
             Err(error) => {
+                let error = crate::i18n::file_error(&error);
                 self.reveal_after_load = None;
                 self.column_reveal = None;
                 if !self.has_complete_listing && !self.entries.is_empty() {

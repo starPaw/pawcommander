@@ -1810,7 +1810,7 @@ pub(super) fn validate_source_child_name(source: &Location, name: &OsStr) -> Res
     validate_name(name).map_err(|error| {
         crate::tr_format!(
             "Unsupported SFTP transfer name in {source}: {error}",
-            error = crate::i18n::file_error(&error),
+            error = crate::i18n::path_error(&error),
             source = source
         )
     })

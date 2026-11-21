@@ -2,7 +2,7 @@ use super::{
     entry_widget, fs_ops, list_notice, Action, ColumnNavigation, DirectoryEntries, DropTargets,
     EntryOptions, FileEntry, FolderView, Location, PaneOptions, Tab, COMPACT_FILE_ROW_HEIGHT,
 };
-use crate::{i18n::text, icons, theme::paint_focus};
+use crate::{i18n::text, icons, operations::TransferError, theme::paint_focus};
 use eframe::egui::{self, RichText, Vec2};
 use std::collections::BTreeMap;
 use std::sync::{
@@ -16,7 +16,7 @@ const COLUMN_GAP: f32 = 6.0;
 const HEADING_HEIGHT: f32 = 22.0;
 const REMOTE_RETRY: Duration = Duration::from_secs(1);
 
-type Listing = Result<Option<Vec<FileEntry>>, String>;
+type Listing = Result<Option<Vec<FileEntry>>, TransferError>;
 
 #[derive(Default)]
 pub(super) struct Columns {
@@ -122,7 +122,7 @@ impl Columns {
                         entries.replace(files);
                         Some(Ok(entries))
                     }
-                    Err(error) => Some(Err(error)),
+                    Err(error) => Some(Err(crate::i18n::file_error(&error))),
                 };
                 if let Some(listing) = listing {
                     self.listings.insert(read.location.clone(), listing);

@@ -3,7 +3,7 @@
 
 mod bandwidth;
 
-use crate::file_error::{Failure, PathError};
+use crate::file_error::{Failure, ListingError, PathError};
 use crate::vfs::{Endpoint, Location};
 use bandwidth::Pacer;
 pub(crate) use bandwidth::TransferLimits;
@@ -72,7 +72,7 @@ enum CopyTraffic {
 }
 
 #[derive(Debug)]
-struct Cancelled;
+pub(crate) struct Cancelled;
 
 impl std::fmt::Display for Cancelled {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -224,6 +224,12 @@ impl From<&str> for TransferError {
 impl From<PathError> for TransferError {
     fn from(error: PathError) -> Self {
         Self::Failed(Failure::Path(error))
+    }
+}
+
+impl From<ListingError> for TransferError {
+    fn from(error: ListingError) -> Self {
+        Self::Failed(Failure::Listing(Box::new(error)))
     }
 }
 

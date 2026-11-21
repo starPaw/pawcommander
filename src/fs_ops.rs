@@ -1,6 +1,7 @@
 //! Local filesystem operations. Copies are staged privately on the destination
 //! volume before publication. This does not snapshot a changing filesystem.
 
+use crate::file_error::{ListingError, ListingErrorKind};
 use crate::operations::{Cancellation, CopyReader, Progress, TransferError};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
@@ -107,7 +108,7 @@ pub enum TransferKind {
 pub fn read_directory(
     path: &Path,
     cancelled: &impl Fn() -> bool,
-) -> Result<Vec<FileEntry>, String> {
+) -> Result<Vec<FileEntry>, TransferError> {
     let mut entries = Vec::new();
     visit_directory(path, cancelled, |entry| entries.push(entry))?;
     if !cancelled() {
@@ -125,12 +126,12 @@ pub fn visit_directory(
     path: &Path,
     cancelled: &impl Fn() -> bool,
     mut visit: impl FnMut(FileEntry),
-) -> Result<(), String> {
+) -> Result<(), TransferError> {
     if cancelled() {
         return Ok(());
     }
     let mut directory = fs::read_dir(path)
-        .map_err(|e| at(crate::i18n::text!("Не удалось прочитать папку"), path, e))?;
+        .map_err(|error| ListingError::new(path.to_owned(), ListingErrorKind::OpenLocal(error)))?;
     while !cancelled() {
         let Some(item) = directory.next() else {
             break;
@@ -138,24 +139,16 @@ pub fn visit_directory(
         if cancelled() {
             break;
         }
-        let item = item.map_err(|e| {
-            at(
-                crate::i18n::text!("Не удалось прочитать элемент папки"),
-                path,
-                e,
-            )
+        let item = item.map_err(|error| {
+            ListingError::new(path.to_owned(), ListingErrorKind::ReadLocalEntry(error))
         })?;
         let path = item.path();
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
             // Another app may remove a file while the listing is being read.
             Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-            Err(e) => {
-                return Err(at(
-                    crate::i18n::text!("Не удалось получить сведения об элементе"),
-                    &path,
-                    e,
-                ));
+            Err(error) => {
+                return Err(ListingError::new(path, ListingErrorKind::LocalMetadata(error)).into());
             }
         };
         if cancelled() {

@@ -419,7 +419,7 @@ pub(super) fn normalize_remote(path: &Path) -> Result<PathBuf, TransferError> {
     Ok(PathBuf::from(format!("/{}", parts.join("/"))))
 }
 
-pub(super) fn validate_name(name: &str) -> Result<(), TransferError> {
+pub(super) fn validate_name(name: &str) -> Result<(), PathError> {
     let mut components = Path::new(name).components();
     if name.trim().is_empty()
         || name == "."
@@ -428,7 +428,7 @@ pub(super) fn validate_name(name: &str) -> Result<(), TransferError> {
         || !matches!(components.next(), Some(Component::Normal(_)))
         || components.next().is_some()
     {
-        return Err(PathError::InvalidName(name.to_owned()).into());
+        return Err(PathError::InvalidName(name.to_owned()));
     }
     Ok(())
 }
