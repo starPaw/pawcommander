@@ -1,9 +1,13 @@
 use super::{
-    is_link, stale, Budget, Exclusions, Kind, Observed, Snapshot, SyncChange, SyncPlan, SyncRow,
+    is_link, stale, Budget, Exclusions, Kind, Observed, Snapshot, SyncChange, SyncPlan, SyncReport,
+    SyncRow,
 };
 use crate::{
-    file_error::MetadataWarning,
-    operations::{Cancellation, Progress, TransferError},
+    file_error::{
+        AccessAction, AccessError, LocalPathAction, MetadataWarning, MutationError,
+        PublicationError,
+    },
+    operations::{AccessStream, Cancellation, Progress, TransferError},
     result_history::Outcome,
     vfs::{
         compare::scan,
@@ -31,7 +35,7 @@ impl SyncPlan {
         &self.folders
     }
 
-    pub(crate) fn apply(&self, progress: &mut Progress) -> Result<String, String> {
+    pub(crate) fn apply(&self, progress: &mut Progress) -> SyncReport {
         let execution = Execution {
             folders: &self.folders,
             observed: &self.observed,
@@ -51,25 +55,11 @@ pub(super) fn finish(
     result: Result<(), TransferError>,
     completed: usize,
     progress: &mut Progress,
-) -> Result<String, String> {
-    match result {
-        Ok(()) => Ok(crate::tr_format!(
-            "Synchronization complete. Completed: {completed}.",
-            completed = completed
-        )),
-        Err(TransferError::Cancelled) => {
-            progress.results.cancelled = true;
-            Ok(crate::tr_format!(
-                "Synchronization stopped. Completed: {completed}.",
-                completed = completed
-            ))
-        }
-        Err(error) => Err(crate::tr_format!(
-            "{error}. Completed: {completed}.",
-            completed = completed,
-            error = crate::i18n::file_error(&error)
-        )),
+) -> SyncReport {
+    if matches!(result, Err(TransferError::Cancelled)) {
+        progress.results.cancelled = true;
     }
+    SyncReport { completed, result }
 }
 
 pub(super) struct Execution<'a> {
@@ -148,11 +138,10 @@ impl Execution<'_> {
                     *completed += group.len();
                 }
                 Err(error @ TransferError::PublicationUnconfirmed(_)) => {
-                    progress.results.record(
+                    progress.results.record_with_error(
                         &key,
-                        None,
                         Outcome::PublicationUnconfirmed,
-                        Some(crate::i18n::file_error(&error)),
+                        Some(&error),
                     );
                     return Err(error);
                 }
@@ -300,7 +289,9 @@ impl Execution<'_> {
                         source.verify_absent(name)?;
                         parent.verify_absent(name)?;
                         if let Some(path) = backup.location.local() {
-                            trash::delete(path.join(name)).map_err(err)?;
+                            let path = path.join(name);
+                            trash::delete(&path)
+                                .map_err(|source| MutationError::Trash { path, source })?;
                         }
                     }
                     Ok(())
@@ -314,14 +305,13 @@ impl Execution<'_> {
                         .and_then(|()| parent.verify())
                         .and_then(|()| backup.rename(name, &parent, name));
                     if let Err(restore) = restore {
-                        return Err(retained(
-                            TransferError::publication_unconfirmed(crate::tr_format!(
-                                "{error}. Could not restore the previous item: {restore}",
-                                error = crate::i18n::file_error(&error),
-                                restore = crate::i18n::file_error(&restore)
-                            )),
-                            staging,
-                        ));
+                        let failure = PublicationError::Rollback {
+                            target: target.clone(),
+                            backup: backup.location.join(name),
+                            cause: error,
+                            restore,
+                        };
+                        return Err(retained(failure.into(), staging));
                     }
                     *preserve = false;
                     return Err(error);
@@ -364,11 +354,17 @@ fn groups(mut rows: &[SyncRow]) -> Vec<&[SyncRow]> {
 
 fn make_directory(location: &Location) -> Result<(), TransferError> {
     if let Some(path) = location.local() {
-        fs::DirBuilder::new().mode(0o700).create(path)?;
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(path)
+            .map_err(|error| MutationError::local(path, LocalPathAction::CreateDirectory, error))?;
     } else {
         remote(location)?
             .mkdir(location.path(), 0o700)
-            .map_err(err)?;
+            .map_err(|source| MutationError::CreateSftp {
+                destination: location.clone(),
+                source,
+            })?;
     }
     Ok(())
 }
@@ -401,8 +397,8 @@ fn stage_source(
                         let copied = progress.copy(
                             source.path(),
                             Some(size),
-                            &mut input.take(size),
-                            &mut output,
+                            &mut AccessStream::new(input, source).take(size),
+                            &mut AccessStream::new(&mut output, &target),
                         )?;
                         if copied != size {
                             return Err(stale(source));
@@ -413,11 +409,15 @@ fn stage_source(
             }
             Kind::Link(link) => {
                 if let Some(path) = target.local() {
-                    std::os::unix::fs::symlink(Path::new(link), path)?;
+                    std::os::unix::fs::symlink(Path::new(link), path).map_err(|error| {
+                        AccessError::new(&target, AccessAction::CreateLink, error)
+                    })?;
                 } else {
                     remote(&target)?
                         .symlink(Path::new(link), target.path())
-                        .map_err(err)?;
+                        .map_err(|error| {
+                            AccessError::new(&target, AccessAction::CreateLink, error)
+                        })?;
                 }
             }
         }
@@ -498,9 +498,12 @@ fn required_tree(
             )
         } else if is_link(&metadata) {
             let target = if let Some(path) = location.local() {
-                fs::read_link(path)?
+                fs::read_link(path)
+                    .map_err(|error| AccessError::new(&location, AccessAction::ReadLink, error))?
             } else {
-                remote(&location)?.readlink(location.path()).map_err(err)?
+                remote(&location)?
+                    .readlink(location.path())
+                    .map_err(|error| AccessError::new(&location, AccessAction::ReadLink, error))?
             };
             Kind::Link(target.into_os_string())
         } else {

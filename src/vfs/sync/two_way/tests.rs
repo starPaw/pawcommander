@@ -232,7 +232,7 @@ fn choices_stay_in_the_preview_until_a_revalidated_apply_updates_both_folders() 
     pair.file(0, "sub/left-only", b"left");
     pair.file(1, "right-only", b"peer");
     let mut plan = pair.build();
-    assert!(plan.apply(&mut progress).is_err());
+    assert!(plan.apply(&mut progress).result.is_err());
     plan.choose("conflict".into(), 1, &progress).unwrap();
     assert_plan(
         &plan,
@@ -251,14 +251,14 @@ fn choices_stay_in_the_preview_until_a_revalidated_apply_updates_both_folders() 
         .unwrap()
         .set_times(FileTimes::new().set_modified(timestamp))
         .unwrap();
-    assert!(plan.apply(&mut progress).is_err());
+    assert!(plan.apply(&mut progress).result.is_err());
     assert!(!pair.folders[0].path().join("right-only").exists());
     assert_eq!(fs::read(old).unwrap(), b"late");
     assert!(plan.store.read_run().unwrap().is_none());
 
     let mut plan = pair.build();
     plan.choose("conflict".into(), 1, &progress).unwrap();
-    plan.apply(&mut progress).unwrap();
+    plan.apply(&mut progress).result.unwrap();
     assert!(plan.store.read_run().unwrap().is_none());
     let next = pair.build();
     assert!(next.has_baseline());
@@ -324,9 +324,9 @@ fn interrupted_pair_blocks_held_entries_then_requires_review_of_the_actual_folde
         &recovered,
         &[("entry", Reconcile::Conflict(ReconcileConflict::Interrupted))],
     );
-    assert!(recovered.apply(&mut progress).is_err());
+    assert!(recovered.apply(&mut progress).result.is_err());
     recovered.choose("entry".into(), 1, &progress).unwrap();
-    recovered.apply(&mut progress).unwrap();
+    recovered.apply(&mut progress).result.unwrap();
     assert_eq!(fs::read(original).unwrap(), b"left");
     assert!(!pair.build().interrupted());
 }
@@ -370,7 +370,7 @@ fn two_way_exclusion_changes_use_a_fresh_scope_for_deletion_inference() {
     let filtered = pair.build_with(Exclusions::parse("*.TMP\n.git").unwrap());
     assert!(!filtered.has_baseline());
     assert_plan(&filtered, &[("from-right", change(0, SyncChange::Copy))]);
-    filtered.apply(&mut progress).unwrap();
+    filtered.apply(&mut progress).result.unwrap();
     assert_eq!(
         fs::read(pair.folders[1].join("excluded.tmp").path()).unwrap(),
         b"original"
@@ -406,7 +406,7 @@ fn two_way_choice_cannot_replace_a_branch_that_contains_an_exclusion() {
         .unwrap_err()
         .to_string()
         .contains("retained.tmp"));
-    assert!(plan.apply(&mut progress).is_err());
+    assert!(plan.apply(&mut progress).result.is_err());
     assert_eq!(
         fs::read(pair.folders[1].join("branch/retained.tmp").path()).unwrap(),
         b"preserve"
@@ -464,7 +464,7 @@ pub(in crate::vfs) fn two_way_round_trip(remote: &Location) {
     let mut progress = Progress::default();
     plan.choose("disputed".into(), 1, &progress).unwrap();
     assert!(plan.deletes_remote());
-    plan.apply(&mut progress).unwrap();
+    plan.apply(&mut progress).result.unwrap();
     assert!(!peer.path().exists());
     assert_eq!(fs::read(fixture.path().join("upload")).unwrap(), b"left");
     assert_eq!(

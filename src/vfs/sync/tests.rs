@@ -1,4 +1,5 @@
 use super::*;
+use crate::file_error::{Failure, MutationError, PublicationError, RecoveryNotice};
 use std::{
     fs,
     os::unix::fs::symlink,
@@ -89,17 +90,25 @@ fn plan_rejects_nested_or_aliased_folders() {
     let alias = root.path().join("alias");
     symlink(&folder, &alias).unwrap();
     let error = SyncPlan::build(
-        [alias.into(), nested.into()],
+        [alias.into(), nested.clone().into()],
         true,
         Exclusions::default(),
         &mut Progress::default(),
     )
     .err()
     .unwrap();
-    assert_eq!(
-        error.to_string(),
-        text!("Источник и назначение синхронизации пересекаются")
-    );
+    let TransferError::Failed(Failure::Sync(error)) = error else {
+        panic!("expected typed overlapping folders");
+    };
+    let SyncError::Overlap {
+        source,
+        destination,
+    } = *error
+    else {
+        panic!("expected both overlapping paths");
+    };
+    assert_eq!(source.path(), folder.canonicalize().unwrap());
+    assert_eq!(destination.path(), nested.canonicalize().unwrap());
 }
 
 #[test]
@@ -136,7 +145,9 @@ fn apply_publishes_verified_copies_and_both_type_replacements() {
     let mut progress = Progress::default();
     let plan = SyncPlan::build(pair.clone(), false, Exclusions::default(), &mut progress).unwrap();
     let row_count = plan.rows.len();
-    plan.apply(&mut progress).unwrap();
+    let report = plan.apply(&mut progress);
+    report.result.unwrap();
+    assert_eq!(report.completed, row_count);
     for (path, bytes) in [
         ("folder-over-file/.child", b"child".as_slice()),
         ("file-over-folder", b"source file"),
@@ -189,7 +200,13 @@ fn apply_revalidates_before_its_first_mutation() {
     let plan = SyncPlan::build(pair.clone(), false, Exclusions::default(), &mut progress).unwrap();
     fs::write(item.path(), b"edit").unwrap();
     set_modified(item.path(), time);
-    assert!(plan.apply(&mut progress).unwrap_err().contains("z-replace"));
+    let report = plan.apply(&mut progress);
+    assert_eq!(report.completed, 0);
+    let Err(TransferError::Failed(Failure::Mutation(error))) = report.result else {
+        panic!("expected a typed stale plan error");
+    };
+    assert!(matches!(*error, MutationError::PlanChanged(path)
+        if path.path() == item.path().canonicalize().unwrap()));
     assert!(progress
         .results
         .root_outcomes()
@@ -197,6 +214,100 @@ fn apply_revalidates_before_its_first_mutation() {
         .all(|(_, status)| *status == Outcome::NotStarted));
     assert_eq!(fs::read(item.path()).unwrap(), b"edit");
     assert!(!target.join("a-copy").path().exists());
+}
+
+#[test]
+fn failed_replacement_and_restore_keep_both_causes_and_versions() {
+    use crate::result_history::Outcome;
+
+    let (_temporary, pair) = folders();
+    let [source, target] = &pair;
+    fs::write(source.join("a-copy").path(), b"confirmed").unwrap();
+    fs::write(source.join("z-replace").path(), b"incoming").unwrap();
+    fs::write(target.join("z-replace").path(), b"original").unwrap();
+    let destination = target.path().canonicalize().unwrap();
+    let observer = destination.clone();
+    let mut arrived = false;
+    let cancel = Cancellation::at_checkpoint(move || {
+        if !arrived
+            && fs::read_dir(&observer).unwrap().any(|entry| {
+                let entry = entry.unwrap();
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".pawcommander-transfer-")
+                    && entry.path().join("previous/z-replace").is_file()
+            })
+        {
+            let mut item = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(observer.join("z-replace"))
+                .unwrap();
+            std::io::Write::write_all(&mut item, b"arrived").unwrap();
+            arrived = true;
+        }
+        false
+    });
+    let plan = SyncPlan::build(
+        pair.clone(),
+        false,
+        Exclusions::default(),
+        &mut Progress::default(),
+    )
+    .unwrap();
+    let mut progress = Progress::with_cancellation(cancel);
+    let report = plan.apply(&mut progress);
+    assert_eq!(report.completed, 1);
+    let Err(TransferError::PublicationUnconfirmed(Failure::Publication(error))) = report.result
+    else {
+        panic!("expected an unconfirmed publication");
+    };
+    let PublicationError::Retained {
+        staging,
+        notice: RecoveryNotice::InspectStaging,
+        cause,
+    } = *error
+    else {
+        panic!("expected the retained staging location");
+    };
+    let TransferError::Failed(Failure::Publication(error)) = cause else {
+        panic!("expected a typed failed restore");
+    };
+    let PublicationError::Rollback {
+        target,
+        backup,
+        cause,
+        restore,
+    } = *error
+    else {
+        panic!("expected both failures and both paths");
+    };
+    assert_eq!(target.path(), destination.join("z-replace"));
+    assert_eq!(backup, staging.join("previous/z-replace"));
+    let incoming = staging.join("incoming");
+    for (error, from) in [(cause, &incoming), (restore, &backup)] {
+        let TransferError::Failed(Failure::Mutation(rename)) = error else {
+            panic!("expected an actual rename failure");
+        };
+        assert!(
+            matches!(*rename, MutationError::RenameLocal { from: attempted, to, source }
+            if attempted == from.path() && to == target.path() && source.raw_os_error() == Some(libc::EEXIST))
+        );
+    }
+    assert_eq!(fs::read(target.path()).unwrap(), b"arrived");
+    assert_eq!(fs::read(backup.path()).unwrap(), b"original");
+    assert_eq!(fs::read(incoming.path()).unwrap(), b"incoming");
+    assert_eq!(
+        fs::read(source.join("z-replace").path()).unwrap(),
+        b"incoming"
+    );
+    assert_eq!(fs::read(destination.join("a-copy")).unwrap(), b"confirmed");
+    assert_eq!(progress.results.items[0].outcome, Outcome::Completed);
+    assert_eq!(
+        progress.results.items[1].outcome,
+        Outcome::PublicationUnconfirmed
+    );
 }
 
 #[test]
@@ -229,7 +340,7 @@ fn profile_exclusions_filter_new_subtrees_and_protect_items_on_both_sides() {
         .into()
     );
     assert_eq!(plan.excluded_count(), 4);
-    plan.apply(&mut progress).unwrap();
+    plan.apply(&mut progress).result.unwrap();
     assert_eq!(fs::read(right.join("new/keep").path()).unwrap(), b"include");
     assert_eq!(
         fs::read(right.join("new/root-only").path()).unwrap(),
@@ -302,7 +413,7 @@ pub(in crate::vfs) fn sync_round_trip(remote: &Location) {
     assert!(remote_source_matches(&original, &edited));
     let error = plan.verify(&mut progress).unwrap_err();
     assert!(error.to_string().contains("changed.bin"));
-    assert!(plan.apply(&mut progress).is_err());
+    assert!(plan.apply(&mut progress).result.is_err());
     assert_eq!(fs::read(peer.path()).unwrap(), b"edit");
     assert!(destination.join("extra").path().is_file());
     assert!(!destination.join(".new").path().exists());
@@ -318,7 +429,7 @@ pub(in crate::vfs) fn sync_round_trip(remote: &Location) {
         (reverse.copies, reverse.replacements, reverse.deletions),
         (1, 1, 0)
     );
-    reverse.apply(&mut progress).unwrap();
+    reverse.apply(&mut progress).result.unwrap();
     assert_eq!(
         fs::read(source.join("changed.bin").path()).unwrap(),
         b"edit"
@@ -343,7 +454,7 @@ pub(in crate::vfs) fn sync_round_trip(remote: &Location) {
         (upload.copies, upload.replacements, upload.deletions),
         (2, 1, 4)
     );
-    upload.apply(&mut progress).unwrap();
+    upload.apply(&mut progress).result.unwrap();
     assert_eq!(fs::read(peer.path()).unwrap(), b"new!");
     assert_eq!(fs::read(destination.join(".new").path()).unwrap(), b"copy");
     assert_eq!(
@@ -376,7 +487,7 @@ pub(in crate::vfs) fn sync_round_trip(remote: &Location) {
     )
     .unwrap();
     assert_eq!(plan.excluded_count(), 2);
-    plan.apply(&mut progress).unwrap();
+    plan.apply(&mut progress).result.unwrap();
     assert_eq!(
         fs::read(destination.join("new-folder/include").path()).unwrap(),
         b"copy"

@@ -19,7 +19,7 @@ use super::{
     Location, MAX_TREE_DEPTH,
 };
 use crate::{
-    i18n::text,
+    file_error::{ScanError, SyncError},
     operations::{Cancellation, Progress, TransferError},
 };
 use std::{
@@ -54,6 +54,11 @@ pub(crate) struct SyncPlan {
     pub(crate) copies: usize,
     pub(crate) replacements: usize,
     pub(crate) deletions: usize,
+}
+
+pub(crate) struct SyncReport {
+    pub(crate) completed: usize,
+    pub(crate) result: Result<(), TransferError>,
 }
 
 impl SyncPlan {
@@ -178,11 +183,7 @@ fn check_new_name(
 }
 
 fn name_collision(location: &Location) -> TransferError {
-    crate::tr_format!(
-        "Names collide at the destination: {location}",
-        location = location
-    )
-    .into()
+    SyncError::NameCollision(location.clone()).into()
 }
 
 fn is_sync_staging(name: &OsStr) -> bool {
@@ -201,9 +202,7 @@ fn is_sync_staging(name: &OsStr) -> bool {
 }
 
 fn retained_stage(location: &Location) -> TransferError {
-    crate::tr_format!(
-        "Found a sync staging folder: {location}. Wait for any running synchronization to finish. If it was interrupted, inspect the retained versions before building a new plan.", location = location
-    ).into()
+    SyncError::RetainedStage(location.clone()).into()
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -284,7 +283,10 @@ fn check_roots(
     destination: &Location,
     cancel: &Cancellation,
 ) -> Result<(), TransferError> {
-    let overlap = || text!("Источник и назначение синхронизации пересекаются").into();
+    let overlap = || SyncError::Overlap {
+        source: source.clone(),
+        destination: destination.clone(),
+    };
     if (source.might_share_filesystem(destination)
         || source
             .sftp_endpoint()
@@ -293,7 +295,7 @@ fn check_roots(
         && (source.path().starts_with(destination.path())
             || destination.path().starts_with(source.path()))
     {
-        return Err(overlap());
+        return Err(overlap().into());
     }
     if source.local().is_some() && destination.local().is_some() {
         // Check directory identity too. A local alias or volume spelling
@@ -304,7 +306,7 @@ fn check_roots(
             for ancestor in child.ancestors() {
                 cancel.check()?;
                 if entry_metadata(&ancestor)?.is_some_and(|actual| expected.same_object(&actual)) {
-                    return Err(overlap());
+                    return Err(overlap().into());
                 }
             }
         }
@@ -323,10 +325,7 @@ impl Budget {
         self.entries += 1;
         self.bytes += bytes;
         if self.entries > MAX_ENTRIES || self.bytes > MAX_PATH_BYTES {
-            return Err(text!(
-                "Достигнут предел плана: 100 000 объектов или 32 МиБ данных о путях"
-            )
-            .into());
+            return Err(SyncError::PlanLimit.into());
         }
         Ok(())
     }
@@ -348,13 +347,10 @@ impl Snapshot {
         if let Some(excluded) = self.excluded.range(path.to_owned()..).next()
             && excluded.starts_with(path)
         {
-            let location = self.root.join(path);
-            let excluded = excluded.display();
-            return Err(crate::tr_format!(
-                "Replacing or deleting {location} would affect the excluded path {excluded}.",
-                excluded = excluded,
-                location = location
-            )
+            return Err(SyncError::ExcludedPath {
+                target: self.root.join(path),
+                excluded: excluded.clone(),
+            }
             .into());
         }
         Ok(())
@@ -404,7 +400,7 @@ impl Snapshot {
         let kind = match entry {
             scan::Entry::Directory if metadata.is_directory() => {
                 if relative.components().count() > MAX_TREE_DEPTH {
-                    return Err(text!("Достигнут предел вложенности папок").into());
+                    return Err(ScanError::DepthLimit(location).into());
                 }
                 progress.item(location.path());
                 let mut children = BTreeMap::new();
@@ -420,7 +416,11 @@ impl Snapshot {
                     }
                     budget.visit(path.as_os_str().len() + child.extra_path_bytes())?;
                     if children.insert(path, child).is_some() {
-                        return Err(text!("Папка содержит повторяющиеся имена").into());
+                        return Err(ScanError::DuplicateEntry {
+                            directory: location.clone(),
+                            name: name.to_os_string(),
+                        }
+                        .into());
                     }
                     Ok(())
                 })?;
