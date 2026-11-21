@@ -9,15 +9,14 @@ use objc2::{
 };
 use objc2_app_kit::{NSFilePromiseProvider, NSFilePromiseProviderDelegate};
 use objc2_foundation::{
-    NSDictionary, NSError, NSFileCoordinator, NSFileCoordinatorWritingOptions,
-    NSLocalizedDescriptionKey, NSObject, NSObjectProtocol, NSOperationQueue, NSString, NSURL,
+    NSDictionary, NSError, NSLocalizedDescriptionKey, NSObject, NSObjectProtocol, NSOperationQueue,
+    NSString, NSURL,
 };
 use std::{
-    cell::RefCell,
     ffi::{CStr, OsStr},
     os::unix::ffi::OsStrExt,
     path::PathBuf,
-    ptr::{self, NonNull},
+    ptr,
     sync::{
         atomic::{AtomicU8, Ordering},
         mpsc::{self, Receiver, Sender},
@@ -75,32 +74,6 @@ impl PromiseState {
         self.ctx.request_repaint();
         result.recv().map_err(|_| cancelled())?
     }
-
-    fn write(&self, url: &NSURL) -> Result<(), Retained<NSError>> {
-        if !url.isFileURL() {
-            return Err(promise_error(invalid_destination()));
-        }
-        let result = RefCell::new(None);
-        let writer = block2::RcBlock::new(|coordinated: NonNull<NSURL>| {
-            // SAFETY: the coordinator supplies a live URL for the accessor call.
-            *result.borrow_mut() = Some(self.request(unsafe { coordinated.as_ref() }));
-        });
-        let mut error = None;
-        NSFileCoordinator::new().coordinateWritingItemAtURL_options_error_byAccessor(
-            url,
-            NSFileCoordinatorWritingOptions::empty(),
-            Some(&mut error),
-            &writer,
-        );
-        drop(writer);
-        if let Some(error) = error {
-            return Err(error);
-        }
-        result
-            .into_inner()
-            .unwrap_or_else(|| Err(invalid_destination()))
-            .map_err(promise_error)
-    }
 }
 
 define_class!(
@@ -129,7 +102,9 @@ define_class!(
             url: &NSURL,
             done: &block2::DynBlock<dyn Fn(*mut NSError)>,
         ) {
-            let error = self.ivars().write(url).err();
+            // AppKit already coordinates this write. A second claim on the
+            // same URL can block Finder before the transfer reaches the queue.
+            let error = self.ivars().request(url).err().map(promise_error);
             done.call((error
                 .as_ref()
                 .map_or(ptr::null_mut(), |value| Retained::as_ptr(value).cast_mut()),));
