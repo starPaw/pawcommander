@@ -26,6 +26,8 @@ pub(super) enum ComparisonBody {
     #[cfg(target_os = "macos")]
     SettingsTransfer(Box<super::settings_transfer::SettingsTransfer>),
     #[cfg(target_os = "macos")]
+    ViewerExtensions(Box<super::extensions::ExtensionsDialog>),
+    #[cfg(target_os = "macos")]
     Collections(Box<super::collections::CollectionsDialog>),
     #[cfg(target_os = "macos")]
     NewFile(Box<super::file_templates::FileTemplatesDialog>),
@@ -58,6 +60,8 @@ pub(super) enum ComparisonResponse {
     #[cfg(target_os = "macos")]
     ImportSettings(Box<super::settings_transfer::Preferences>),
     #[cfg(target_os = "macos")]
+    ViewerExtensionsChanged(crate::extensions::Catalog),
+    #[cfg(target_os = "macos")]
     CreateFile(
         crate::vfs::file_templates::NewFile,
         mpsc::Sender<Result<(), String>>,
@@ -89,6 +93,8 @@ impl ComparisonDialog {
             #[cfg(target_os = "macos")]
             ComparisonBody::SettingsTransfer(view) => view.poll(),
             #[cfg(target_os = "macos")]
+            ComparisonBody::ViewerExtensions(view) => view.poll(),
+            #[cfg(target_os = "macos")]
             ComparisonBody::Collections(view) => view.poll(),
             #[cfg(target_os = "macos")]
             ComparisonBody::NewFile(view) => view.poll(),
@@ -119,6 +125,8 @@ impl ComparisonDialog {
             ComparisonBody::Volumes => return volumes.show(ctx, file_work),
             #[cfg(target_os = "macos")]
             ComparisonBody::SettingsTransfer(view) => return view.show(ctx),
+            #[cfg(target_os = "macos")]
+            ComparisonBody::ViewerExtensions(view) => return view.show(ctx),
             #[cfg(target_os = "macos")]
             ComparisonBody::Collections(view) => return view.show(ctx, catalog),
             #[cfg(target_os = "macos")]
@@ -162,6 +170,11 @@ impl PawCommander {
         #[cfg(target_os = "macos")]
         if let ComparisonResponse::EjectVolume(target) = response {
             self.eject_volume(target, ctx);
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        if let ComparisonResponse::ViewerExtensionsChanged(catalog) = response {
+            self.extensions.catalog = catalog;
             return;
         }
         if matches!(response, ComparisonResponse::Open) {

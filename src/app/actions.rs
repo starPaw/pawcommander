@@ -25,6 +25,8 @@ pub(super) enum ColumnNavigation {
 
 #[derive(Clone)]
 pub(super) enum Action {
+    #[cfg(target_os = "macos")]
+    PreviewWithExtension(std::path::PathBuf, egui::Id),
     Shortcut(Command),
     MoveSelection {
         delta: isize,
@@ -259,6 +261,10 @@ impl PawCommander {
             return;
         }
         match action {
+            #[cfg(target_os = "macos")]
+            Action::PreviewWithExtension(path, focus) => {
+                self.open_extensions(Some(path), Some(focus), ctx)
+            }
             Action::Shortcut(command) => self.run_shortcut(command, ctx),
             Action::MoveSelection { delta, extend } => {
                 let view = self.folder_view(self.active);

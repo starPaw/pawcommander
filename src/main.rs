@@ -10,6 +10,8 @@ mod conflict;
 mod credentials;
 mod directory_tree;
 mod drag_drop;
+#[cfg(target_os = "macos")]
+mod extensions;
 mod file_clipboard;
 mod folder_jump;
 mod fs_ops;
@@ -54,6 +56,7 @@ fn main() -> std::process::ExitCode {
             "--paw-drag-escape-listener" => std::process::exit(native_drag::listen_for_escape()),
             preview::PDF_WORKER_ARG => std::process::exit(preview::run_pdf_worker()),
             preview::MEDIA_WORKER_ARG => std::process::exit(preview::run_media_worker()),
+            extensions::WORKER_ARG => std::process::exit(extensions::run_worker()),
             _ => {}
         }
     }

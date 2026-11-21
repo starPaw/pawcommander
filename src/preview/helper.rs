@@ -9,13 +9,13 @@ use std::{
 
 const MESSAGE_LIMIT: usize = 128 * 1024;
 
-pub(super) fn read_size(input: &mut impl Read) -> io::Result<usize> {
+pub(crate) fn read_size(input: &mut impl Read) -> io::Result<usize> {
     let mut buffer = [0; 4];
     input.read_exact(&mut buffer)?;
     Ok(u32::from_le_bytes(buffer) as usize)
 }
 
-pub(super) fn read_message<T: DeserializeOwned>(input: &mut impl Read) -> io::Result<T> {
+pub(crate) fn read_message<T: DeserializeOwned>(input: &mut impl Read) -> io::Result<T> {
     let size = read_size(input)?;
     if !(1..=MESSAGE_LIMIT).contains(&size) {
         return Err(bad_response());
@@ -25,17 +25,17 @@ pub(super) fn read_message<T: DeserializeOwned>(input: &mut impl Read) -> io::Re
     serde_json::from_slice(&bytes).map_err(io::Error::other)
 }
 
-pub(super) fn write_blob(output: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_blob(output: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
     let size = u32::try_from(bytes.len()).map_err(io::Error::other)?;
     output.write_all(&size.to_le_bytes())?;
     output.write_all(bytes)
 }
 
-pub(super) fn write_message<T: Serialize>(output: &mut impl Write, message: &T) -> io::Result<()> {
+pub(crate) fn write_message<T: Serialize>(output: &mut impl Write, message: &T) -> io::Result<()> {
     write_blob(output, &serde_json::to_vec(message)?)
 }
 
-pub(super) struct Process {
+pub(crate) struct Process {
     child: Child,
     input: ChildStdin,
     output: ChildStdout,
@@ -47,7 +47,7 @@ impl Process {
         Self::spawn(std::process::Command::new(executable).arg(mode))
     }
 
-    pub(super) fn spawn(command: &mut std::process::Command) -> io::Result<Self> {
+    pub(crate) fn spawn(command: &mut std::process::Command) -> io::Result<Self> {
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -65,7 +65,7 @@ impl Process {
         Ok(session)
     }
 
-    pub(super) fn pipes<'a>(
+    pub(crate) fn pipes<'a>(
         &'a mut self,
         duration: Duration,
         cancel: &'a Cancellation,
@@ -107,7 +107,7 @@ fn nonblocking(stream: &impl AsRawFd) -> io::Result<()> {
     Ok(())
 }
 
-pub(super) struct Timed<'a, T> {
+pub(crate) struct Timed<'a, T> {
     stream: &'a mut T,
     deadline: Instant,
     cancel: &'a Cancellation,
