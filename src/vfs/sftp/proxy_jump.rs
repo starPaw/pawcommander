@@ -1,7 +1,7 @@
 use super::{
     at_target, authenticate, login_primary, open_verified, route_error, ssh_failure,
-    validate_endpoint, verify_session, Endpoint, InteractiveAuth, PrimaryAuth, TrustFiles,
-    IO_TIMEOUT_MS,
+    validate_endpoint, verify_session, Endpoint, HostKeyRole, InteractiveAuth, PrimaryAuth,
+    TrustFiles, IO_TIMEOUT_MS,
 };
 use crate::file_error::{ConnectionError, SshStage};
 use crate::operations::TransferError;
@@ -29,7 +29,7 @@ pub(super) fn open(
 ) -> Result<Session, TransferError> {
     validate_endpoint(target).map_err(|error| at_target(target, error))?;
     if let Some(auth) = auth.as_deref_mut() {
-        auth.set_host_key_title(crate::i18n::key!("Проверка ключа промежуточного сервера"));
+        auth.set_host_key_role(HostKeyRole::Jump);
     }
     let socket = tunnel(target, &jump.endpoint(), trust, auth.as_deref_mut(), login)
         .map_err(|error| route_error(jump.label(), true, error))?;
@@ -38,7 +38,7 @@ pub(super) fn open(
         .map_err(|error| at_target(target, error))?;
     session.set_tcp_stream(socket);
     if let Some(auth) = auth.as_deref_mut() {
-        auth.set_host_key_title(crate::i18n::key!("Проверка ключа конечного сервера"));
+        auth.set_host_key_role(HostKeyRole::Target);
     }
     verify_session(session, target, trust, auth.as_deref())
         .map_err(|error| at_target(target, error))

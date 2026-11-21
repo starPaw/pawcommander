@@ -1,6 +1,7 @@
 use super::{Endpoint, InteractiveAuth};
+use crate::file_error::{HostKeyError, KnownHostEntryError, KnownHostsError, PinError};
+use crate::name_match::Mask;
 use crate::operations::TransferError;
-use crate::{i18n::text, name_match::Mask};
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -68,7 +69,7 @@ impl<'a> HostNames<'a> {
 }
 
 impl TrustFiles {
-    pub(super) fn user() -> Result<Self, String> {
+    pub(super) fn user() -> Result<Self, HostKeyError> {
         #[cfg(test)]
         if std::env::var_os("PAWCOMMANDER_TEST_SFTP_RECONNECT").as_deref()
             == Some(std::ffi::OsStr::new("1"))
@@ -76,7 +77,7 @@ impl TrustFiles {
         {
             return Ok(Self::new(PathBuf::from(root).join("known_hosts"), None));
         }
-        let home = dirs::home_dir().ok_or_else(|| text!("Не найдена домашняя папка"))?;
+        let home = dirs::home_dir().ok_or(HostKeyError::HomeUnavailable)?;
         Ok(Self::new(
             home.join(".ssh/known_hosts"),
             dirs::data_local_dir().map(|root| root.join("PawCommander").join("ssh-host-keys")),
@@ -93,9 +94,7 @@ impl TrustFiles {
         endpoint: &Endpoint,
         interactive: Option<&InteractiveAuth>,
     ) -> Result<(), TransferError> {
-        let (key, _) = session
-            .host_key()
-            .ok_or_else(|| text!("Сервер не предоставил ключ SSH"))?;
+        let (key, _) = session.host_key().ok_or(HostKeyError::KeyUnavailable)?;
         let names = HostNames::new(endpoint);
         let pin = Pin {
             address: names.scoped.clone(),
@@ -107,14 +106,11 @@ impl TrustFiles {
             return Ok(());
         }
         let Some(interactive) = interactive else {
-            return Err(text!(
-                "Ключ сервера SSH не подтверждён. Откройте форму SFTP и проверьте отпечаток.",
-            )
-            .into());
+            return Err(HostKeyError::Unverified.into());
         };
         let path = path
             .as_deref()
-            .ok_or_else(|| text!("Не найдена папка для доверенных ключей PawCommander"))?;
+            .ok_or(HostKeyError::PinDirectoryUnavailable)?;
         interactive.confirm_host_key(HostKey {
             address: pin.address.clone(),
             algorithm: session.methods(MethodType::HostKey).unwrap_or("SSH").into(),
@@ -122,7 +118,10 @@ impl TrustFiles {
         })?;
         // Another process may have changed either trust file while the dialog was open.
         if !trusted()? {
-            remember(path, &pin)?;
+            remember(path, &pin).map_err(|cause| HostKeyError::Pin {
+                path: path.to_owned(),
+                cause,
+            })?;
         }
         Ok(())
     }
@@ -134,25 +133,24 @@ impl TrustFiles {
         key: &[u8],
         pin: &Pin,
         path: Option<&Path>,
-    ) -> Result<bool, String> {
-        let known = check_known_hosts(session, &self.known_hosts, names, key).map_err(|error| {
-            let path = self.known_hosts.display();
-            crate::tr_format!(
-                "Could not verify the SSH host key using {path} ({error})",
-                error = error,
-                path = path
-            )
+    ) -> Result<bool, HostKeyError> {
+        let known = check_known_hosts(session, &self.known_hosts, names, key).map_err(|cause| {
+            HostKeyError::KnownHosts {
+                path: self.known_hosts.clone(),
+                cause,
+            }
         })?;
         if known == Lookup::Mismatch {
-            let changed = text!("Ключ сервера SSH изменился.");
-            let fingerprint = &pin.fingerprint;
-            let path = self.known_hosts.display();
-            return Err(crate::tr_format!(
-                "{changed} The server presented {fingerprint}. Verify the fingerprint with the administrator and review the entry in {path}.", changed = changed, fingerprint = fingerprint, path = path
-            ));
+            return Err(HostKeyError::KnownHostsChanged {
+                path: self.known_hosts.clone(),
+                received: pin.fingerprint.clone(),
+            });
         }
         let saved = match path {
-            Some(path) => check_pin(path, pin)?,
+            Some(path) => check_pin(path, pin).map_err(|cause| HostKeyError::Pin {
+                path: path.to_owned(),
+                cause,
+            })?,
             None => false,
         };
         Ok(known == Lookup::Match || saved)
@@ -168,25 +166,30 @@ fn check_known_hosts(
     path: &Path,
     names: &HostNames<'_>,
     key: &[u8],
-) -> Result<Lookup, String> {
+) -> Result<Lookup, KnownHostsError> {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Lookup::Missing),
-        Err(error) => return Err(error.to_string()),
+        Err(error) => return Err(KnownHostsError::Read(error)),
     };
-    let mut known = session.known_hosts().map_err(|error| error.to_string())?;
-    let mut revoked = session.known_hosts().map_err(|error| error.to_string())?;
-    let mut authorities = session.known_hosts().map_err(|error| error.to_string())?;
-    for line in BufReader::new(file).split(b'\n') {
-        let line = line.map_err(|error| error.to_string())?;
-        read_line(&line, names, &mut known, &mut revoked, &mut authorities)?;
+    let mut known = session.known_hosts().map_err(KnownHostsError::Initialize)?;
+    let mut revoked = session.known_hosts().map_err(KnownHostsError::Initialize)?;
+    let mut authorities = session.known_hosts().map_err(KnownHostsError::Initialize)?;
+    for (index, line) in BufReader::new(file).split(b'\n').enumerate() {
+        let line = line.map_err(KnownHostsError::Read)?;
+        read_line(&line, names, &mut known, &mut revoked, &mut authorities).map_err(|cause| {
+            KnownHostsError::Entry {
+                line: index + 1,
+                cause,
+            }
+        })?;
     }
     let original_scoped = format!("[{}]:{}", names.original, names.port);
     let lookup = |hosts: &KnownHosts, label: &str| match hosts.check(label, key) {
         CheckResult::Match => Ok(Lookup::Match),
         CheckResult::Mismatch => Ok(Lookup::Mismatch),
         CheckResult::NotFound => Ok(Lookup::Missing),
-        CheckResult::Failure => Err(text!("Ошибка проверки записи known_hosts").to_owned()),
+        CheckResult::Failure => Err(KnownHostsError::Check),
     };
     let check =
         |hosts: &KnownHosts, canonical: &str, original: &str| match lookup(hosts, canonical)? {
@@ -202,7 +205,7 @@ fn check_known_hosts(
         }
     };
     let revoked_at = |canonical: &str, original: &str| {
-        Ok::<_, String>(
+        Ok::<_, KnownHostsError>(
             lookup(&revoked, canonical)? == Lookup::Match
                 || (canonical != original && lookup(&revoked, original)? == Lookup::Match),
         )
@@ -210,7 +213,7 @@ fn check_known_hosts(
     if revoked_at(&names.scoped, &original_scoped)?
         || (names.port == 22 && revoked_at(&names.host, names.original)?)
     {
-        return Err(text!("Ключ сервера SSH отозван").into());
+        return Err(KnownHostsError::Revoked);
     }
     let result = match scoped(&known)? {
         Lookup::Missing => bare(&known)?,
@@ -219,7 +222,7 @@ fn check_known_hosts(
     if result == Lookup::Missing
         && (scoped(&authorities)? != Lookup::Missing || bare(&authorities)? != Lookup::Missing)
     {
-        return Err(text!("Для этого сервера в known_hosts указан центр сертификации SSH. Проверьте сертификат через OpenSSH.").into());
+        return Err(KnownHostsError::CertificateAuthority);
     }
     Ok(result)
 }
@@ -230,8 +233,7 @@ fn read_line(
     known: &mut KnownHosts,
     revoked: &mut KnownHosts,
     authorities: &mut KnownHosts,
-) -> Result<(), String> {
-    let invalid = || text!("Некорректная запись known_hosts").to_owned();
+) -> Result<(), KnownHostEntryError> {
     let mut fields = line
         .split(|byte| byte.is_ascii_whitespace())
         .filter(|field| !field.is_empty());
@@ -242,22 +244,28 @@ fn read_line(
         return Ok(());
     }
     let (entries, hosts) = match first {
-        b"@revoked" => (revoked, fields.next().ok_or_else(invalid)?),
-        b"@cert-authority" => (authorities, fields.next().ok_or_else(invalid)?),
-        marker if marker.starts_with(b"@") => return Err(invalid()),
+        b"@revoked" => (revoked, fields.next().ok_or(KnownHostEntryError::Format)?),
+        b"@cert-authority" => (
+            authorities,
+            fields.next().ok_or(KnownHostEntryError::Format)?,
+        ),
+        marker if marker.starts_with(b"@") => return Err(KnownHostEntryError::Format),
         _ => (known, first),
     };
-    let hosts = std::str::from_utf8(hosts).map_err(|_| invalid())?;
-    let algorithm =
-        std::str::from_utf8(fields.next().ok_or_else(invalid)?).map_err(|_| invalid())?;
-    let key = std::str::from_utf8(fields.next().ok_or_else(invalid)?).map_err(|_| invalid())?;
+    let hosts = std::str::from_utf8(hosts).map_err(KnownHostEntryError::Encoding)?;
+    let mut next_field = || {
+        std::str::from_utf8(fields.next().ok_or(KnownHostEntryError::Format)?)
+            .map_err(KnownHostEntryError::Encoding)
+    };
+    let algorithm = next_field()?;
+    let key = next_field()?;
     let mut add = |host: &str| {
         entries
             .read_str(
                 &format!("{host} {algorithm} {key}"),
                 KnownHostFileKind::OpenSSH,
             )
-            .map_err(|error| error.to_string())
+            .map_err(KnownHostEntryError::Parse)
     };
     if hosts.starts_with('|') {
         add(hosts)?;
@@ -299,63 +307,42 @@ fn pin_path(directory: &Path, address: &str) -> PathBuf {
     directory.join(name)
 }
 
-fn pin_io_error(path: &Path, error: impl std::fmt::Display) -> String {
-    let path = path.display();
-    crate::tr_format!(
-        "Could not read or save the trusted SSH key in {path} ({error})",
-        error = error,
-        path = path
-    )
-}
-
-fn check_pin(path: &Path, expected: &Pin) -> Result<bool, String> {
+fn check_pin(path: &Path, expected: &Pin) -> Result<bool, PinError> {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(pin_io_error(path, error)),
+        Err(error) => return Err(PinError::Read(error)),
     };
     let mut bytes = Vec::new();
     file.take(4097)
         .read_to_end(&mut bytes)
-        .map_err(|error| pin_io_error(path, error))?;
+        .map_err(PinError::Read)?;
     if bytes.len() > 4096 {
-        return Err(pin_io_error(
-            path,
-            text!("Запись доверенного ключа слишком велика"),
-        ));
+        return Err(PinError::TooLarge);
     }
-    let saved: Pin = serde_json::from_slice(&bytes).map_err(|error| pin_io_error(path, error))?;
+    let saved: Pin = serde_json::from_slice(&bytes).map_err(PinError::Json)?;
     if saved != *expected {
-        let changed = text!("Ключ сервера SSH изменился.");
-        let path = path.display();
-        let received = &expected.fingerprint;
-        let saved = &saved.fingerprint;
-        return Err(crate::tr_format!(
-            "{changed} Saved fingerprint {saved}, received {received}. Verify the fingerprint with the administrator and review the record in {path}.", changed = changed, path = path, received = received, saved = saved
-        ));
+        return Err(PinError::Changed {
+            saved: saved.fingerprint,
+            received: expected.fingerprint.clone(),
+        });
     }
     Ok(true)
 }
 
-fn remember(path: &Path, pin: &Pin) -> Result<(), String> {
+fn remember(path: &Path, pin: &Pin) -> Result<(), PinError> {
     let directory = path.parent().expect("pin has a parent directory");
-    let stage = || -> std::io::Result<tempfile::NamedTempFile> {
-        fs::create_dir_all(directory)?;
-        let mut file = tempfile::NamedTempFile::new_in(directory)?;
-        serde_json::to_writer(&mut file, pin)?;
-        file.write_all(b"\n")?;
-        file.as_file().sync_all()?;
-        Ok(file)
-    };
-    match stage()
-        .map_err(|error| pin_io_error(path, error))?
-        .persist_noclobber(path)
-    {
+    fs::create_dir_all(directory).map_err(PinError::Write)?;
+    let mut file = tempfile::NamedTempFile::new_in(directory).map_err(PinError::Write)?;
+    serde_json::to_writer(&mut file, pin).map_err(PinError::Json)?;
+    file.write_all(b"\n").map_err(PinError::Write)?;
+    file.as_file().sync_all().map_err(PinError::Write)?;
+    match file.persist_noclobber(path) {
         Ok(_) => Ok(()),
         Err(error) if error.error.kind() == ErrorKind::AlreadyExists && check_pin(path, pin)? => {
             Ok(())
         }
-        Err(error) => Err(pin_io_error(path, error.error)),
+        Err(error) => Err(PinError::Write(error.error)),
     }
 }
 
@@ -363,6 +350,7 @@ fn remember(path: &Path, pin: &Pin) -> Result<(), String> {
 mod tests {
     use super::*;
     use base64::engine::general_purpose::STANDARD;
+    use std::error::Error as _;
 
     #[test]
     fn ssh_known_hosts_keeps_ports_distinct_and_honors_revocation() {
@@ -401,19 +389,67 @@ mod tests {
             ),
         )
         .unwrap();
-        assert_eq!(
-            check(&endpoint, new).unwrap_err(),
-            text!("Ключ сервера SSH отозван")
-        );
+        assert!(matches!(
+            check(&endpoint, new),
+            Err(KnownHostsError::Revoked)
+        ));
         fs::write(
             &path,
             format!("@cert-authority [*.example]:2222 ssh-ed25519 {old_encoded}\n"),
         )
         .unwrap();
-        assert_eq!(
-            check(&endpoint, new).unwrap_err(),
-            text!("Для этого сервера в known_hosts указан центр сертификации SSH. Проверьте сертификат через OpenSSH.")
-        );
+        assert!(matches!(
+            check(&endpoint, new),
+            Err(KnownHostsError::CertificateAuthority)
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn invalid_known_hosts_blocks_a_matching_pin_and_preserves_the_file_and_cause() {
+        let home = tempfile::tempdir().unwrap();
+        let known = home.path().join("known_hosts");
+        let directory = home.path().join("pins");
+        let trust = TrustFiles::new(known.clone(), Some(directory.clone()));
+        let session = Session::new().unwrap();
+        let endpoint = Endpoint {
+            host: "fixture.example".into(),
+            port: 22,
+            user: "account".into(),
+            key: None,
+            jump: None,
+        };
+        let names = HostNames::new(&endpoint);
+        let key = b"confirmed fixture key";
+        let pin = Pin {
+            address: names.scoped.clone(),
+            fingerprint: fingerprint(key),
+        };
+        let path = pin_path(&directory, &pin.address);
+        remember(&path, &pin).unwrap();
+        let pinned = fs::read(&path).unwrap();
+        let check = || trust.trusted(&session, &names, key, &pin, Some(&path));
+        assert!(check().unwrap());
+
+        let invalid = b"# fixture comment\nfixture.example ssh-ed25519 \xff\n";
+        fs::write(&known, invalid).unwrap();
+        let error = check().unwrap_err();
+        assert!(matches!(&error, HostKeyError::KnownHosts {
+            path,
+            cause: KnownHostsError::Entry { line: 2, cause: KnownHostEntryError::Encoding(_) },
+        } if path == &known));
+        let encoding = error.source().unwrap().source().unwrap().source().unwrap();
+        assert!(encoding.is::<std::str::Utf8Error>());
+        assert_eq!(fs::read(&known).unwrap(), invalid);
+        assert_eq!(fs::read(&path).unwrap(), pinned);
+
+        fs::remove_file(&known).unwrap();
+        fs::create_dir(&known).unwrap();
+        assert!(matches!(check(), Err(HostKeyError::KnownHosts {
+            path,
+            cause: KnownHostsError::Read(source),
+        }) if path == known && source.raw_os_error() == Some(libc::EISDIR)));
+        assert_eq!(fs::read(&path).unwrap(), pinned);
     }
 
     #[test]
@@ -431,10 +467,32 @@ mod tests {
             address: pinned.address.clone(),
             fingerprint: fingerprint(b"other fixture key"),
         };
-        assert!(remember(&path, &changed)
-            .unwrap_err()
-            .starts_with(text!("Ключ сервера SSH изменился.")));
+        assert!(
+            matches!(remember(&path, &changed), Err(PinError::Changed { saved, received })
+            if saved == pinned.fingerprint && received == changed.fingerprint)
+        );
         assert_eq!(fs::read(&path).unwrap(), original);
         assert!(!check_pin(&pin_path(dir.path(), "[host.example]:2222"), &pinned).unwrap());
+    }
+
+    #[test]
+    fn malformed_and_oversized_pins_preserve_the_existing_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let pin = Pin {
+            address: "[host.example]:22".into(),
+            fingerprint: fingerprint(b"confirmed fixture key"),
+        };
+        let path = pin_path(dir.path(), &pin.address);
+        let malformed = b"{\n";
+        fs::write(&path, malformed).unwrap();
+        let error = remember(&path, &pin).unwrap_err();
+        assert!(matches!(&error, PinError::Json(source) if source.is_eof()));
+        assert!(error.source().unwrap().is::<serde_json::Error>());
+        assert_eq!(fs::read(&path).unwrap(), malformed);
+
+        let oversized = vec![b' '; 4097];
+        fs::write(&path, &oversized).unwrap();
+        assert!(matches!(check_pin(&path, &pin), Err(PinError::TooLarge)));
+        assert_eq!(fs::read(&path).unwrap(), oversized);
     }
 }

@@ -105,6 +105,7 @@ formats! {
     "Destination {target} changed after the conflict dialog was shown" => ("Назначение {target} изменилось после показа диалога", "Cíl {target} se změnil po zobrazení dialogu kolize"),
     "Archive updated: {source}" => ("Архив обновлён: {source}", "Archiv byl aktualizován: {source}"),
     "Could not verify the SSH host key using {path} ({error})" => ("Не удалось проверить ключ SSH по {path} ({error})", "Klíč hostitele SSH se nepodařilo ověřit pomocí {path} ({error})"),
+    "known_hosts line {line}: {error}" => ("Строка {line} в known_hosts: {error}", "Řádek {line} v known_hosts: {error}"),
     "{changed} The server presented {fingerprint}. Verify the fingerprint with the administrator and review the entry in {path}." => ("{changed} Сервер предоставил {fingerprint}. Сверьте отпечаток у администратора и проверьте запись в {path}.", "{changed} Server předložil {fingerprint}. Ověřte otisk u správce a zkontrolujte záznam v {path}."),
     "Could not read or save the trusted SSH key in {path} ({error})" => ("Не удалось прочитать или сохранить доверенный ключ SSH в {path} ({error})", "Důvěryhodný klíč SSH se nepodařilo načíst nebo uložit do {path} ({error})"),
     "{changed} Saved fingerprint {saved}, received {received}. Verify the fingerprint with the administrator and review the record in {path}." => ("{changed} Сохранён {saved}, получен {received}. Сверьте отпечаток у администратора и проверьте запись в {path}.", "{changed} Uložený otisk: {saved}. Přijatý otisk: {received}. Ověřte otisk u správce a zkontrolujte záznam v {path}."),

@@ -3,6 +3,9 @@ use crate::vfs::Location;
 use std::net::SocketAddr;
 use std::{error::Error, fmt, io, path::PathBuf, str::Utf8Error};
 
+mod host_key;
+pub(crate) use host_key::{HostKeyError, KnownHostEntryError, KnownHostsError, PinError};
+
 #[derive(Debug)]
 pub(crate) enum Failure {
     Message(String),
@@ -100,6 +103,7 @@ pub(crate) enum ConnectionError {
         stage: SshStage,
         source: ssh2::Error,
     },
+    HostKey(HostKeyError),
     #[cfg(target_os = "macos")]
     Forward {
         target: String,
@@ -134,6 +138,7 @@ impl fmt::Display for ConnectionError {
             }
             Self::Transport(source) => write!(f, "Could not configure the SSH transport: {source}"),
             Self::Ssh { stage, source } => write!(f, "SSH {stage:?}: {source}"),
+            Self::HostKey(error) => fmt::Display::fmt(error, f),
             #[cfg(target_os = "macos")]
             Self::Forward { target, source } => {
                 write!(f, "Could not forward TCP to {target}: {source}")
@@ -164,6 +169,7 @@ impl Error for ConnectionError {
             Self::Resolve { source, .. } | Self::Transport(source) => Some(source),
             Self::Connect { last, .. } => last.as_ref().map(|(_, error)| error as &dyn Error),
             Self::Ssh { source, .. } => Some(source),
+            Self::HostKey(error) => Some(error),
             #[cfg(target_os = "macos")]
             Self::Forward { source, .. } => Some(source),
             Self::Route { cause, .. } | Self::Automatic(cause) => Some(cause),

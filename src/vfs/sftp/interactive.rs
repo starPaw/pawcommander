@@ -1,6 +1,5 @@
 use super::{host_key::HostKey, Endpoint};
 use crate::file_error::ConnectionError;
-use crate::i18n::text;
 use crate::operations::TransferError;
 use ssh2::{KeyboardInteractivePrompt, Prompt, Session};
 use std::{
@@ -114,9 +113,18 @@ pub(crate) enum ConnectionPrompt {
 
 pub(crate) struct HostKeyRequest {
     pub key: HostKey,
-    pub title: &'static str,
+    pub role: HostKeyRole,
     pub deadline: Instant,
     reply: mpsc::Sender<()>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HostKeyRole {
+    Server,
+    #[cfg(target_os = "macos")]
+    Jump,
+    #[cfg(target_os = "macos")]
+    Target,
 }
 
 impl HostKeyRequest {
@@ -154,8 +162,7 @@ pub(crate) struct InteractiveAuth {
     timeout: Duration,
     exchange_deadline: Option<Instant>,
     server: String,
-    #[cfg(target_os = "macos")]
-    host_key_title: Option<crate::i18n::MessageKey>,
+    host_key_role: HostKeyRole,
 }
 
 impl InteractiveAuth {
@@ -171,8 +178,7 @@ impl InteractiveAuth {
                 timeout: PROMPT_TIMEOUT,
                 exchange_deadline: None,
                 server: String::new(),
-                #[cfg(target_os = "macos")]
-                host_key_title: None,
+                host_key_role: HostKeyRole::Server,
             },
             receive,
         )
@@ -183,19 +189,16 @@ impl InteractiveAuth {
     }
 
     #[cfg(target_os = "macos")]
-    pub(super) fn set_host_key_title(&mut self, title: crate::i18n::MessageKey) {
-        self.host_key_title = Some(title);
+    pub(super) fn set_host_key_role(&mut self, role: HostKeyRole) {
+        self.host_key_role = role;
     }
 
     pub(crate) fn confirm_host_key(&self, key: HostKey) -> Result<(), TransferError> {
         let (reply, receive) = mpsc::channel();
         let deadline = Instant::now() + HOST_KEY_TIMEOUT;
-        let title = crate::i18n::key!("Проверка ключа сервера");
-        #[cfg(target_os = "macos")]
-        let title = self.host_key_title.unwrap_or(title);
         self.send(ConnectionPrompt::HostKey(HostKeyRequest {
             key,
-            title: text(title),
+            role: self.host_key_role,
             deadline,
             reply,
         }));

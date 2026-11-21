@@ -1,11 +1,11 @@
 use super::{remote, sessions, Endpoint, Path, PathBuf};
-use crate::file_error::{ConnectionError, Failure};
+use crate::file_error::{ConnectionError, Failure, HostKeyError};
 use crate::i18n::connection_result_error;
 use crate::operations::TransferError;
 use crate::vfs::{
     sftp::{connect_location_at, TrustFiles},
-    ConnectRequest, ConnectedLocation, ConnectionControl, ConnectionPrompt, InteractiveAuth,
-    JumpHost,
+    ConnectRequest, ConnectedLocation, ConnectionControl, ConnectionPrompt, HostKeyRole,
+    InteractiveAuth, JumpHost,
 };
 use std::{
     fs,
@@ -50,13 +50,13 @@ impl Connection {
         }
     }
 
-    fn key(&self, port: u16, expected: &str, title: &str) -> crate::vfs::HostKeyRequest {
+    fn key(&self, port: u16, expected: &str, role: HostKeyRole) -> crate::vfs::HostKeyRequest {
         let ConnectionPrompt::HostKey(prompt) = self.prompts.recv_timeout(WAIT).unwrap() else {
             panic!("Expected a host key prompt");
         };
         assert_eq!(prompt.key.address, format!("[127.0.0.1]:{port}"));
         assert_eq!(prompt.key.fingerprint, expected);
-        assert_eq!(prompt.title, title);
+        assert_eq!(prompt.role, role);
         prompt
     }
 
@@ -117,16 +117,16 @@ fn openssh_proxy_jump_verifies_both_hosts_and_forwards_sftp() {
 
     let cancelled = Connection::launch(&endpoint, &root, fresh_trust(), JUMP_PHRASE);
     cancelled
-        .key(jump_port, &jump_hash, "Verify jump host key")
+        .key(jump_port, &jump_hash, HostKeyRole::Jump)
         .approve();
-    let _target = cancelled.key(port, &target_hash, "Verify target host key");
+    let _target = cancelled.key(port, &target_hash, HostKeyRole::Target);
     assert!(cancelled.control.cancel());
     assert!(matches!(cancelled.finish(), Err(TransferError::Cancelled)));
     assert!(!sessions().lock().unwrap().contains_key(&endpoint));
 
     let accepted = Connection::launch(&endpoint, &root, fresh_trust(), JUMP_PHRASE);
     accepted
-        .key(port, &target_hash, "Verify target host key")
+        .key(port, &target_hash, HostKeyRole::Target)
         .approve();
     let location = accepted.finish().unwrap().location;
     assert_eq!(location.sftp_endpoint(), Some(&endpoint));
@@ -189,26 +189,47 @@ fn openssh_proxy_jump_verifies_both_hosts_and_forwards_sftp() {
     let other_key = fs::read_to_string(root.join("other.pub")).unwrap();
     let jump_key = fs::read_to_string(root.join("jump-host.pub")).unwrap();
     let target_key = fs::read_to_string(root.join("host.pub")).unwrap();
-    for (records, expected_stage, actual_hash) in [
+    for (records, expected_jump, actual_hash) in [
         (
             format!("[127.0.0.1]:{jump_port} {other_key}[127.0.0.1]:{port} {target_key}"),
-            "Jump host",
+            true,
             &jump_hash,
         ),
         (
             format!("[127.0.0.1]:{jump_port} {jump_key}[127.0.0.1]:{port} {other_key}"),
-            "Target host",
+            false,
             &target_hash,
         ),
     ] {
         let mismatched = root.join("mismatched");
         fs::write(&mismatched, records).unwrap();
-        let trust = TrustFiles::new(mismatched, None);
+        let trust = TrustFiles::new(mismatched.clone(), None);
         let result = Connection::launch(&endpoint, &root, trust, JUMP_PHRASE).finish();
         let error = result
             .err()
             .expect("Host verification must reject the mismatched key");
+        let TransferError::Failed(Failure::Connection(route)) = &error else {
+            panic!("lost connection cause: {error:?}");
+        };
+        let ConnectionError::Route {
+            jump,
+            cause: TransferError::Failed(Failure::Connection(cause)),
+            ..
+        } = route.as_ref()
+        else {
+            panic!("lost route context: {route:?}");
+        };
+        assert_eq!(*jump, expected_jump);
+        assert!(
+            matches!(cause.as_ref(), ConnectionError::HostKey(HostKeyError::KnownHostsChanged { path, received })
+            if path == &mismatched && received == actual_hash)
+        );
         let error = connection_result_error(&error);
+        let expected_stage = if expected_jump {
+            "Jump host"
+        } else {
+            "Target host"
+        };
         assert!(
             error.contains(expected_stage) && error.contains(actual_hash),
             "{error}"
