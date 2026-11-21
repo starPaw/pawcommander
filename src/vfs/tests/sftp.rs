@@ -1072,7 +1072,7 @@ fn openssh_round_trip_and_host_verification() {
         )
         .unwrap_err();
         assert_eq!(
-            error,
+            crate::i18n::transfer_failure(&error),
             crate::i18n::text!("Элементы уже находятся в этой папке")
         );
         assert_eq!(fs::read(refresh_file.path()).unwrap(), b"external edit");
@@ -1193,7 +1193,8 @@ fn openssh_round_trip_and_host_verification() {
             |_, _| panic!("source removed"),
         )
         .unwrap_err();
-        assert!(error.contains("fstatvfs@openssh.com"), "{error}");
+        let message = crate::i18n::transfer_failure(&error);
+        assert!(message.contains("fstatvfs@openssh.com"), "{message}");
         assert!(!target.path().exists());
         assert_eq!(fs::read(source.path().join(".hidden")).unwrap(), b"hidden");
         assert!(read_directory(&remote_root, &|| false).unwrap().is_empty());

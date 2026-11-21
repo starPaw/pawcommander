@@ -1,13 +1,39 @@
 use super::text;
 use crate::file_error::{ArchiveMemberError, Failure, ListingError, ListingErrorKind, PathError};
 use crate::operations::TransferError;
+use crate::vfs::TransferFailure;
 
 pub(crate) fn file_error(error: &TransferError) -> String {
     match error {
         TransferError::Failed(Failure::Path(error)) => path_error(error),
         TransferError::Failed(Failure::Listing(error)) => listing_error(error),
+        TransferError::Failed(Failure::ConflictClosed) => text!("Диалог конфликта закрыт").into(),
         _ => error.to_string(),
     }
+}
+
+pub(crate) fn transfer_failure(failure: &TransferFailure) -> String {
+    let TransferFailure { error, summary } = failure;
+    let message = file_error(error);
+    let (completed, skipped, remaining) =
+        (summary.completed, summary.skipped, summary.remaining.len());
+    if matches!(error, TransferError::PublicationUnconfirmed(_)) {
+        return crate::tr_format!(
+            "{error}. Server publication is unconfirmed. Completed: {completed}. Skipped: {skipped}. Remaining: {remaining}. Inspect the source and destination before retrying.", completed = completed, error = message, remaining = remaining, skipped = skipped
+        );
+    }
+    if summary.preparing {
+        return message;
+    }
+    let paths = summary
+        .remaining
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("; ");
+    crate::tr_format!(
+        "{error}. Completed: {completed}. Skipped: {skipped}. Remaining: {remaining}: {paths}. Refresh both folders before retrying; check any recovery instructions.", completed = completed, error = message, paths = paths, remaining = remaining, skipped = skipped
+    )
 }
 
 pub(crate) fn path_error(error: &PathError) -> String {

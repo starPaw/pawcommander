@@ -1,5 +1,5 @@
 use super::*;
-use crate::vfs::RetryTransfer;
+use crate::vfs::{RetryTransfer, TransferFailure};
 
 fn retry_progress(retry: RetryTransfer) -> Progress {
     let mut progress = Progress::default();
@@ -13,7 +13,7 @@ fn run(
     target: &Location,
     kind: TransferKind,
     decision: Decision,
-) -> Result<TransferSummary, String> {
+) -> Result<TransferSummary, TransferFailure> {
     transfer_with_conflicts(
         sources,
         target,

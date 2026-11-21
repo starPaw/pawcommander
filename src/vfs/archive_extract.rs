@@ -26,7 +26,7 @@ pub(crate) fn extract_archive(
     directory: &Location,
     password: Option<&str>,
     progress: &mut Progress,
-    decide: impl FnMut(Conflict) -> Result<Answer, String>,
+    decide: impl FnMut(Conflict) -> Result<Answer, TransferError>,
 ) -> Result<String, String> {
     let mut totals = Totals {
         selected: sources.len(),
@@ -43,10 +43,12 @@ pub(crate) fn extract_archive(
                 summary = summary
             ))
         }
-        Err(error) if totals.completed + totals.skipped != 0 => {
-            Err(format!("{error}. {}", totals.text()))
-        }
-        Err(error) => Err(error.to_string()),
+        Err(error) if totals.completed + totals.skipped != 0 => Err(format!(
+            "{}. {}",
+            crate::i18n::file_error(&error),
+            totals.text()
+        )),
+        Err(error) => Err(crate::i18n::file_error(&error)),
     }
 }
 
@@ -79,7 +81,7 @@ fn extract(
     directory: &Location,
     password: Option<&str>,
     progress: &mut Progress,
-    mut decide: impl FnMut(Conflict) -> Result<Answer, String>,
+    mut decide: impl FnMut(Conflict) -> Result<Answer, TransferError>,
     totals: &mut Totals,
 ) -> Result<(), TransferError> {
     if directory.is_archive() {
@@ -218,7 +220,7 @@ fn extract(
                     TransferError::PublicationUnconfirmed(_) => Outcome::PublicationUnconfirmed,
                     TransferError::Failed(_) => Outcome::Failed,
                 },
-                Some(error.to_string()),
+                Some(crate::i18n::file_error(error)),
             ),
         };
         progress.results.record(&tree.source, None, outcome, reason);

@@ -2,7 +2,7 @@ use super::copy_metadata::{self, Mode as MetadataMode};
 use super::location::{validate_name, Location};
 use super::mutations::remove_remote_tree;
 use super::sftp::remote;
-use super::{err, TransferSummary, MAX_TREE_DEPTH};
+use super::{err, TransferFailure, TransferSummary, MAX_TREE_DEPTH};
 use crate::conflict::{Answer, Conflict, Decision, EntryDetails};
 use crate::fs_ops::TransferKind;
 use crate::operations::{Cancellation, CopyReader, Progress, TransferError};
@@ -340,9 +340,9 @@ pub fn transfer_with_conflicts(
     destination: &Location,
     kind: TransferKind,
     progress: &mut Progress,
-    decide: impl FnMut(Conflict) -> Result<Answer, String>,
+    decide: impl FnMut(Conflict) -> Result<Answer, TransferError>,
     moved: impl FnMut(&Location, &[PathBuf]),
-) -> Result<TransferSummary, String> {
+) -> Result<TransferSummary, TransferFailure> {
     progress.results.plan(sources.iter().map(|source| {
         let target = source
             .path()
@@ -370,30 +370,7 @@ pub fn transfer_with_conflicts(
             summary.cancelled = true;
             Ok(summary)
         }
-        Err(TransferError::PublicationUnconfirmed(error)) => {
-            let (completed, skipped, remaining) =
-                (summary.completed, summary.skipped, summary.remaining.len());
-            Err(crate::tr_format!(
-                "{error}. Server publication is unconfirmed. Completed: {completed}. Skipped: {skipped}. Remaining: {remaining}. Inspect the source and destination before retrying.", completed = completed, error = error, remaining = remaining, skipped = skipped
-            ))
-        }
-        Err(error @ TransferError::Failed(_)) if summary.preparing => {
-            Err(crate::i18n::file_error(&error))
-        }
-        Err(error @ TransferError::Failed(_)) => {
-            let error = crate::i18n::file_error(&error);
-            let (completed, skipped, remaining) =
-                (summary.completed, summary.skipped, summary.remaining.len());
-            let paths = summary
-                .remaining
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("; ");
-            Err(crate::tr_format!(
-                "{error}. Completed: {completed}. Skipped: {skipped}. Remaining: {remaining}: {paths}. Refresh both folders before retrying; check any recovery instructions.", completed = completed, error = error, paths = paths, remaining = remaining, skipped = skipped
-            ))
-        }
+        Err(error) => Err(TransferFailure { error, summary }),
     }
 }
 
@@ -402,7 +379,7 @@ pub(super) fn transfer_run(
     destination: &Location,
     kind: TransferKind,
     progress: &mut Progress,
-    mut decide: impl FnMut(Conflict) -> Result<Answer, String>,
+    mut decide: impl FnMut(Conflict) -> Result<Answer, TransferError>,
     mut moved: impl FnMut(&Location, &[PathBuf]),
     summary: &mut TransferSummary,
 ) -> Result<(), TransferError> {
@@ -773,11 +750,13 @@ pub fn transfer(
             Err(crate::tr_format!(
                 "“{}” already exists. Overwriting is disabled.",
                 conflict.target.location
-            ))
+            )
+            .into())
         },
         |_, _| {},
     )
     .map(|report| report.completed)
+    .map_err(|failure| crate::i18n::transfer_failure(&failure))
 }
 
 pub(super) fn canonical(location: &Location) -> Result<PathBuf, String> {

@@ -1,3 +1,4 @@
+use crate::vfs::Location;
 use std::{error::Error, fmt, io, path::PathBuf, str::Utf8Error};
 
 #[derive(Debug)]
@@ -6,12 +7,13 @@ pub(crate) enum Failure {
     Io { source: io::Error, message: String },
     Path(PathError),
     Listing(Box<ListingError>),
+    ConflictClosed,
 }
 
 impl Failure {
     pub(crate) fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Message(_) => None,
+            Self::Message(_) | Self::ConflictClosed => None,
             Self::Io { source, .. } => Some(source),
             Self::Path(error) => Some(error),
             Self::Listing(error) => Some(error.as_ref()),
@@ -25,6 +27,7 @@ impl fmt::Display for Failure {
             Self::Message(message) | Self::Io { message, .. } => f.write_str(message),
             Self::Path(error) => fmt::Display::fmt(error, f),
             Self::Listing(error) => fmt::Display::fmt(error, f),
+            Self::ConflictClosed => f.write_str("Conflict dialog closed"),
         }
     }
 }
@@ -169,4 +172,3 @@ impl Error for PathError {
         }
     }
 }
-use crate::vfs::Location;

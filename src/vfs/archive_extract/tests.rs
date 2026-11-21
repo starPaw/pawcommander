@@ -3,7 +3,7 @@ use crate::{archive::Format, operations::Cancellation, vfs::create_archive};
 use flate2::{write::DeflateEncoder, Compression};
 use std::{io::Write, path::Path};
 
-fn unexpected_conflict(_: Conflict) -> Result<Answer, String> {
+fn unexpected_conflict(_: Conflict) -> Result<Answer, TransferError> {
     panic!("unexpected conflict prompt")
 }
 

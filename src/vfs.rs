@@ -105,6 +105,25 @@ pub struct TransferSummary {
     pub preparing: bool,
 }
 
+/// The operation stopped with the work already published and the work still pending.
+#[derive(Debug)]
+pub struct TransferFailure {
+    pub(crate) error: crate::operations::TransferError,
+    pub(crate) summary: TransferSummary,
+}
+
+impl fmt::Display for TransferFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.error, f)
+    }
+}
+
+impl std::error::Error for TransferFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
 const MAX_TREE_DEPTH: usize = 128;
 
 fn err(error: impl fmt::Display) -> String {

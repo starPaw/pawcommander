@@ -173,7 +173,7 @@ fn conflict_move_rejects_replaced_directory_and_keeps_its_selection_pending() {
                 |_, _| panic!("the changed source must not retire any clipboard entries"),
             )
             .unwrap_err();
-            assert!(error.contains(&source.display().to_string()));
+            assert!(crate::i18n::transfer_failure(&error).contains(&source.display()));
             assert_eq!(
                 fs::read(original.join("child.txt").path()).unwrap(),
                 b"original child"
@@ -318,7 +318,7 @@ fn same_folder_move_stops_before_conflicts_but_copy_can_keep_both() {
         )
         .unwrap_err();
         assert_eq!(
-            error,
+            crate::i18n::transfer_failure(&error),
             crate::i18n::text!("Элементы уже находятся в этой папке")
         );
         assert_eq!(fs::read(outside.path()).unwrap(), b"outside");
@@ -414,10 +414,12 @@ fn conflict_replace_preserves_changed_destination_and_restores_on_publish_error(
         |_, _| {},
     )
     .unwrap_err();
-    assert!(failure.contains(&crate::tr_format!(
-        "Destination {target} changed after the conflict dialog was shown",
-        target = target
-    )));
+    assert!(
+        crate::i18n::transfer_failure(&failure).contains(&crate::tr_format!(
+            "Destination {target} changed after the conflict dialog was shown",
+            target = target
+        ))
+    );
     assert_eq!(fs::read(target.path()).unwrap(), b"changed elsewhere");
 
     let expected = entry_metadata(&target).unwrap().unwrap();

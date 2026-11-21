@@ -56,6 +56,7 @@ fn first_transfer(
         |_, _| {},
     )
     .map(|_| ())
+    .map_err(|failure| crate::i18n::transfer_failure(&failure))
 }
 
 fn continued(recovery: &Path, partial: &Path, source: &Path, target: &Path, bytes: &[u8]) {
