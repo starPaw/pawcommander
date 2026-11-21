@@ -46,6 +46,10 @@ impl SftpForm {
         self.ssh_config_job = None;
         match result {
             Ok(config) => {
+                #[cfg(target_os = "macos")]
+                {
+                    self.show_identity_choices = false;
+                }
                 if config.matched {
                     self.host.clone_from(&config.host);
                     self.user.clone_from(&config.user);
@@ -87,6 +91,10 @@ impl SftpForm {
             self.password.clear();
         }
         self.ssh_config = None;
+        #[cfg(target_os = "macos")]
+        {
+            self.show_identity_choices = false;
+        }
     }
 
     pub(in crate::app) fn endpoint(&self) -> Endpoint {
@@ -114,21 +122,45 @@ impl SftpForm {
         if config.identities.len() < 2 {
             return;
         }
-        egui::ComboBox::from_id_salt("ssh_config_identity_files")
-            .selected_text(text("Файлы ключей из SSH config"))
-            .show_ui(ui, |ui| {
-                for path in &config.identities {
-                    let label = path.to_string_lossy();
-                    if ui
-                        .selectable_label(label == self.key, label.as_ref())
-                        .clicked()
-                        && label != self.key
+        let title = text("Файлы ключей из SSH config");
+        #[cfg(target_os = "macos")]
+        {
+            if ui
+                .selectable_label(self.show_identity_choices, title)
+                .clicked()
+            {
+                self.show_identity_choices = !self.show_identity_choices;
+            }
+            if !self.show_identity_choices {
+                return;
+            }
+        }
+        let choose = |ui: &mut egui::Ui| {
+            for path in &config.identities {
+                let label = path.to_string_lossy();
+                if ui
+                    .selectable_label(label == self.key, label.as_ref())
+                    .clicked()
+                    && label != self.key
+                {
+                    self.key = label.into_owned();
+                    self.passphrase.clear();
+                    #[cfg(target_os = "macos")]
                     {
-                        self.key = label.into_owned();
-                        self.passphrase.clear();
+                        self.show_identity_choices = false;
                     }
                 }
-            });
+            }
+        };
+        #[cfg(target_os = "macos")]
+        egui::ScrollArea::vertical()
+            .id_salt("ssh_config_identity_choices")
+            .max_height(105.0)
+            .show(ui, choose);
+        #[cfg(not(target_os = "macos"))]
+        egui::ComboBox::from_id_salt("ssh_config_identity_files")
+            .selected_text(title)
+            .show_ui(ui, choose);
     }
 
     pub(super) fn show_config_result(&self, ui: &mut egui::Ui) {

@@ -164,7 +164,19 @@ fn ssh_config_form_reviews_the_effective_endpoint_and_selects_an_identity() {
     };
     click_text(&mut app, "Key files from SSH config");
     let second = ssh.join("second");
+    app.sftp_form.as_mut().unwrap().passphrase = "first key only".into();
     click_text(&mut app, second.to_str().unwrap());
     assert_eq!(app.sftp_form.as_ref().unwrap().endpoint().key, Some(second));
+    assert!(app.sftp_form.as_ref().unwrap().passphrase.is_empty());
     assert!(app.connection.is_none());
+
+    #[cfg(target_os = "macos")]
+    {
+        let message = "The SSH host key changed. Saved fingerprint SHA256:previous. Received SHA256:rotated. Verify the fingerprint with the administrator and review the saved key.";
+        app.sftp_form.as_mut().unwrap().error = Some(message.repeat(3));
+        draw(&mut app, vec![]);
+        let rendered = operation_footer_text(&draw(&mut app, vec![]));
+        assert!(rendered.contains("SHA256:previous") && rendered.contains("SHA256:rotated"));
+        assert!(rendered.contains("Cancel") && rendered.contains("Connect directly"));
+    }
 }
