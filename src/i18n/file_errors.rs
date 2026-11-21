@@ -1,6 +1,4 @@
 use super::text;
-#[cfg(target_os = "macos")]
-use crate::file_error::SyncError;
 use crate::file_error::{
     AccessAction, AccessCause, AccessError, ArchiveError, ArchiveMemberError, ChecksumError,
     ConnectionError, Failure, HostKeyError, KnownHostEntryError, KnownHostsError, ListingError,
@@ -9,6 +7,8 @@ use crate::file_error::{
     ProbeAction, PublicationError, RecoveryNotice, ScanError, SearchError, SpaceError, SshStage,
     StagingCleanupError, StagingError, StagingRecordAction,
 };
+#[cfg(target_os = "macos")]
+use crate::file_error::{ResumeRecordError, ResumeRecordProblem, ResumeRecordSection, SyncError};
 use crate::operations::TransferError;
 use crate::vfs::{DeletionFailure, TransferFailure};
 
@@ -48,11 +48,64 @@ pub(crate) fn file_error(error: &TransferError) -> String {
                 ),
                 Failure::Publication(reason) => publication_error(reason),
                 Failure::Staging(error) => staging_error(error),
+                #[cfg(target_os = "macos")]
+                Failure::ResumeRecord(error) => resume_record_error(error),
                 Failure::StagingCleanup(error) => staging_cleanup_error(error),
                 _ => error.to_string(),
             }
         }
         TransferError::Cancelled => crate::tr_format!("Operation cancelled"),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn resume_record_error(error: &ResumeRecordError) -> String {
+    use ResumeRecordProblem::*;
+
+    let path = error.path.display();
+    match &error.problem {
+        Read(error) => crate::tr_format!(
+            "Could not read recovery record {path}: {error}", path = path, error = error
+        ),
+        ReadDirectory(error) => crate::tr_format!(
+            "Could not read recovery folder {path}: {error}", path = path, error = error
+        ),
+        Lock(error) => crate::tr_format!(
+            "Could not lock recovery record {path}: {error}", path = path, error = error
+        ),
+        InUse => format!("{} · {path}", text!("Эта копия уже обрабатывается другим заданием.")),
+        IdentityChanged => crate::tr_format!(
+            "Recovery record {path} was replaced or is no longer a regular file", path = path
+        ),
+        SizeLimit(limit) => crate::tr_format!(
+            "Recovery record {path} exceeds the {limit}-byte limit", path = path, limit = limit
+        ),
+        Json { section: ResumeRecordSection::Header, source } => crate::tr_format!(
+            "Could not decode the header of recovery record {path}: {error}", path = path, error = source
+        ),
+        Json { section: ResumeRecordSection::Event(number), source } => crate::tr_format!(
+            "Could not decode event {number} in recovery record {path}: {error}",
+            number = number, path = path, error = source
+        ),
+        Json { section: ResumeRecordSection::AccessTimes, source } => format!(
+            "{} · {path} ({source})", text!("Некорректная запись времени доступа для переноса")
+        ),
+        UnsupportedVersion(version) => crate::tr_format!(
+            "Unsupported version {version} of recovery record {path}", version = version, path = path
+        ),
+        VersionMismatch { stored, expected } => crate::tr_format!(
+            "Recovery record {path} has version {stored} but its contents require version {expected}",
+            path = path, stored = stored, expected = expected
+        ),
+        EventOrder(number) => crate::tr_format!(
+            "Event {number} is out of order in recovery record {path}", path = path, number = number
+        ),
+        InvalidAccessTimes => format!("{} · {path}", text!("Некорректная запись времени доступа для переноса")),
+        InvalidPaths => crate::tr_format!("Invalid paths in recovery record {path}", path = path),
+        InvalidName => crate::tr_format!("Invalid recovery record name in {path}", path = path),
+        ScanLimit(limit) => crate::tr_format!(
+            "Stopped reading recovery folder {path} after {limit} entries", path = path, limit = limit
+        ),
     }
 }
 
@@ -783,6 +836,11 @@ fn mutation_error(error: &MutationError, unconfirmed: bool) -> String {
             path.display()
         ),
         SourceChanged(path) => super::source_changed_during_copy(path),
+        MoveIncomplete { target, cause } => crate::tr_format!(
+            "A copy was created at {target}. The move is incomplete. Check the source and result history. {error}",
+            target = target,
+            error = file_error(cause)
+        ),
         #[cfg(target_os = "macos")]
         PlanChanged(location) => crate::tr_format!(
             "An item changed after planning: {location}. Build the plan again.", location = location

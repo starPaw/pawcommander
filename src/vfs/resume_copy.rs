@@ -17,7 +17,7 @@ use super::{
     Location,
 };
 use crate::app::SavedLocation;
-use crate::file_error::{RecoveryNotice, StagingError};
+use crate::file_error::{RecoveryNotice, ResumeRecordError, ResumeRecordProblem, StagingError};
 use crate::i18n::text;
 use crate::operations::{AccessStream, Cancellation, Progress, TransferError};
 use crate::result_history::Outcome;
@@ -216,27 +216,19 @@ struct Paths {
 }
 
 impl Receipt {
-    fn paths(&self) -> Result<Paths, TransferError> {
-        let source = self
-            .source
-            .clone()
-            .into_location()
-            .ok_or_else(changed_copy)?;
-        let target = self
-            .target
-            .clone()
-            .into_location()
-            .ok_or_else(changed_copy)?;
+    fn paths(&self) -> Option<Paths> {
+        let source = self.source.clone().into_location()?;
+        let target = self.target.clone().into_location()?;
         if source == target
             || source.is_archive()
             || target.is_archive()
             || !source.path().is_absolute()
             || !target.path().is_absolute()
         {
-            return Err(changed_copy());
+            return None;
         }
         let stage = staging_at(&target, &self.stage_name)?;
-        Ok(Paths {
+        Some(Paths {
             source,
             target,
             stage,
@@ -244,7 +236,7 @@ impl Receipt {
     }
 }
 
-fn staging_at(item: &Location, stage_name: &str) -> Result<Location, TransferError> {
+fn staging_at(item: &Location, stage_name: &str) -> Option<Location> {
     let prefix = if item.remote() {
         ".pawcommander-sftp-"
     } else {
@@ -257,9 +249,9 @@ fn staging_at(item: &Location, stage_name: &str) -> Result<Location, TransferErr
                 .all(|byte| byte.is_ascii_digit() || byte == b'-')
     });
     if !valid {
-        return Err(changed_copy());
+        return None;
     }
-    Ok(item.parent().ok_or_else(changed_copy)?.join(stage_name))
+    Some(item.parent()?.join(stage_name))
 }
 
 pub(crate) struct Offer {
@@ -273,10 +265,10 @@ fn receipts(directory: &Path) -> PathBuf {
     directory.join("resumable")
 }
 
-pub(crate) fn scan(directory: &Path) -> (Vec<Offer>, Vec<String>) {
+pub(crate) fn scan(directory: &Path) -> (Vec<Offer>, Vec<ResumeRecordError>) {
     let mut offers = Vec::new();
     let errors = journal::visit_available(&receipts(directory), |ticket| {
-        let paths = ticket.receipt.paths().map_err(|error| error.to_string())?;
+        let paths = ticket.paths()?;
         offers.push(Offer {
             id: ticket.name().into(),
             source: paths.source.display(),
@@ -351,7 +343,7 @@ fn start_file(
         };
         let ticket = register_copy(directory, stage, receipt, None, &cancel)?;
         *preserve = true;
-        let paths = ticket.receipt.paths()?;
+        let paths = ticket.paths()?;
         finish_copy(&ticket, &paths, progress, false, published)?;
         after(&ticket, &paths, progress)
     })
@@ -546,7 +538,7 @@ fn restore_held_source(
         }
         None => return Ok(None),
     };
-    let stage = staging_at(&paths.source, &record.stage_name)?;
+    let stage = staging_at(&paths.source, &record.stage_name).ok_or_else(changed_copy)?;
     let held = stage.join("source");
     let result = (|| {
         let source_present = entry_metadata(&paths.source)?.is_some();
@@ -587,7 +579,7 @@ fn retained_source(held: &Location, error: TransferError) -> TransferError {
 
 fn discard_source_stage(ticket: &Ticket, paths: &Paths) -> Result<(), TransferError> {
     if let Some(HeldSource::Verified(record)) = &ticket.holding {
-        let stage = staging_at(&paths.source, &record.stage_name)?;
+        let stage = staging_at(&paths.source, &record.stage_name).ok_or_else(changed_copy)?;
         if entry_metadata(&stage)?.is_some() {
             discard_stage(&stage, record.stage_identity, ticket.name(), &[])
                 .map_err(|error| retained_source(&stage.join("source"), error))?;
@@ -644,6 +636,14 @@ fn finish_move(
         discard_source_stage(ticket, paths)?;
     } else {
         let verified = (|| {
+            let original_access_times = match &ticket.receipt.original {
+                Original::File(_) => Some(vec![ticket
+                    .receipt
+                    .source_accessed
+                    .as_ref()
+                    .and_then(SavedTime::get)]),
+                Original::Folder(_) => ticket.folder_access_times()?,
+            };
             let renamed = restore_held_source(ticket, paths, progress)?;
             let source = MoveSource::capture(item, progress)?;
             let source_identity = verify_move_source(
@@ -653,14 +653,6 @@ fn finish_move(
                 renamed,
                 progress,
             )?;
-            let original_access_times = match &ticket.receipt.original {
-                Original::File(_) => Some(vec![ticket
-                    .receipt
-                    .source_accessed
-                    .as_ref()
-                    .and_then(SavedTime::get)]),
-                Original::Folder(_) => ticket.folder_access_times()?,
-            };
             let source = source.with_original_access_times(original_access_times)?;
             discard_source_stage(ticket, paths)?;
             Ok((source, source_identity))
@@ -719,14 +711,30 @@ pub(crate) fn resume(
     directory: &Path,
     id: &str,
     progress: &mut Progress,
-) -> Result<String, String> {
+) -> Result<ResumeCompletion, TransferError> {
+    let directory = receipts(directory);
     if !journal::valid_name(OsStr::new(id)) {
-        return Err(changed_copy().to_string());
+        return Err(ResumeRecordError::new(&directory, ResumeRecordProblem::InvalidName).into());
     }
-    let ticket = Ticket::open(receipts(directory).join(id))
-        .map_err(|err| err.to_string())?
-        .ok_or_else(|| text!("Эта копия уже обрабатывается другим заданием."))?;
-    let paths = ticket.receipt.paths().map_err(|err| err.to_string())?;
+    let path = directory.join(id);
+    let opened = Ticket::open(path.clone()).and_then(|ticket| {
+        let ticket =
+            ticket.ok_or_else(|| ResumeRecordError::new(&path, ResumeRecordProblem::InUse))?;
+        let paths = ticket.paths()?;
+        Ok((ticket, paths))
+    });
+    let (ticket, paths) = match opened {
+        Ok(opened) => opened,
+        Err(error) => {
+            let record = Location::Local(path);
+            let error = TransferError::from(error);
+            progress.results.plan([(record.clone(), None)]);
+            progress
+                .results
+                .record_with_error(&record, Outcome::Failed, Some(&error));
+            return Err(error);
+        }
+    };
     progress
         .results
         .plan([(paths.source.clone(), Some(paths.target.display()))]);
@@ -789,42 +797,22 @@ pub(crate) fn resume(
     progress
         .results
         .record(&paths.source, None, outcome, reason);
-    result
-        .map(|result| match (moving, result) {
-            (true, Completion::Copied(offset)) => crate::tr_format!(
-                "Move resumed at byte {offset} and completed.",
-                offset = offset
-            ),
-            (true, Completion::FolderCopied(bytes)) => crate::tr_format!(
-                "Folder move completed. Reused {bytes} staged bytes.",
-                bytes = bytes
-            ),
-            (true, Completion::AlreadyPresent) => {
-                text!("Перенос завершён после сверки копии.").into()
-            }
-            (false, Completion::Copied(offset)) => crate::tr_format!(
-                "Copy resumed at byte {offset} and completed.",
-                offset = offset
-            ),
-            (false, Completion::AlreadyPresent) => {
-                text!("В назначении подтверждена полная копия.").into()
-            }
-            (false, Completion::FolderCopied(bytes)) => crate::tr_format!(
-                "Folder copy completed. Reused {bytes} staged bytes.",
-                bytes = bytes
-            ),
-        })
-        .map(|mut message| {
-            if metadata_warning {
-                message.push('\n');
-                message.push_str(partial_metadata);
-            }
-            message
-        })
-        .map_err(|error| crate::i18n::file_error(&error))
+    result.map(|kind| ResumeCompletion {
+        kind,
+        moving,
+        metadata_warning,
+    })
 }
 
-enum Completion {
+#[derive(Debug)]
+pub(crate) struct ResumeCompletion {
+    pub(crate) kind: Completion,
+    pub(crate) moving: bool,
+    pub(crate) metadata_warning: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Completion {
     Copied(u64),
     FolderCopied(u64),
     AlreadyPresent,

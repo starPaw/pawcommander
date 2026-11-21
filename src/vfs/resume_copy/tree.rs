@@ -418,7 +418,7 @@ pub(super) fn start(
             &cancel,
         )?;
         *preserve = true;
-        let paths = ticket.receipt.paths()?;
+        let paths = ticket.paths()?;
         finish(&ticket, &paths, Some(snapshot), progress, published)?;
         after(&ticket, &paths, progress)
     })
@@ -482,6 +482,7 @@ fn finish(
         let draft = snapshot.inventory(&payload, false, &cancel)?;
         let (partials, reused) = snapshot.verify_bytes(paths, &payload, &draft, false, progress)?;
         draft_verified = true;
+        let original_access_times = ticket.folder_access_times()?;
         if resuming && reused < snapshot.bytes {
             check_copy_space(snapshot.bytes - reused, &paths.target, &paths.stage)?;
         }
@@ -489,7 +490,6 @@ fn finish(
         let complete = snapshot.inventory(&payload, true, &cancel)?;
         snapshot.verify_bytes(paths, &payload, &complete, true, progress)?;
         snapshot.verify_source(&paths.source, &cancel)?;
-        let original_access_times = ticket.folder_access_times()?;
         snapshot.apply_metadata(
             paths,
             &payload,

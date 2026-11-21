@@ -1,5 +1,6 @@
 //! Durable receipts for one worker and one staged copy.
-use super::{HeldSource, Intent, Original, Receipt, RenamedIdentity, SavedTime};
+use super::{HeldSource, Intent, Original, Paths, Receipt, RenamedIdentity, SavedTime};
+use crate::file_error::{ResumeRecordError, ResumeRecordProblem, ResumeRecordSection};
 use crate::recovery::{same_owned_marker, sync_directory};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -114,34 +115,56 @@ impl Ticket {
         })
     }
 
-    pub(super) fn open(path: PathBuf) -> io::Result<Option<Self>> {
+    pub(super) fn open(path: PathBuf) -> Result<Option<Self>, ResumeRecordError> {
+        let failure = |problem| ResumeRecordError::new(&path, problem);
+        let read = |error| failure(ResumeRecordProblem::Read(error));
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(&path)?;
-        if !file.metadata()?.is_file() || !same_owned_marker(&file, &path)? {
-            return Err(io::Error::other("Copy recovery record identity changed"));
+            .open(&path)
+            .map_err(read)?;
+        if !file.metadata().map_err(read)?.is_file()
+            || !same_owned_marker(&file, &path).map_err(read)?
+        {
+            return Err(failure(ResumeRecordProblem::IdentityChanged));
         }
         match file.try_lock() {
             Ok(()) => {}
             Err(TryLockError::WouldBlock) => return Ok(None),
-            Err(error) => return Err(io::Error::other(error)),
+            Err(TryLockError::Error(error)) => {
+                return Err(failure(ResumeRecordProblem::Lock(error)))
+            }
         }
         let mut reader = BufReader::new(&file);
         let mut header = Vec::new();
         (&mut reader)
             .take(MAX_BYTES + 1)
-            .read_until(b'\n', &mut header)?;
+            .read_until(b'\n', &mut header)
+            .map_err(read)?;
         if header.len() as u64 > MAX_BYTES {
-            return Err(io::Error::other(
-                "Invalid copy recovery record size or identity",
-            ));
+            return Err(failure(ResumeRecordProblem::SizeLimit(MAX_BYTES)));
         }
-        let (stored_version, receipt): (u32, Receipt) =
-            serde_json::from_slice(&header).map_err(io::Error::other)?;
-        if stored_version != version(&receipt) {
-            return Err(io::Error::other("Unsupported copy recovery record version"));
+        let invalid_header = |source| {
+            failure(ResumeRecordProblem::Json {
+                section: ResumeRecordSection::Header,
+                source,
+            })
+        };
+        // Read the envelope first so an unfamiliar receipt schema still reports its version.
+        let (stored, _): (u32, serde::de::IgnoredAny) =
+            serde_json::from_slice(&header).map_err(invalid_header)?;
+        if !matches!(stored, VERSION | MOVE_VERSION | MOVE_ACCESS_TIMES_VERSION) {
+            return Err(failure(ResumeRecordProblem::UnsupportedVersion(stored)));
+        }
+        let (_, receipt): (u32, Receipt) =
+            serde_json::from_slice(&header).map_err(invalid_header)?;
+        let expected = version(&receipt);
+        if stored != expected {
+            return Err(failure(ResumeRecordProblem::VersionMismatch {
+                stored,
+                expected,
+            }));
         }
         // New folder moves put the length-delimited date table between the
         // first JSON line and the events. Old receipts go straight to events.
@@ -150,11 +173,13 @@ impl Ticket {
             let offset = header.len() as u64;
             if !has_separator
                 || !valid_access_times(&receipt, section)
-                || offset + section.bytes > file.metadata()?.len()
+                || offset + section.bytes > file.metadata().map_err(read)?.len()
             {
-                return Err(invalid_access_times());
+                return Err(failure(ResumeRecordProblem::InvalidAccessTimes));
             }
-            reader.seek(SeekFrom::Start(offset + section.bytes))?;
+            reader
+                .seek(SeekFrom::Start(offset + section.bytes))
+                .map_err(read)?;
             Some(offset)
         } else {
             None
@@ -162,17 +187,24 @@ impl Ticket {
         let event_limit =
             MAX_BYTES - header.len() as u64 + u64::from(access_times_offset.is_some());
         let mut tail = Vec::new();
-        reader.take(event_limit + 1).read_to_end(&mut tail)?;
-        if tail.len() as u64 > event_limit || !same_owned_marker(&file, &path)? {
-            return Err(io::Error::other(
-                "Invalid copy recovery record size or identity",
-            ));
+        reader
+            .take(event_limit + 1)
+            .read_to_end(&mut tail)
+            .map_err(read)?;
+        if tail.len() as u64 > event_limit {
+            return Err(failure(ResumeRecordProblem::SizeLimit(MAX_BYTES)));
+        }
+        if !same_owned_marker(&file, &path).map_err(read)? {
+            return Err(failure(ResumeRecordProblem::IdentityChanged));
         }
         let events = if access_times_offset.is_some() {
             if tail.is_empty() {
                 None
             } else {
-                Some(tail.strip_prefix(b"\n").ok_or_else(invalid_access_times)?)
+                Some(
+                    tail.strip_prefix(b"\n")
+                        .ok_or_else(|| failure(ResumeRecordProblem::InvalidAccessTimes))?,
+                )
             }
         } else {
             has_separator.then_some(tail.as_slice())
@@ -180,11 +212,18 @@ impl Ticket {
         let mut publication = None;
         let mut holding = None;
         let mut removed = false;
-        for line in events
+        for (index, line) in events
             .into_iter()
             .flat_map(|bytes| bytes.split(|&byte| byte == b'\n'))
+            .enumerate()
         {
-            let event = serde_json::from_slice(line).map_err(io::Error::other)?;
+            let number = index + 1;
+            let event = serde_json::from_slice(line).map_err(|source| {
+                failure(ResumeRecordProblem::Json {
+                    section: ResumeRecordSection::Event(number),
+                    source,
+                })
+            })?;
             match event {
                 Event::Publication(seal) if receipt.intent == Intent::Move && holding.is_none() => {
                     publication = Some(seal);
@@ -193,7 +232,7 @@ impl Ticket {
                     holding = Some(location);
                 }
                 Event::Removed if holding.is_some() && !removed => removed = true,
-                _ => return Err(io::Error::other("Invalid move recovery record sequence")),
+                _ => return Err(failure(ResumeRecordProblem::EventOrder(number))),
             }
         }
         Ok(Some(Self {
@@ -207,25 +246,42 @@ impl Ticket {
         }))
     }
 
-    pub(super) fn folder_access_times(&self) -> io::Result<Option<Vec<Option<SystemTime>>>> {
+    pub(super) fn paths(&self) -> Result<Paths, ResumeRecordError> {
+        self.receipt
+            .paths()
+            .ok_or_else(|| ResumeRecordError::new(&self.path, ResumeRecordProblem::InvalidPaths))
+    }
+
+    pub(super) fn folder_access_times(
+        &self,
+    ) -> Result<Option<Vec<Option<SystemTime>>>, ResumeRecordError> {
         let Some(offset) = self.access_times_offset else {
             return Ok(None);
         };
+        let failure = |problem| ResumeRecordError::new(&self.path, problem);
+        let read = |error| failure(ResumeRecordProblem::Read(error));
         let section = self
             .receipt
             .folder_access_times
             .as_ref()
-            .ok_or_else(invalid_access_times)?;
+            .ok_or_else(|| failure(ResumeRecordProblem::InvalidAccessTimes))?;
         let mut bytes = vec![0; section.bytes as usize];
         let mut file = &self.file;
-        file.seek(SeekFrom::Start(offset))?;
-        file.read_exact(&mut bytes)?;
+        file.seek(SeekFrom::Start(offset)).map_err(read)?;
+        file.read_exact(&mut bytes).map_err(read)?;
         let digest: [u8; 32] = Sha256::digest(&bytes).into();
-        if digest != section.digest || !same_owned_marker(file, &self.path)? {
-            return Err(invalid_access_times());
+        if !same_owned_marker(file, &self.path).map_err(read)? {
+            return Err(failure(ResumeRecordProblem::IdentityChanged));
         }
-        let saved: Vec<Option<SavedTime>> =
-            serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+        if digest != section.digest {
+            return Err(failure(ResumeRecordProblem::InvalidAccessTimes));
+        }
+        let saved: Vec<Option<SavedTime>> = serde_json::from_slice(&bytes).map_err(|source| {
+            failure(ResumeRecordProblem::Json {
+                section: ResumeRecordSection::AccessTimes,
+                source,
+            })
+        })?;
         Ok(Some(
             saved
                 .iter()
@@ -294,17 +350,21 @@ pub(super) fn valid_name(name: &OsStr) -> bool {
 
 pub(super) fn visit_available(
     directory: &Path,
-    mut visit: impl FnMut(Ticket) -> Result<(), String>,
-) -> Vec<String> {
+    mut visit: impl FnMut(Ticket) -> Result<(), ResumeRecordError>,
+) -> Vec<ResumeRecordError> {
+    let read = |error| ResumeRecordError::new(directory, ResumeRecordProblem::ReadDirectory(error));
     let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return vec![],
-        Err(error) => return vec![error.to_string()],
+        Err(error) => return vec![read(error)],
     };
     let mut errors = Vec::new();
     for (index, entry) in entries.enumerate() {
         if index == MAX_ENTRIES {
-            errors.push("Copy recovery scan stopped after 1024 entries".into());
+            errors.push(ResumeRecordError::new(
+                directory,
+                ResumeRecordProblem::ScanLimit(MAX_ENTRIES),
+            ));
             break;
         }
         match entry {
@@ -315,11 +375,11 @@ pub(super) fn visit_available(
                     }
                 }
                 Ok(None) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => errors.push(error.to_string()),
+                Err(error) if error.is_missing() => {}
+                Err(error) => errors.push(error),
             },
             Ok(_) => {}
-            Err(error) => errors.push(error.to_string()),
+            Err(error) => errors.push(read(error)),
         }
     }
     errors

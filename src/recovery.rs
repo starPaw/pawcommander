@@ -172,7 +172,7 @@ struct Saved {
 #[derive(Default)]
 pub(crate) struct Report {
     pub unfinished: Vec<Record>,
-    pub errors: Vec<String>,
+    pub errors: Vec<TransferError>,
     #[cfg(target_os = "macos")]
     copies: Vec<crate::vfs::resume_copy::Offer>,
 }
@@ -283,7 +283,7 @@ impl Recovery {
             }) {
             Ok(_) => self.receive = Some(receive),
             Err(error) => {
-                self.report.errors.push(error.to_string());
+                self.report.errors.push(error.into());
                 self.open = true;
             }
         }
@@ -348,7 +348,7 @@ impl Recovery {
                         ui.separator();
                     }
                     for error in &self.report.errors {
-                        ui.add(egui::Label::new(error).selectable(true).wrap());
+                        ui.add(egui::Label::new(crate::i18n::file_error(error)).selectable(true).wrap());
                     }
                     for record in &self.report.unfinished {
                         let time = chrono::DateTime::from_timestamp(record.started as i64, 0)
@@ -547,22 +547,25 @@ pub(crate) fn scan(directory: &Path) -> Report {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return report,
         Err(error) => {
-            report.errors.push(error.to_string());
+            report.errors.push(error.into());
             return report;
         }
     };
     let mut report_bytes = 0usize;
     for (index, entry) in entries.enumerate() {
         if index == MAX_ENTRIES {
-            report.errors.push(format!(
+            report.errors.push(
+                format!(
                 "Recovery scan stopped after {MAX_ENTRIES} entries; additional records may exist"
-            ));
+            )
+                .into(),
+            );
             break;
         }
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
-                report.errors.push(error.to_string());
+                report.errors.push(error.into());
                 continue;
             }
         };
@@ -573,7 +576,9 @@ pub(crate) fn scan(directory: &Path) -> Report {
         match read_record(&path) {
             Ok(Some((record, warnings))) => {
                 for warning in warnings {
-                    report.errors.push(format!("{}: {warning}", path.display()));
+                    report
+                        .errors
+                        .push(format!("{}: {warning}", path.display()).into());
                 }
                 report_bytes = report_bytes
                     .saturating_add(record.label.len())
@@ -601,7 +606,9 @@ pub(crate) fn scan(directory: &Path) -> Report {
                 report.unfinished.push(record);
             }
             Ok(None) => {}
-            Err(error) => report.errors.push(format!("{}: {error}", path.display())),
+            Err(error) => report.errors.push(TransferError::io(error, |error| {
+                format!("{}: {error}", path.display())
+            })),
         }
     }
     report.unfinished.sort_by_key(|record| record.started);
@@ -609,7 +616,9 @@ pub(crate) fn scan(directory: &Path) -> Report {
     {
         let (copies, errors) = crate::vfs::resume_copy::scan(directory);
         report.copies = copies;
-        report.errors.extend(errors);
+        report
+            .errors
+            .extend(errors.into_iter().map(TransferError::from));
     }
     report
 }

@@ -15,6 +15,41 @@ pub(crate) use file_errors::{
 pub(crate) use formats::czech_format;
 pub(crate) use formats::russian_format;
 
+#[cfg(target_os = "macos")]
+pub(crate) fn resume_completion(report: crate::vfs::resume_copy::ResumeCompletion) -> String {
+    use crate::vfs::resume_copy::Completion;
+
+    let mut message = match (report.moving, report.kind) {
+        (true, Completion::Copied(offset)) => crate::tr_format!(
+            "Move resumed at byte {offset} and completed.",
+            offset = offset
+        ),
+        (true, Completion::FolderCopied(bytes)) => crate::tr_format!(
+            "Folder move completed. Reused {bytes} staged bytes.",
+            bytes = bytes
+        ),
+        (true, Completion::AlreadyPresent) => text!("Перенос завершён после сверки копии.").into(),
+        (false, Completion::Copied(offset)) => crate::tr_format!(
+            "Copy resumed at byte {offset} and completed.",
+            offset = offset
+        ),
+        (false, Completion::FolderCopied(bytes)) => crate::tr_format!(
+            "Folder copy completed. Reused {bytes} staged bytes.",
+            bytes = bytes
+        ),
+        (false, Completion::AlreadyPresent) => {
+            text!("В назначении подтверждена полная копия.").into()
+        }
+    };
+    if report.metadata_warning {
+        message.push('\n');
+        message.push_str(text!(
+            "Даты или права доступа сохранены частично. Подробности указаны в строках журнала."
+        ));
+    }
+    message
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum Language {
