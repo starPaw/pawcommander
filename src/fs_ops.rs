@@ -2,10 +2,11 @@
 //! volume before publication. This does not snapshot a changing filesystem.
 
 use crate::file_error::{
-    ListingError, ListingErrorKind, LocalPathAction, MutationError, PathError, StagingCleanupError,
+    ListingError, ListingErrorKind, LocalPathAction, MutationError, PathError, SpaceError,
+    StagingCleanupError,
 };
 use crate::operations::{Cancellation, CopyReader, Progress, TransferError};
-use crate::vfs::DeletionFailure;
+use crate::vfs::{DeletionFailure, Location};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
@@ -516,7 +517,7 @@ impl StagingDirectory {
     }
 }
 
-fn create_staging_directory(parent: &Path) -> Result<StagingDirectory, String> {
+fn create_staging_directory(parent: &Path) -> Result<StagingDirectory, TransferError> {
     for _ in 0..100 {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -544,13 +545,13 @@ fn create_staging_directory(parent: &Path) -> Result<StagingDirectory, String> {
             builder
         };
         match builder.create(&path) {
-            Ok(()) => return StagingDirectory::new(path),
+            Ok(()) => return StagingDirectory::new(path).map_err(Into::into),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                 crate::recovery::abandon_staging(&location).map_err(|error| error.to_string())?;
                 continue;
             }
             Err(e) => {
-                return Err(copy_space_error(parent, &e).unwrap_or_else(|| {
+                return Err(local_copy_error(Some(parent), e, |e| {
                     at(
                         crate::i18n::text!("Не удалось подготовить копирование в папку"),
                         parent,
@@ -562,7 +563,7 @@ fn create_staging_directory(parent: &Path) -> Result<StagingDirectory, String> {
     }
     Err(
         crate::i18n::text!("Не удалось создать временную папку для копирования; повторите попытку")
-            .to_owned(),
+            .into(),
     )
 }
 
@@ -652,12 +653,8 @@ pub(crate) fn copy_atomically_cancellable(
     progress.results.captured();
     let parent = destination
         .parent()
-        .ok_or(crate::i18n::text!("Недопустимое место назначения копии"))?;
-    ensure_copy_space(
-        manifest.bytes,
-        available_copy_space(parent)?,
-        parent.display(),
-    )?;
+        .ok_or_else(|| SpaceError::MissingDestinationParent(target_location.clone()))?;
+    check_local_copy_space(manifest.bytes, parent)?;
     progress.checkpoint()?;
     let staging = create_staging_directory(parent)?;
     if let Err(error) =
@@ -699,9 +696,8 @@ pub(crate) fn copy_atomically_cancellable(
         })
         .and_then(|()| cancel.check())
         .map_err(|e| {
-            TransferError::io(e, |e| {
-                copy_space_error(parent, e)
-                    .unwrap_or_else(|| at(crate::i18n::text!("Не удалось скопировать"), source, e))
+            local_copy_error(Some(parent), e, |e| {
+                at(crate::i18n::text!("Не удалось скопировать"), source, e)
             })
         })
         .and_then(|()| check_staging())
@@ -716,21 +712,22 @@ pub(crate) fn copy_atomically_cancellable(
 }
 
 #[cfg(unix)]
-pub(crate) fn available_copy_space(parent: &Path) -> Result<u128, String> {
+fn available_copy_space(parent: &Path) -> io::Result<u128> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
-    let path = CString::new(parent.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
+    let path = CString::new(parent.as_os_str().as_bytes())
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
     if unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
-        return Err(space_query_error(parent, io::Error::last_os_error()));
+        return Err(io::Error::last_os_error());
     }
     let stat = unsafe { stat.assume_init() };
     Ok((stat.f_bavail as u128) * (stat.f_frsize as u128))
 }
 
 #[cfg(windows)]
-pub(crate) fn available_copy_space(parent: &Path) -> Result<u128, String> {
+fn available_copy_space(parent: &Path) -> io::Result<u128> {
     use std::os::windows::ffi::OsStrExt;
 
     #[link(name = "kernel32")]
@@ -744,7 +741,7 @@ pub(crate) fn available_copy_space(parent: &Path) -> Result<u128, String> {
     }
     let mut path: Vec<u16> = parent.as_os_str().encode_wide().collect();
     if path.contains(&0) {
-        return Err(crate::i18n::text!("Недопустимый путь проверки свободного места").into());
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
     }
     // Also handles a UNC share root, for which Win32 requires a trailing slash.
     if !matches!(path.last(), Some(47 | 92)) {
@@ -762,49 +759,57 @@ pub(crate) fn available_copy_space(parent: &Path) -> Result<u128, String> {
         )
     } == 0
     {
-        return Err(space_query_error(parent, io::Error::last_os_error()));
+        return Err(io::Error::last_os_error());
     }
     Ok(u128::from(available))
 }
 
 #[cfg(not(any(unix, windows)))]
-pub(crate) fn available_copy_space(_parent: &Path) -> Result<u128, String> {
-    Err(crate::i18n::text!("Проверка свободного места на этой платформе недоступна").into())
+fn available_copy_space(_parent: &Path) -> io::Result<u128> {
+    Err(io::Error::from(io::ErrorKind::Unsupported))
 }
 
-#[cfg(any(unix, windows))]
-fn space_query_error(parent: &Path, error: io::Error) -> String {
-    let parent = parent.display();
-    crate::tr_format!(
-        "Could not check available space in “{parent}”: {error}",
-        error = error,
-        parent = parent
-    )
+pub(crate) fn check_local_copy_space(required: u64, parent: &Path) -> Result<(), TransferError> {
+    let available = available_copy_space(parent).map_err(|source| SpaceError::LocalQuery {
+        directory: parent.to_owned(),
+        source,
+    })?;
+    ensure_copy_space(required, available, &Location::Local(parent.to_owned()))
 }
 
-pub(crate) fn copy_space_error(parent: &Path, error: &io::Error) -> Option<String> {
-    match error.kind() {
-        io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded => {
-            let parent = parent.display();
-            Some(crate::tr_format!(
-                "Not enough free space while copying into “{parent}”: {error}",
-                error = error,
-                parent = parent
-            ))
+pub(crate) fn local_copy_error(
+    parent: Option<&Path>,
+    error: io::Error,
+    context: impl FnOnce(&io::Error) -> String,
+) -> TransferError {
+    if let Some(parent) = parent
+        && matches!(
+            error.kind(),
+            io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded
+        )
+    {
+        SpaceError::LocalWrite {
+            directory: parent.to_owned(),
+            source: error,
         }
-        _ => None,
+        .into()
+    } else {
+        TransferError::io(error, context)
     }
 }
 
 pub(crate) fn ensure_copy_space(
     required: u64,
     available: u128,
-    parent: impl std::fmt::Display,
-) -> Result<(), String> {
+    directory: &Location,
+) -> Result<(), TransferError> {
     if u128::from(required) > available {
-        Err(crate::tr_format!(
-            "Not enough free space in “{parent}”: about {required} bytes needed, {available} bytes available", available = available, parent = parent, required = required
-        ))
+        Err(SpaceError::Insufficient {
+            directory: directory.clone(),
+            required,
+            available,
+        }
+        .into())
     } else {
         Ok(())
     }
@@ -1826,26 +1831,42 @@ mod tests {
 
     #[test]
     fn space_preflight_is_conservative_and_does_not_modify_files() {
+        use crate::file_error::Failure;
+
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("source");
         let destination = root.path().join("destination");
         fs::write(&source, b"new contents").unwrap();
         fs::write(&destination, b"existing contents").unwrap();
-        ensure_copy_space(
-            SourceManifest::capture(&source).unwrap().bytes,
-            available_copy_space(root.path()).unwrap(),
-            root.path().display(),
-        )
-        .unwrap();
-        let folder = root.path().display();
+        check_local_copy_space(SourceManifest::capture(&source).unwrap().bytes, root.path())
+            .unwrap();
+        let folder = Location::Local(root.path().to_owned());
         let error = ensure_copy_space(12, 11, &folder).unwrap_err();
-        assert!(
-            error.contains(root.path().to_string_lossy().as_ref()),
-            "{error}"
-        );
+        assert!(matches!(
+            error,
+            TransferError::Failed(Failure::Space(reason))
+                if matches!(reason.as_ref(), SpaceError::Insufficient {
+                    directory, required: 12, available: 11,
+                } if directory == &folder)
+        ));
         assert!(ensure_copy_space(12, 12, &folder).is_ok());
-        assert!(ensure_copy_space(u64::MAX, u128::from(u64::MAX) + 1, folder).is_ok());
-        assert!(available_copy_space(&root.path().join("missing")).is_err());
+        assert!(ensure_copy_space(u64::MAX, u128::from(u64::MAX) + 1, &folder).is_ok());
+        let missing = root.path().join("missing");
+        let error = check_local_copy_space(1, &missing).unwrap_err();
+        let TransferError::Failed(Failure::Space(reason)) = error else {
+            panic!("expected a typed space query error");
+        };
+        let SpaceError::LocalQuery {
+            directory,
+            source: cause,
+        } = reason.as_ref()
+        else {
+            panic!("expected failure to query the local folder");
+        };
+        assert_eq!(directory, &missing);
+        assert_eq!(cause.kind(), io::ErrorKind::NotFound);
+        #[cfg(unix)]
+        assert_eq!(cause.raw_os_error(), Some(libc::ENOENT));
         assert_eq!(fs::read(source).unwrap(), b"new contents");
         assert_eq!(fs::read(destination).unwrap(), b"existing contents");
     }
@@ -1858,12 +1879,36 @@ mod tests {
         fs::write(source.join("nested/two"), b"56789").unwrap();
         assert_eq!(SourceManifest::capture(&source).unwrap().bytes, 9);
         let bytes = SourceManifest::capture(&source).unwrap().bytes;
-        assert!(ensure_copy_space(bytes, 8, root.path().display()).is_err());
-        assert!(ensure_copy_space(bytes, 9, root.path().display()).is_ok());
+        let folder = Location::Local(root.path().to_owned());
+        assert!(ensure_copy_space(bytes, 8, &folder).is_err());
+        assert!(ensure_copy_space(bytes, 9, &folder).is_ok());
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(&source, source.join("link")).unwrap();
             assert_eq!(SourceManifest::capture(&source).unwrap().bytes, 9);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_copy_distinguishes_disk_full_and_quota_with_original_errors() {
+        use crate::file_error::Failure;
+
+        let folder = Path::new("/space-test");
+        for (errno, kind) in [
+            (libc::ENOSPC, io::ErrorKind::StorageFull),
+            (libc::EDQUOT, io::ErrorKind::QuotaExceeded),
+        ] {
+            let error = local_copy_error(Some(folder), io::Error::from_raw_os_error(errno), |_| {
+                panic!("a capacity error must carry its own context")
+            });
+            let TransferError::Failed(Failure::Space(reason)) = error else {
+                panic!("expected a typed local write error");
+            };
+            assert!(matches!(
+                reason.as_ref(), SpaceError::LocalWrite { directory, source }
+                    if directory == folder && source.kind() == kind && source.raw_os_error() == Some(errno)
+            ));
         }
     }
 

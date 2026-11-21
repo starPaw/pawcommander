@@ -1450,6 +1450,8 @@ fn openssh_round_trip_and_host_verification() {
     );
     fs::remove_dir_all(staged.path()).unwrap();
     if std::env::var("PAWCOMMANDER_TEST_DISABLE_STATVFS").as_deref() == Ok("1") {
+        use crate::file_error::{Failure, ProbeAction, SpaceError};
+
         let target = remote_root.join(source.name());
         let error = staged_copy(&source, &target).unwrap_err();
         assert!(error.contains("fstatvfs@openssh.com"), "{error}");
@@ -1466,8 +1468,28 @@ fn openssh_round_trip_and_host_verification() {
             |_, _| panic!("source removed"),
         )
         .unwrap_err();
+        let TransferError::Failed(Failure::Space(reason)) = &error.error else {
+            panic!("expected a typed remote space error: {error:?}");
+        };
+        let SpaceError::SftpProbe(probe) = reason.as_ref() else {
+            panic!("expected an SFTP probe error: {reason:?}");
+        };
+        assert_eq!(probe.directory, remote_root);
+        assert_eq!(
+            probe.probe.path().file_name(),
+            Some(std::ffi::OsStr::new("space-probe"))
+        );
+        let [(ProbeAction::Query, cause)] = probe.causes.as_slice() else {
+            panic!("expected the refusal and successful cleanup: {probe:?}");
+        };
+        assert_eq!(
+            cause.code(),
+            ssh2::ErrorCode::SFTP(libssh2_sys::LIBSSH2_FX_PERMISSION_DENIED)
+        );
         let message = crate::i18n::transfer_failure(&error);
         assert!(message.contains("fstatvfs@openssh.com"), "{message}");
+        assert!(message.contains("[SFTP(3)]"), "{message}");
+        assert!(!probe.probe.path().exists());
         assert!(!target.path().exists());
         assert_eq!(fs::read(source.path().join(".hidden")).unwrap(), b"hidden");
         assert!(read_directory(&remote_root, &|| false).unwrap().is_empty());

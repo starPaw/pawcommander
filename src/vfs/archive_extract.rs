@@ -173,11 +173,7 @@ fn extract(
         }
         progress.results.target(&tree.source, target.display());
         if let Some(path) = parent.location.local() {
-            fs_ops::ensure_copy_space(
-                tree.bytes,
-                fs_ops::available_copy_space(path)?,
-                &parent.location,
-            )?;
+            fs_ops::check_local_copy_space(tree.bytes, path)?;
         }
         let mut published = false;
         let result = with_staging_typed(&target, Some(&cancel), |staging, _| {

@@ -132,7 +132,8 @@ fn create_hard_link(
     }
 
     progress.checkpoint().map_err(|error| error.to_string())?;
-    let staging = create_staging_directory(directory)?;
+    let staging =
+        create_staging_directory(directory).map_err(|error| crate::i18n::file_error(&error))?;
     let payload = staging.path.join("link");
     let result = (|| {
         let location = Location::Local(staging.path.clone());
