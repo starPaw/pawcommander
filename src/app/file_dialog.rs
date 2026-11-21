@@ -13,29 +13,33 @@ use std::{
 };
 
 #[derive(Clone, Copy)]
-pub(super) enum Kind {
-    Import,
-    Export,
+pub(super) enum Mode {
+    Open,
+    Save {
+        suggested_name: &'static str,
+        message: &'static str,
+    },
 }
 
 pub(super) struct Picker {
     panel: Retained<NSSavePanel>,
     result: mpsc::Receiver<NSModalResponse>,
-    pub(super) kind: Kind,
+    pub(super) mode: Mode,
 }
 
 impl Picker {
-    pub(super) fn open(kind: Kind, ctx: &egui::Context) -> Result<Self, String> {
+    pub(super) fn open(mode: Mode, ctx: &egui::Context) -> Result<Self, String> {
         let mtm = MainThreadMarker::new()
             .ok_or_else(|| text!("Не удалось открыть окно выбора файла."))?;
-        let panel = match kind {
-            Kind::Import => Retained::into_super(NSOpenPanel::openPanel(mtm)),
-            Kind::Export => {
+        let panel = match mode {
+            Mode::Open => Retained::into_super(NSOpenPanel::openPanel(mtm)),
+            Mode::Save {
+                suggested_name,
+                message,
+            } => {
                 let panel = NSSavePanel::savePanel(mtm);
-                panel.setNameFieldStringValue(&NSString::from_str("PawCommander-settings.json"));
-                panel.setMessage(Some(&NSString::from_str(text!(
-                    "Выберите имя нового файла настроек."
-                ))));
+                panel.setNameFieldStringValue(&NSString::from_str(suggested_name));
+                panel.setMessage(Some(&NSString::from_str(message)));
                 panel
             }
         };
@@ -49,7 +53,7 @@ impl Picker {
         Ok(Self {
             panel,
             result,
-            kind,
+            mode,
         })
     }
 
@@ -63,7 +67,7 @@ impl Picker {
                 });
                 Some(
                     path.map(Some)
-                        .ok_or_else(|| text!("Путь к файлу настроек недоступен.").into()),
+                        .ok_or_else(|| text!("Путь к выбранному файлу недоступен.").into()),
                 )
             }
             Ok(response) if response == NSModalResponseCancel => Some(Ok(None)),

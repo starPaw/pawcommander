@@ -398,6 +398,8 @@ pub(super) fn entry_widget(
         Some(problem) => format!("{tooltip}\n{problem}"),
         None => tooltip,
     };
+    #[cfg(target_os = "macos")]
+    let row_focus = response.id;
     response
         .on_hover_text(tooltip)
         .context_menu(|ui| {
@@ -444,6 +446,15 @@ pub(super) fn entry_widget(
                 .on_disabled_hover_text(crate::i18n::text!("Zed не найден. Установите редактор и выберите Настройки → Инструменты → Проверить снова."))
                 .clicked() {
                 actions.push(Action::OpenInZed(pane, path.clone()));
+                ui.close();
+            }
+            #[cfg(target_os = "macos")]
+            if !is_dir
+                && let Some(path) = path.local()
+                && ui.button(crate::i18n::text!("Предпросмотр с расширением…")).clicked()
+            {
+                actions.push(Action::Focus(pane));
+                actions.push(Action::PreviewWithExtension(path.to_owned(), row_focus));
                 ui.close();
             }
             #[cfg(target_os = "macos")]

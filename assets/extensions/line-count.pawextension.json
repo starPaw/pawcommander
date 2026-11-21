@@ -1,0 +1,15 @@
+{
+  "api_version": 1,
+  "id": "pawcommander.line-count",
+  "name": "Line count",
+  "extensions": [
+    "txt",
+    "md",
+    "log",
+    "csv"
+  ],
+  "permissions": [
+    "read_selected_file"
+  ],
+  "module": "AGFzbQEAAAABBgFgAX8BfgMCAQAFAwEAAQcYAgZtZW1vcnkCAAtwYXdfcHJldmlldwAACnEBbwEDfwJAA0AgASAATw0BIAIgAS0AAEEKRmohAiABQQFqIQEMAAsLIAAEQCACIABBAWstAABBCkdqIQILQYCABCEDA0AgA0EBayIDIAJBCnBBMGo6AAAgAkEKbiICDQALIAOtQiCGQYCABCADa62ECwBABG5hbWUCIAEABAAGbGVuZ3RoAQVpbmRleAIFbGluZXMDBWRpZ2l0AxcBAAMAA2VuZAEEc2NhbgMHZGVjaW1hbA=="
+}

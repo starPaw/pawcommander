@@ -1,8 +1,8 @@
 mod document;
-mod picker;
 
 use super::{
     comparison::{ComparisonBody, ComparisonDialog, ComparisonResponse},
+    file_dialog::{Mode, Picker},
     PawCommander,
 };
 use crate::{
@@ -12,7 +12,6 @@ use crate::{
 };
 pub(super) use document::Preferences;
 use eframe::egui;
-use picker::{Kind, Picker};
 use std::{path::PathBuf, sync::mpsc, thread};
 
 pub(super) struct SettingsTransfer {
@@ -36,12 +35,12 @@ impl SettingsTransfer {
         match &self.state {
             State::Picking(picker) => {
                 let Some(result) = picker.poll() else { return };
-                let kind = picker.kind;
+                let mode = picker.mode;
                 self.state = State::Ready;
                 match result {
-                    Ok(Some(path)) => match kind {
-                        Kind::Import => self.read(path),
-                        Kind::Export => self.state = State::Export(path),
+                    Ok(Some(path)) => match mode {
+                        Mode::Open => self.read(path),
+                        Mode::Save { .. } => self.state = State::Export(path),
                     },
                     Ok(None) => {}
                     Err(error) => self.error = Some(error),
@@ -84,9 +83,9 @@ impl SettingsTransfer {
         }
     }
 
-    fn choose(&mut self, kind: Kind) {
+    fn choose(&mut self, mode: Mode) {
         self.error = None;
-        match Picker::open(kind, &self.ctx) {
+        match Picker::open(mode, &self.ctx) {
             Ok(picker) => self.state = State::Picking(picker),
             Err(error) => self.error = Some(error),
         }
@@ -140,10 +139,13 @@ impl SettingsTransfer {
                     let mut close = false;
                     ui.horizontal_wrapped(|ui| {
                         if button(ui, text!("Экспортировать настройки…")) {
-                            self.choose(Kind::Export);
+                            self.choose(Mode::Save {
+                                suggested_name: "PawCommander-settings.json",
+                                message: text!("Выберите имя нового файла настроек."),
+                            });
                         }
                         if button(ui, text!("Импортировать настройки…")) {
-                            self.choose(Kind::Import);
+                            self.choose(Mode::Open);
                         }
                         close = button(ui, text!("Закрыть"));
                     });

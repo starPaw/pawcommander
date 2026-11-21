@@ -16,6 +16,10 @@ macro_rules! formats {
 }
 
 formats! {
+    "Could not read the extension package ({error})." => ("Не удалось прочитать пакет расширения ({error}).", "Nepodařilo se přečíst balíček rozšíření ({error})."),
+    "Unsupported extension API version {version}." => ("Версия API расширения {version} не поддерживается.", "Verze API rozšíření {version} není podporována."),
+    "Could not start the viewer worker ({error})." => ("Не удалось запустить фоновый просмотрщик ({error}).", "Nepodařilo se spustit úlohu náhledu ({error})."),
+    "Could not read the selected file ({error})." => ("Не удалось прочитать выбранный файл ({error}).", "Nepodařilo se přečíst vybraný soubor ({error})."),
     "From {before} to {after}" => ("Было «{before}», станет «{after}»", "Z „{before}“ na „{after}“"),
     "Unsupported settings version {version}." => ("Версия настроек {version} не поддерживается.", "Verze nastavení {version} není podporována."),
     "Could not read the settings file ({error})." => ("Не удалось прочитать файл настроек ({error}).", "Nepodařilo se přečíst soubor nastavení ({error})."),

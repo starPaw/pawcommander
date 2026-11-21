@@ -24,8 +24,12 @@ mod drives;
 mod duplicates;
 mod entry_widget;
 #[cfg(target_os = "macos")]
+mod extensions;
+#[cfg(target_os = "macos")]
 mod external_editors;
 mod file_compare;
+#[cfg(target_os = "macos")]
+mod file_dialog;
 #[cfg(target_os = "macos")]
 mod file_templates;
 #[cfg(target_os = "macos")]
@@ -116,6 +120,8 @@ pub struct PawCommander {
     collections: crate::vfs::collections::Catalog,
     #[cfg(target_os = "macos")]
     file_templates: crate::vfs::file_templates::Library,
+    #[cfg(target_os = "macos")]
+    extensions: extensions::Extensions,
     preview: Preview,
     thumbnails: Thumbnails,
     quick_look: Option<QuickLook>,
@@ -727,6 +733,11 @@ impl eframe::App for PawCommander {
             eframe::set_value(storage, Self::SYNC_PROFILES_KEY, &self.sync_profiles);
             eframe::set_value(storage, Self::COLLECTIONS_KEY, &self.collections);
             eframe::set_value(storage, Self::FILE_TEMPLATES_KEY, &self.file_templates);
+            eframe::set_value(
+                storage,
+                Self::EXTENSIONS_KEY,
+                &self.extensions.catalog.installed(),
+            );
         }
         eframe::set_value(storage, Self::FOLDER_VIEWS_KEY, &saved_views);
         self.search.save(storage);

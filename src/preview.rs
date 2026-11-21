@@ -3,7 +3,7 @@ use crate::test_ui::ContextExt as _;
 mod code;
 pub(crate) mod encoding;
 #[cfg(target_os = "macos")]
-mod helper;
+pub(crate) mod helper;
 mod hex;
 mod large_text;
 mod markup;
