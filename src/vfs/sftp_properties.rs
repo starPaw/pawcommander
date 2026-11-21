@@ -5,6 +5,7 @@ use super::{
     Location, MAX_TREE_DEPTH,
 };
 use crate::i18n::text;
+use crate::operations::TransferError;
 use ssh2::{Error, File, FileStat, Sftp};
 use std::{
     collections::HashSet,
@@ -18,7 +19,7 @@ pub(crate) enum PropertyEvent<'a> {
         stat: &'a FileStat,
         selected: bool,
     },
-    Error(&'a Location, String),
+    Error(&'a Location, TransferError),
 }
 
 /// Reads selected roots and their descendants on one authenticated channel.
@@ -91,7 +92,7 @@ pub(crate) fn visit_properties(
 enum ReadError {
     Cancelled,
     Server(Error),
-    Path(crate::operations::TransferError),
+    Path(TransferError),
 }
 
 struct Scanner<'a, F> {
@@ -118,12 +119,12 @@ impl<F: FnMut(PropertyEvent<'_>)> Scanner<'_, F> {
 
     /// Returns whether to continue with siblings and other roots.
     fn report(&mut self, location: &Location, error: ReadError) -> bool {
-        let (message, keep_reading) = match error {
+        let (cause, keep_reading) = match error {
             ReadError::Cancelled => return false,
-            ReadError::Server(error) => (error.to_string(), !should_reopen(&error)),
-            ReadError::Path(error) => (crate::i18n::file_error(&error), true),
+            ReadError::Server(error) => (error.to_string().into(), !should_reopen(&error)),
+            ReadError::Path(error) => (error, true),
         };
-        (self.visit)(PropertyEvent::Error(location, message));
+        (self.visit)(PropertyEvent::Error(location, cause));
         keep_reading
     }
 

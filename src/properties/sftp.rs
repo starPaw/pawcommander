@@ -43,7 +43,9 @@ pub(super) fn scan(
                     summary.details.push((location.clone(), details(stat)));
                 }
             }
-            PropertyEvent::Error(location, error) => summary.read_error(location, error),
+            PropertyEvent::Error(location, error) => {
+                summary.read_error(location, crate::i18n::file_error(&error));
+            }
         }
         progress(&summary);
     });

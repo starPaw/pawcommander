@@ -1,5 +1,5 @@
 use crate::i18n::text;
-use crate::operations::Cancellation;
+use crate::operations::{Cancellation, TransferError};
 use crate::vfs::{Location, ModeRule, PermissionsPreview};
 use eframe::egui;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -14,7 +14,7 @@ pub(super) struct PermissionsDialog {
 
 struct Pending {
     cancel: Cancellation,
-    receive: Receiver<Result<PermissionsPreview, String>>,
+    receive: Receiver<Result<PermissionsPreview, TransferError>>,
 }
 
 impl PermissionsDialog {
@@ -156,7 +156,7 @@ impl PermissionsDialog {
         };
         match pending.receive.try_recv() {
             Ok(Ok(preview)) => self.preview = Some(preview),
-            Ok(Err(error)) => self.error = Some(error),
+            Ok(Err(error)) => self.error = Some(crate::i18n::file_error(&error)),
             Err(TryRecvError::Empty) => return,
             Err(TryRecvError::Disconnected) => {
                 self.error =

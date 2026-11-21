@@ -25,7 +25,7 @@ pub(crate) fn open_preview_stream(location: &Location) -> Result<ssh2::File, Str
 }
 
 fn preview_input(location: &Location) -> Result<(ssh2::FileStat, Option<ssh2::File>), String> {
-    let sftp = remote(location)?;
+    let sftp = remote(location).map_err(|error| crate::i18n::file_error(&error))?;
     let stat = sftp.lstat(location.path()).map_err(err)?;
     if stat.is_dir() {
         return Ok((stat, None));

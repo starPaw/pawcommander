@@ -1,7 +1,10 @@
 use super::{
-    at_target, authenticate, err, login_primary, open_verified, validate_endpoint, verify_session,
-    Endpoint, InteractiveAuth, PrimaryAuth, TrustFiles, IO_TIMEOUT_MS,
+    at_target, authenticate, login_primary, open_verified, route_error, ssh_failure,
+    validate_endpoint, verify_session, Endpoint, InteractiveAuth, PrimaryAuth, TrustFiles,
+    IO_TIMEOUT_MS,
 };
+use crate::file_error::{ConnectionError, SshStage};
+use crate::operations::TransferError;
 use crate::vfs::JumpHost;
 use ssh2::{BlockDirections, Channel, Session};
 use std::{
@@ -23,21 +26,16 @@ pub(super) fn open(
     trust: &TrustFiles,
     mut auth: Option<&mut InteractiveAuth>,
     login: Login<'_>,
-) -> Result<Session, String> {
+) -> Result<Session, TransferError> {
     validate_endpoint(target).map_err(|error| at_target(target, error))?;
     if let Some(auth) = auth.as_deref_mut() {
         auth.set_host_key_title(crate::i18n::key!("Проверка ключа промежуточного сервера"));
     }
-    let socket =
-        tunnel(target, &jump.endpoint(), trust, auth.as_deref_mut(), login).map_err(|error| {
-            let address = jump.label();
-            crate::tr_format!(
-                "Jump host {address} · {error}",
-                address = address,
-                error = error
-            )
-        })?;
-    let mut session = Session::new().map_err(err)?;
+    let socket = tunnel(target, &jump.endpoint(), trust, auth.as_deref_mut(), login)
+        .map_err(|error| route_error(jump.label(), true, error))?;
+    let mut session = Session::new()
+        .map_err(ssh_failure(SshStage::Session))
+        .map_err(|error| at_target(target, error))?;
     session.set_tcp_stream(socket);
     if let Some(auth) = auth.as_deref_mut() {
         auth.set_host_key_title(crate::i18n::key!("Проверка ключа конечного сервера"));
@@ -52,7 +50,7 @@ fn tunnel(
     trust: &TrustFiles,
     auth: Option<&mut InteractiveAuth>,
     login: Login<'_>,
-) -> Result<UnixStream, String> {
+) -> Result<UnixStream, TransferError> {
     let control = auth.as_deref().map(InteractiveAuth::control);
     let session = open_verified(jump, trust, auth.as_deref())?;
     let saved = if login.use_saved && jump.key.is_some() && login.passphrase.is_empty() {
@@ -78,21 +76,22 @@ fn tunnel(
     }
     let channel = session
         .channel_direct_tcpip(target.host_name(), target.port, None)
-        .map_err(|error| {
-            let address = target.label();
-            crate::tr_format!(
-                "Could not forward TCP to {address} ({error})",
-                address = address,
-                error = error
-            )
+        .map_err(|source| ConnectionError::Forward {
+            target: target.label(),
+            source,
         })?;
-    let (socket, peer) = UnixStream::pair().map_err(err)?;
+    let (socket, peer) = UnixStream::pair().map_err(ConnectionError::Transport)?;
     let timeout = Some(Duration::from_millis(u64::from(IO_TIMEOUT_MS)));
-    socket.set_read_timeout(timeout).map_err(err)?;
-    socket.set_write_timeout(timeout).map_err(err)?;
-    peer.set_nonblocking(true).map_err(err)?;
+    socket
+        .set_read_timeout(timeout)
+        .map_err(ConnectionError::Transport)?;
+    socket
+        .set_write_timeout(timeout)
+        .map_err(ConnectionError::Transport)?;
+    peer.set_nonblocking(true)
+        .map_err(ConnectionError::Transport)?;
     if let Some(control) = &control {
-        let cancel_socket = socket.try_clone().map_err(err)?;
+        let cancel_socket = socket.try_clone().map_err(ConnectionError::Transport)?;
         control.attach(move || {
             let _ = cancel_socket.shutdown(Shutdown::Both);
         })?;
@@ -103,7 +102,7 @@ fn tunnel(
         .spawn(move || {
             let _ = relay(peer, session, channel);
         })
-        .map_err(err)?;
+        .map_err(ConnectionError::Transport)?;
     Ok(socket)
 }
 

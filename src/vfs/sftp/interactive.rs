@@ -1,5 +1,7 @@
 use super::{host_key::HostKey, Endpoint};
+use crate::file_error::ConnectionError;
 use crate::i18n::text;
+use crate::operations::TransferError;
 use ssh2::{KeyboardInteractivePrompt, Prompt, Session};
 use std::{
     sync::{mpsc, Arc, Mutex},
@@ -35,11 +37,11 @@ enum Abort {
 }
 
 impl Abort {
-    fn message(self) -> &'static str {
+    fn error(self) -> TransferError {
         match self {
-            Self::Cancelled => text!("Подключение отменено"),
-            Self::TimedOut => text!("Время интерактивной SSH-аутентификации истекло"),
-            Self::HostKeyTimedOut => text!("Время проверки ключа сервера SSH истекло"),
+            Self::Cancelled => TransferError::Cancelled,
+            Self::TimedOut => ConnectionError::InteractiveTimeout.into(),
+            Self::HostKeyTimedOut => ConnectionError::HostKeyTimeout.into(),
         }
     }
 }
@@ -70,30 +72,33 @@ impl ConnectionControl {
         matches!(*self.0.lock().unwrap(), Attempt::Pending(_))
     }
 
-    pub(super) fn check(&self) -> Result<(), String> {
+    pub(super) fn check(&self) -> Result<(), TransferError> {
         match *self.0.lock().unwrap() {
-            Attempt::Aborted(reason) => Err(reason.message().into()),
+            Attempt::Aborted(reason) => Err(reason.error()),
             _ => Ok(()),
         }
     }
 
-    pub(super) fn attach(&self, shutdown: impl FnOnce() + Send + 'static) -> Result<(), String> {
+    pub(super) fn attach(
+        &self,
+        shutdown: impl FnOnce() + Send + 'static,
+    ) -> Result<(), TransferError> {
         let mut attempt = self.0.lock().unwrap();
         match &mut *attempt {
             Attempt::Pending(slot) => {
                 *slot = Some(Box::new(shutdown));
                 Ok(())
             }
-            Attempt::Aborted(reason) => Err(reason.message().into()),
-            Attempt::Finalizing => Err("SSH connection already finalized".into()),
+            Attempt::Aborted(reason) => Err(reason.error()),
+            Attempt::Finalizing => Err(ConnectionError::Finalized.into()),
         }
     }
 
     /// Release the shutdown handle before the session can be shared.
-    pub(super) fn finalize(&self) -> Result<(), String> {
+    pub(super) fn finalize(&self) -> Result<(), TransferError> {
         let mut attempt = self.0.lock().unwrap();
         if let Attempt::Aborted(reason) = *attempt {
-            return Err(reason.message().into());
+            return Err(reason.error());
         }
         *attempt = Attempt::Finalizing;
         Ok(())
@@ -182,7 +187,7 @@ impl InteractiveAuth {
         self.host_key_title = Some(title);
     }
 
-    pub(crate) fn confirm_host_key(&self, key: HostKey) -> Result<(), String> {
+    pub(crate) fn confirm_host_key(&self, key: HostKey) -> Result<(), TransferError> {
         let (reply, receive) = mpsc::channel();
         let deadline = Instant::now() + HOST_KEY_TIMEOUT;
         let title = crate::i18n::key!("Проверка ключа сервера");
@@ -197,7 +202,11 @@ impl InteractiveAuth {
         self.wait(receive, deadline, Abort::HostKeyTimedOut)
     }
 
-    pub(super) fn authenticate(&mut self, session: &Session, endpoint: &Endpoint) {
+    pub(super) fn authenticate(
+        &mut self,
+        session: &Session,
+        endpoint: &Endpoint,
+    ) -> Result<(), ssh2::Error> {
         let previous_timeout = session.timeout();
         let deadline = Instant::now() + Duration::from_millis(u64::from(EXCHANGE_TIMEOUT_MS));
         self.exchange_deadline = Some(deadline);
@@ -210,6 +219,7 @@ impl InteractiveAuth {
         if result.is_err() && Instant::now() >= deadline {
             self.control.stop(Abort::TimedOut);
         }
+        result
     }
 
     #[cfg(test)]
@@ -263,7 +273,7 @@ impl InteractiveAuth {
         receive: mpsc::Receiver<T>,
         deadline: Instant,
         on_timeout: Abort,
-    ) -> Result<T, String> {
+    ) -> Result<T, TransferError> {
         loop {
             self.control.check()?;
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -277,7 +287,7 @@ impl InteractiveAuth {
             };
             self.control.stop(abort);
             self.control.check()?;
-            return Err(abort.message().into());
+            return Err(abort.error());
         }
     }
 }

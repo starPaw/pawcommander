@@ -1148,7 +1148,7 @@ impl PawCommander {
                     }
                     Err(error) => {
                         if let Some(form) = &mut self.sftp_form {
-                            form.error = Some(error);
+                            form.error = Some(crate::i18n::connection_result_error(&error));
                         }
                     }
                 }

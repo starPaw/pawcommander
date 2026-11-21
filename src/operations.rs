@@ -4,8 +4,8 @@
 mod bandwidth;
 
 use crate::file_error::{
-    AccessCause, AccessError, Failure, ListingError, MutationError, PathError, PublicationError,
-    RecoveryNotice,
+    AccessCause, AccessError, ConnectionError, Failure, ListingError, MutationError, PathError,
+    PublicationError, RecoveryNotice,
 };
 use crate::vfs::{Endpoint, Location};
 use bandwidth::Pacer;
@@ -262,11 +262,19 @@ impl From<PathError> for TransferError {
 
 impl From<AccessError> for TransferError {
     fn from(error: AccessError) -> Self {
-        if matches!(&error.cause, AccessCause::Local(source) if Self::is_cancelled_io(source)) {
-            Self::Cancelled
-        } else {
-            Self::Failed(Failure::Access(Box::new(error)))
+        match &error.cause {
+            AccessCause::Local(source) if Self::is_cancelled_io(source) => Self::Cancelled,
+            AccessCause::Connection(source) if matches!(source.as_ref(), Self::Cancelled) => {
+                Self::Cancelled
+            }
+            _ => Self::Failed(Failure::Access(Box::new(error))),
         }
+    }
+}
+
+impl From<ConnectionError> for TransferError {
+    fn from(error: ConnectionError) -> Self {
+        Self::Failed(Failure::Connection(Box::new(error)))
     }
 }
 

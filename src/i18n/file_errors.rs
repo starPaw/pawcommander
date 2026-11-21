@@ -1,8 +1,8 @@
 use super::text;
 use crate::file_error::{
-    AccessAction, AccessError, ArchiveMemberError, Failure, ListingError, ListingErrorKind,
-    LocalPathAction, MutationError, PathError, PublicationError, RecoveryNotice,
-    StagingCleanupError,
+    AccessAction, AccessCause, AccessError, ArchiveMemberError, ConnectionError, Failure,
+    ListingError, ListingErrorKind, LocalPathAction, MutationError, PathError, PublicationError,
+    RecoveryNotice, SshStage, StagingCleanupError,
 };
 use crate::operations::TransferError;
 use crate::vfs::{DeletionFailure, TransferFailure};
@@ -12,6 +12,7 @@ pub(crate) fn file_error(error: &TransferError) -> String {
         TransferError::Failed(reason) | TransferError::PublicationUnconfirmed(reason) => {
             match reason {
                 Failure::Path(error) => path_error(error),
+                Failure::Connection(error) => connection_error(error),
                 Failure::Access(error) => access_error(error),
                 Failure::ComparisonPane { right, cause } => {
                     let pane = if *right {
@@ -36,22 +37,94 @@ pub(crate) fn file_error(error: &TransferError) -> String {
     }
 }
 
+pub(crate) fn connection_result_error(error: &TransferError) -> String {
+    if matches!(error, TransferError::Cancelled) {
+        text!("Подключение отменено").into()
+    } else {
+        file_error(error)
+    }
+}
+
+fn connection_error(error: &ConnectionError) -> String {
+    match error {
+        ConnectionError::InvalidEndpoint => text!("Укажите сервер, пользователя и порт 1–65535").into(),
+        ConnectionError::Resolve { host, source } => crate::tr_format!(
+            "Could not resolve SFTP host {host}: {error}",
+            host = host,
+            error = source
+        ),
+        ConnectionError::Connect { endpoint, last: Some((address, source)) } => crate::tr_format!(
+            "Could not connect to the SFTP server {endpoint} ({address}): {error}",
+            endpoint = endpoint,
+            address = address,
+            error = source
+        ),
+        ConnectionError::Connect { endpoint, last: None } => crate::tr_format!(
+            "No addresses found for the SFTP server {endpoint}", endpoint = endpoint
+        ),
+        ConnectionError::Transport(source) => crate::tr_format!(
+            "Could not configure the SSH connection: {error}", error = source
+        ),
+        ConnectionError::Ssh { stage, source } => {
+            let prefix = match stage {
+                SshStage::Session => text!("Не удалось создать сеанс SSH"),
+                SshStage::Handshake => text!("Не удалось согласовать соединение SSH"),
+                SshStage::AuthenticationMethods => text!("Не удалось получить способы SSH-аутентификации"),
+                SshStage::Authentication => text!("Сервер не подтвердил аутентификацию"),
+                SshStage::InteractiveAuthentication => text!("Сервер не подтвердил интерактивную аутентификацию"),
+                SshStage::Channel => text!("Не удалось открыть канал SFTP"),
+                SshStage::Agent => return crate::tr_format!(
+                    "SSH agent ({error}). Add a key to the agent or supply a key or password in SFTP.",
+                    error = source
+                ),
+            };
+            format!("{prefix}: {source}")
+        }
+        #[cfg(target_os = "macos")]
+        ConnectionError::Forward { target, source } => crate::tr_format!(
+            "Could not forward TCP to {address} ({error})",
+            address = target,
+            error = source
+        ),
+        ConnectionError::Route { jump, address, cause } => {
+            let message = file_error(cause);
+            if *jump {
+                crate::tr_format!("Jump host {address} · {error}", address = address, error = message)
+            } else {
+                crate::tr_format!("Target host {address} · {error}", address = address, error = message)
+            }
+        }
+        ConnectionError::Automatic(cause) => crate::tr_format!(
+            "Could not open the SFTP connection ({error}). Use the SFTP dialog to sign in with a password or MFA.",
+            error = file_error(cause)
+        ),
+        ConnectionError::AuthenticationUnconfirmed { interactive: true } =>
+            text!("Сервер не подтвердил интерактивную аутентификацию").into(),
+        ConnectionError::AuthenticationUnconfirmed { interactive: false } =>
+            text!("Сервер не подтвердил аутентификацию").into(),
+        ConnectionError::UnsupportedAuthentication => text!("Сервер не предложил доступный способ аутентификации").into(),
+        ConnectionError::InteractiveTimeout => text!("Время интерактивной SSH-аутентификации истекло").into(),
+        ConnectionError::HostKeyTimeout => text!("Время проверки ключа сервера SSH истекло").into(),
+        ConnectionError::Finalized => text!("Подключение SSH уже завершено").into(),
+    }
+}
+
 fn access_error(error: &AccessError) -> String {
+    let cause = match &error.cause {
+        AccessCause::Connection(error) => file_error(error),
+        cause => cause.to_string(),
+    };
     let action = match error.action {
         AccessAction::ResolvePath => text!("Не удалось определить путь к элементу"),
         AccessAction::ReadMetadata | AccessAction::ReadOpenMetadata => {
             text!("Не удалось получить сведения об элементе")
         }
         AccessAction::OpenFile => {
-            return crate::tr_format!(
-                "Could not open {}: {error}",
-                error.location,
-                error = error.cause
-            );
+            return crate::tr_format!("Could not open {}: {error}", error.location, error = cause);
         }
         AccessAction::ReadChildren => text!("Не удалось прочитать папку"),
     };
-    format!("{action} «{}»: {}", error.location, error.cause)
+    format!("{action} «{}»: {cause}", error.location)
 }
 
 pub(crate) fn deletion_failure(failure: &DeletionFailure) -> String {
@@ -208,7 +281,7 @@ fn mutation_error(error: &MutationError, unconfirmed: bool) -> String {
             "Could not open SFTP to rename {from} to {to}: {error}",
             from = from,
             to = to,
-            error = reason
+            error = file_error(reason)
         ),
         RenameSftp { from, to, source } if unconfirmed => crate::tr_format!(
             "The server did not confirm the rename from {from} to {to}: {error}",
@@ -247,7 +320,7 @@ fn mutation_error(error: &MutationError, unconfirmed: bool) -> String {
         ),
         OpenSftpRemoval { location, reason } => crate::tr_format!(
             "Could not open SFTP for deletion at {location}: {error}",
-            error = reason,
+            error = file_error(reason),
             location = location
         ),
         RemoveSftp { location, source, .. } if unconfirmed => crate::tr_format!(

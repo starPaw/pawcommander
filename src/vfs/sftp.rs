@@ -1,6 +1,7 @@
 use super::err;
 use super::location::{Endpoint, Location};
-use crate::{archive, i18n::text};
+use crate::file_error::{AccessAction, AccessError, ConnectionError, MutationError, SshStage};
+use crate::operations::TransferError;
 use libssh2_sys::{
     LIBSSH2_ERROR_CHANNEL_CLOSED, LIBSSH2_ERROR_CHANNEL_FAILURE, LIBSSH2_ERROR_SOCKET_DISCONNECT,
     LIBSSH2_ERROR_SOCKET_RECV, LIBSSH2_ERROR_SOCKET_SEND, LIBSSH2_ERROR_SOCKET_TIMEOUT,
@@ -81,19 +82,25 @@ pub(super) fn connect_with_key(
             use_saved: false,
             passphrase: "",
         },
-    )?;
+    )
+    .map_err(|error| crate::i18n::connection_result_error(&error))?;
     login_primary(
         &session,
         &endpoint.user,
         PrimaryAuth::new(endpoint, password, passphrase, private_key),
-    )?;
+    )
+    .map_err(|error| crate::i18n::connection_result_error(&error))?;
     Ok(session)
 }
 
-fn login_primary(session: &Session, user: &str, primary: PrimaryAuth<'_>) -> Result<(), String> {
+fn login_primary(
+    session: &Session,
+    user: &str,
+    primary: PrimaryAuth<'_>,
+) -> Result<(), TransferError> {
     primary.attempt(session, user)?;
     if !session.authenticated() {
-        return Err(text!("Сервер не подтвердил аутентификацию").into());
+        return Err(ConnectionError::AuthenticationUnconfirmed { interactive: false }.into());
     }
     Ok(())
 }
@@ -102,43 +109,54 @@ fn open_verified(
     endpoint: &Endpoint,
     trust: &TrustFiles,
     interactive: Option<&InteractiveAuth>,
-) -> Result<Session, String> {
+) -> Result<Session, TransferError> {
     validate_endpoint(endpoint)?;
     let host = endpoint.host_name();
     // Bound TCP and SSH I/O waits. DNS resolution uses the OS resolver.
     let control = interactive.map(InteractiveAuth::control);
     let control = control.as_ref();
-    let addresses = (host, endpoint.port)
-        .to_socket_addrs()
-        .map_err(|e| crate::tr_format!("Could not resolve the server: {e}", e = e))?;
+    let addresses =
+        (host, endpoint.port)
+            .to_socket_addrs()
+            .map_err(|source| ConnectionError::Resolve {
+                host: host.to_owned(),
+                source,
+            })?;
     let mut tcp = None;
+    let mut last = None;
     for address in addresses {
         if let Some(control) = control {
             control.check()?;
         }
-        if let Ok(stream) = TcpStream::connect_timeout(&address, Duration::from_secs(10)) {
-            tcp = Some(stream);
-            break;
+        match TcpStream::connect_timeout(&address, Duration::from_secs(10)) {
+            Ok(stream) => {
+                tcp = Some(stream);
+                break;
+            }
+            Err(error) => last = Some((address, error)),
         }
     }
-    let tcp = tcp.ok_or(crate::i18n::text!(
-        "Не удалось подключиться к серверу SFTP (тайм-аут 10 с на адрес)"
-    ))?;
+    let tcp = tcp.ok_or_else(|| ConnectionError::Connect {
+        endpoint: endpoint.label(),
+        last,
+    })?;
     if let Some(control) = control {
-        let socket = tcp.try_clone().map_err(err)?;
+        let socket = tcp.try_clone().map_err(ConnectionError::Transport)?;
         control.attach(move || {
             let _ = socket.shutdown(Shutdown::Both);
         })?;
     }
     let timeout = Some(Duration::from_millis(u64::from(IO_TIMEOUT_MS)));
-    tcp.set_read_timeout(timeout).map_err(err)?;
-    tcp.set_write_timeout(timeout).map_err(err)?;
-    let mut session = Session::new().map_err(err)?;
+    tcp.set_read_timeout(timeout)
+        .map_err(ConnectionError::Transport)?;
+    tcp.set_write_timeout(timeout)
+        .map_err(ConnectionError::Transport)?;
+    let mut session = Session::new().map_err(ssh_failure(SshStage::Session))?;
     session.set_tcp_stream(tcp);
     verify_session(session, endpoint, trust, interactive)
 }
 
-fn validate_endpoint(endpoint: &Endpoint) -> Result<(), String> {
+fn validate_endpoint(endpoint: &Endpoint) -> Result<(), TransferError> {
     let host = endpoint.host_name();
     if host.is_empty()
         || host.chars().any(|ch| ch.is_control() || ch.is_whitespace())
@@ -146,7 +164,7 @@ fn validate_endpoint(endpoint: &Endpoint) -> Result<(), String> {
         || endpoint.user.chars().any(char::is_control)
         || endpoint.port == 0
     {
-        return Err(crate::i18n::text!("Укажите сервер, пользователя и порт 1–65535").into());
+        return Err(ConnectionError::InvalidEndpoint.into());
     }
     Ok(())
 }
@@ -156,9 +174,11 @@ fn verify_session(
     endpoint: &Endpoint,
     trust: &TrustFiles,
     interactive: Option<&InteractiveAuth>,
-) -> Result<Session, String> {
+) -> Result<Session, TransferError> {
     session.set_timeout(IO_TIMEOUT_MS);
-    session.handshake().map_err(err)?;
+    session
+        .handshake()
+        .map_err(ssh_failure(SshStage::Handshake))?;
     trust.verify(&session, endpoint, interactive)?;
     Ok(session)
 }
@@ -168,27 +188,39 @@ fn open_connection(
     trust: &TrustFiles,
     interactive: Option<&mut InteractiveAuth>,
     #[cfg(target_os = "macos")] login: proxy_jump::Login<'_>,
-) -> Result<Session, String> {
+) -> Result<Session, TransferError> {
     if let Some(jump) = &endpoint.jump {
         #[cfg(target_os = "macos")]
         return proxy_jump::open(endpoint, jump, trust, interactive, login);
         #[cfg(not(target_os = "macos"))]
         {
             let _ = jump;
-            return Err(text!("Подключения через ProxyJump доступны на macOS").into());
+            return Err(crate::i18n::text!("Подключения через ProxyJump доступны на macOS").into());
         }
     }
     open_verified(endpoint, trust, interactive.as_deref())
 }
 
-fn at_target(endpoint: &Endpoint, error: String) -> String {
+fn ssh_failure(stage: SshStage) -> impl FnOnce(ssh2::Error) -> TransferError {
+    move |source| ConnectionError::Ssh { stage, source }.into()
+}
+
+fn route_error(address: String, jump: bool, cause: TransferError) -> TransferError {
+    if matches!(cause, TransferError::Cancelled) {
+        cause
+    } else {
+        ConnectionError::Route {
+            jump,
+            address,
+            cause,
+        }
+        .into()
+    }
+}
+
+fn at_target(endpoint: &Endpoint, error: TransferError) -> TransferError {
     if endpoint.jump.is_some() {
-        let address = endpoint.label();
-        crate::tr_format!(
-            "Target host {address} · {error}",
-            address = address,
-            error = error
-        )
+        route_error(endpoint.label(), false, error)
     } else {
         error
     }
@@ -231,25 +263,28 @@ impl<'a> PrimaryAuth<'a> {
         matches!(self, Self::MemoryKey(..) | Self::KeyFile(..))
     }
 
-    fn attempt(&self, session: &Session, user: &str) -> Result<(), String> {
+    fn attempt(&self, session: &Session, user: &str) -> Result<(), TransferError> {
+        let failure = ssh_failure(SshStage::Authentication);
         match *self {
-            Self::Password(password) => session.userauth_password(user, password).map_err(err),
-            Self::MemoryKey(key, phrase) => session.userauth_pubkey_memory(user, None, key, phrase).map_err(err),
-            Self::KeyFile(key, phrase) => session.userauth_pubkey_file(user, None, key, phrase).map_err(err),
-            Self::Agent => session.userauth_agent(user).map_err(|error| {
-                crate::tr_format!(
-                    "SSH agent ({error}). Add a key to the agent or supply a key or password in SFTP.", error = error
-                )
-            }),
+            Self::Password(password) => session.userauth_password(user, password).map_err(failure),
+            Self::MemoryKey(key, phrase) => session
+                .userauth_pubkey_memory(user, None, key, phrase)
+                .map_err(failure),
+            Self::KeyFile(key, phrase) => session
+                .userauth_pubkey_file(user, None, key, phrase)
+                .map_err(failure),
+            Self::Agent => session
+                .userauth_agent(user)
+                .map_err(ssh_failure(SshStage::Agent)),
         }
     }
 }
 
-fn auth_methods(session: &Session, user: &str) -> Result<String, String> {
+fn auth_methods(session: &Session, user: &str) -> Result<String, TransferError> {
     match session.auth_methods(user) {
         Ok(methods) => Ok(methods.to_owned()),
         Err(_) if session.authenticated() => Ok(String::new()),
-        Err(error) => Err(err(error)),
+        Err(error) => Err(ssh_failure(SshStage::AuthenticationMethods)(error)),
     }
 }
 
@@ -262,7 +297,7 @@ fn authenticate(
     endpoint: &Endpoint,
     primary: &PrimaryAuth<'_>,
     interactive: &mut InteractiveAuth,
-) -> Result<bool, String> {
+) -> Result<bool, TransferError> {
     let user = &endpoint.user;
     let control = interactive.control();
     let mut methods = auth_methods(session, user)?;
@@ -287,10 +322,13 @@ fn authenticate(
                 && offers(&methods, "keyboard-interactive");
         } else if !tried_interactive && offers(&methods, "keyboard-interactive") {
             tried_interactive = true;
-            interactive.authenticate(session, endpoint);
+            let result = interactive.authenticate(session, endpoint);
             control.check()?;
             if !session.authenticated() {
-                failure = Some(text!("Сервер не подтвердил интерактивную аутентификацию").into());
+                failure = Some(result.err().map_or_else(
+                    || ConnectionError::AuthenticationUnconfirmed { interactive: true }.into(),
+                    ssh_failure(SshStage::InteractiveAuthentication),
+                ));
                 if tried_primary {
                     break;
                 }
@@ -303,15 +341,14 @@ fn authenticate(
     if session.authenticated() {
         Ok(key_accepted)
     } else {
-        Err(failure
-            .unwrap_or_else(|| text!("Сервер не предложил доступный способ аутентификации").into()))
+        Err(failure.unwrap_or_else(|| ConnectionError::UnsupportedAuthentication.into()))
     }
 }
 
 pub(crate) fn connect_location(
     request: ConnectRequest,
     auth: InteractiveAuth,
-) -> Result<ConnectedLocation, String> {
+) -> Result<ConnectedLocation, TransferError> {
     connect_location_at(request, auth, &TrustFiles::user()?)
 }
 
@@ -319,7 +356,7 @@ pub(super) fn connect_location_at(
     request: ConnectRequest,
     mut auth: InteractiveAuth,
     trust: &TrustFiles,
-) -> Result<ConnectedLocation, String> {
+) -> Result<ConnectedLocation, TransferError> {
     let control = auth.control();
     let result = connect_reviewed(request, &mut auth, &control, trust);
     control.finalize()?;
@@ -331,7 +368,7 @@ fn connect_reviewed(
     auth: &mut InteractiveAuth,
     control: &ConnectionControl,
     trust: &TrustFiles,
-) -> Result<ConnectedLocation, String> {
+) -> Result<ConnectedLocation, TransferError> {
     let ConnectRequest {
         endpoint,
         path,
@@ -367,9 +404,10 @@ fn connect_reviewed(
             .key
             .as_ref()
             .ok_or(crate::i18n::text!("Укажите файл приватного ключа"))?;
+        let local_key = Location::Local(key_path.clone());
         let mut bytes = Vec::new();
         fs::File::open(key_path)
-            .map_err(err)?
+            .map_err(|source| AccessError::new(&local_key, AccessAction::OpenFile, source))?
             .take(64 * 1024 + 1)
             .read_to_end(&mut bytes)
             .map_err(err)?;
@@ -401,11 +439,30 @@ fn connect_reviewed(
     .map_err(|error| at_target(&endpoint, error))?;
     let sftp = session
         .sftp()
-        .map_err(|error| at_target(&endpoint, err(error)))?;
+        .map_err(ssh_failure(SshStage::Channel))
+        .map_err(|error| at_target(&endpoint, error))?;
+    let requested = Location::Sftp {
+        endpoint: endpoint.clone(),
+        path: if path.is_empty() {
+            ".".into()
+        } else {
+            path.into()
+        },
+    };
     let path = sftp
-        .realpath(Path::new(if path.is_empty() { "." } else { &path }))
-        .map_err(err)?;
-    if !sftp.stat(&path).map_err(err)?.is_dir() {
+        .realpath(requested.path())
+        .map_err(|source| AccessError::new(&requested, AccessAction::ResolvePath, source))?;
+    if !sftp
+        .stat(&path)
+        .map_err(|source| {
+            AccessError::new(
+                &requested.with_path(path.clone()),
+                AccessAction::ReadMetadata,
+                source,
+            )
+        })?
+        .is_dir()
+    {
         return Err(crate::i18n::text!("Начальный путь не является папкой").into());
     }
     control.finalize()?;
@@ -450,7 +507,7 @@ pub(super) fn should_reopen(error: &ssh2::Error) -> bool {
 pub(super) fn cached_channel(
     endpoint: &Endpoint,
     session: &Arc<Session>,
-) -> Result<Option<Sftp>, String> {
+) -> Result<Option<Sftp>, TransferError> {
     match session.sftp() {
         Ok(channel) => Ok(Some(channel)),
         Err(error) if should_reopen(&error) => {
@@ -463,14 +520,8 @@ pub(super) fn cached_channel(
             }
             Ok(None)
         }
-        Err(error) => Err(sftp_open_error(error)),
+        Err(error) => Err(ConnectionError::Automatic(ssh_failure(SshStage::Channel)(error)).into()),
     }
-}
-
-fn sftp_open_error(error: impl std::fmt::Display) -> String {
-    crate::tr_format!(
-        "Could not open the SFTP connection ({error}). Use the SFTP dialog to sign in with a password or MFA.", error = error
-    )
 }
 
 fn opening_gate(endpoint: &Endpoint) -> Result<Arc<OpeningGate>, String> {
@@ -485,7 +536,7 @@ fn opening_gate(endpoint: &Endpoint) -> Result<Arc<OpeningGate>, String> {
     Ok(gate)
 }
 
-pub(super) fn cached(endpoint: &Endpoint) -> Result<Option<Sftp>, String> {
+pub(super) fn cached(endpoint: &Endpoint) -> Result<Option<Sftp>, TransferError> {
     let session = sessions().lock().map_err(err)?.get(endpoint).cloned();
     match session {
         Some(session) => cached_channel(endpoint, &session),
@@ -493,10 +544,10 @@ pub(super) fn cached(endpoint: &Endpoint) -> Result<Option<Sftp>, String> {
     }
 }
 
-pub(super) fn remote(location: &Location) -> Result<Sftp, String> {
+pub(super) fn remote(location: &Location) -> Result<Sftp, TransferError> {
     let Location::Sftp { endpoint, .. } = location else {
         if location.is_archive() {
-            return Err(archive::readonly().into());
+            return Err(MutationError::ReadOnlyArchive(location.clone()).into());
         }
         return Err(crate::i18n::text!("Ожидалось подключение SFTP").into());
     };
@@ -535,10 +586,13 @@ pub(super) fn remote(location: &Location) -> Result<Sftp, String> {
             saved.as_ref().map(|s| s.private_key.as_str()),
         ),
     )
-    .map_err(|error| at_target(endpoint, sftp_open_error(error)))?;
+    .map_err(ConnectionError::Automatic)
+    .map_err(|error| at_target(endpoint, error.into()))?;
     let channel = session
         .sftp()
-        .map_err(|error| at_target(endpoint, sftp_open_error(error)))?;
+        .map_err(ssh_failure(SshStage::Channel))
+        .map_err(ConnectionError::Automatic)
+        .map_err(|error| at_target(endpoint, error.into()))?;
     // The SFTP dialog may have published a manually authenticated session
     // while this worker was opening its own channel.
     let session = Arc::new(session);
