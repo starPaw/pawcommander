@@ -1,7 +1,7 @@
 use super::listing::next_sftp_entry;
 use super::location::{normalize_remote, validate_name, Endpoint, Location};
 use super::sftp::{cached, should_reopen};
-use crate::i18n::text;
+use crate::file_error::{AccessAction, AccessError, ListingError, ListingErrorKind, SearchError};
 use crate::operations::TransferError;
 use libssh2_sys::LIBSSH2_FX_NO_SUCH_FILE;
 use ssh2::{Error, ErrorCode, FileStat, Sftp};
@@ -21,9 +21,11 @@ pub(crate) struct SftpSearchConnection {
 
 impl SftpSearchConnection {
     pub(crate) fn open(location: &Location) -> Result<Self, TransferError> {
-        let unavailable = || text!("Для поиска подключитесь к серверу по SFTP.").to_owned();
+        let unavailable = || SearchError::RequiresSftpConnection(location.clone());
         let endpoint = location.sftp_endpoint().ok_or_else(unavailable)?;
-        let channel = cached(endpoint)?.ok_or_else(unavailable)?;
+        let channel = cached(endpoint)
+            .map_err(|error| AccessError::new(location, AccessAction::OpenFile, error))?
+            .ok_or_else(unavailable)?;
         Ok(Self {
             endpoint: endpoint.clone(),
             channel,
@@ -34,24 +36,26 @@ impl SftpSearchConnection {
         &self,
         location: &Location,
         follow_link: bool,
-    ) -> Result<Option<bool>, String> {
+    ) -> Result<Option<bool>, TransferError> {
         if location.sftp_endpoint() != Some(&self.endpoint) {
-            return Err(text!("Результаты относятся к разным подключениям SFTP.").into());
+            return Err(SearchError::DifferentSftpConnection(location.clone()).into());
         }
         let path = location.path();
+        let check_error =
+            |error| AccessError::new(location, AccessAction::CheckSearchResult, error);
         let entry = match self.channel.lstat(path) {
             Ok(entry) => entry,
             Err(error) if error.code() == ErrorCode::SFTP(LIBSSH2_FX_NO_SUCH_FILE) => {
                 return Ok(None)
             }
-            Err(error) => return Err(error.to_string()),
+            Err(error) => return Err(check_error(error).into()),
         };
         if follow_link && entry.file_type().is_symlink() {
             return self
                 .channel
                 .stat(path)
                 .map(|stat| Some(stat.is_dir()))
-                .map_err(super::err);
+                .map_err(|error| check_error(error).into());
         }
         Ok(Some(entry.is_dir()))
     }
@@ -71,12 +75,24 @@ pub(crate) struct Coverage {
     pub(crate) depth_limited: bool,
     pub(crate) disconnected: bool,
     pub(crate) unreadable: usize,
+    pub(crate) failure: Option<TransferError>,
 }
 
 impl Coverage {
-    fn record_error(&mut self, error: &Error) {
-        self.disconnected = should_reopen(error);
+    fn record_skip(&mut self, failure: impl FnOnce() -> TransferError) {
         self.unreadable += 1;
+        self.failure.get_or_insert_with(failure);
+    }
+
+    fn record_error(&mut self, error: Error, failure: impl FnOnce(Error) -> TransferError) {
+        self.disconnected = should_reopen(&error);
+        if self.disconnected {
+            // Report the cause that ended the walk even if an earlier branch failed.
+            self.unreadable += 1;
+            self.failure = Some(failure(error));
+        } else {
+            self.record_skip(|| failure(error));
+        }
     }
 }
 
@@ -86,7 +102,7 @@ pub(crate) fn walk(
     deadline: Instant,
     cancelled: &impl Fn() -> bool,
     mut visit: impl FnMut(&Location, &FileStat) -> Visit,
-) -> Result<Coverage, String> {
+) -> Result<Coverage, TransferError> {
     let timed_out = Cell::new(false);
     let can_read = || {
         if Instant::now() >= deadline {
@@ -98,11 +114,12 @@ pub(crate) fn walk(
     if can_read() {
         let connection = SftpSearchConnection::open(folder);
         if can_read() {
-            let connection = connection.map_err(|error| crate::i18n::file_error(&error))?;
+            let connection = connection?;
             let canonical = connection.channel.realpath(folder.path());
             if can_read() {
-                let path = normalize_remote(&canonical.map_err(super::err)?)
-                    .map_err(|error| crate::i18n::file_error(&error))?;
+                let canonical = canonical
+                    .map_err(|error| AccessError::new(folder, AccessAction::ResolvePath, error))?;
+                let path = normalize_remote(&canonical)?;
                 let canonical = folder.with_path(path);
                 coverage = walk_from(
                     &connection.channel,
@@ -115,7 +132,7 @@ pub(crate) fn walk(
         }
     }
     if cancelled() {
-        return Err(text!("Поиск отменён").into());
+        return Err(TransferError::Cancelled);
     }
     coverage.timed_out = timed_out.get();
     Ok(coverage)
@@ -127,7 +144,7 @@ fn walk_from(
     max_depth: usize,
     can_read: &impl Fn() -> bool,
     visit: &mut impl FnMut(&Location, &FileStat) -> Visit,
-) -> Result<Coverage, String> {
+) -> Result<Coverage, TransferError> {
     let mut coverage = Coverage::default();
     let mut pending_bytes = root.path().as_os_str().len();
     let mut pending = VecDeque::from([(root, 1)]);
@@ -143,30 +160,44 @@ fn walk_from(
         if depth > 1 {
             // SFTP paths are resolved by the server. Recheck the branch before
             // opening it in case it has been replaced by a symbolic link.
-            match channel.realpath(path) {
+            let resolved = channel.realpath(path);
+            if !can_read() {
+                break;
+            }
+            match resolved {
                 Ok(actual) if actual.as_os_str() == path.as_os_str() => {}
-                Ok(_) => {
-                    coverage.unreadable += 1;
+                Ok(actual) => {
+                    coverage.record_skip(|| {
+                        SearchError::DirectoryChanged {
+                            location: location.clone(),
+                            resolved: actual,
+                        }
+                        .into()
+                    });
                     continue;
                 }
                 Err(error) => {
-                    coverage.record_error(&error);
+                    coverage.record_error(error, |error| {
+                        AccessError::new(&location, AccessAction::ResolvePath, error).into()
+                    });
                     if coverage.disconnected {
                         break;
                     }
                     continue;
                 }
             }
-            if !can_read() {
-                break;
-            }
         }
-        let mut directory = match channel.opendir(path) {
+        let directory = channel.opendir(path);
+        if !can_read() {
+            break;
+        }
+        let open_error =
+            |error| ListingError::new(location.clone(), ListingErrorKind::OpenSftp(error)).into();
+        let mut directory = match directory {
             Ok(directory) => directory,
-            Err(_) if !can_read() => break,
-            Err(error) if depth == 1 => return Err(error.to_string()),
+            Err(error) if depth == 1 => return Err(open_error(error)),
             Err(error) => {
-                coverage.record_error(&error);
+                coverage.record_error(error, open_error);
                 if coverage.disconnected {
                     break;
                 }
@@ -186,7 +217,10 @@ fn walk_from(
                 Ok(Some(entry)) => entry,
                 Ok(None) => break,
                 Err(error) => {
-                    coverage.record_error(&error);
+                    coverage.record_error(error, |error| {
+                        ListingError::new(location.clone(), ListingErrorKind::ReadSftp(error))
+                            .into()
+                    });
                     if coverage.disconnected {
                         break 'walk;
                     }
@@ -197,18 +231,28 @@ fn walk_from(
             if name == Path::new(".") || name == Path::new("..") {
                 continue;
             }
-            let Some(name) = name.to_str().filter(|name| validate_name(name).is_ok()) else {
-                coverage.unreadable += 1;
+            let Some(text) = name.to_str() else {
+                coverage.record_skip(|| {
+                    ListingError::new(location.clone(), ListingErrorKind::SftpNameEncoding(name))
+                        .into()
+                });
                 continue;
             };
-            let child = location.join(name);
+            if let Err(error) = validate_name(text) {
+                coverage.record_skip(|| {
+                    ListingError::new(location.clone(), ListingErrorKind::InvalidSftpName(error))
+                        .into()
+                });
+                continue;
+            }
+            let child = location.join(text);
             match visit(&child, &stat) {
                 Visit::Prune => continue,
                 Visit::Stop => break 'walk,
                 Visit::Continue => {}
             }
             if stat.perm.is_none() {
-                coverage.unreadable += 1;
+                coverage.record_skip(|| SearchError::MissingFileType(child.clone()).into());
             }
             if stat.is_dir() {
                 if depth >= max_depth {
@@ -223,4 +267,31 @@ fn walk_from(
         }
     }
     Ok(coverage)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::file_error::Failure;
+
+    #[test]
+    fn terminal_disconnect_keeps_its_original_error_after_a_skipped_branch() {
+        let mut coverage = Coverage::default();
+        let folder = Location::Local("/fixture".into());
+        let format =
+            |error| ListingError::new(folder.clone(), ListingErrorKind::ReadSftp(error)).into();
+        coverage.record_error(
+            Error::from_errno(ErrorCode::SFTP(libssh2_sys::LIBSSH2_FX_PERMISSION_DENIED)),
+            format,
+        );
+        let disconnected = ErrorCode::Session(libssh2_sys::LIBSSH2_ERROR_SOCKET_DISCONNECT);
+        coverage.record_error(Error::from_errno(disconnected), format);
+        assert_eq!(coverage.unreadable, 2);
+        assert!(coverage.disconnected);
+        assert!(
+            matches!(coverage.failure, Some(TransferError::Failed(Failure::Listing(error)))
+            if error.location == folder && matches!(&error.kind, ListingErrorKind::ReadSftp(cause)
+                if cause.code() == disconnected))
+        );
+    }
 }

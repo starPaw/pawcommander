@@ -1,6 +1,6 @@
 use super::directory::{EntryKind, EntryMetadata};
-use super::{FolderSearch, Results, SearchMatch, MAX_RESULTS};
-use crate::i18n::text;
+use super::{FolderSearch, Results, SearchMatch, Warnings, MAX_RESULTS};
+use crate::operations::TransferError;
 use crate::vfs::{search, Location};
 use std::time::Instant;
 
@@ -13,7 +13,7 @@ pub(super) fn run(
     query: &FolderSearch<'_>,
     deadline: Instant,
     cancelled: &impl Fn() -> bool,
-) -> Result<Results, String> {
+) -> Result<Results, TransferError> {
     let mut matches = Vec::new();
     let mut missing_metadata = 0;
     let coverage = search::walk(
@@ -70,31 +70,13 @@ pub(super) fn run(
     matches.truncate(MAX_RESULTS);
     matches.sort_unstable_by(|a, b| a.path.cmp(&b.path));
 
-    let mut warnings = Vec::new();
-    if coverage.timed_out {
-        warnings.push(
-            text!("Лимит времени поиска SFTP достигнут. Показаны собранные результаты.").into(),
-        );
-    }
-    if coverage.entries_limited {
-        warnings.push(text!("Лимит обхода SFTP достигнут. Показаны собранные результаты.").into());
-    }
-    if coverage.depth_limited {
-        warnings.push(text!("Поиск достиг выбранной глубины вложенности.").into());
-    }
-    if coverage.disconnected {
-        warnings.push(text!("Связь с SFTP прервалась во время поиска.").into());
-    }
-    let skipped = coverage.unreadable + missing_metadata;
-    if skipped > 0 {
-        warnings.push(crate::tr_format!(
-            "SFTP coverage is incomplete. Read errors or missing metadata affected {skipped} items.", skipped = skipped
-        ));
-    }
     Ok(Results {
         matches,
         limited,
-        warning: warnings.join("\n"),
+        warning: Warnings::Sftp {
+            coverage,
+            missing_metadata,
+        },
     })
 }
 

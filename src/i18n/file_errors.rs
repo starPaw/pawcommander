@@ -3,7 +3,7 @@ use crate::file_error::{
     AccessAction, AccessCause, AccessError, ArchiveMemberError, ConnectionError, Failure,
     HostKeyError, KnownHostEntryError, KnownHostsError, ListingError, ListingErrorKind,
     LocalPathAction, MutationError, PathError, PinError, PreviewError, PublicationError,
-    RecoveryNotice, SshStage, StagingCleanupError,
+    RecoveryNotice, SearchError, SshStage, StagingCleanupError,
 };
 use crate::operations::TransferError;
 use crate::vfs::{DeletionFailure, TransferFailure};
@@ -16,6 +16,7 @@ pub(crate) fn file_error(error: &TransferError) -> String {
                 Failure::Connection(error) => connection_error(error),
                 Failure::Access(error) => access_error(error),
                 Failure::Preview(error) => preview_error(error),
+                Failure::Search(error) => search_error(error),
                 Failure::ComparisonPane { right, cause } => {
                     let pane = if *right {
                         text!("Правая панель")
@@ -179,12 +180,43 @@ fn access_error(error: &AccessError) -> String {
         }
         AccessAction::ReadChildren => text!("Не удалось прочитать папку"),
         AccessAction::ReadFile => text!("Не удалось прочитать файл"),
+        AccessAction::CheckSearchResult => {
+            return crate::tr_format!(
+                "Could not check search result {path}: {error}",
+                path = error.location,
+                error = cause
+            );
+        }
         #[cfg(target_os = "macos")]
         AccessAction::WritePreviewCache => {
             text!("Не удалось записать временный файл предпросмотра")
         }
     };
     format!("{action} «{}»: {cause}", error.location)
+}
+
+fn search_error(error: &SearchError) -> String {
+    let (message, location) = match error {
+        SearchError::RequiresSftpConnection(location) => (
+            text!("Для поиска подключитесь к серверу по SFTP."),
+            location,
+        ),
+        SearchError::DifferentSftpConnection(location) => (
+            text!("Результаты относятся к разным подключениям SFTP."),
+            location,
+        ),
+        SearchError::MissingFileType(location) => {
+            (text!("Сервер SFTP не сообщил тип объекта"), location)
+        }
+        SearchError::DirectoryChanged { location, resolved } => {
+            return crate::tr_format!(
+                "The SFTP folder {path} now resolves to {target}. It was skipped.",
+                path = location,
+                target = resolved.display()
+            );
+        }
+    };
+    format!("{message} · {location}")
 }
 
 fn preview_error(error: &PreviewError) -> String {
@@ -517,7 +549,11 @@ fn staging_cleanup_error(error: &StagingCleanupError) -> String {
 
 fn listing_error(error: &ListingError) -> String {
     use ListingErrorKind::*;
-    let path = error.location.path().display();
+    let path = if error.location.remote() {
+        error.location.display()
+    } else {
+        error.location.path().display().to_string()
+    };
     let (action, cause): (_, &dyn std::fmt::Display) = match &error.kind {
         OpenLocal(source) => (text!("Не удалось прочитать папку"), source),
         OpenSftp(source) => (text!("Не удалось прочитать папку"), source),
@@ -529,8 +565,13 @@ fn listing_error(error: &ListingError) -> String {
             return crate::tr_format!("Could not read archive “{}”: {error}", path, error = source);
         }
         MissingArchiveFolder => return text!("Папка отсутствует в архиве").into(),
-        SftpNameEncoding(_) => return text!("Имя файла SFTP не является UTF-8").into(),
-        InvalidSftpName(source) => return path_error(source),
+        SftpNameEncoding(name) => {
+            return format!(
+                "{} · {path}/{name:?}",
+                text!("Имя файла SFTP не является UTF-8")
+            )
+        }
+        InvalidSftpName(source) => return format!("{} · {path}", path_error(source)),
         RequiresSftpConnection => {
             return text!("Для просмотра дерева подключитесь по SFTP.").into()
         }

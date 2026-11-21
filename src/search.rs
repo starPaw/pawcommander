@@ -13,13 +13,15 @@ mod saved;
 pub(crate) use remote::check_sftp_search;
 
 use crate::name_match::{normalize, Mask};
-use crate::vfs::Location;
+use crate::operations::TransferError;
+use crate::vfs::{search::Coverage, Location};
 use content::{LineMatch, Scan, Scanner};
 use directory::{Directory, Entry, EntryKind, EntryMetadata};
 use eframe::egui;
 use filters::{FilterInput, Filters};
 use index::{IndexInfo, IndexStatus};
 use std::{
+    borrow::Cow,
     ffi::OsStr,
     io::{self, Read},
     path::{Path, PathBuf},
@@ -44,7 +46,62 @@ const INDEX_REVEAL_WAIT: Duration = Duration::from_secs(2);
 struct Results {
     matches: Vec<SearchMatch>,
     limited: bool,
-    warning: String,
+    warning: Warnings,
+}
+
+enum Warnings {
+    Text(String),
+    Sftp {
+        coverage: Coverage,
+        missing_metadata: usize,
+    },
+}
+
+impl From<String> for Warnings {
+    fn from(warning: String) -> Self {
+        Self::Text(warning)
+    }
+}
+
+impl Results {
+    fn warning(&self) -> Cow<'_, str> {
+        match &self.warning {
+            Warnings::Text(warning) => Cow::Borrowed(warning),
+            Warnings::Sftp {
+                coverage,
+                missing_metadata,
+            } => Cow::Owned(sftp_warning(coverage, *missing_metadata)),
+        }
+    }
+}
+
+fn sftp_warning(coverage: &Coverage, missing_metadata: usize) -> String {
+    use crate::i18n::text;
+    let mut warnings = Vec::new();
+    if coverage.timed_out {
+        warnings.push(
+            text!("Лимит времени поиска SFTP достигнут. Показаны собранные результаты.").into(),
+        );
+    }
+    if coverage.entries_limited {
+        warnings.push(text!("Лимит обхода SFTP достигнут. Показаны собранные результаты.").into());
+    }
+    if coverage.depth_limited {
+        warnings.push(text!("Поиск достиг выбранной глубины вложенности.").into());
+    }
+    if coverage.disconnected {
+        warnings.push(text!("Связь с SFTP прервалась во время поиска.").into());
+    }
+    let skipped = coverage.unreadable + missing_metadata;
+    if skipped > 0 {
+        warnings.push(crate::tr_format!(
+            "SFTP coverage is incomplete. Read errors or missing metadata affected {skipped} items.", skipped = skipped
+        ));
+    }
+    if let Some(failure) = &coverage.failure {
+        warnings.push(crate::i18n::file_error(failure));
+    }
+    warnings.join("\n")
 }
 
 struct SearchMatch {
@@ -93,7 +150,7 @@ impl From<Location> for SearchMatch {
     }
 }
 
-struct Job<T = Result<Results, String>> {
+struct Job<T = Result<Results, TransferError>> {
     cancel: Arc<AtomicBool>,
     result: Receiver<T>,
 }
@@ -293,12 +350,15 @@ impl Search {
         let worker = std::thread::Builder::new().spawn(move || {
             let result = match filters {
                 Some(filters) => FolderSearch::new(folder_target, &query, &exclusions, filters)
+                    .map_err(TransferError::from)
                     .and_then(|search| {
                         let folder = folder.as_ref().expect("validated folder");
                         let cancelled = || worker_cancel.load(Ordering::Relaxed);
                         match remote_deadline {
                             Some(deadline) => remote::run(folder, &search, deadline, &cancelled),
-                            None => run_folder(folder.path(), search, &cancelled),
+                            None => {
+                                run_folder(folder.path(), search, &cancelled).map_err(Into::into)
+                            }
                         }
                     }),
                 None => run(
@@ -306,7 +366,8 @@ impl Search {
                     &query,
                     &worker_cancel,
                     TIMEOUT,
-                ),
+                )
+                .map_err(Into::into),
             };
             let _ = tx.send(result);
             worker_ctx.request_repaint();
@@ -348,7 +409,10 @@ impl Search {
                 if !job.cancelled() {
                     match result {
                         Ok(results) => self.results = Some(results),
-                        Err(error) => self.error = Some(error),
+                        Err(TransferError::Cancelled) => {
+                            self.error = Some(crate::i18n::text!("Поиск отменён").into())
+                        }
+                        Err(error) => self.error = Some(crate::i18n::file_error(&error)),
                     }
                 }
                 *slot = None;
@@ -684,8 +748,9 @@ impl Search {
                     } else {
                         crate::tr_format!("Found: {count}{limit}", count = crate::i18n::display::integer(count), limit = limit)
                     });
-                    if !results.warning.is_empty() {
-                        ui.colored_label(ui.visuals().warn_fg_color, &results.warning);
+                    let warning = results.warning();
+                    if !warning.is_empty() {
+                        ui.colored_label(ui.visuals().warn_fg_color, warning.as_ref());
                     }
                     if results.matches.is_empty() && self.error.is_none() {
                         ui.label(match self.mode {
@@ -1071,7 +1136,7 @@ fn run_folder(
     Ok(Results {
         matches,
         limited,
-        warning: warnings.join("\n"),
+        warning: warnings.join("\n").into(),
     })
 }
 
@@ -1165,7 +1230,7 @@ fn run(cli: &Path, query: &str, cancel: &AtomicBool, timeout: Duration) -> Resul
     Ok(Results {
         matches: paths.into_iter().map(SearchMatch::from).collect(),
         limited,
-        warning,
+        warning: warning.into(),
     })
 }
 
@@ -1332,7 +1397,7 @@ mod tests {
         tx.send(Ok(Results {
             matches: vec![PathBuf::from("/stale").into()],
             limited: false,
-            warning: String::new(),
+            warning: String::new().into(),
         }))
         .unwrap();
         search.poll();
@@ -1385,7 +1450,7 @@ mod tests {
             results: Some(Results {
                 matches: vec![stale.clone().into(), valid.clone().into()],
                 limited: false,
-                warning: String::new(),
+                warning: String::new().into(),
             }),
             selected: Some(0),
             index_reveal: Some(IndexReveal {
@@ -1431,7 +1496,7 @@ mod tests {
         tx.send(Ok(Results {
             matches: vec![path.clone().into()],
             limited: false,
-            warning: String::new(),
+            warning: String::new().into(),
         }))
         .unwrap();
 
@@ -1483,7 +1548,7 @@ mod tests {
             Results {
                 matches: vec![PathBuf::from("/indexed.txt").into()],
                 limited: false,
-                warning: String::new(),
+                warning: String::new().into(),
             },
             false,
             "indexed".into(),
@@ -1548,7 +1613,7 @@ mod tests {
             let results =
                 run_folder(root.path(), FolderTarget::Name, query, excluded, &|| false).unwrap();
             assert_eq!(paths(&results), [folder.join("CAFÉ ФАЙЛ.RS")]);
-            assert!(results.warning.is_empty());
+            assert!(results.warning().is_empty());
         }
         assert!(
             run_folder(root.path(), FolderTarget::Name, "target", "target", &|| {
@@ -1601,7 +1666,7 @@ mod tests {
         fs::write(deepest.join("match"), "").unwrap();
         let results = run_folder(root.path(), FolderTarget::Name, "match", "", &|| false).unwrap();
         assert!(results.matches.is_empty());
-        assert!(!results.warning.is_empty());
+        assert!(!results.warning().is_empty());
     }
 
     #[cfg(unix)]
@@ -1617,7 +1682,7 @@ mod tests {
         fs::write(&native, "").unwrap();
         let results = run_folder(root.path(), FolderTarget::Name, "test-", "", &|| false).unwrap();
         assert_eq!(paths(&results), [native]);
-        assert!(results.warning.is_empty());
+        assert!(results.warning().is_empty());
 
         // Simulate a directory swapped for a link between listing and descent.
         let child = root.path().join("child");
@@ -1650,7 +1715,7 @@ mod tests {
         ] {
             let results =
                 run_folder(root.path(), target, query, "*.tmp, ignored", &|| false).unwrap();
-            assert!(results.warning.is_empty());
+            assert!(results.warning().is_empty());
             let lines: Vec<_> = results
                 .matches
                 .iter()
@@ -1683,8 +1748,8 @@ mod tests {
         oversized.set_len(content::MAX_FILE_BYTES + 1).unwrap();
         let results = run_folder(root.path(), FolderTarget::Text, "hit", "", &|| false).unwrap();
         assert!(results.matches.is_empty());
-        assert!(results.warning.contains("larger than 1 MiB (1)"));
-        assert!(results.warning.contains("non-UTF-8 files (2)"));
+        assert!(results.warning().contains("larger than 1 MiB (1)"));
+        assert!(results.warning().contains("non-UTF-8 files (2)"));
 
         let path = root.path().join("matches.txt");
         fs::write(&path, "hit\n".repeat(MAX_RESULTS + 1)).unwrap();
@@ -1733,7 +1798,7 @@ mod tests {
 
         let results = run_folder(root.path(), FolderTarget::Text, "secret", "", &|| false).unwrap();
         assert!(results.matches.is_empty());
-        assert!(results.warning.is_empty());
+        assert!(results.warning().is_empty());
     }
 
     #[test]
@@ -1826,7 +1891,7 @@ mod tests {
         assert_eq!(
             run(&cli, "x", &AtomicBool::new(false), TIMEOUT)
                 .unwrap()
-                .warning,
+                .warning(),
             "database is stale"
         );
     }

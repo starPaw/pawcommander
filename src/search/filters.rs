@@ -446,7 +446,7 @@ mod tests {
             let results = run_folder(root.path(), search, &|| false).unwrap();
             assert_eq!(results.matches.len(), 1);
             assert_eq!(results.matches[0].path.path(), matching_path);
-            assert!(results.warning.is_empty(), "{}", results.warning);
+            assert!(results.warning().is_empty(), "{}", results.warning());
         }
     }
 
@@ -471,7 +471,7 @@ mod tests {
         let results = run_folder(root.path(), search, &|| false).unwrap();
         assert_eq!(results.matches.len(), 1);
         assert_eq!(results.matches[0].path.path(), folder);
-        assert!(results.warning.is_empty());
+        assert!(results.warning().is_empty());
     }
 
     #[test]

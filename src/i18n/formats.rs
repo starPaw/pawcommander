@@ -347,6 +347,7 @@ formats! {
     "Search folder: {path}" => ("Папка поиска: {path}", "Složka hledání: {path}"),
     "Run search “{name}”" => ("Запустить поиск «{name}»", "Spustit hledání „{name}“"),
     "Could not check search result {path}: {error}" => ("Не удалось проверить результат поиска {path}: {error}", "Výsledek hledání {path} se nepodařilo zkontrolovat: {error}"),
+    "The SFTP folder {path} now resolves to {target}. It was skipped." => ("Папка SFTP {path} теперь указывает на {target}. Поиск пропустил её.", "Složka SFTP {path} nyní odkazuje na {target}. Hledání ji přeskočilo."),
     "Could not start checking search results: {error}" => ("Не удалось запустить проверку результатов поиска: {error}", "Kontrolu výsledků hledání se nepodařilo spustit: {error}"),
     "Search result no longer exists: {path}" => ("Результат поиска больше не существует: {path}", "Výsledek hledání už neexistuje: {path}"),
     "{count} items no longer exist at their original paths and were removed from the search results." => ("Объектов больше нет на прежнем месте: {count}. Они удалены из результатов поиска.", "Z výsledků zmizely položky, které už na původních cestách neexistují: {count}."),

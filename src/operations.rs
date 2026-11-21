@@ -5,7 +5,7 @@ mod bandwidth;
 
 use crate::file_error::{
     AccessCause, AccessError, ConnectionError, Failure, HostKeyError, ListingError, MutationError,
-    PathError, PreviewError, PublicationError, RecoveryNotice,
+    PathError, PreviewError, PublicationError, RecoveryNotice, SearchError,
 };
 use crate::vfs::{Endpoint, Location};
 use bandwidth::Pacer;
@@ -296,6 +296,12 @@ impl From<AccessError> for TransferError {
 impl From<PreviewError> for TransferError {
     fn from(error: PreviewError) -> Self {
         Self::Failed(Failure::Preview(Box::new(error)))
+    }
+}
+
+impl From<SearchError> for TransferError {
+    fn from(error: SearchError) -> Self {
+        Self::Failed(Failure::Search(Box::new(error)))
     }
 }
 
