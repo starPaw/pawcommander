@@ -405,6 +405,8 @@ List rows and grid tiles expose their full names, types, and selection states to
 
 ## Keyboard shortcuts
 
+On macOS, open **Settings → Help…** for a quick orientation and a searchable command reference. Search by words in the command name to see its current binding, including changes you saved in Keyboard Shortcuts. Use **Open Command Palette** to keep your search and run an available command.
+
 Open **Settings → Command Palette** or press `Cmd/Ctrl+Shift+P`. Type words from a command name to filter the list, use `↑` or `↓` to select an available command, and press `Enter` to run it. Press `Esc` to return to the previous control. The list shows the shortcuts from your active profile, including custom bindings. You can run a command from the palette even if it has no shortcut.
 
 Open **Settings → Keyboard Shortcuts** to view and change bindings. Click a binding and press the new shortcut. If it is already assigned, PawCommander shows which action uses it. Clear that action's binding first if you want to reassign the key. Press `Esc` to stop recording. Use **Save** to apply and remember your changes, or **Cancel** to discard them.

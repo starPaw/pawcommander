@@ -136,11 +136,27 @@ impl PawCommander {
                                 });
                                 ui.close();
                             }
+                            #[cfg(target_os = "macos")]
+                            {
+                                let help = ui.add_enabled(
+                                    !self.conflict_open(),
+                                    egui::Button::new(self.settings.shortcuts.hint(
+                                        ctx,
+                                        Command::Help,
+                                        Command::Help.label(),
+                                    )),
+                                );
+                                paint_focus(ui, &help, 5);
+                                if help.clicked() {
+                                    self.open_help(Some(button.id), ctx);
+                                    ui.close();
+                                }
+                            }
                             let palette_label = Command::Palette.label();
                             let palette = ui.button(self.settings.shortcuts.hint(ctx, Command::Palette, palette_label));
                             paint_focus(ui, &palette, 5);
                             if palette.clicked() {
-                                self.open_command_palette(ctx, Some(button.id));
+                                self.open_command_palette(ctx, Some(button.id), String::new());
                                 ui.close();
                             }
                             for (command, action, enabled) in [

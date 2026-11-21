@@ -70,11 +70,13 @@ pub enum Command {
     FocusToolbar,
     #[serde(rename = "CommandPalette")]
     Palette,
+    #[cfg(target_os = "macos")]
+    Help,
     FolderJump,
 }
 
 impl Command {
-    pub const ALL: [Self; 43 + 11 * cfg!(target_os = "macos") as usize] = [
+    pub const ALL: [Self; 43 + 12 * cfg!(target_os = "macos") as usize] = [
         Self::EditPath,
         Self::Filter,
         Self::Search,
@@ -139,6 +141,8 @@ impl Command {
         Self::MoveToPane,
         Self::FocusToolbar,
         Self::Palette,
+        #[cfg(target_os = "macos")]
+        Self::Help,
         Self::FolderJump,
     ];
 
@@ -206,8 +210,18 @@ impl Command {
             Self::MoveToPane => text!("Переместить в соседнюю панель"),
             Self::FocusToolbar => text!("Фокус на панели инструментов"),
             Self::Palette => text!("Палитра команд"),
+            #[cfg(target_os = "macos")]
+            Self::Help => text!("Справка…"),
             Self::FolderJump => text!("Быстрый переход к папке"),
         }
+    }
+
+    pub(crate) fn matching(query: &str) -> impl Iterator<Item = Self> {
+        let query = query.to_lowercase();
+        Self::ALL.into_iter().filter(move |command| {
+            let label = command.label().to_lowercase();
+            query.split_whitespace().all(|word| label.contains(word))
+        })
     }
 
     // Only dedicated default navigation chords may leave a text field.
@@ -279,7 +293,7 @@ impl Profile {
             FolderJump => (CMD_SHIFT, Key::J),
             #[cfg(target_os = "macos")]
             CustomActions | SyncFolders | CreateLink | FindDuplicates | DiskUsage | Collections
-            | NewFile | CompatibleNames | MountedVolumes => return None,
+            | NewFile | CompatibleNames | MountedVolumes | Help => return None,
             Preview
             | EditInZed
             | OpenTerminal

@@ -10,12 +10,13 @@ impl PawCommander {
         &mut self,
         ctx: &egui::Context,
         previous_focus: Option<egui::Id>,
+        query: String,
     ) {
         let focused_file = self
             .file_row_focus(ctx)
             .filter(|(pane, file)| Some(self.panes[*pane].tab().entry_id(file)) == previous_focus)
             .map(|(_, file)| file.clone());
-        self.command_palette = Some(CommandPalette::new(previous_focus, focused_file));
+        self.command_palette = Some(CommandPalette::new(previous_focus, focused_file, query));
     }
 
     pub(super) fn restore_focus(ctx: &egui::Context, previous_focus: Option<egui::Id>) {
@@ -112,6 +113,8 @@ impl PawCommander {
                 Command::DiskUsage => self.can_analyze_disk_usage(),
                 #[cfg(target_os = "macos")]
                 Command::Collections => !self.conflict_open(),
+                #[cfg(target_os = "macos")]
+                Command::Help => idle,
                 #[cfg(target_os = "macos")]
                 Command::SyncFolders => self.can_open_folder_sync(),
                 Command::AddToArchive => {
