@@ -1,5 +1,6 @@
 use super::*;
 use crate::conflict::{Answer, Decision};
+use crate::file_error::{Failure, MutationError, ResumeRecordSection};
 use crate::fs_ops::TransferKind;
 use crate::vfs::transfer_with_conflicts;
 use std::io::{Seek, SeekFrom, Write};
@@ -67,7 +68,8 @@ fn continued(recovery: &Path, partial: &Path, source: &Path, target: &Path, byte
     assert_eq!(offers.len(), 1);
     let (mut progress, mut view) = Progress::tracked_transfer();
     let result = resume(recovery, &offers[0].id, &mut progress).unwrap();
-    assert!(result.contains(&offset.to_string()), "{result}");
+    assert_eq!(result.kind, Completion::Copied(offset));
+    assert_eq!(result.moving, offers[0].moving);
     assert_eq!(view.snapshot().total_written, bytes.len() as u64 - offset);
     if offers[0].moving {
         assert!(!source.exists());
@@ -82,6 +84,62 @@ fn continued(recovery: &Path, partial: &Path, source: &Path, target: &Path, byte
         if offers[0].moving { "move" } else { "copy" },
         view.snapshot().total_written
     );
+}
+
+#[test]
+fn unreadable_recovery_records_report_their_path_and_cause() {
+    let temp = tempfile::tempdir().unwrap();
+    let recovery = temp.path();
+    let directory = receipts(recovery);
+    fs::create_dir(&directory).unwrap();
+    let malformed = directory.join("copy-malformed.json");
+    let future = directory.join("copy-future.json");
+    let symlink = directory.join("copy-link.json");
+    let sentinel = recovery.join("sentinel");
+    fs::write(&malformed, b"[1,{").unwrap();
+    fs::write(&future, br#"[99,{"future":true}]"#).unwrap();
+    fs::write(&sentinel, b"keep").unwrap();
+    std::os::unix::fs::symlink(&sentinel, &symlink).unwrap();
+
+    let (offers, errors) = scan(recovery);
+    assert!(offers.is_empty());
+    assert_eq!(errors.len(), 3);
+    for error in errors {
+        match error.problem {
+            ResumeRecordProblem::Json {
+                section: ResumeRecordSection::Header,
+                source,
+            } => {
+                assert_eq!(error.path, malformed);
+                assert_eq!(source.line(), 1);
+                assert!(source.column() > 0);
+            }
+            ResumeRecordProblem::UnsupportedVersion(99) => assert_eq!(error.path, future),
+            ResumeRecordProblem::Read(source) => {
+                assert_eq!(error.path, symlink);
+                assert_eq!(source.raw_os_error(), Some(libc::ELOOP));
+            }
+            other => panic!("Unexpected problem for {:?}: {other:?}", error.path),
+        }
+    }
+
+    let (mut progress, mut view) = Progress::tracked_transfer();
+    let error = resume(recovery, "copy-future.json", &mut progress).unwrap_err();
+    assert!(matches!(
+        error,
+        TransferError::Failed(Failure::ResumeRecord(error))
+            if error.path == future && matches!(error.problem, ResumeRecordProblem::UnsupportedVersion(99))
+    ));
+    let [row] = progress.results.items.as_slice() else {
+        panic!("Expected one history row for the failing record");
+    };
+    assert_eq!(row.outcome, Outcome::Failed);
+    assert_eq!(row.source, future.display().to_string());
+    assert_eq!(view.snapshot().total_written, 0);
+    assert_eq!(fs::read(&malformed).unwrap(), b"[1,{");
+    assert_eq!(fs::read(&future).unwrap(), br#"[99,{"future":true}]"#);
+    assert_eq!(fs::read_link(symlink).unwrap(), sentinel);
+    assert_eq!(fs::read(sentinel).unwrap(), b"keep");
 }
 
 #[test]
@@ -140,8 +198,10 @@ fn retained_copy_restarts_from_checked_offset_and_never_retries_changed_data() {
                 assert!(errors.is_empty());
                 let (mut progress, mut view) = Progress::tracked_transfer();
                 assert_eq!(
-                    resume(&recovery, &offers[0].id, &mut progress).unwrap(),
-                    text!("В назначении подтверждена полная копия.")
+                    resume(&recovery, &offers[0].id, &mut progress)
+                        .unwrap()
+                        .kind,
+                    Completion::AlreadyPresent
                 );
                 assert_eq!(view.snapshot().total_written, 0);
                 assert_eq!(fs::read(&target).unwrap(), bytes);
@@ -214,7 +274,7 @@ fn retained_location(recovery: &Path, offer: &Offer) -> Location {
     let ticket = Ticket::open(receipts(recovery).join(&offer.id))
         .unwrap()
         .unwrap();
-    let paths = ticket.receipt.paths().unwrap();
+    let paths = ticket.paths().unwrap();
     let Some(HeldSource::Verified(record)) = &ticket.holding else {
         panic!("move has no checked source staging record");
     };
@@ -333,9 +393,7 @@ fn older_folder_moves_warn_and_a_damaged_access_time_section_preserves_the_sourc
         let mut progress = Progress::default();
         let result = resume(&recovery, &offer.id, &mut progress);
         if legacy {
-            assert!(result.unwrap().contains(text!(
-                "Даты или права доступа сохранены частично. Подробности указаны в строках журнала."
-            )));
+            assert!(result.unwrap().metadata_warning);
             assert!(progress.results.items.iter().all(|row| {
                 row.outcome == Outcome::CompletedWithWarning
                     && row
@@ -346,9 +404,22 @@ fn older_folder_moves_warn_and_a_damaged_access_time_section_preserves_the_sourc
             assert!(!source.path().exists());
             assert!(!path.exists());
         } else {
-            assert!(result
-                .unwrap_err()
-                .contains(text!("Некорректная запись времени доступа для переноса")));
+            let TransferError::Failed(Failure::Mutation(error)) = result.unwrap_err() else {
+                panic!("Expected an incomplete move with a recovery record error");
+            };
+            let MutationError::MoveIncomplete {
+                target: saved_target,
+                cause,
+            } = *error
+            else {
+                panic!("Expected the published target in the incomplete move error");
+            };
+            assert_eq!(saved_target, target);
+            assert!(matches!(
+                cause,
+                TransferError::Failed(Failure::ResumeRecord(error))
+                    if error.path == path && matches!(error.problem, ResumeRecordProblem::InvalidAccessTimes)
+            ));
             assert_eq!(
                 fs::read(source.path().join("child")).unwrap(),
                 b"source bytes"
@@ -385,7 +456,7 @@ fn move_recovery_preserves_held_source_and_recognizes_acknowledged_removal() {
         );
         assert_eq!(fs::read(target.path()).unwrap(), bytes);
         if phase == Phase::Quarantined {
-            assert!(result.unwrap_err().contains(&held.display()));
+            assert!(crate::i18n::file_error(&result.unwrap_err()).contains(&held.display()));
             assert_eq!(fs::read(held.path()).unwrap(), bytes);
             assert_eq!(scan(&recovery).0.len(), 1);
         } else {
@@ -484,7 +555,8 @@ fn move_recovery_keeps_an_incomplete_or_unowned_held_tree() {
         }
         let (mut progress, mut view) = Progress::tracked_transfer();
         let error = resume(&recovery, &offer.id, &mut progress).unwrap_err();
-        assert!(error.contains(&held.display()), "{problem}: {error}");
+        let message = crate::i18n::file_error(&error);
+        assert!(message.contains(&held.display()), "{problem}: {message}");
         assert_eq!(view.snapshot().total_written, 0);
         assert_eq!(fs::read(held.join("z-child/large").path()).unwrap(), bytes);
         assert_eq!(fs::read(target.join("a-finished").path()).unwrap(), HEAD);
@@ -587,9 +659,9 @@ fn checked_folder(recovery: &Path, stage: &Path, source: &Path, target: &Path, b
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!(offers.len(), 1);
     let (mut progress, mut view) = Progress::tracked_transfer();
-    let message = resume(recovery, &offers[0].id, &mut progress).unwrap();
+    let result = resume(recovery, &offers[0].id, &mut progress).unwrap();
     let reused = suffix_offset + HEAD.len() as u64;
-    assert!(message.contains(&reused.to_string()), "{message}");
+    assert_eq!(result.kind, Completion::FolderCopied(reused));
     assert_eq!(
         view.snapshot().total_written,
         bytes.len() as u64 - suffix_offset
@@ -659,8 +731,8 @@ fn interrupted_folder_reuses_verified_children_and_refuses_changed_trees() {
             assert!(errors.is_empty(), "{errors:?}");
             assert_eq!(offers.len(), 1);
             let (mut progress, mut view) = Progress::tracked_transfer();
-            let message = resume(&recovery, &offers[0].id, &mut progress).unwrap();
-            assert!(message.contains(&saved.to_string()), "{message}");
+            let result = resume(&recovery, &offers[0].id, &mut progress).unwrap();
+            assert_eq!(result.kind, Completion::FolderCopied(saved));
             assert_eq!(
                 view.snapshot().total_written,
                 tail.len() as u64 + HEAD.len() as u64 + b"native name".len() as u64 - saved

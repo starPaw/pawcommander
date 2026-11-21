@@ -362,6 +362,13 @@ impl From<crate::file_error::StagingError> for TransferError {
     }
 }
 
+#[cfg(target_os = "macos")]
+impl From<crate::file_error::ResumeRecordError> for TransferError {
+    fn from(error: crate::file_error::ResumeRecordError) -> Self {
+        Self::Failed(Failure::ResumeRecord(Box::new(error)))
+    }
+}
+
 impl From<ConnectionError> for TransferError {
     fn from(error: ConnectionError) -> Self {
         Self::Failed(Failure::Connection(Box::new(error)))

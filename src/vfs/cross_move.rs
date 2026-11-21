@@ -9,6 +9,7 @@ use super::transfer::{
     TransferSourceManifest,
 };
 use super::{err, Location};
+use crate::file_error::MutationError;
 use crate::operations::{AccessStream, Cancellation, CopyReader, Progress, TransferError};
 use std::collections::BTreeMap;
 use std::fs;
@@ -556,7 +557,9 @@ pub(super) fn incomplete(
     if progress.cancellation().is_requested() {
         progress.results.cancelled = true;
     }
-    crate::tr_format!(
-        "A copy was created at {target}. The move is incomplete. Check the source and result history. {error}", error = crate::i18n::file_error(&error), target = target
-    ).into()
+    MutationError::MoveIncomplete {
+        target: target.clone(),
+        cause: error,
+    }
+    .into()
 }

@@ -345,6 +345,8 @@ impl PawCommander {
                 description,
                 work: Box::new(move |progress| {
                     crate::vfs::resume_copy::resume(&directory, &offer.id, progress)
+                        .map(crate::i18n::resume_completion)
+                        .map_err(|error| crate::i18n::file_error(&error))
                 }),
                 transfer: Some(TransferInteraction {
                     events,

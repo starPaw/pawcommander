@@ -7,6 +7,8 @@ mod archive;
 mod checksum;
 mod host_key;
 mod metadata;
+#[cfg(target_os = "macos")]
+mod resume_record;
 mod space;
 mod staging;
 #[cfg(target_os = "macos")]
@@ -15,6 +17,8 @@ pub(crate) use archive::ArchiveError;
 pub(crate) use checksum::{ChecksumError, ManifestLineError};
 pub(crate) use host_key::{HostKeyError, KnownHostEntryError, KnownHostsError, PinError};
 pub(crate) use metadata::{MetadataError, MetadataField, MetadataWarning};
+#[cfg(target_os = "macos")]
+pub(crate) use resume_record::{ResumeRecordError, ResumeRecordProblem, ResumeRecordSection};
 pub(crate) use space::{ProbeAction, SftpSpaceFailure, SpaceError};
 pub(crate) use staging::{StagingError, StagingRecordAction};
 #[cfg(target_os = "macos")]
@@ -49,6 +53,8 @@ pub(crate) enum Failure {
     Mutation(Box<MutationError>),
     Publication(Box<PublicationError>),
     Staging(Box<StagingError>),
+    #[cfg(target_os = "macos")]
+    ResumeRecord(Box<ResumeRecordError>),
     StagingCleanup(Box<StagingCleanupError>),
 }
 
@@ -87,6 +93,8 @@ impl Failure {
             Self::Mutation(error) => Some(error.as_ref()),
             Self::Publication(error) => Some(error.as_ref()),
             Self::Staging(error) => Some(error.as_ref()),
+            #[cfg(target_os = "macos")]
+            Self::ResumeRecord(error) => Some(error.as_ref()),
             Self::StagingCleanup(error) => Some(error.as_ref()),
         }
     }
@@ -118,6 +126,8 @@ impl fmt::Display for Failure {
             Self::Mutation(error) => fmt::Display::fmt(error, f),
             Self::Publication(error) => fmt::Display::fmt(error, f),
             Self::Staging(error) => fmt::Display::fmt(error, f),
+            #[cfg(target_os = "macos")]
+            Self::ResumeRecord(error) => fmt::Display::fmt(error, f),
             Self::StagingCleanup(error) => fmt::Display::fmt(error, f),
         }
     }
@@ -827,6 +837,10 @@ pub(crate) enum MutationError {
     UndoUnavailable(Location),
     DestinationExists(Location),
     SourceChanged(Location),
+    MoveIncomplete {
+        target: Location,
+        cause: TransferError,
+    },
     #[cfg(target_os = "macos")]
     PlanChanged(Location),
     #[cfg(target_os = "macos")]
@@ -904,6 +918,12 @@ impl fmt::Display for MutationError {
             }
             Self::DestinationExists(location) => write!(f, "Destination {location} already exists"),
             Self::SourceChanged(location) => write!(f, "Source changed during copying: {location}"),
+            Self::MoveIncomplete { target, cause } => {
+                write!(
+                    f,
+                    "A copy was created at {target}, but the move is incomplete: {cause}"
+                )
+            }
             #[cfg(target_os = "macos")]
             Self::PlanChanged(location) => write!(f, "An item changed after planning: {location}"),
             #[cfg(target_os = "macos")]
@@ -969,6 +989,7 @@ impl Error for MutationError {
             Self::OpenSftpRename { reason, .. } | Self::OpenSftpRemoval { reason, .. } => {
                 Some(reason)
             }
+            Self::MoveIncomplete { cause, .. } => Some(cause),
             Self::Trash { source, .. } => Some(source),
             _ => None,
         }
