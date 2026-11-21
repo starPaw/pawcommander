@@ -638,7 +638,9 @@ impl Preview {
                         }
                         #[cfg(target_os = "macos")]
                         Content::Image { exif, .. } => {
-                            metadata::section(ui, |ui| metadata::exif_fields(ui, exif.as_deref()));
+                            metadata::section(ui, true, |ui| {
+                                metadata::exif_fields(ui, exif.as_deref())
+                            });
                         }
                         #[cfg(target_os = "macos")]
                         Content::Media(_) => {
