@@ -1,5 +1,5 @@
 use super::{
-    archive_io_error, invalid, too_large, ArchiveMessage, MetadataReader, MAX_ENTRIES,
+    archive_io_error, archive_io_error_with_cause, invalid, too_large, MetadataReader, MAX_ENTRIES,
     MAX_METADATA_BYTES,
 };
 use crate::operations::Cancellation;
@@ -155,13 +155,7 @@ pub(super) fn zip_error(error: ZipError) -> io::Error {
             crate::i18n::key!("Недопустимая запись архива"),
         ),
     };
-    io::Error::new(
-        kind,
-        ArchiveMessage {
-            key,
-            zip_error: Some(error),
-        },
-    )
+    archive_io_error_with_cause(kind, key, error)
 }
 
 pub(super) struct EntryReader<'a> {

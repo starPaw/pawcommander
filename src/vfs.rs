@@ -47,7 +47,7 @@ use std::fmt;
 
 pub(crate) use archive_create::{archive_file_name, create_archive};
 pub(crate) use archive_edit::{edit_archive, ArchiveEdit};
-pub(crate) use archive_extract::extract_archive;
+pub(crate) use archive_extract::{extract_archive, ExtractionFailure, ExtractionSummary};
 pub(crate) use batch_rename::{BatchRenamePreview, BatchRenameRules};
 pub(crate) use checksum::{
     checksum_manifest_name, create_checksum_manifest, looks_like_checksum_manifest,

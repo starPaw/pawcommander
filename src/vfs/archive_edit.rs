@@ -2,15 +2,12 @@ use super::{
     archive_create::ArchivePlan,
     location::{validate_name, Location},
     staged_file::StagedFile,
-    transfer::{
-        canonical, changed_source, entry_metadata, publish_replacement, with_staging_typed,
-        EntryMetadata,
-    },
+    transfer::{canonical, entry_metadata, publish_replacement, with_staging_typed, EntryMetadata},
     undo::Parent,
 };
 use crate::{
     archive::{ArchiveWriter, EditableArchive, Format, MemberEdit},
-    i18n::text,
+    file_error::{AccessAction, AccessError, ArchiveError, MutationError},
     operations::{Progress, TransferError},
     result_history::Outcome,
 };
@@ -36,7 +33,7 @@ pub(crate) fn edit_archive(
     edit: ArchiveEdit,
     password: Option<&str>,
     progress: &mut Progress,
-) -> Result<String, String> {
+) -> Result<Location, TransferError> {
     let source = Location::Local(file.to_owned());
     progress.results.plan([(source.clone(), None)]);
     progress.results.begin(&source);
@@ -49,31 +46,20 @@ pub(crate) fn edit_archive(
         progress,
         &mut published,
     );
-    let (outcome, reason) = match &result {
-        Ok(()) => (Outcome::Completed, None),
-        Err(error) => (
-            if published {
-                Outcome::CompletedWithWarning
-            } else if matches!(error, TransferError::Cancelled) {
-                Outcome::Cancelled
-            } else {
-                Outcome::Failed
-            },
-            Some(crate::i18n::file_error(error)),
-        ),
+    let outcome = match &result {
+        Ok(()) => Outcome::Completed,
+        Err(_) if published => Outcome::CompletedWithWarning,
+        Err(TransferError::Cancelled) => Outcome::Cancelled,
+        Err(TransferError::PublicationUnconfirmed(_)) => Outcome::PublicationUnconfirmed,
+        Err(TransferError::Failed(_)) => Outcome::Failed,
     };
-    progress.results.record(&source, None, outcome, reason);
-    match result {
-        Ok(()) => Ok(crate::tr_format!(
-            "Archive updated: {source}",
-            source = source
-        )),
-        Err(TransferError::Cancelled) => {
-            progress.results.cancelled = true;
-            Ok(text!("Редактирование архива остановлено").into())
-        }
-        Err(error) => Err(crate::i18n::file_error(&error)),
+    progress
+        .results
+        .record_with_error(&source, outcome, result.as_ref().err());
+    if outcome == Outcome::Cancelled {
+        progress.results.cancelled = true;
     }
+    result.map(|()| source)
 }
 
 fn rebuild(
@@ -85,19 +71,17 @@ fn rebuild(
 ) -> Result<(), TransferError> {
     let cancel = progress.cancellation();
     cancel.check()?;
-    let format =
-        Format::from_path(source.path()).ok_or_else(|| text!("Поддерживаются архивы ZIP и TAR"))?;
-    let directory = source.parent().ok_or_else(|| changed_source(source))?;
+    let format = Format::from_path(source.path())
+        .ok_or_else(|| ArchiveError::UnsupportedFormat(source.clone()))?;
+    let changed = || ArchiveError::SourceChanged(source.clone());
+    let directory = source.parent().ok_or_else(changed)?;
     let parent = Parent::capture(&directory)?;
-    let target = parent.location.join(
-        source
-            .path()
-            .file_name()
-            .ok_or_else(|| changed_source(source))?,
-    );
+    let target = parent
+        .location
+        .join(source.path().file_name().ok_or_else(changed)?);
     let expected = entry_metadata(&target)?
         .filter(EntryMetadata::is_file)
-        .ok_or_else(|| changed_source(source))?;
+        .ok_or_else(changed)?;
 
     let moved_to;
     let edit_paths = match &edit {
@@ -110,7 +94,11 @@ fn rebuild(
             validate_name(name)?;
             moved_to = entry.with_file_name(name);
             if moved_to == *entry {
-                return Err(text!("Имя записи архива не изменилось").into());
+                let location = source
+                    .browse_archive()
+                    .expect("supported archive format")
+                    .join(entry);
+                return Err(ArchiveError::MemberNameUnchanged(location).into());
             }
             MemberEdit::Rename {
                 from: entry,
@@ -130,17 +118,17 @@ fn rebuild(
                         .iter()
                         .all(|source| source.parent().as_ref() == Some(origin))
             })
-            .ok_or_else(|| text!("Выберите файлы или папки в соседней панели"))?;
+            .ok_or(ArchiveError::SelectOtherPane)?;
         let origin_parent = Parent::capture(&origin)?;
         additions.capture_sources(sources, &origin_parent.location, folder, progress, &cancel)?;
         if additions.contains_file(&expected) {
-            return Err(text!("Архив нельзя добавить в него самого").into());
+            return Err(ArchiveError::CannotAddArchiveToItself(source.clone()).into());
         }
         if archive.has_protected_entries()
             && password.is_none()
             && additions.names().any(|(_, dir)| !dir)
         {
-            return Err(text!("Задайте пароль для добавляемых файлов ZIP").into());
+            return Err(ArchiveError::AdditionsRequirePassword(source.clone()).into());
         }
         Some((origin, origin_parent))
     } else {
@@ -150,34 +138,41 @@ fn rebuild(
     with_staging_typed(&target, Some(&cancel), |staging, preserve| {
         let payload = staging.join("payload");
         let output = StagedFile::open(&payload, cancel.clone())?;
-        let mut writer = ArchiveWriter::rebuild(format, password, output)?;
+        let mut writer = ArchiveWriter::rebuild(format, password, output)
+            .map_err(|error| AccessError::write(source, error))?;
         archive.write_existing(&mut writer, progress)?;
         additions.append(source, &mut writer, progress, &cancel)?;
         progress.item(source.path());
-        writer.finish()?.close()?;
+        writer
+            .finish()
+            .map_err(|error| AccessError::write(source, error))?
+            .close()?;
         archive.validate_output(payload.path(), additions.names(), progress)?;
         if let EntryMetadata::Local(metadata) = &expected {
-            fs::set_permissions(payload.path(), metadata.permissions())?;
+            fs::set_permissions(payload.path(), metadata.permissions())
+                .map_err(|error| AccessError::write(&payload, error))?;
         }
         additions.verify(&cancel)?;
         if let Some((origin, captured)) = &additions_origin {
             captured.verify()?;
             if canonical(origin)? != captured.location.path() {
-                return Err(changed_source(origin).into());
+                return Err(MutationError::SourceChanged(origin.clone()).into());
             }
         }
         archive.verify_source()?;
-        if let EntryMetadata::Local(metadata) = &expected
-            && !crate::fs_ops::source_metadata_matches(
-                metadata,
-                &fs::symlink_metadata(target.path())?,
-            )?
-        {
-            return Err(changed_source(source).into());
+        if let EntryMetadata::Local(metadata) = &expected {
+            let metadata_error =
+                |error| AccessError::new(&target, AccessAction::ReadMetadata, error);
+            let current = fs::symlink_metadata(target.path()).map_err(metadata_error)?;
+            if !crate::fs_ops::source_metadata_matches(metadata, &current)
+                .map_err(metadata_error)?
+            {
+                return Err(changed().into());
+            }
         }
         parent.verify()?;
         if canonical(&directory)? != parent.location.path() {
-            return Err(changed_source(source).into());
+            return Err(changed().into());
         }
         cancel.check()?;
         publish_replacement(&payload, &target, staging, &expected, preserve)?;
@@ -189,7 +184,7 @@ fn rebuild(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{operations::Cancellation, vfs::create_archive};
+    use crate::{file_error::Failure, operations::Cancellation, vfs::create_archive};
     use std::{
         collections::BTreeMap,
         io::{self, Read, Write},
@@ -306,7 +301,15 @@ mod tests {
             sources: vec![addition.clone()],
         };
         let error = edit_archive(&archive_path, add(), None, &mut progress).unwrap_err();
-        assert!(error.contains("password"), "{error}");
+        assert!(
+            matches!(
+                &error,
+                TransferError::Failed(Failure::Archive(reason))
+                    if matches!(reason.as_ref(), ArchiveError::AdditionsRequirePassword(location)
+                        if location.path() == archive_path)
+            ),
+            "{error:?}"
+        );
         assert_eq!(fs::read(&archive_path).unwrap(), unchanged);
         edit_archive(&archive_path, add(), Some(new_password), &mut progress).unwrap();
         assert_eq!(zip_payload(&archive_path), before);
@@ -356,7 +359,10 @@ mod tests {
             &mut progress,
         )
         .unwrap_err();
-        assert!(error.contains("hard link"), "{error}");
+        assert!(
+            crate::i18n::file_error(&error).contains("hard link"),
+            "{error:?}"
+        );
         assert_eq!(fs::read(&path).unwrap(), original);
 
         edit_archive(
@@ -414,7 +420,16 @@ mod tests {
             &mut progress,
         )
         .unwrap_err();
-        assert!(error.contains("already used"), "{error}");
+        assert!(
+            matches!(
+                &error,
+                TransferError::Failed(Failure::Archive(reason))
+                    if matches!(reason.as_ref(), ArchiveError::MemberOccupied(location)
+                        if location.archive_source() == Some(path.canonicalize().unwrap().as_path())
+                            && location.path() == Path::new("second"))
+            ),
+            "{error:?}"
+        );
         assert_eq!(fs::read(&path).unwrap(), before);
         assert!(!has_stage(temp.path()));
     }
@@ -439,8 +454,8 @@ mod tests {
         let mut progress = Progress::with_cancellation(Cancellation::at_checkpoint(move || {
             has_payload(&directory)
         }));
-        let cancelled = edit_archive(&path, rename(), None, &mut progress).unwrap();
-        assert!(cancelled.contains("stopped"), "{cancelled}");
+        let cancelled = edit_archive(&path, rename(), None, &mut progress).unwrap_err();
+        assert!(matches!(cancelled, TransferError::Cancelled));
         assert_eq!(progress.results.items[0].outcome, Outcome::Cancelled);
         assert_eq!(fs::read(&path).unwrap(), initial);
         assert!(!has_stage(temp.path()));

@@ -27,7 +27,17 @@ impl Parent {
     }
 
     pub(super) fn verify(&self) -> Result<(), TransferError> {
-        let actual = entry_metadata(&self.location)?.ok_or_else(|| unavailable(&self.location))?;
+        if self.matches()? {
+            Ok(())
+        } else {
+            Err(unavailable(&self.location).into())
+        }
+    }
+
+    pub(super) fn matches(&self) -> Result<bool, TransferError> {
+        let Some(actual) = entry_metadata(&self.location)? else {
+            return Ok(false);
+        };
         let same = match (&self.metadata, &actual) {
             (EntryMetadata::Local(_), EntryMetadata::Local(actual)) => {
                 actual.is_dir()
@@ -40,11 +50,7 @@ impl Parent {
             (EntryMetadata::Remote(_), EntryMetadata::Remote(actual)) => actual.is_dir(),
             _ => false,
         };
-        if same && canonical(&self.location)? == self.location.path() {
-            Ok(())
-        } else {
-            Err(unavailable(&self.location).into())
-        }
+        Ok(same && canonical(&self.location)? == self.location.path())
     }
 }
 

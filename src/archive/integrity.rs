@@ -96,8 +96,7 @@ impl Report<'_> {
         password: Option<&str>,
     ) -> Result<(), TransferError> {
         self.progress.check_cancelled()?;
-        let mut archive = Extraction::open(path, password)
-            .map_err(|source| AccessError::new(self.source, AccessAction::OpenFile, source))?;
+        let mut archive = Extraction::open(path, password)?;
         match format {
             Format::Zip => self.check_zip(
                 &mut archive,

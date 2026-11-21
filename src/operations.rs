@@ -326,13 +326,10 @@ impl From<ChecksumError> for TransferError {
 
 impl From<ArchiveError> for TransferError {
     fn from(error: ArchiveError) -> Self {
-        match &error {
-            ArchiveError::AddEntry { source, .. } | ArchiveError::Verify { source, .. }
-                if Self::is_cancelled_io(source) =>
-            {
-                Self::Cancelled
-            }
-            _ => Self::Failed(Failure::Archive(Box::new(error))),
+        if error.io_cause().is_some_and(Self::is_cancelled_io) {
+            Self::Cancelled
+        } else {
+            Self::Failed(Failure::Archive(Box::new(error)))
         }
     }
 }

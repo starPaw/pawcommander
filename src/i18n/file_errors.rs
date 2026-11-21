@@ -62,6 +62,8 @@ fn archive_error(error: &ArchiveError) -> String {
         ArchiveError::SelectCurrentFolder => {
             text!("Выберите файлы или папки из текущей папки").into()
         }
+        ArchiveError::SelectArchiveEntries => text!("Выберите записи из одной папки архива").into(),
+        ArchiveError::SelectOtherPane => text!("Выберите файлы или папки в соседней панели").into(),
         ArchiveError::PasswordRequiresZip => text!("Пароль можно задать только для ZIP").into(),
         ArchiveError::UnsupportedFormat(archive) => {
             format!("{} · {archive}", text!("Поддерживаются архивы ZIP и TAR"))
@@ -77,6 +79,35 @@ fn archive_error(error: &ArchiveError) -> String {
         ArchiveError::EntryEncoding(entry) => format!(
             "{} · {entry}",
             text!("Для создания архива нужны имена файлов в UTF-8")
+        ),
+        ArchiveError::MemberMissing(entry) => {
+            crate::tr_format!("Archive entry no longer exists: {}", entry)
+        }
+        ArchiveError::MemberOccupied(entry) => {
+            crate::tr_format!("Path is already used in the archive: {}", entry)
+        }
+        ArchiveError::MemberNameUnchanged(entry) => {
+            format!("{} · {entry}", text!("Имя записи архива не изменилось"))
+        }
+        ArchiveError::CannotAddArchiveToItself(archive) => format!(
+            "{} · {archive}",
+            text!("Архив нельзя добавить в него самого")
+        ),
+        ArchiveError::AdditionsRequirePassword(archive) => format!(
+            "{} · {archive}",
+            text!("Задайте пароль для добавляемых файлов ZIP")
+        ),
+        ArchiveError::ExtractionLimit(entry) => format!(
+            "{} · {entry}",
+            text!("Выбрано больше 32 ГиБ для распаковки")
+        ),
+        ArchiveError::ExtractionDestinationChanged(directory) => crate::tr_format!(
+            "The destination folder changed: {directory}",
+            directory = directory
+        ),
+        ArchiveError::ExtractionReplaceUnavailable(destination) => format!(
+            "{} · {destination}",
+            text!("Замена доступна только для двух разных обычных файлов.")
         ),
         ArchiveError::EntryPath { entry, source } => {
             let reason = match source {
@@ -97,9 +128,32 @@ fn archive_error(error: &ArchiveError) -> String {
             entry = entry,
             error = source
         ),
+        ArchiveError::Read { archive, source } => crate::tr_format!(
+            "Could not read archive “{}”: {error}",
+            archive,
+            error = source
+        ),
+        ArchiveError::ExtractEntry {
+            entry,
+            destination,
+            source,
+        } => crate::tr_format!(
+            "Could not extract {entry} to {destination}: {error}",
+            entry = entry,
+            destination = destination,
+            error = source
+        ),
+        ArchiveError::Rebuild { location, source } => crate::tr_format!(
+            "Could not rebuild archive at {location}: {error}",
+            location = location,
+            error = source
+        ),
         ArchiveError::Verify { archive, source } => format!("{archive}: {source}"),
         ArchiveError::ChangedDuringVerification(archive) => {
             format!("{} · {archive}", text!("Архив изменился во время проверки"))
+        }
+        ArchiveError::SourceChanged(archive) => {
+            crate::tr_format!("The archive changed during the operation: {}", archive)
         }
     }
 }

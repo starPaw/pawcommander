@@ -1,5 +1,4 @@
 use super::{
-    err,
     sftp::remote,
     staged_file::StagedFile,
     transfer::{
@@ -12,6 +11,7 @@ use super::{
 use crate::{
     archive::{Extraction, SelectedTree},
     conflict::{Answer, Conflict, Decision, EntryDetails},
+    file_error::{ArchiveError, LocalPathAction, MutationError},
     fs_ops,
     operations::{Progress, TransferError},
     result_history::Outcome,
@@ -27,52 +27,39 @@ pub(crate) fn extract_archive(
     password: Option<&str>,
     progress: &mut Progress,
     decide: impl FnMut(Conflict) -> Result<Answer, TransferError>,
-) -> Result<String, String> {
-    let mut totals = Totals {
+) -> Result<ExtractionSummary, ExtractionFailure> {
+    let mut summary = ExtractionSummary {
         selected: sources.len(),
-        ..Totals::default()
+        ..ExtractionSummary::default()
     };
-    let result = extract(sources, directory, password, progress, decide, &mut totals);
+    let result = extract(sources, directory, password, progress, decide, &mut summary);
     match result {
-        Ok(()) => Ok(totals.text()),
-        Err(TransferError::Cancelled) => {
-            progress.results.cancelled = true;
-            let summary = totals.text();
-            Ok(crate::tr_format!(
-                "Extraction stopped. {summary}",
-                summary = summary
-            ))
+        Ok(()) => Ok(summary),
+        Err(error) => {
+            if matches!(error, TransferError::Cancelled) {
+                progress.results.cancelled = true;
+            }
+            Err(ExtractionFailure { summary, error })
         }
-        Err(error) if totals.completed + totals.skipped != 0 => Err(format!(
-            "{}. {}",
-            crate::i18n::file_error(&error),
-            totals.text()
-        )),
-        Err(error) => Err(crate::i18n::file_error(&error)),
     }
 }
 
-#[derive(Default)]
-struct Totals {
-    selected: usize,
-    completed: usize,
-    skipped: usize,
+#[derive(Debug)]
+pub(crate) struct ExtractionFailure {
+    pub(crate) summary: ExtractionSummary,
+    pub(crate) error: TransferError,
 }
 
-impl Totals {
-    fn text(&self) -> String {
-        let Self {
-            selected,
-            completed,
-            skipped,
-        } = *self;
-        let remaining = selected - completed - skipped;
-        crate::tr_format!(
-            "Extracted: {completed}. Skipped: {skipped}. Remaining: {remaining}.",
-            completed = completed,
-            remaining = remaining,
-            skipped = skipped
-        )
+#[derive(Debug, Default)]
+pub(crate) struct ExtractionSummary {
+    selected: usize,
+    pub(crate) completed: usize,
+    pub(crate) skipped: usize,
+}
+
+impl ExtractionSummary {
+    pub(crate) fn remaining(&self) -> usize {
+        self.selected - self.completed - self.skipped
     }
 }
 
@@ -82,10 +69,10 @@ fn extract(
     password: Option<&str>,
     progress: &mut Progress,
     mut decide: impl FnMut(Conflict) -> Result<Answer, TransferError>,
-    totals: &mut Totals,
+    totals: &mut ExtractionSummary,
 ) -> Result<(), TransferError> {
     if directory.is_archive() {
-        return Err(crate::archive::readonly().into());
+        return Err(MutationError::ReadOnlyArchive(directory.clone()).into());
     }
     progress.results.plan(sources.iter().map(|source| {
         (
@@ -180,10 +167,7 @@ fn extract(
                 }
                 Decision::Replace if can_replace => replace = Some(existing),
                 Decision::Replace => {
-                    return Err(crate::i18n::text!(
-                        "Замена доступна только для двух разных обычных файлов.",
-                    )
-                    .into())
+                    return Err(ArchiveError::ExtractionReplaceUnavailable(target).into())
                 }
             }
         }
@@ -198,7 +182,7 @@ fn extract(
         let mut published = false;
         let result = with_staging_typed(&target, Some(&cancel), |staging, _| {
             let payload = staging.join("payload");
-            unpack_tree(&mut archive, &tree, &payload, progress)?;
+            unpack_tree(&mut archive, &tree, &payload, &target, progress)?;
             progress.item(target.path());
             archive.verify_source()?;
             verify_destination(&parent, directory)?;
@@ -211,19 +195,16 @@ fn extract(
                 || published = true,
             )
         });
-        let (outcome, reason) = match &result {
-            Ok(()) => (Outcome::Completed, None),
-            Err(error) => (
-                match error {
-                    _ if published => Outcome::CompletedWithWarning,
-                    TransferError::Cancelled => Outcome::Cancelled,
-                    TransferError::PublicationUnconfirmed(_) => Outcome::PublicationUnconfirmed,
-                    TransferError::Failed(_) => Outcome::Failed,
-                },
-                Some(crate::i18n::file_error(error)),
-            ),
+        let outcome = match &result {
+            Ok(()) => Outcome::Completed,
+            Err(_) if published => Outcome::CompletedWithWarning,
+            Err(TransferError::Cancelled) => Outcome::Cancelled,
+            Err(TransferError::PublicationUnconfirmed(_)) => Outcome::PublicationUnconfirmed,
+            Err(TransferError::Failed(_)) => Outcome::Failed,
         };
-        progress.results.record(&tree.source, None, outcome, reason);
+        progress
+            .results
+            .record_with_error(&tree.source, outcome, result.as_ref().err());
         totals.completed += usize::from(published);
         result?;
     }
@@ -231,12 +212,8 @@ fn extract(
 }
 
 fn verify_destination(parent: &Parent, directory: &Location) -> Result<(), TransferError> {
-    if parent.verify().is_err() || canonical(directory)? != parent.location.path() {
-        return Err(crate::tr_format!(
-            "The destination folder changed: {directory}",
-            directory = directory
-        )
-        .into());
+    if !parent.matches()? || canonical(directory)? != parent.location.path() {
+        return Err(ArchiveError::ExtractionDestinationChanged(directory.clone()).into());
     }
     Ok(())
 }
@@ -245,34 +222,46 @@ fn unpack_tree(
     archive: &mut Extraction<'_>,
     tree: &SelectedTree,
     payload: &Location,
+    target: &Location,
     progress: &mut Progress,
 ) -> Result<(), TransferError> {
     let cancel = progress.cancellation();
     for entry in &tree.entries {
         cancel.check()?;
-        let member = tree.source.join(&entry.relative);
-        let path = entry
-            .relative
-            .iter()
-            .fold(payload.clone(), |dir, part| dir.join(part));
-        let context = |error: &std::io::Error| format!("{member}: {error}");
+        let descend = |root: &Location| {
+            entry
+                .relative
+                .iter()
+                .fold(root.clone(), |dir, part| dir.join(part))
+        };
+        let member = descend(&tree.source);
+        let path = descend(payload);
         if entry.is_dir() {
             progress.item(member.path());
             if let Some(path) = path.local() {
                 let mut builder = fs::DirBuilder::new();
                 #[cfg(unix)]
                 std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-                builder
-                    .create(path)
-                    .map_err(|error| TransferError::io(error, context))?;
+                builder.create(path).map_err(|error| {
+                    MutationError::local(path, LocalPathAction::CreateDirectory, error)
+                })?;
             } else {
-                remote(&path)?.mkdir(path.path(), 0o700).map_err(err)?;
+                remote(&path)?.mkdir(path.path(), 0o700).map_err(|source| {
+                    MutationError::CreateSftp {
+                        destination: path.clone(),
+                        source,
+                    }
+                })?;
             }
         } else {
             let mut file = StagedFile::open(&path, cancel.clone())?;
             archive
                 .copy_entry(entry, member.path(), &mut file, progress)
-                .map_err(|error| TransferError::io(error, context))?;
+                .map_err(|source| ArchiveError::ExtractEntry {
+                    entry: member,
+                    destination: descend(target),
+                    source,
+                })?;
             file.close()?;
         }
     }
