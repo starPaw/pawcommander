@@ -3,7 +3,8 @@ use super::{
     TransferKind,
 };
 use crate::{
-    operations::CopyReader,
+    file_error::{AccessAction, AccessError, Failure, MutationError, PublicationError},
+    operations::{AccessStream, CopyReader},
     result_history::Outcome,
     vfs::{
         copy_metadata,
@@ -13,6 +14,7 @@ use crate::{
             check_copy_space, entry_metadata, with_staging_typed, EntryMetadata,
             LocalEntryMetadata, SourceReader, TransferSourceEntry, TransferSourceManifest,
         },
+        TransferFailure, TransferSummary,
     },
 };
 use std::{
@@ -31,21 +33,25 @@ impl Plan {
         &self.destination.location
     }
 
-    pub(crate) fn apply(self, progress: &mut Progress) -> Result<String, String> {
+    pub(crate) fn apply(self, progress: &mut Progress) -> Result<TransferSummary, TransferFailure> {
         let cancel = progress.cancellation().pausable_scan();
         progress.results.plan(
             self.roots
                 .iter()
                 .map(|root| (root.item.original.clone(), Some(root.item.target.display()))),
         );
+        let mut summary = TransferSummary::default();
         if let Err(error) = self.verify(&cancel) {
-            if matches!(error, TransferError::Cancelled) {
-                progress.results.cancelled = true;
-            }
-            return Err(crate::i18n::file_error(&error));
+            summary.preparing = true;
+            summary.remaining = self
+                .roots
+                .into_iter()
+                .map(|root| root.item.original)
+                .collect();
+            return interrupted(summary, error, progress);
         }
-        let completed = self.roots.len();
-        for (completed, root) in self.roots.into_iter().enumerate() {
+        let mut roots = self.roots.into_iter();
+        while let Some(root) = roots.next() {
             let source = root.item.original.clone();
             let target = root.item.target.clone();
             progress.results.begin(&source);
@@ -67,48 +73,70 @@ impl Plan {
                 progress,
                 &mut effect,
             );
+            let completed = effect.published && (self.kind == TransferKind::Copy || effect.removed);
+            if completed {
+                summary.completed += 1;
+            }
+            let metadata_warning = progress.results.active_metadata_warning();
+            summary.metadata_warnings += usize::from(metadata_warning);
             let outcome = match &result {
+                Ok(()) if metadata_warning => Outcome::CompletedWithWarning,
                 Ok(()) => Outcome::Completed,
-                Err(_)
-                    if effect.published && self.kind == TransferKind::Move && !effect.removed =>
-                {
-                    Outcome::CopiedSourceRemaining
-                }
+                Err(_) if effect.published && !completed => Outcome::CopiedSourceRemaining,
                 Err(_) if effect.published => Outcome::CompletedWithWarning,
                 Err(TransferError::Cancelled) => Outcome::Cancelled,
                 Err(TransferError::PublicationUnconfirmed(_)) => Outcome::PublicationUnconfirmed,
                 Err(TransferError::Failed(_)) => Outcome::Failed,
             };
-            progress.results.record(
-                &source,
-                Some(target.display()),
-                outcome,
-                result.as_ref().err().map(crate::i18n::file_error),
-            );
+            progress
+                .results
+                .record_with_error(&source, outcome, result.as_ref().err());
             if let Err(error) = result {
-                if matches!(error, TransferError::Cancelled) {
-                    progress.results.cancelled = true;
+                if !completed {
+                    summary.remaining.push(source);
                 }
-                return Err(crate::tr_format!(
-                    "Completed items: {completed}. {error}",
-                    completed = completed,
-                    error = crate::i18n::file_error(&error)
-                ));
+                summary
+                    .remaining
+                    .extend(roots.map(|root| root.item.original));
+                return interrupted(summary, error, progress);
             }
         }
-        Ok(crate::tr_format!(
-            "Transfer with compatible names finished. Items: {completed}",
-            completed = completed
-        ))
+        Ok(summary)
     }
 
     fn verify(&self, cancel: &Cancellation) -> Result<(), TransferError> {
+        cancel.check()?;
         let occupied = names_in(&self.destination, cancel)?;
         for root in &self.roots {
             check_target(&root.item.target, &occupied, self.apple_double)?;
             root.manifest.verify(cancel, |_, _| {})?;
         }
         Ok(())
+    }
+}
+
+fn interrupted(
+    mut summary: TransferSummary,
+    error: TransferError,
+    progress: &mut Progress,
+) -> Result<TransferSummary, TransferFailure> {
+    let cancelled = matches!(&error, TransferError::Cancelled);
+    let cause = match &error {
+        TransferError::PublicationUnconfirmed(Failure::Publication(reason)) => {
+            match reason.as_ref() {
+                PublicationError::CompatibleCopyUnconfirmed { cause, .. } => Some(cause),
+                _ => None,
+            }
+        }
+        TransferError::Failed(Failure::StagingCleanup(reason)) => reason.operation.as_ref(),
+        _ => None,
+    };
+    progress.results.cancelled |= cancelled || matches!(cause, Some(TransferError::Cancelled));
+    summary.cancelled = progress.results.cancelled;
+    if cancelled {
+        Ok(summary)
+    } else {
+        Err(TransferFailure { error, summary })
     }
 }
 
@@ -251,30 +279,46 @@ impl CopyTree<'_, '_> {
             }
             directory.current_metadata()
         } else {
+            let target = beneath(&self.root.item.target, &self.root.paths[source]);
             let mut input = SourceReader::open(source)?;
             entry.verify_metadata(source, &input.metadata(source)?)?;
             let mut file = parent.exclusive_file(name)?;
             self.created = true;
             let size = entry.size();
             let verify = self.check_bytes || self.progress.copy_verification();
-            let mut data = CopyReader::new((&mut input).take(size), verify);
-            let written = self
-                .progress
-                .copy(source.path(), Some(size), &mut data, &mut file)?;
-            file.sync_all()?;
-            if written != size || file.metadata()?.len() != size {
-                return Err(stale_source(source));
+            let mut data =
+                CopyReader::new(AccessStream::new(&mut input, source).take(size), verify);
+            let written = self.progress.copy(
+                source.path(),
+                Some(size),
+                &mut data,
+                &mut AccessStream::new(&mut file, &target),
+            )?;
+            file.sync_all()
+                .map_err(|error| AccessError::new(&target, AccessAction::SyncFile, error))?;
+            let metadata_error =
+                |error| AccessError::new(&target, AccessAction::ReadOpenMetadata, error);
+            if written != size {
+                return Err(MutationError::SourceChanged(source.clone()).into());
+            }
+            if file.metadata().map_err(metadata_error)?.len() != size {
+                return Err(stale_target(&target));
             }
             if let Some(hash) = data.finish() {
-                file.seek(SeekFrom::Start(0))?;
-                self.progress
-                    .verify_copy(source.path(), size, hash, &mut file)?;
+                file.seek(SeekFrom::Start(0))
+                    .map_err(|error| AccessError::new(&target, AccessAction::SeekFile, error))?;
+                self.progress.verify_copy(
+                    source.path(),
+                    size,
+                    hash,
+                    &mut AccessStream::new(&mut file, &target),
+                )?;
             }
             entry.verify_metadata(source, &input.metadata(source)?)?;
             entry.verify(source, &cancel, true)?;
             Ok(EntryMetadata::Local(LocalEntryMetadata::from_file(
                 &file,
-                file.metadata()?,
+                file.metadata().map_err(metadata_error)?,
             )))
         };
         let identity = result?;
@@ -387,11 +431,7 @@ fn check_vacant(target: &Location, occupied: &HashSet<String>) -> Result<(), Tra
     if !occupied.contains(&super::portable_key(name)) && entry_metadata(target)?.is_none() {
         return Ok(());
     }
-    Err(crate::tr_format!(
-        "Destination name became occupied after preview: {target}. Rebuild the plan.",
-        target = target
-    )
-    .into())
+    Err(MutationError::CompatibleNameOccupied(target.clone()).into())
 }
 
 fn verify_published_name(
@@ -405,8 +445,10 @@ fn verify_published_name(
     let companion = apple_double.then(|| super::portable_key(&metadata_name(name)));
     let mut matches = 0;
     let mut companions = 0;
-    for item in std::fs::read_dir(destination.location.path())? {
-        let item = item?;
+    let read_error =
+        |error| AccessError::new(&destination.location, AccessAction::ReadChildren, error);
+    for item in std::fs::read_dir(destination.location.path()).map_err(read_error)? {
+        let item = item.map_err(read_error)?;
         let key = super::portable_key(&item.file_name());
         if key == expected {
             matches += 1;
@@ -438,7 +480,8 @@ fn verify_apple_double(path: &Location, entry: &TransferSourceEntry) -> Result<(
     let mut file = SourceReader::open(path)?;
     entry.verify_metadata(path, &file.metadata(path)?)?;
     let mut header = [0; HEADER.len()];
-    file.read_exact(&mut header)?;
+    file.read_exact(&mut header)
+        .map_err(|error| AccessError::read(path, error))?;
     if header != HEADER {
         return Err(stale_target(path));
     }
@@ -453,22 +496,16 @@ fn beneath(root: &Location, relative: &Path) -> Location {
     }
 }
 
-fn stale_source(source: &Location) -> TransferError {
-    crate::tr_format!("Source file changed: {source}", source = source).into()
-}
-
 fn stale_target(target: &Location) -> TransferError {
-    crate::tr_format!(
-        "Destination differs from the verified copy: {target}",
-        target = target
-    )
-    .into()
+    PublicationError::CompatibleOutputChanged(target.clone()).into()
 }
 
 fn unconfirmed(target: &Location, error: TransferError) -> TransferError {
-    TransferError::publication_unconfirmed(crate::tr_format!(
-        "Inspect the possibly incomplete copy at {target}. The source was preserved. {error}",
-        error = crate::i18n::file_error(&error),
-        target = target
-    ))
+    TransferError::PublicationUnconfirmed(
+        PublicationError::CompatibleCopyUnconfirmed {
+            target: target.clone(),
+            cause: error,
+        }
+        .into(),
+    )
 }

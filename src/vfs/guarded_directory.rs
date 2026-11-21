@@ -7,7 +7,7 @@ use super::{
     Location,
 };
 use crate::file_error::{
-    AccessAction, AccessError, MutationError, PublicationError, RecoveryNotice,
+    AccessAction, AccessError, LocalPathAction, MutationError, PublicationError, RecoveryNotice,
 };
 use crate::operations::{Cancellation, TransferError};
 use std::{ffi::OsStr, fs, io, os::fd::OwnedFd, path::Path};
@@ -95,7 +95,13 @@ impl Directory {
             OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::from_raw_mode(0o600),
         )
-        .map_err(io::Error::from)?;
+        .map_err(|error| {
+            AccessError::new(
+                &self.location.join(name),
+                AccessAction::CreateFile,
+                io::Error::from(error),
+            )
+        })?;
         Ok(fs::File::from(file))
     }
 
@@ -107,8 +113,14 @@ impl Directory {
             .descriptor
             .as_ref()
             .ok_or_else(|| stale(&self.location))?;
-        mkdirat(parent, name, Mode::from_raw_mode(0o700)).map_err(io::Error::from)?;
         let location = self.location.join(name);
+        mkdirat(parent, name, Mode::from_raw_mode(0o700)).map_err(|error| {
+            MutationError::LocalIo {
+                path: location.path().to_owned(),
+                action: LocalPathAction::CreateDirectory,
+                source: error.into(),
+            }
+        })?;
         let result = (|| {
             let descriptor = openat(
                 parent,
@@ -116,8 +128,12 @@ impl Directory {
                 OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                 Mode::empty(),
             )
-            .map_err(io::Error::from)?;
-            let metadata = held_metadata(&descriptor)?;
+            .map_err(|error| {
+                AccessError::new(&location, AccessAction::OpenFile, io::Error::from(error))
+            })?;
+            let metadata = held_metadata(&descriptor).map_err(|error| {
+                AccessError::new(&location, AccessAction::ReadOpenMetadata, error)
+            })?;
             let actual = canonical(&location)?;
             let child = Self {
                 location: location.with_path(actual),
@@ -128,11 +144,13 @@ impl Directory {
             Ok::<_, TransferError>(child)
         })();
         result.map_err(|error| {
-            TransferError::publication_unconfirmed(crate::tr_format!(
-                "The new folder {location} could not be verified: {error}",
-                error = error,
-                location = location
-            ))
+            TransferError::PublicationUnconfirmed(
+                PublicationError::DirectoryUnverified {
+                    target: location,
+                    cause: error,
+                }
+                .into(),
+            )
         })
     }
 
@@ -142,7 +160,9 @@ impl Directory {
             .descriptor
             .as_ref()
             .ok_or_else(|| stale(&self.location))?;
-        held_metadata(descriptor).map_err(TransferError::from)
+        held_metadata(descriptor).map_err(|error| {
+            AccessError::new(&self.location, AccessAction::ReadOpenMetadata, error).into()
+        })
     }
 
     pub(super) fn rename(

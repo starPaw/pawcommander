@@ -56,7 +56,9 @@ fn unknown_publication_survives_staging_cleanup_failure() {
     let staging: Location = PathBuf::from("/private-staging").into();
     let target: Location = PathBuf::from("/destination").into();
     let result = StagingCleanupError::combine(
-        Err(TransferError::publication_unconfirmed("reply lost".into())),
+        Err(TransferError::PublicationUnconfirmed(Failure::Message(
+            "reply lost".into(),
+        ))),
         Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied).into()),
         &staging,
         &target,

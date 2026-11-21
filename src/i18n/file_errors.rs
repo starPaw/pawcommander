@@ -1293,6 +1293,11 @@ fn mutation_error(error: &MutationError, unconfirmed: bool) -> String {
             "“{}” already exists. Choose another name or folder. Existing items are preserved",
             path.display()
         ),
+        #[cfg(target_os = "macos")]
+        CompatibleNameOccupied(target) => crate::tr_format!(
+            "Destination name became occupied after preview: {target}. Rebuild the plan.",
+            target = target
+        ),
         SourceChanged(path) => super::source_changed_during_copy(path),
         MoveIncomplete { target, cause } => crate::tr_format!(
             "A copy was created at {target}. The move is incomplete. Check the source and result history. {error}",
@@ -1440,6 +1445,23 @@ fn publication_error(error: &PublicationError) -> String {
                 crate::tr_format!("Copy completed at {target}. {error}", target = target, error = reason)
             }
         }
+        #[cfg(target_os = "macos")]
+        PublicationError::CompatibleOutputChanged(target) => crate::tr_format!(
+            "Destination differs from the verified copy: {target}",
+            target = target
+        ),
+        #[cfg(target_os = "macos")]
+        PublicationError::CompatibleCopyUnconfirmed { target, cause } => crate::tr_format!(
+            "Inspect the possibly incomplete copy at {target}. The source was preserved. {error}",
+            target = target,
+            error = file_error(cause)
+        ),
+        #[cfg(target_os = "macos")]
+        PublicationError::DirectoryUnverified { target, cause } => crate::tr_format!(
+            "The new folder {location} could not be verified: {error}",
+            location = target,
+            error = file_error(cause)
+        ),
         PublicationError::Backup {
             target,
             backup,

@@ -264,7 +264,36 @@ impl PawCommander {
                 description,
                 work: Box::new(move |progress| {
                     progress.set_copy_verification(verify);
-                    plan.apply(progress).map_err(TransferError::from)
+                    let summary = plan.apply(progress).map_err(|failure| {
+                        let error = crate::i18n::file_error(&failure.error);
+                        if failure.summary.preparing {
+                            error
+                        } else {
+                            crate::tr_format!(
+                                "Completed items: {completed}. {error}",
+                                completed = failure.summary.completed,
+                                error = error
+                            )
+                        }
+                    })?;
+                    let completed = summary.completed;
+                    let mut message = if summary.cancelled {
+                        crate::tr_format!(
+                            "Completed items: {completed}. {error}",
+                            completed = completed,
+                            error = crate::tr_format!("Operation cancelled")
+                        )
+                    } else {
+                        crate::tr_format!(
+                            "Transfer with compatible names finished. Items: {completed}",
+                            completed = completed
+                        )
+                    };
+                    if summary.metadata_warnings != 0 {
+                        message.push('\n');
+                        message.push_str(crate::i18n::text!("Даты или права доступа сохранены частично. Подробности указаны в строках журнала."));
+                    }
+                    Ok(message)
                 }),
                 transfer: Some(TransferInteraction {
                     events: receive,
