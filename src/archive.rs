@@ -11,8 +11,10 @@ pub(crate) use integrity::verify_archive;
 pub(crate) use writer::{ArchiveWriter, Attributes, CreationLimits};
 
 use crate::{
+    file_error::{ArchiveMemberError, ListingError, ListingErrorKind},
     fs_ops::ListingMetadata,
     i18n::text,
+    operations::{Cancelled, TransferError},
     vfs::{FileEntry, Location},
 };
 use chrono::TimeZone;
@@ -97,20 +99,28 @@ pub(crate) struct Index {
 }
 
 impl Index {
-    pub(crate) fn load(file: &Path, cancelled: &impl Fn() -> bool) -> Result<Self, String> {
-        let format =
-            Format::from_path(file).ok_or_else(|| text!("Поддерживаются архивы ZIP и TAR"))?;
+    pub(crate) fn load(file: &Path, cancelled: &impl Fn() -> bool) -> Result<Self, TransferError> {
+        let format = Format::from_path(file)
+            .ok_or_else(|| ListingError::new(file.to_owned(), ListingErrorKind::ArchiveFormat))?;
         if cancelled() {
-            return Err(cancelled_read().to_string());
+            return Err(TransferError::Cancelled);
         }
+        // ZIP and TAR can wrap I/O errors. Record cancellation when the
+        // reader actually observes it, before those errors are converted.
+        let observed_cancellation = Cell::new(false);
+        let check = || {
+            let requested = cancelled();
+            observed_cancellation.set(observed_cancellation.get() || requested);
+            requested
+        };
         open_regular(file)
-            .and_then(|(file, metadata)| Self::read(&file, metadata.len(), format, cancelled))
+            .and_then(|(file, metadata)| Self::read(&file, metadata.len(), format, &check))
             .map_err(|error| {
-                crate::tr_format!(
-                    "Could not read archive “{}”: {error}",
-                    file.display(),
-                    error = error
-                )
+                if observed_cancellation.get() {
+                    TransferError::Cancelled
+                } else {
+                    ListingError::new(file.to_owned(), ListingErrorKind::ReadArchive(error)).into()
+                }
             })
     }
 
@@ -141,11 +151,10 @@ impl Index {
         &self,
         location: &Location,
         cancelled: &impl Fn() -> bool,
-    ) -> Result<Vec<FileEntry>, String> {
-        let members = self
-            .folders
-            .get(location.path())
-            .ok_or_else(|| text!("Папка отсутствует в архиве").to_owned())?;
+    ) -> Result<Vec<FileEntry>, TransferError> {
+        let members = self.folders.get(location.path()).ok_or_else(|| {
+            ListingError::new(location.clone(), ListingErrorKind::MissingArchiveFolder)
+        })?;
         Ok(members
             .iter()
             .take_while(|_| !cancelled())
@@ -548,11 +557,18 @@ fn zip_modified(time: rawzip::time::ZipDateTimeKind) -> Option<SystemTime> {
 }
 
 pub(crate) fn member_path(raw: &[u8]) -> io::Result<PathBuf> {
+    parse_member_path(raw).map_err(|error| match error {
+        ArchiveMemberError::InvalidPath => invalid_path(),
+        ArchiveMemberError::LimitExceeded => too_large(),
+    })
+}
+
+pub(crate) fn parse_member_path(raw: &[u8]) -> Result<PathBuf, ArchiveMemberError> {
     if raw.len() > MAX_PATH_BYTES {
-        return Err(too_large());
+        return Err(ArchiveMemberError::LimitExceeded);
     }
     if raw.starts_with(b"/") || raw.contains(&b'\\') || raw.iter().any(|b| b.is_ascii_control()) {
-        return Err(invalid_path());
+        return Err(ArchiveMemberError::InvalidPath);
     }
     let mut path = PathBuf::new();
     for (depth, part) in raw
@@ -561,10 +577,10 @@ pub(crate) fn member_path(raw: &[u8]) -> io::Result<PathBuf> {
         .enumerate()
     {
         if depth >= MAX_DEPTH {
-            return Err(too_large());
+            return Err(ArchiveMemberError::LimitExceeded);
         }
         if part == b".." || part.get(1) == Some(&b':') {
-            return Err(invalid_path());
+            return Err(ArchiveMemberError::InvalidPath);
         }
         #[cfg(unix)]
         let name = {
@@ -572,12 +588,13 @@ pub(crate) fn member_path(raw: &[u8]) -> io::Result<PathBuf> {
             OsStr::from_bytes(part)
         };
         #[cfg(not(unix))]
-        let name = OsStr::new(std::str::from_utf8(part).map_err(|_| invalid_path())?);
+        let name =
+            OsStr::new(std::str::from_utf8(part).map_err(|_| ArchiveMemberError::InvalidPath)?);
         if !matches!(
             Path::new(name).components().next(),
             Some(std::path::Component::Normal(_))
         ) {
-            return Err(invalid_path());
+            return Err(ArchiveMemberError::InvalidPath);
         }
         path.push(name);
     }
@@ -603,7 +620,7 @@ fn too_large() -> io::Error {
 }
 
 fn cancelled_read() -> io::Error {
-    io::Error::other(text!("Чтение архива отменено"))
+    io::Error::other(Cancelled)
 }
 
 fn open_regular(path: &Path) -> io::Result<(File, fs::Metadata)> {
@@ -869,7 +886,15 @@ mod tests {
         let root = Location::Local(path.clone()).browse_archive().unwrap();
         let index = Index::load(&path, &|| false).unwrap();
         assert_eq!(index.list(&root, &|| false).unwrap()[0].size, size);
-        assert!(Index::load(&path, &|| true).is_err());
+        assert!(matches!(
+            Index::load(&path, &|| true),
+            Err(TransferError::Cancelled)
+        ));
+        let entered_reader = Cell::new(false);
+        assert!(matches!(
+            Index::load(&path, &|| entered_reader.replace(true)),
+            Err(TransferError::Cancelled)
+        ));
     }
 
     #[test]

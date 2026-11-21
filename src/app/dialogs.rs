@@ -167,7 +167,8 @@ fn extraction_destination(
     } else {
         archive_directory
     };
-    let destination = fs_ops::resolve(address, base)?;
+    let destination =
+        fs_ops::resolve(address, base).map_err(|error| crate::i18n::file_error(&error))?;
     if destination.is_archive() {
         Err(crate::archive::readonly().into())
     } else {

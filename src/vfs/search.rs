@@ -100,8 +100,9 @@ pub(crate) fn walk(
             let connection = connection?;
             let canonical = connection.channel.realpath(folder.path());
             if can_read() {
-                let canonical =
-                    folder.with_path(normalize_remote(&canonical.map_err(super::err)?)?);
+                let path = normalize_remote(&canonical.map_err(super::err)?)
+                    .map_err(|error| crate::i18n::file_error(&error))?;
+                let canonical = folder.with_path(path);
                 coverage = walk_from(
                     &connection.channel,
                     canonical,

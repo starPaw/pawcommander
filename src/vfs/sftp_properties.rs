@@ -91,7 +91,7 @@ pub(crate) fn visit_properties(
 enum ReadError {
     Cancelled,
     Server(Error),
-    Path(String),
+    Path(crate::operations::TransferError),
 }
 
 struct Scanner<'a, F> {
@@ -121,7 +121,7 @@ impl<F: FnMut(PropertyEvent<'_>)> Scanner<'_, F> {
         let (message, keep_reading) = match error {
             ReadError::Cancelled => return false,
             ReadError::Server(error) => (error.to_string(), !should_reopen(&error)),
-            ReadError::Path(message) => (message, true),
+            ReadError::Path(error) => (crate::i18n::file_error(&error), true),
         };
         (self.visit)(PropertyEvent::Error(location, message));
         keep_reading

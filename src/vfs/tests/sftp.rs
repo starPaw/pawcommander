@@ -997,6 +997,17 @@ fn openssh_round_trip_and_host_verification() {
     let local_root = Location::Local(root.join("local"));
     fs::create_dir(local_root.path()).unwrap();
     fs::create_dir(remote_root.path()).unwrap();
+    let missing = remote_root.join("nonexistent-listing-test");
+    let failure = read_directory(&missing, &|| false).unwrap_err();
+    let TransferError::Failed(crate::file_error::Failure::Listing(failure)) = failure else {
+        panic!("expected a typed failure for the absent SFTP directory: {failure:?}");
+    };
+    assert_eq!(failure.location, missing);
+    assert!(matches!(
+        failure.kind,
+        crate::file_error::ListingErrorKind::OpenSftp(source)
+            if source.code() == ssh2::ErrorCode::SFTP(libssh2_sys::LIBSSH2_FX_NO_SUCH_FILE)
+    ));
     #[cfg(target_os = "macos")]
     check_sftp_editor(
         &local_root,

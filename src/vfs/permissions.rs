@@ -79,7 +79,10 @@ impl PermissionsPreview {
         for source in sources {
             if !source.same_backend(&directory)
                 || source.path().parent() != Some(directory.path())
-                || normalize_remote(source.path())?.as_os_str() != source.path().as_os_str()
+                || normalize_remote(source.path())
+                    .map_err(|error| crate::i18n::file_error(&error))?
+                    .as_os_str()
+                    != source.path().as_os_str()
             {
                 return Err(invalid());
             }

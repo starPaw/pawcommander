@@ -7,7 +7,7 @@ use std::hash::Hash;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 
-type Children = Result<Vec<Location>, String>;
+type Children = Result<Vec<Location>, crate::operations::TransferError>;
 
 const ROW_HEIGHT: f32 = 23.0;
 const MAX_HEIGHT: f32 = 208.0;
@@ -191,7 +191,7 @@ impl DirectoryTree {
             Ok(children) => children,
             Err(mpsc::TryRecvError::Empty) => return,
             Err(mpsc::TryRecvError::Disconnected) => {
-                Err(text!("Не удалось прочитать папку: фоновая задача завершилась").to_owned())
+                Err(text!("Не удалось прочитать папку: фоновая задача завершилась").into())
             }
         };
         if !job.cancelled.load(Ordering::Relaxed) {
@@ -234,7 +234,7 @@ impl DirectoryTree {
                 });
             }
             Err(error) => {
-                self.children.insert(location, Err(error.to_string()));
+                self.children.insert(location, Err(error.into()));
                 self.rows = None;
                 ctx.request_repaint();
             }
@@ -375,7 +375,10 @@ impl DirectoryTree {
                                 retry,
                                 None,
                             );
-                            if response.on_hover_text(error).clicked() {
+                            if response
+                                .on_hover_text(crate::i18n::file_error(error))
+                                .clicked()
+                            {
                                 click = Some(TreeClick::Retry(location.clone()));
                             }
                         }

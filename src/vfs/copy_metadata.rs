@@ -232,7 +232,7 @@ impl RemoteObject<'_> {
             Self::Path(channel, path) => channel.lstat(path),
             Self::Handle(handle) => handle.stat(),
         }
-        .map_err(|error| TransferError::Failed(err(error)))
+        .map_err(|error| TransferError::from(err(error)))
     }
 
     fn set(&mut self, stat: FileStat) -> Result<(), TransferError> {
@@ -253,7 +253,7 @@ impl RemoteObject<'_> {
             {
                 Ok(())
             }
-            result => result.map_err(|error| TransferError::Failed(err(error))),
+            result => result.map_err(|error| TransferError::from(err(error))),
         }
     }
 

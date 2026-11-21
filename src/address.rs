@@ -106,7 +106,11 @@ impl Completion {
         }
     }
 
-    pub fn resolve(&self, address: &str, current: &Location) -> Result<Location, String> {
+    pub fn resolve(
+        &self,
+        address: &str,
+        current: &Location,
+    ) -> Result<Location, crate::operations::TransferError> {
         let path = vfs::resolve(address, current)?;
         if address.starts_with("sftp:")
             && let Some(completed) = self

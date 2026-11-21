@@ -167,7 +167,7 @@ fn verify_file_pair(
     }
     progress
         .verify_copy_before_source_removal(displayed_source.path(), size, digest, &mut output)
-        .map_err(|error| TransferError::io(error, err))?;
+        .map_err(TransferError::from)?;
     if !copied.matches_moved_target(&output.metadata()?) {
         return Err(changed(target).into());
     }

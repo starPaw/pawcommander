@@ -59,7 +59,7 @@ pub(crate) fn edit_archive(
             } else {
                 Outcome::Failed
             },
-            Some(error.to_string()),
+            Some(crate::i18n::file_error(error)),
         ),
     };
     progress.results.record(&source, None, outcome, reason);
@@ -72,7 +72,7 @@ pub(crate) fn edit_archive(
             progress.results.cancelled = true;
             Ok(text!("Редактирование архива остановлено").into())
         }
-        Err(error) => Err(error.to_string()),
+        Err(error) => Err(crate::i18n::file_error(&error)),
     }
 }
 

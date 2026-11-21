@@ -1,6 +1,24 @@
 use super::*;
 
 #[test]
+fn missing_directory_retains_its_path_and_original_io_error() {
+    use crate::file_error::{Failure, ListingErrorKind};
+
+    let root = tempfile::tempdir().unwrap();
+    let missing = Location::Local(root.path().join("missing folder"));
+    let error = read_directory(&missing, &|| false).unwrap_err();
+    let TransferError::Failed(Failure::Listing(details)) = &error else {
+        panic!("expected a listing failure: {error:?}");
+    };
+    assert_eq!(details.location, missing);
+    assert!(matches!(
+        &details.kind,
+        ListingErrorKind::OpenLocal(source) if source.kind() == std::io::ErrorKind::NotFound
+    ));
+    assert!(crate::i18n::file_error(&error).contains(missing.path().to_str().unwrap()));
+}
+
+#[test]
 fn local_operations_keep_existing_conflict_and_trash_policy() {
     let root = tempfile::tempdir().unwrap();
     let local = Location::Local(root.path().into());

@@ -15,6 +15,7 @@ mod drag_drop;
 #[cfg(target_os = "macos")]
 mod extensions;
 mod file_clipboard;
+mod file_error;
 mod folder_jump;
 mod fs_ops;
 mod i18n;

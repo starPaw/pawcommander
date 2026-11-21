@@ -377,8 +377,11 @@ pub fn transfer_with_conflicts(
                 "{error}. Server publication is unconfirmed. Completed: {completed}. Skipped: {skipped}. Remaining: {remaining}. Inspect the source and destination before retrying.", completed = completed, error = error, remaining = remaining, skipped = skipped
             ))
         }
-        Err(TransferError::Failed(error)) if summary.preparing => Err(error),
-        Err(TransferError::Failed(error)) => {
+        Err(error @ TransferError::Failed(_)) if summary.preparing => {
+            Err(crate::i18n::file_error(&error))
+        }
+        Err(error @ TransferError::Failed(_)) => {
+            let error = crate::i18n::file_error(&error);
             let (completed, skipped, remaining) =
                 (summary.completed, summary.skipped, summary.remaining.len());
             let paths = summary
@@ -973,7 +976,7 @@ fn copy_to_smb(
         | io::ErrorKind::PermissionDenied
         | io::ErrorKind::InvalidInput
         | io::ErrorKind::NotFound
-        | io::ErrorKind::Unsupported => TransferError::Failed(err(error)),
+        | io::ErrorKind::Unsupported => TransferError::from(error),
         _ => unconfirmed(&error),
     })?;
     let result = (|| -> Result<(), TransferError> {
@@ -1254,7 +1257,7 @@ pub(super) fn rename_for_publication(
             .rename(source.path(), target.path(), Some(RenameFlags::empty()))
             .map_err(|error| TransferError::PublicationUnconfirmed(err(error)))
     } else {
-        rename_without_replacing(source, target).map_err(TransferError::Failed)
+        rename_without_replacing(source, target).map_err(TransferError::from)
     }
 }
 
@@ -1281,7 +1284,7 @@ fn publication_error(target: &Location, attempted: bool, error: String) -> Trans
     if target.remote() && attempted {
         TransferError::PublicationUnconfirmed(error)
     } else {
-        TransferError::Failed(error)
+        TransferError::from(error)
     }
 }
 
@@ -1697,7 +1700,7 @@ pub(super) fn staging_result_typed(
             Err(if unconfirmed {
                 TransferError::PublicationUnconfirmed(message)
             } else {
-                TransferError::Failed(message)
+                TransferError::from(message)
             })
         }
     }
@@ -1807,7 +1810,7 @@ pub(super) fn validate_source_child_name(source: &Location, name: &OsStr) -> Res
     validate_name(name).map_err(|error| {
         crate::tr_format!(
             "Unsupported SFTP transfer name in {source}: {error}",
-            error = error,
+            error = crate::i18n::path_error(&error),
             source = source
         )
     })
@@ -2106,10 +2109,12 @@ pub(super) fn copy_tree_entry(
         .get(source)
         .ok_or_else(|| changed_source(source))?;
     entry.verify(source, &cancel, false)?;
-    let local_write_error = |e| {
-        local_parent
-            .and_then(|parent| fs_ops::copy_space_error(parent, &e))
-            .unwrap_or_else(|| err(e))
+    let local_write_error = |error| {
+        TransferError::io(error, |source| {
+            local_parent
+                .and_then(|parent| fs_ops::copy_space_error(parent, source))
+                .unwrap_or_else(|| err(source))
+        })
     };
     if let Some(children) = &entry.children {
         if let Some(path) = target.local() {
@@ -2174,7 +2179,7 @@ pub(super) fn copy_tree_entry(
                 &mut bounded,
                 &mut output,
             )
-            .map_err(|error| TransferError::io(error, local_write_error))?;
+            .map_err(local_write_error)?;
         cancel.check()?;
         output.sync_all().map_err(local_write_error)?;
         written
@@ -2194,7 +2199,7 @@ pub(super) fn copy_tree_entry(
                 &mut bounded,
                 &mut output,
             )
-            .map_err(|error| TransferError::io(error, err))?;
+            .map_err(TransferError::from)?;
         cancel.check()?;
         output.flush().map_err(err)?;
         output.close().map_err(err)?;
@@ -2224,7 +2229,7 @@ pub(super) fn copy_tree_entry(
         observe(source, CopyPhase::Verifying)?;
         progress
             .verify_copy(source.path(), expected_size, source_hash, &mut copied)
-            .map_err(|error| TransferError::io(error, err))?;
+            .map_err(TransferError::from)?;
     }
     observe(source, CopyPhase::EntryCopied).map_err(Into::into)
 }

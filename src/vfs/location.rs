@@ -1,5 +1,6 @@
-use super::err;
 use crate::archive;
+use crate::file_error::PathError;
+use crate::operations::TransferError;
 use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
@@ -294,13 +295,12 @@ const SFTP_ADDRESS_PATH_ESCAPE: &percent_encoding::AsciiSet = &percent_encoding:
 pub(super) const ARCHIVE_ADDRESS_ESCAPE: &percent_encoding::AsciiSet =
     &percent_encoding::CONTROLS.add(b'%').add(b'!');
 
-pub fn resolve(address: &str, current: &Location) -> Result<Location, String> {
+pub fn resolve(address: &str, current: &Location) -> Result<Location, TransferError> {
     if let Some(address) = address.strip_prefix("archive:") {
-        let invalid = || crate::i18n::text!("Недопустимый адрес архива").to_owned();
-        let (file, member) = address.split_once("!/").ok_or_else(invalid)?;
+        let (file, member) = address.split_once("!/").ok_or(PathError::ArchiveAddress)?;
         let file = percent_decode_str(file).collect::<Vec<_>>();
         if file.contains(&0) {
-            return Err(invalid());
+            return Err(PathError::ArchiveAddress.into());
         }
         #[cfg(unix)]
         let file = {
@@ -308,43 +308,36 @@ pub fn resolve(address: &str, current: &Location) -> Result<Location, String> {
             PathBuf::from(OsString::from_vec(file))
         };
         #[cfg(not(unix))]
-        let file = PathBuf::from(String::from_utf8(file).map_err(|_| invalid())?);
+        let file = PathBuf::from(String::from_utf8(file).map_err(|_| PathError::ArchiveAddress)?);
         if !file.is_absolute() || archive::Format::from_path(&file).is_none() {
-            return Err(invalid());
+            return Err(PathError::ArchiveFile(file).into());
         }
-        let path =
-            archive::member_path(&percent_decode_str(member).collect::<Vec<_>>()).map_err(err)?;
+        let path = archive::parse_member_path(&percent_decode_str(member).collect::<Vec<_>>())
+            .map_err(|source| PathError::ArchiveMember {
+                archive: file.clone(),
+                source,
+            })?;
         return Ok(Location::Archive {
             archive: Arc::new(file),
             path,
         });
     }
     if address.starts_with("sftp:") {
-        let url = url::Url::parse(address)
-            .map_err(|e| crate::tr_format!("Invalid SFTP address: {e}", e = e))?;
+        let url = url::Url::parse(address).map_err(PathError::SftpUrl)?;
         if url.scheme() != "sftp"
             || url.password().is_some()
             || url.query().is_some()
             || url.fragment().is_some()
         {
-            return Err(crate::i18n::text!(
-                "Используйте sftp://пользователь@сервер:22/путь без пароля, query и fragment",
-            )
-            .into());
+            return Err(PathError::SftpUrlFields.into());
         }
-        let host = url
-            .host_str()
-            .ok_or(crate::i18n::text!("Укажите сервер SFTP"))?
-            .to_owned();
+        let host = url.host_str().ok_or(PathError::MissingSftpHost)?.to_owned();
         let user = percent_decode_str(url.username())
             .decode_utf8()
-            .map_err(|_| crate::i18n::text!("Имя пользователя должно быть UTF-8"))?
+            .map_err(PathError::SftpUserEncoding)?
             .into_owned();
         if user.is_empty() {
-            return Err(crate::i18n::text!(
-                "Укажите пользователя: sftp://пользователь@сервер/путь"
-            )
-            .into());
+            return Err(PathError::MissingSftpUser.into());
         }
         let mut endpoint = Endpoint {
             host,
@@ -367,9 +360,9 @@ pub fn resolve(address: &str, current: &Location) -> Result<Location, String> {
         }
         let path = percent_decode_str(url.path())
             .decode_utf8()
-            .map_err(|_| crate::i18n::text!("Путь должен быть UTF-8"))?;
+            .map_err(PathError::SftpPathEncoding)?;
         if path.contains('\0') {
-            return Err(crate::i18n::text!("Недопустимый путь").into());
+            return Err(PathError::SftpPathContainsNul(PathBuf::from(path.as_ref())).into());
         }
         return Ok(Location::Sftp {
             endpoint,
@@ -378,10 +371,7 @@ pub fn resolve(address: &str, current: &Location) -> Result<Location, String> {
     }
     if current.remote() {
         if address == "~" || address.starts_with("~/") {
-            return Err(crate::i18n::text!(
-                "Для домашней папки сервера используйте кнопку SFTP и начальный путь «.»",
-            )
-            .into());
+            return Err(PathError::SftpHomeShorthand.into());
         }
         let path = if address.starts_with('/') {
             PathBuf::from(address)
@@ -409,15 +399,12 @@ pub fn resolve(address: &str, current: &Location) -> Result<Location, String> {
     })
 }
 
-pub(super) fn normalize_remote(path: &Path) -> Result<PathBuf, String> {
+pub(super) fn normalize_remote(path: &Path) -> Result<PathBuf, TransferError> {
     let text = path
         .to_str()
-        .ok_or(crate::i18n::text!("Путь SFTP должен быть UTF-8"))?;
+        .ok_or_else(|| PathError::RemotePathEncoding(path.to_owned()))?;
     if !text.starts_with('/') || text.contains(['\0', '\\']) {
-        return Err(crate::i18n::text!(
-            "Используйте абсолютный POSIX-путь SFTP без обратных слешей",
-        )
-        .into());
+        return Err(PathError::RemotePathSyntax(path.to_owned()).into());
     }
     let mut parts = Vec::new();
     for part in text.split('/') {
@@ -432,7 +419,7 @@ pub(super) fn normalize_remote(path: &Path) -> Result<PathBuf, String> {
     Ok(PathBuf::from(format!("/{}", parts.join("/"))))
 }
 
-pub(super) fn validate_name(name: &str) -> Result<(), String> {
+pub(super) fn validate_name(name: &str) -> Result<(), PathError> {
     let mut components = Path::new(name).components();
     if name.trim().is_empty()
         || name == "."
@@ -441,7 +428,7 @@ pub(super) fn validate_name(name: &str) -> Result<(), String> {
         || !matches!(components.next(), Some(Component::Normal(_)))
         || components.next().is_some()
     {
-        return Err(crate::i18n::text!("Введите имя без /, \\, NUL, . и ..").into());
+        return Err(PathError::InvalidName(name.to_owned()));
     }
     Ok(())
 }

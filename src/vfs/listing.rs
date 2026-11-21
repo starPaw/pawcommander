@@ -1,6 +1,8 @@
 use super::err;
 use super::location::{validate_name, Location};
 use super::sftp::{cached_channel, remote, sessions};
+use crate::file_error::{ListingError, ListingErrorKind};
+use crate::operations::TransferError;
 use crate::{archive, fs_ops};
 use ssh2::{ErrorCode, File, FileStat, Sftp};
 use std::path::{Path, PathBuf};
@@ -36,7 +38,7 @@ pub fn visit_directory(
     location: &Location,
     cancelled: &impl Fn() -> bool,
     mut visit: impl FnMut(FileEntry),
-) -> Result<(), String> {
+) -> Result<(), TransferError> {
     if cancelled() {
         return Ok(());
     }
@@ -55,7 +57,7 @@ pub fn visit_directory(
 pub fn read_directory(
     location: &Location,
     cancelled: &impl Fn() -> bool,
-) -> Result<Vec<FileEntry>, String> {
+) -> Result<Vec<FileEntry>, TransferError> {
     if cancelled() {
         return Ok(Vec::new());
     }
@@ -74,7 +76,7 @@ pub fn read_directory(
 pub fn read_automatic_directory(
     location: &Location,
     cancelled: &impl Fn() -> bool,
-) -> Result<Option<Vec<FileEntry>>, String> {
+) -> Result<Option<Vec<FileEntry>>, TransferError> {
     if cancelled() {
         return Ok(None);
     }
@@ -87,12 +89,12 @@ pub fn read_automatic_directory(
     let _poll = match REMOTE_POLL.try_lock() {
         Ok(poll) => poll,
         Err(TryLockError::WouldBlock) => return Ok(None),
-        Err(error) => return Err(err(error)),
+        Err(error) => return Err(err(error).into()),
     };
     let session = match sessions().try_lock() {
         Ok(sessions) => sessions.get(endpoint).cloned(),
         Err(TryLockError::WouldBlock) => return Ok(None),
-        Err(error) => return Err(err(error)),
+        Err(error) => return Err(err(error).into()),
     };
     let Some(session) = session else {
         return Ok(None);
@@ -108,7 +110,7 @@ pub fn visit_connected_directory(
     location: &Location,
     cancelled: &impl Fn() -> bool,
     visit: impl FnMut(FileEntry),
-) -> Result<(), String> {
+) -> Result<(), TransferError> {
     if cancelled() {
         return Ok(());
     }
@@ -124,7 +126,7 @@ pub fn visit_connected_directory(
         None => None,
     };
     let channel = channel.ok_or_else(|| {
-        crate::i18n::text!("Для просмотра дерева подключитесь по SFTP.").to_owned()
+        ListingError::new(location.clone(), ListingErrorKind::RequiresSftpConnection)
     })?;
     visit_sftp_directory(location, &channel, cancelled, visit)
 }
@@ -135,7 +137,7 @@ pub fn visit_address_directory(
     allow_unique_session: bool,
     cancelled: &impl Fn() -> bool,
     visit: impl FnMut(FileEntry),
-) -> Result<(), String> {
+) -> Result<(), TransferError> {
     if cancelled() {
         return Ok(());
     }
@@ -174,7 +176,7 @@ pub(super) fn read_sftp_directory(
     location: &Location,
     sftp: &Sftp,
     cancelled: &impl Fn() -> bool,
-) -> Result<Vec<FileEntry>, String> {
+) -> Result<Vec<FileEntry>, TransferError> {
     let mut entries = Vec::new();
     visit_sftp_directory(location, sftp, cancelled, |entry| entries.push(entry))?;
     Ok(entries)
@@ -185,13 +187,18 @@ pub(super) fn visit_sftp_directory(
     sftp: &Sftp,
     cancelled: &impl Fn() -> bool,
     mut visit: impl FnMut(FileEntry),
-) -> Result<(), String> {
+) -> Result<(), TransferError> {
     if cancelled() {
         return Ok(());
     }
-    let mut dir = sftp.opendir(location.path()).map_err(err)?;
+    let mut dir = sftp
+        .opendir(location.path())
+        .map_err(|error| ListingError::new(location.clone(), ListingErrorKind::OpenSftp(error)))?;
     while !cancelled() {
-        let Some((filename, stat)) = next_sftp_entry(&mut dir).map_err(err)? else {
+        let Some((filename, stat)) = next_sftp_entry(&mut dir).map_err(|error| {
+            ListingError::new(location.clone(), ListingErrorKind::ReadSftp(error))
+        })?
+        else {
             break;
         };
         if cancelled() {
@@ -200,10 +207,15 @@ pub(super) fn visit_sftp_directory(
         if filename == Path::new(".") || filename == Path::new("..") {
             continue;
         }
-        let name = filename
-            .to_str()
-            .ok_or(crate::i18n::text!("Имя файла SFTP не является UTF-8"))?;
-        validate_name(name)?;
+        let name = filename.to_str().ok_or_else(|| {
+            ListingError::new(
+                location.clone(),
+                ListingErrorKind::SftpNameEncoding(filename.clone()),
+            )
+        })?;
+        validate_name(name).map_err(|error| {
+            ListingError::new(location.clone(), ListingErrorKind::InvalidSftpName(error))
+        })?;
         let path = location.join(name);
         let is_symlink = stat.file_type().is_symlink();
         let is_dir = stat.is_dir()
