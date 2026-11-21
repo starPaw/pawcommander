@@ -18,7 +18,7 @@ fn remote_addresses_round_trip_and_keep_connection_and_posix_history() {
     assert!(location.ancestors().last().unwrap().parent().is_none());
     let ipv6 = resolve("sftp://alice@[::1]:2222/a", &local).unwrap();
     assert_eq!(resolve(&ipv6.display(), &local).unwrap(), ipv6);
-    let special = location.with_path(PathBuf::from("/literal%20/100% #?.txt"));
+    let special = location.with_path(PathBuf::from("/literal%20/100% #?\r\n\t.txt"));
     assert_eq!(resolve(&special.display(), &local).unwrap(), special);
     let form_ipv6 = Location::Sftp {
         endpoint: Endpoint {

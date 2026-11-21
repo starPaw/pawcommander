@@ -279,16 +279,18 @@ impl fmt::Display for Location {
                     url.set_port(Some(endpoint.port)).map_err(|_| fmt::Error)?;
                 }
                 let path = path.to_string_lossy().replace('\\', "/");
-                url.path_segments_mut()
-                    .map_err(|_| fmt::Error)?
-                    .clear()
-                    .extend(path.split('/').skip(1));
+                // The URL path setter discards literal tabs and line breaks.
+                // Escape controls and filename percent signs before passing it the path.
+                let escaped: std::borrow::Cow<'_, str> =
+                    percent_encoding::utf8_percent_encode(&path, SFTP_ADDRESS_PATH_ESCAPE).into();
+                url.set_path(&escaped);
                 write!(f, "{url}")
             }
         }
     }
 }
 
+const SFTP_ADDRESS_PATH_ESCAPE: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS.add(b'%');
 pub(super) const ARCHIVE_ADDRESS_ESCAPE: &percent_encoding::AsciiSet =
     &percent_encoding::CONTROLS.add(b'%').add(b'!');
 
