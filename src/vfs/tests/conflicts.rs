@@ -423,12 +423,16 @@ fn conflict_replace_preserves_changed_destination_and_restores_on_publish_error(
     assert_eq!(fs::read(target.path()).unwrap(), b"changed elsewhere");
 
     let expected = entry_metadata(&target).unwrap().unwrap();
-    assert!(
-        publish_item(&root.join("missing"), &target, Some(&expected), || {
+    assert!(publish_item_typed(
+        &root.join("missing"),
+        &target,
+        Some(&expected),
+        |_| {},
+        || {
             panic!("missing payload cannot be published");
-        })
-        .is_err()
-    );
+        }
+    )
+    .is_err());
     assert_eq!(fs::read(target.path()).unwrap(), b"changed elsewhere");
     assert_eq!(fs::read_dir(target_dir.path()).unwrap().count(), 1);
 }

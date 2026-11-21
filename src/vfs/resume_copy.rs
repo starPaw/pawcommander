@@ -12,12 +12,12 @@ use super::{
     staged_file::StagedFile,
     transfer::{
         check_copy_space, entry_metadata, publish_checked_replacement, rename_for_publication,
-        rename_without_replacing, with_preserved_staging, EntryMetadata, TransferItem,
-        TransferSourceManifest,
+        with_preserved_staging, EntryMetadata, TransferItem, TransferSourceManifest,
     },
     Location,
 };
 use crate::app::SavedLocation;
+use crate::file_error::RecoveryNotice;
 use crate::i18n::text;
 use crate::operations::{Cancellation, Progress, TransferError};
 use crate::result_history::Outcome;
@@ -901,14 +901,12 @@ fn finish_copy(
             && !parked
         {
             let mut preserve = false;
-            let mut attempted = false;
             publish_checked_replacement(
                 &payload,
                 &paths.target,
                 &paths.stage,
                 &mut preserve,
-                &mut attempted,
-                rename_without_replacing,
+                rename_for_publication,
                 |candidate| {
                     verify_target(
                         Some(expected),
@@ -916,17 +914,13 @@ fn finish_copy(
                         candidate != &paths.target,
                         progress,
                     )
-                    .map_err(|error| error.to_string())
                 },
             )
-            .map_err(|error| {
-                if preserve {
-                    TransferError::publication_unconfirmed(error)
-                } else if cancel.is_requested() {
-                    TransferError::Cancelled
-                } else {
-                    error.into()
+            .map_err(|error| match error {
+                TransferError::Failed(reason) if preserve => {
+                    TransferError::PublicationUnconfirmed(reason)
                 }
+                error => error,
             })?;
         } else {
             if parked {
@@ -966,13 +960,13 @@ fn finish_copy(
                 true,
                 &mut Progress::default(),
             )?;
-            rename_without_replacing(&backup, &paths.target)?;
+            rename_for_publication(&backup, &paths.target)?;
         }
         discard_stage(&paths.stage, receipt.stage_identity, owner, &["payload"])
     } else {
         return result.map_err(|error| retained_error(&paths.stage, error));
     };
-    cleanup.map_err(|error| retained(&paths.stage, &error.to_string()))?;
+    cleanup.map_err(|error| retained_error(&paths.stage, error))?;
     ticket.finish()?;
     progress.partial_copy_retained = false;
     result
@@ -1187,19 +1181,6 @@ fn changed_target() -> TransferError {
     text!("Файл назначения изменился со времени начала копирования.").into()
 }
 
-fn retained(stage: &Location, message: &str) -> String {
-    crate::tr_format!(
-        "{message} Partial copy retained at {stage}. See Crash recovery.",
-        message = message,
-        stage = stage
-    )
-}
-
 fn retained_error(stage: &Location, error: TransferError) -> TransferError {
-    match error {
-        error @ TransferError::PublicationUnconfirmed(_) => TransferError::publication_unconfirmed(
-            retained(stage, &crate::i18n::file_error(&error)),
-        ),
-        other => retained(stage, &crate::i18n::file_error(&other)).into(),
-    }
+    error.with_retained_staging(stage, RecoveryNotice::ResumeCopy)
 }

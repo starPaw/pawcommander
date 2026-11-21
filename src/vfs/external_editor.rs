@@ -4,11 +4,12 @@ use super::{
     sftp::remote,
     staged_file::StagedFile,
     transfer::{
-        entry_metadata, publish_checked_replacement, rename_without_replacing,
+        entry_metadata, publish_checked_replacement, rename_for_publication,
         validate_source_child_name, with_staging_typed, EntryMetadata,
     },
     Location,
 };
+use crate::file_error::RecoveryNotice;
 use crate::i18n::text;
 use crate::operations::{CopyReader, Progress, TransferError};
 use crate::result_history::Outcome;
@@ -140,34 +141,26 @@ impl RemoteEdit {
             }
             let metadata = preserve_access(&payload, &current.metadata)?;
             cancel.check()?;
-            let mut attempted = false;
             publish_checked_replacement(
                 &payload,
                 &self.target,
                 staging,
                 preserve,
-                &mut attempted,
-                rename_without_replacing,
+                rename_for_publication,
                 |candidate| {
-                    let actual = Revision::read(candidate, progress).map_err(|e| e.to_string())?;
+                    let actual = Revision::read(candidate, progress)?;
                     if current.matches(&actual) {
                         Ok(())
                     } else {
-                        Err(conflict().to_string())
+                        Err(conflict())
                     }
                 },
             )
             .map_err(|error| {
                 if *preserve {
-                    TransferError::publication_unconfirmed(crate::tr_format!(
-                        "{error}. Inspect the destination and retained folder {staging}.",
-                        error = error,
-                        staging = staging
-                    ))
-                } else if cancel.is_requested() {
-                    TransferError::Cancelled
+                    error.with_retained_staging(staging, RecoveryNotice::ExternalEditor)
                 } else {
-                    error.into()
+                    error
                 }
             })?;
             new_revision = Some(Revision { metadata, digest });

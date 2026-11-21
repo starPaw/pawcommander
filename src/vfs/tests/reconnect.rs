@@ -64,10 +64,7 @@ fn interrupt_rename(
     );
     assert_eq!(disconnect.join().unwrap(), expected_marker);
     let failure = operation.expect_err("the client received the withheld reply");
-    assert!(matches!(
-        failure.error,
-        TransferError::PublicationUnconfirmed(_)
-    ));
+    check_rename_causes(&failure.error, source, destination, kind, replace);
     assert_eq!(failure.summary.completed, 0);
     assert_eq!(failure.summary.remaining, std::slice::from_ref(source));
     assert_eq!(
@@ -82,6 +79,70 @@ fn interrupt_rename(
         .unwrap();
     assert!(retry.needs_inspection());
     (retry, session)
+}
+
+fn check_rename_causes(
+    error: &TransferError,
+    source: &Location,
+    destination: &Location,
+    kind: TransferKind,
+    replaced: bool,
+) {
+    use crate::file_error::{Failure, MutationError, PublicationError, RecoveryNotice};
+
+    let target = destination.join(source.name());
+    let (cause, from) = if kind == TransferKind::Copy {
+        let TransferError::PublicationUnconfirmed(Failure::Publication(retained)) = error else {
+            panic!("expected the retained staging path: {error:?}");
+        };
+        let PublicationError::Retained {
+            staging,
+            notice: RecoveryNotice::InspectStaging,
+            cause,
+        } = retained.as_ref()
+        else {
+            panic!("expected the retained staging path: {retained:?}");
+        };
+        let primary = if replaced {
+            let TransferError::PublicationUnconfirmed(Failure::Publication(rollback)) = cause
+            else {
+                panic!("expected a retained backup with both errors: {cause:?}");
+            };
+            let PublicationError::Rollback {
+                target: attempted,
+                backup,
+                cause,
+                restore,
+            } = rollback.as_ref()
+            else {
+                panic!("expected both errors from the two rename calls: {rollback:?}");
+            };
+            assert_eq!(attempted, &target);
+            assert_eq!(backup, &staging.join("previous"));
+            assert!(
+                matches!(
+                    restore, TransferError::PublicationUnconfirmed(Failure::Mutation(reason))
+                        if matches!(reason.as_ref(), MutationError::RenameSftp { from, to, source }
+                            if from == backup && to == &target && matches!(source.code(), ssh2::ErrorCode::SFTP(_)))
+                ),
+                "the restored target was already occupied: {restore:?}"
+            );
+            cause
+        } else {
+            cause
+        };
+        (primary, staging.join("payload"))
+    } else {
+        (error, source.clone())
+    };
+    assert!(
+        matches!(
+            cause, TransferError::PublicationUnconfirmed(Failure::Mutation(reason))
+                if matches!(reason.as_ref(), MutationError::RenameSftp { from: actual, to, source }
+                    if actual == &from && to == &target && matches!(source.code(), ssh2::ErrorCode::Session(_)))
+        ),
+        "the original rename transport error and paths were lost: {cause:?}"
+    );
 }
 
 #[cfg(target_os = "macos")]

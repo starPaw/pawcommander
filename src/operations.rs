@@ -3,7 +3,9 @@
 
 mod bandwidth;
 
-use crate::file_error::{Failure, ListingError, MutationError, PathError};
+use crate::file_error::{
+    Failure, ListingError, MutationError, PathError, PublicationError, RecoveryNotice,
+};
 use crate::vfs::{Endpoint, Location};
 use bandwidth::Pacer;
 pub(crate) use bandwidth::TransferLimits;
@@ -193,6 +195,25 @@ impl TransferError {
         Self::PublicationUnconfirmed(Failure::Message(message))
     }
 
+    pub(crate) fn with_publication_context(
+        self,
+        context: impl FnOnce(Self) -> PublicationError,
+    ) -> Self {
+        match self {
+            Self::Cancelled => self,
+            Self::Failed(_) => Self::Failed(context(self).into()),
+            Self::PublicationUnconfirmed(_) => Self::PublicationUnconfirmed(context(self).into()),
+        }
+    }
+
+    pub(crate) fn with_retained_staging(self, staging: &Location, notice: RecoveryNotice) -> Self {
+        self.with_publication_context(|cause| PublicationError::Retained {
+            staging: staging.clone(),
+            notice,
+            cause,
+        })
+    }
+
     pub fn is_cancelled_io(error: &io::Error) -> bool {
         error.get_ref().is_some_and(|e| e.is::<Cancelled>())
     }
@@ -239,6 +260,12 @@ impl From<ListingError> for TransferError {
 
 impl From<MutationError> for TransferError {
     fn from(error: MutationError) -> Self {
+        Self::Failed(error.into())
+    }
+}
+
+impl From<PublicationError> for TransferError {
+    fn from(error: PublicationError) -> Self {
         Self::Failed(error.into())
     }
 }

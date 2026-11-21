@@ -1536,10 +1536,14 @@ fn openssh_round_trip_and_host_verification() {
     // Direct no-replace publication must also reject an existing target.
     let file = renamed.join("hello world.txt");
     assert!(staged_copy(&file, &renamed.join(".hidden")).is_err());
-    let ambiguous = super::super::transfer::rename_for_publication(&file, &renamed.join(".hidden"));
+    let occupied = renamed.join(".hidden");
+    let ambiguous = rename_for_publication(&file, &occupied);
     assert!(matches!(
         ambiguous,
-        Err(TransferError::PublicationUnconfirmed(_))
+        Err(TransferError::PublicationUnconfirmed(crate::file_error::Failure::Mutation(reason)))
+            if matches!(reason.as_ref(), crate::file_error::MutationError::RenameSftp {
+                from, to, source
+            } if from == &file && to == &occupied && matches!(source.code(), ssh2::ErrorCode::SFTP(_)))
     ));
     assert_eq!(fs::read_to_string(file.path()).unwrap(), "replacement");
     assert_eq!(

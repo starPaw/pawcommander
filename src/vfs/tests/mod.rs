@@ -13,13 +13,13 @@ use super::sftp::{connect_with_key, remote, sessions};
 use super::transfer::validate_source_child_name;
 use super::transfer::{
     canonical, check_copy_space, copy_transfer_cancellable, copy_transfer_checked, entry_metadata,
-    publish_item, publish_replacement_with_backup_rename, record_item_result,
-    remote_source_matches, rename_without_replacing, staged_copy, staging_result,
-    staging_result_typed, transfer, transfer_with_conflicts, with_staging, CopyPhase, TransferItem,
-    TransferSourceManifest,
+    publish_item_typed, publish_replacement_with_backup_rename, record_item_result,
+    remote_source_matches, rename_for_publication, staged_copy, staging_result, transfer,
+    transfer_with_conflicts, with_staging, CopyPhase, TransferItem, TransferSourceManifest,
 };
 use super::{connect, TransferSummary};
 use crate::conflict::{Answer, Conflict, Decision};
+use crate::file_error::StagingCleanupError;
 use crate::fs_ops;
 use crate::fs_ops::TransferKind;
 use crate::operations::{Cancellation, Progress, TransferError};
