@@ -7,6 +7,7 @@ pub(super) use tests::comparison_round_trip;
 
 use super::{read_scope::ReadScope, transfer::canonical, Location, MAX_TREE_DEPTH};
 use crate::{
+    file_error::{Failure, MutationError},
     i18n::text,
     operations::{Cancellation, Progress, TransferError},
 };
@@ -103,11 +104,18 @@ pub(crate) fn compare_folders(
     scan.walk(PathBuf::new(), [true, true], 0)?;
     for (side, (scope, folder)) in scopes.iter().zip(folders).enumerate() {
         scan.cancel.check()?;
-        scope
-            .parent
-            .verify()
-            .map_err(|_| side_error(side, scan::folder_changed()))?;
-        if canonical(folder).map_err(|error| side_error(side, error.into()))?
+        scope.parent.verify().map_err(|error| {
+            let error = match error {
+                TransferError::Failed(Failure::Mutation(ref reason))
+                    if matches!(reason.as_ref(), MutationError::UndoUnavailable(_)) =>
+                {
+                    scan::folder_changed()
+                }
+                error => error,
+            };
+            side_error(side, error)
+        })?;
+        if canonical(folder).map_err(|error| side_error(side, error))?
             != scope.parent.location.path()
         {
             return Err(side_error(side, scan::folder_changed()));
@@ -275,12 +283,10 @@ fn side_error(side: usize, error: TransferError) -> TransferError {
     if matches!(error, TransferError::Cancelled) {
         return error;
     }
-    let pane = if side == 0 {
-        text!("Левая панель")
-    } else {
-        text!("Правая панель")
-    };
-    format!("{pane} · {error}").into()
+    TransferError::Failed(Failure::ComparisonPane {
+        right: side != 0,
+        cause: Box::new(error),
+    })
 }
 
 fn limit() -> TransferError {

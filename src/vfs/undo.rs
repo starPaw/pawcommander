@@ -4,6 +4,7 @@ use super::transfer::{
     TransferSourceEntry, TransferSourceManifest,
 };
 use super::Location;
+use crate::file_error::MutationError;
 use crate::operations::{Cancellation, Progress, TransferError};
 use crate::result_history::Outcome;
 use std::collections::BTreeMap;
@@ -17,16 +18,16 @@ pub(super) struct Parent {
 }
 
 impl Parent {
-    pub(super) fn capture(location: &Location) -> Result<Self, String> {
+    pub(super) fn capture(location: &Location) -> Result<Self, TransferError> {
         let location = location.with_path(canonical(location)?);
-        let metadata = entry_metadata(&location)?.ok_or_else(unavailable)?;
+        let metadata = entry_metadata(&location)?.ok_or_else(|| unavailable(&location))?;
         let parent = Self { location, metadata };
         parent.verify()?;
         Ok(parent)
     }
 
-    pub(super) fn verify(&self) -> Result<(), String> {
-        let actual = entry_metadata(&self.location)?.ok_or_else(unavailable)?;
+    pub(super) fn verify(&self) -> Result<(), TransferError> {
+        let actual = entry_metadata(&self.location)?.ok_or_else(|| unavailable(&self.location))?;
         let same = match (&self.metadata, &actual) {
             (EntryMetadata::Local(_), EntryMetadata::Local(actual)) => {
                 actual.is_dir()
@@ -42,15 +43,13 @@ impl Parent {
         if same && canonical(&self.location)? == self.location.path() {
             Ok(())
         } else {
-            Err(unavailable())
+            Err(unavailable(&self.location).into())
         }
     }
 }
 
-fn unavailable() -> String {
-    crate::tr_format!(
-        "Undo unavailable: a file or folder changed or is inaccessible. Inspect both paths."
-    )
+fn unavailable(location: &Location) -> MutationError {
+    MutationError::UndoUnavailable(location.clone())
 }
 
 #[derive(Clone)]
@@ -61,22 +60,28 @@ pub(super) struct Capture {
 }
 
 impl Capture {
-    pub(super) fn before(source: &Location, target: &Location) -> Result<Self, String> {
+    pub(super) fn before(source: &Location, target: &Location) -> Result<Self, TransferError> {
         if source == target || !source.same_backend(target) || source.is_archive() {
-            return Err(unavailable());
+            return Err(unavailable(source).into());
         }
         let parents = [
-            Parent::capture(&source.parent().ok_or_else(unavailable)?)?,
-            Parent::capture(&target.parent().ok_or_else(unavailable)?)?,
+            Parent::capture(&source.parent().ok_or_else(|| unavailable(source))?)?,
+            Parent::capture(&target.parent().ok_or_else(|| unavailable(target))?)?,
         ];
-        let original = parents[0]
-            .location
-            .join(source.path().file_name().ok_or_else(unavailable)?);
-        let current = parents[1]
-            .location
-            .join(target.path().file_name().ok_or_else(unavailable)?);
+        let original = parents[0].location.join(
+            source
+                .path()
+                .file_name()
+                .ok_or_else(|| unavailable(source))?,
+        );
+        let current = parents[1].location.join(
+            target
+                .path()
+                .file_name()
+                .ok_or_else(|| unavailable(target))?,
+        );
         if original == current || entry_metadata(&current)?.is_some() {
-            return Err(unavailable());
+            return Err(unavailable(&current).into());
         }
         Ok(Self {
             original,
@@ -89,27 +94,27 @@ impl Capture {
         self,
         source: &Location,
         manifest: &TransferSourceManifest,
-    ) -> Result<UndoEntry, String> {
+    ) -> Result<UndoEntry, TransferError> {
         for parent in &self.parents {
             parent.verify()?;
         }
         if entry_metadata(&self.original)?.is_some() {
-            return Err(unavailable());
+            return Err(unavailable(&self.original).into());
         }
         let mut entries = BTreeMap::new();
         for (path, expected) in &manifest.entries {
             let relative = path
                 .path()
                 .strip_prefix(source.path())
-                .map_err(|_| unavailable())?;
+                .map_err(|_| unavailable(path))?;
             let current = if relative.as_os_str().is_empty() {
                 self.current.clone()
             } else {
                 self.current.join(relative)
             };
-            let metadata = entry_metadata(&current)?.ok_or_else(unavailable)?;
+            let metadata = entry_metadata(&current)?.ok_or_else(|| unavailable(&current))?;
             if !expected.matches_moved_target(&metadata) {
-                return Err(unavailable());
+                return Err(unavailable(&current).into());
             }
             entries.insert(
                 current,
@@ -120,7 +125,7 @@ impl Capture {
             );
         }
         if entries.is_empty() || entries.len() > MAX_UNDO_ENTRIES {
-            return Err(unavailable());
+            return Err(unavailable(&self.current).into());
         }
         Ok(UndoEntry {
             capture: self,
@@ -149,7 +154,7 @@ impl UndoEntry {
         }
         for (path, expected) in &self.entries {
             cancel.check()?;
-            let actual = entry_metadata(path)?.ok_or_else(unavailable)?;
+            let actual = entry_metadata(path)?.ok_or_else(|| unavailable(path))?;
             // Ignore rename-only ctime changes, so two renames can be undone
             // in reverse order. Identity, contents metadata and children must match.
             let unchanged = expected.matches_moved_target(&actual)
@@ -161,12 +166,12 @@ impl UndoEntry {
                     _ => true,
                 };
             if !unchanged {
-                return Err(unavailable().into());
+                return Err(unavailable(path).into());
             }
             if let Some(names) = &expected.children
                 && *names != source_children(path, cancel, true)?
             {
-                return Err(unavailable().into());
+                return Err(unavailable(path).into());
             }
         }
         for parent in &self.capture.parents {
@@ -189,34 +194,40 @@ impl UndoEntry {
         // No replacement option. The final OS/SFTP rename also refuses an
         // occupied target, including one that appeared after preflight.
         rename_for_publication(source, target)?;
-        let mut verified = true;
+        let mut failure = None;
         for (path, expected) in &self.entries {
             let relative = path
                 .path()
                 .strip_prefix(source.path())
-                .map_err(|_| unavailable())?;
+                .map_err(|_| TransferError::PublicationUnconfirmed(unavailable(path).into()))?;
             let restored = if relative.as_os_str().is_empty() {
                 target.clone()
             } else {
                 target.join(relative)
             };
-            let matches = entry_metadata(&restored)
-                .ok()
-                .flatten()
-                .is_some_and(|actual| expected.matches_moved_target(&actual));
-            verified &= matches;
+            let check = entry_metadata(&restored).and_then(|actual| {
+                if actual.is_some_and(|actual| expected.matches_moved_target(&actual)) {
+                    Ok(())
+                } else {
+                    Err(unavailable(&restored).into())
+                }
+            });
             if path != source {
-                progress
-                    .results
-                    .moved_entry(path, matches, (!matches).then(unavailable));
+                progress.results.moved_entry(
+                    path,
+                    check.is_ok(),
+                    check.as_ref().err().map(crate::i18n::file_error),
+                );
+            }
+            if failure.is_none() {
+                failure = check.err();
             }
         }
-        if verified {
-            Ok(())
-        } else {
-            // Rename was acknowledged, but the final object cannot be proven.
-            // Never offer a second inverse action for this receipt.
-            Err(TransferError::publication_unconfirmed(unavailable()))
+        // Acknowledged renames with unverifiable results must not offer a
+        // second inverse action.
+        match failure {
+            Some(error) => Err(error.with_unconfirmed_publication()),
+            None => Ok(()),
         }
     }
 }
@@ -292,7 +303,7 @@ pub(crate) fn rename_with_undo(
     super::location::validate_name(name)?;
     let target = source
         .parent()
-        .ok_or_else(|| crate::file_error::MutationError::UndoUnavailable(source.clone()))?
+        .ok_or_else(|| unavailable(source))?
         .join(name);
     progress
         .results

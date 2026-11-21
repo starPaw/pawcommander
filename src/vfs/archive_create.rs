@@ -283,7 +283,7 @@ impl ArchiveSource {
         }
         let mut input = SourceReader::open(&self.source)?;
         self.entry
-            .verify_metadata(&self.source, &input.metadata()?)?;
+            .verify_metadata(&self.source, &input.metadata(&self.source)?)?;
         let expected = self.attributes.size;
         let count = progress
             .read_stream(self.source.path(), expected, &mut input, |reader| {
@@ -294,7 +294,7 @@ impl ArchiveSource {
             return Err(changed_source(&self.source).into());
         }
         self.entry
-            .verify_metadata(&self.source, &input.metadata()?)?;
+            .verify_metadata(&self.source, &input.metadata(&self.source)?)?;
         Ok(())
     }
 }

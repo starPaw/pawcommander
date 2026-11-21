@@ -4,7 +4,8 @@
 mod bandwidth;
 
 use crate::file_error::{
-    Failure, ListingError, MutationError, PathError, PublicationError, RecoveryNotice,
+    AccessCause, AccessError, Failure, ListingError, MutationError, PathError, PublicationError,
+    RecoveryNotice,
 };
 use crate::vfs::{Endpoint, Location};
 use bandwidth::Pacer;
@@ -195,6 +196,13 @@ impl TransferError {
         Self::PublicationUnconfirmed(Failure::Message(message))
     }
 
+    pub(crate) fn with_unconfirmed_publication(self) -> Self {
+        match self {
+            Self::Failed(reason) => Self::PublicationUnconfirmed(reason),
+            error => error,
+        }
+    }
+
     pub(crate) fn with_publication_context(
         self,
         context: impl FnOnce(Self) -> PublicationError,
@@ -249,6 +257,16 @@ impl From<&str> for TransferError {
 impl From<PathError> for TransferError {
     fn from(error: PathError) -> Self {
         Self::Failed(Failure::Path(error))
+    }
+}
+
+impl From<AccessError> for TransferError {
+    fn from(error: AccessError) -> Self {
+        if matches!(&error.cause, AccessCause::Local(source) if Self::is_cancelled_io(source)) {
+            Self::Cancelled
+        } else {
+            Self::Failed(Failure::Access(Box::new(error)))
+        }
     }
 }
 

@@ -5,6 +5,7 @@ use super::{
     Location,
 };
 use crate::{
+    file_error::{AccessAction, AccessError},
     i18n::text,
     operations::{Cancellation, Progress, TransferError},
 };
@@ -40,13 +41,13 @@ impl CheckedFile<'_> {
     pub(super) fn verify(&mut self, cancel: &Cancellation) -> Result<(), TransferError> {
         cancel.check()?;
         self.stamp
-            .verify_metadata(&self.source, &self.input.metadata()?)
+            .verify_metadata(&self.source, &self.input.metadata(&self.source)?)
             .map_err(|_| changed_during_read())?;
         let Some(mut current) = self.scope.input(self.path, cancel)? else {
             return Err(changed_during_read());
         };
         self.stamp
-            .verify_metadata(&self.source, &current.metadata()?)
+            .verify_metadata(&self.source, &current.metadata(&self.source)?)
             .map_err(|_| changed_during_read())
     }
 }
@@ -110,7 +111,7 @@ impl ReadScope {
             return Ok(None);
         };
         let source = self.parent.location.join(path);
-        let metadata = input.metadata()?;
+        let metadata = input.metadata(&source)?;
         if !metadata.is_file() {
             return Err(unsupported());
         }
@@ -141,7 +142,12 @@ impl ReadScope {
             return match local_input(root, path, cancel) {
                 Ok(file) => Ok(Some(SourceReader::Local(file))),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-                Err(error) => Err(error.into()),
+                Err(error) => Err(AccessError::new(
+                    &self.parent.location.join(path),
+                    AccessAction::OpenFile,
+                    error,
+                )
+                .into()),
             };
         }
 
@@ -163,7 +169,7 @@ impl ReadScope {
             children: None,
         };
         entry
-            .verify_metadata(&source, &input.metadata()?)
+            .verify_metadata(&source, &input.metadata(&source)?)
             .map_err(|_| changed_during_read())?;
         Ok(Some(input))
     }

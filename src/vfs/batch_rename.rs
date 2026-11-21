@@ -124,7 +124,7 @@ impl BatchRenamePreview {
         sources: &[Location],
         rules: &BatchRenameRules,
         cancel: &Cancellation,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, TransferError> {
         if !(2..=MAX_UNDO_ENTRIES).contains(&sources.len()) {
             return Err(text!("Выберите от 2 до 100 000 элементов.").into());
         }
@@ -134,7 +134,7 @@ impl BatchRenamePreview {
         {
             return Err(text!("Шаблон или регулярное выражение слишком длинные.").into());
         }
-        cancel.check().map_err(|error| error.to_string())?;
+        cancel.check()?;
         let directory = sources[0].parent().ok_or_else(|| {
             text!("Для массового переименования выберите элементы в одной папке.")
         })?;
@@ -162,7 +162,7 @@ impl BatchRenamePreview {
         let parent = Parent::capture(&directory)?;
         let mut rows = Vec::with_capacity(sources.len());
         for (index, source) in sources.iter().enumerate() {
-            cancel.check().map_err(|error| error.to_string())?;
+            cancel.check()?;
             let mut row = BatchRenameRow {
                 source: source.clone(),
                 name: None,
@@ -208,16 +208,16 @@ impl BatchRenamePreview {
                     ensure_vacant(&target)?;
                     row.expected = Some(metadata);
                 }
-                Ok::<_, String>(())
+                Ok::<_, TransferError>(())
             })();
             if let Err(error) = result {
-                row.problem = Some(error);
+                row.problem = Some(crate::i18n::file_error(&error));
             }
             rows.push(row);
         }
         mark_duplicate_targets(&mut rows, case_sensitive(&parent.location));
         parent.verify()?;
-        cancel.check().map_err(|error| error.to_string())?;
+        cancel.check()?;
         let changes = rows.iter().filter(|row| row.changes_name()).count();
         let conflicts = rows.iter().filter(|row| row.problem.is_some()).count();
         Ok(Self {
@@ -284,7 +284,7 @@ impl BatchRenamePreview {
                 rename(&source, &target)?;
                 let receipt = capture
                     .finish(&source, &manifest)
-                    .map_err(TransferError::publication_unconfirmed)?;
+                    .map_err(TransferError::with_unconfirmed_publication)?;
                 progress.results.descendants(
                     &source,
                     &row.target(),
@@ -351,12 +351,9 @@ fn changed_since_preview(source: &Location) -> String {
     )
 }
 
-fn ensure_vacant(target: &Location) -> Result<(), String> {
+fn ensure_vacant(target: &Location) -> Result<(), TransferError> {
     if entry_metadata(target)?.is_some() {
-        return Err(crate::tr_format!(
-            "Name already exists: {target}",
-            target = target
-        ));
+        return Err(crate::tr_format!("Name already exists: {target}", target = target).into());
     }
     Ok(())
 }

@@ -138,7 +138,7 @@ impl Execution<'_> {
                         &key,
                         None,
                         Outcome::PublicationUnconfirmed,
-                        Some(error.to_string()),
+                        Some(crate::i18n::file_error(&error)),
                     );
                     return Err(error);
                 }
@@ -384,7 +384,7 @@ fn stage_source(
                     .read_checked(path, &cancel, |source, size, input| {
                         expected
                             .version
-                            .verify_metadata(source, &input.metadata()?)?;
+                            .verify_metadata(source, &input.metadata(source)?)?;
                         let mut output = StagedFile::open(&target, cancel.clone())?;
                         let copied = progress.copy(
                             source.path(),
@@ -439,7 +439,7 @@ fn preserve_attributes(
                 let mut file = SourceReader::open(&target)?;
                 target_entry
                     .version
-                    .verify_metadata(&target, &file.metadata()?)?;
+                    .verify_metadata(&target, &file.metadata(&target)?)?;
                 copy_metadata::finish_file(&target, &attributes, &mut file)?
             }
             Kind::Link(_) => None,

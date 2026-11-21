@@ -112,14 +112,6 @@ fn verify_entry(
     Ok(())
 }
 
-fn reader(path: &Location) -> Result<SourceReader, TransferError> {
-    Ok(if let Some(local) = path.local() {
-        SourceReader::Local(crate::fs_ops::open_regular_source(local).map_err(err)?)
-    } else {
-        SourceReader::Remote(remote(path)?.open(path.path()).map_err(err)?)
-    })
-}
-
 fn verify_file_pair(
     source: &Location,
     target: &Location,
@@ -142,8 +134,8 @@ fn verify_file_pair(
     if !before.metadata.is_file() || !copied.metadata.is_file() || before.size() != copied.size() {
         return Err(changed(target).into());
     }
-    let mut input = reader(source)?;
-    if !before.matches_moved_target(&input.metadata()?) {
+    let mut input = SourceReader::open(source)?;
+    if !before.matches_moved_target(&input.metadata(source)?) {
         return Err(changed(source).into());
     }
     let mut hashed = CopyReader::new((&mut input).take(before.size()), true);
@@ -158,17 +150,17 @@ fn verify_file_pair(
         size += n as u64;
     }
     let digest = hashed.finish().expect("mandatory move verification");
-    if size != before.size() || !before.matches_moved_target(&input.metadata()?) {
+    if size != before.size() || !before.matches_moved_target(&input.metadata(source)?) {
         return Err(changed(source).into());
     }
-    let mut output = reader(target)?;
-    if !copied.matches_moved_target(&output.metadata()?) {
+    let mut output = SourceReader::open(target)?;
+    if !copied.matches_moved_target(&output.metadata(target)?) {
         return Err(changed(target).into());
     }
     progress
         .verify_copy_before_source_removal(displayed_source.path(), size, digest, &mut output)
         .map_err(TransferError::from)?;
-    if !copied.matches_moved_target(&output.metadata()?) {
+    if !copied.matches_moved_target(&output.metadata(target)?) {
         return Err(changed(target).into());
     }
     verify_entry(target, copied, &cancel)?;
@@ -176,7 +168,7 @@ fn verify_file_pair(
     if let Some(wanted) = attributes {
         let warning = copy_metadata::finish_file(target, &wanted, &mut output)?;
         let open_version = TransferSourceEntry {
-            metadata: output.metadata()?,
+            metadata: output.metadata(target)?,
             children: None,
         };
         open_version.verify(target, &cancel, true)?;
@@ -184,7 +176,7 @@ fn verify_file_pair(
             .results
             .note_metadata(displayed_source, warning.as_deref());
     }
-    current_source.verify_metadata(source, &input.metadata()?)?;
+    current_source.verify_metadata(source, &input.metadata(source)?)?;
     current_source.verify(source, &cancel, true)?;
     verify_entry(source, before, &cancel)
 }

@@ -1,7 +1,8 @@
 use super::text;
 use crate::file_error::{
-    ArchiveMemberError, Failure, ListingError, ListingErrorKind, LocalPathAction, MutationError,
-    PathError, PublicationError, RecoveryNotice, StagingCleanupError,
+    AccessAction, AccessError, ArchiveMemberError, Failure, ListingError, ListingErrorKind,
+    LocalPathAction, MutationError, PathError, PublicationError, RecoveryNotice,
+    StagingCleanupError,
 };
 use crate::operations::TransferError;
 use crate::vfs::{DeletionFailure, TransferFailure};
@@ -11,6 +12,15 @@ pub(crate) fn file_error(error: &TransferError) -> String {
         TransferError::Failed(reason) | TransferError::PublicationUnconfirmed(reason) => {
             match reason {
                 Failure::Path(error) => path_error(error),
+                Failure::Access(error) => access_error(error),
+                Failure::ComparisonPane { right, cause } => {
+                    let pane = if *right {
+                        text!("Правая панель")
+                    } else {
+                        text!("Левая панель")
+                    };
+                    format!("{pane} · {}", file_error(cause))
+                }
                 Failure::Listing(error) => listing_error(error),
                 Failure::ConflictClosed => text!("Диалог конфликта закрыт").into(),
                 Failure::Mutation(reason) => mutation_error(
@@ -24,6 +34,24 @@ pub(crate) fn file_error(error: &TransferError) -> String {
         }
         TransferError::Cancelled => crate::tr_format!("Operation cancelled"),
     }
+}
+
+fn access_error(error: &AccessError) -> String {
+    let action = match error.action {
+        AccessAction::ResolvePath => text!("Не удалось определить путь к элементу"),
+        AccessAction::ReadMetadata | AccessAction::ReadOpenMetadata => {
+            text!("Не удалось получить сведения об элементе")
+        }
+        AccessAction::OpenFile => {
+            return crate::tr_format!(
+                "Could not open {}: {error}",
+                error.location,
+                error = error.cause
+            );
+        }
+        AccessAction::ReadChildren => text!("Не удалось прочитать папку"),
+    };
+    format!("{action} «{}»: {}", error.location, error.cause)
 }
 
 pub(crate) fn deletion_failure(failure: &DeletionFailure) -> String {

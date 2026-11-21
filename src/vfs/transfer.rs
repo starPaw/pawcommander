@@ -4,11 +4,14 @@ use super::mutations::remove_remote_tree;
 use super::sftp::remote;
 use super::{err, TransferFailure, TransferSummary, MAX_TREE_DEPTH};
 use crate::conflict::{Answer, Conflict, Decision, EntryDetails};
-use crate::file_error::{MutationError, PublicationError, RecoveryNotice, StagingCleanupError};
+use crate::file_error::{
+    AccessAction, AccessCause, AccessError, MutationError, PublicationError, RecoveryNotice,
+    StagingCleanupError,
+};
 use crate::fs_ops::TransferKind;
 use crate::operations::{Cancellation, CopyReader, Progress, TransferError};
 use crate::{archive, fs_ops};
-use ssh2::{ErrorCode, FileStat, OpenFlags, OpenType, RenameFlags};
+use ssh2::{FileStat, OpenFlags, OpenType, RenameFlags};
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
@@ -181,21 +184,24 @@ pub(super) fn entry_kind(file: bool, dir: bool, symlink: bool) -> crate::i18n::M
     }
 }
 
-pub(super) fn entry_metadata(location: &Location) -> Result<Option<EntryMetadata>, String> {
+pub(super) fn entry_metadata(location: &Location) -> Result<Option<EntryMetadata>, TransferError> {
+    match read_entry_metadata(location) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(cause) if cause.is_absent() => Ok(None),
+        Err(cause) => Err(AccessError::new(location, AccessAction::ReadMetadata, cause).into()),
+    }
+}
+
+fn read_entry_metadata(location: &Location) -> Result<EntryMetadata, AccessCause> {
     if let Some(path) = location.local() {
-        match fs::symlink_metadata(path) {
-            Ok(meta) => Ok(Some(EntryMetadata::Local(LocalEntryMetadata::at(
-                path, meta,
-            )))),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(format!("{location}: {e}")),
-        }
+        fs::symlink_metadata(path)
+            .map(|metadata| EntryMetadata::Local(LocalEntryMetadata::at(path, metadata)))
+            .map_err(Into::into)
     } else {
-        match remote(location)?.lstat(location.path()) {
-            Ok(stat) => Ok(Some(EntryMetadata::Remote(stat))),
-            Err(e) if e.code() == ErrorCode::SFTP(2) => Ok(None),
-            Err(e) => Err(format!("{location}: {e}")),
-        }
+        remote(location)?
+            .lstat(location.path())
+            .map(EntryMetadata::Remote)
+            .map_err(Into::into)
     }
 }
 
@@ -411,7 +417,7 @@ pub(super) fn transfer_run(
             if kind == TransferKind::Move && item.source == item.target {
                 return Err(crate::i18n::text!("Элементы уже находятся в этой папке").into());
             }
-            entry_metadata(&item.target).map_err(Into::into)
+            entry_metadata(&item.target)
         })
         .collect::<Result<Vec<_>, TransferError>>()?;
     let count = targets.iter().flatten().count();
@@ -424,8 +430,9 @@ pub(super) fn transfer_run(
         if let Some(target_meta) = target_meta {
             progress.item(item.original.path());
             index += 1;
-            let source_meta = entry_metadata(&item.source)?
-                .ok_or_else(|| crate::tr_format!("Source item {} disappeared", item.source))?;
+            let source_meta = read_entry_metadata(&item.source).map_err(|cause| {
+                AccessError::new(&item.source, AccessAction::ReadMetadata, cause)
+            })?;
             let can_replace = source_meta.is_file()
                 && target_meta.is_file()
                 && !source_meta.same_object(&target_meta)
@@ -532,7 +539,7 @@ pub(super) fn transfer_run(
                     if let Some(error) = error {
                         progress.results.staged(
                             source,
-                            Some(error.to_string()),
+                            Some(crate::i18n::file_error(error)),
                             matches!(error, TransferError::Cancelled),
                         );
                     } else {
@@ -548,13 +555,13 @@ pub(super) fn transfer_run(
                     match manifest.verify(&cancel, |source, error| {
                         progress
                             .results
-                            .staged(source, Some(error.to_string()), false)
+                            .staged(source, Some(crate::i18n::file_error(error)), false)
                     }) {
                         Ok(()) => Some(manifest),
                         Err(TransferError::Cancelled) => return Err(TransferError::Cancelled),
                         Err(error) => {
                             progress.results.abandon_group();
-                            history_warning = Some(error.to_string());
+                            history_warning = Some(crate::i18n::file_error(&error));
                             None
                         }
                     }
@@ -562,7 +569,7 @@ pub(super) fn transfer_run(
                 Err(TransferError::Cancelled) => return Err(TransferError::Cancelled),
                 Err(error) => {
                     progress.results.abandon_group();
-                    history_warning = Some(error.to_string());
+                    history_warning = Some(crate::i18n::file_error(&error));
                     None
                 }
             }
@@ -640,7 +647,7 @@ pub(super) fn transfer_run(
                     &source,
                     verified,
                     (!verified).then(|| match check {
-                        Err(error) => error,
+                        Err(error) => crate::i18n::file_error(&error),
                         _ => crate::tr_format!(
                             "Could not confirm the move of {source} to {target}",
                             source = source,
@@ -764,12 +771,17 @@ pub fn transfer(
     .map_err(|failure| crate::i18n::transfer_failure(&failure))
 }
 
-pub(super) fn canonical(location: &Location) -> Result<PathBuf, String> {
-    if let Some(path) = location.local() {
-        fs::canonicalize(path).map_err(err)
+pub(super) fn canonical(location: &Location) -> Result<PathBuf, TransferError> {
+    let action = AccessAction::ResolvePath;
+    let result = if let Some(path) = location.local() {
+        fs::canonicalize(path).map_err(|error| AccessError::new(location, action, error))
     } else {
-        remote(location)?.realpath(location.path()).map_err(err)
-    }
+        remote(location)
+            .map_err(|error| AccessError::new(location, action, error))?
+            .realpath(location.path())
+            .map_err(|error| AccessError::new(location, action, error))
+    };
+    result.map_err(Into::into)
 }
 
 #[cfg(test)]
@@ -952,7 +964,7 @@ fn copy_to_smb(
     let size = source.size();
     check_copy_space(size, &item.target, &item.target)?;
     let mut input = SourceReader::open(&item.source)?;
-    source.verify_metadata(&item.source, &input.metadata()?)?;
+    source.verify_metadata(&item.source, &input.metadata(&item.source)?)?;
     source.verify(&item.source, &cancel, true)?;
     progress.checkpoint()?;
     let unconfirmed = |error: &dyn std::fmt::Display| {
@@ -980,7 +992,7 @@ fn copy_to_smb(
             file.seek(SeekFrom::Start(0))?;
             progress.verify_copy(item.source.path(), size, hash, &mut file)?;
         }
-        source.verify_metadata(&item.source, &input.metadata()?)?;
+        source.verify_metadata(&item.source, &input.metadata(&item.source)?)?;
         source.verify(&item.source, &cancel, true)?;
         let warning = copy_metadata::finish_file(
             &item.target,
@@ -1051,7 +1063,8 @@ pub(super) fn copy_transfer_checked(
     progress: &mut Progress,
     observe: &mut impl FnMut(&Location, CopyPhase) -> Result<(), String>,
 ) -> Result<(), String> {
-    copy_transfer_cancellable(item, expected, progress, observe, || {}).map_err(|e| e.to_string())
+    copy_transfer_cancellable(item, expected, progress, observe, || {})
+        .map_err(|error| crate::i18n::file_error(&error))
 }
 
 #[cfg(test)]
@@ -1088,7 +1101,7 @@ fn copy_transfer(
             if let Some(error) = error {
                 progress.results.staged(
                     source,
-                    Some(error.to_string()),
+                    Some(crate::i18n::file_error(error)),
                     matches!(error, TransferError::Cancelled),
                 );
             } else {
@@ -1133,7 +1146,7 @@ fn copy_transfer(
             manifest.verify(&cancel, |source, error| {
                 progress.results.staged(
                     source,
-                    Some(error.to_string()),
+                    Some(crate::i18n::file_error(error)),
                     matches!(error, TransferError::Cancelled),
                 )
             })?;
@@ -1729,13 +1742,22 @@ pub(super) fn source_children(
 ) -> Result<Vec<OsString>, TransferError> {
     cancel.check()?;
     let mut names = Vec::new();
+    let action = AccessAction::ReadChildren;
     if let Some(path) = source.local() {
-        for entry in fs::read_dir(path).map_err(err)? {
+        for entry in fs::read_dir(path).map_err(|error| AccessError::new(source, action, error))? {
             cancel.check()?;
-            names.push(entry.map_err(err)?.file_name());
+            names.push(
+                entry
+                    .map_err(|error| AccessError::new(source, action, error))?
+                    .file_name(),
+            );
         }
     } else {
-        for (path, _) in remote(source)?.readdir(source.path()).map_err(err)? {
+        let children = remote(source)
+            .map_err(|error| AccessError::new(source, action, error))?
+            .readdir(source.path())
+            .map_err(|error| AccessError::new(source, action, error))?;
+        for (path, _) in children {
             cancel.check()?;
             let name = path.strip_prefix(source.path()).map_err(err)?;
             let mut parts = name.components();
@@ -1876,7 +1898,8 @@ impl TransferSourceManifest {
         let metadata = entry_metadata(source)?.ok_or_else(|| changed_source(source))?;
         let (is_dir, is_file) = match &metadata {
             EntryMetadata::Local(meta) => {
-                meta.modified().map_err(err)?;
+                meta.modified()
+                    .map_err(|error| AccessError::new(source, AccessAction::ReadMetadata, error))?;
                 (meta.is_dir(), meta.is_file())
             }
             EntryMetadata::Remote(stat) => {
@@ -1942,34 +1965,37 @@ pub(super) enum SourceReader {
 }
 
 impl SourceReader {
-    pub(super) fn open(source: &Location) -> Result<Self, String> {
-        if let Some(path) = source.local() {
+    pub(super) fn open(source: &Location) -> Result<Self, TransferError> {
+        let action = AccessAction::OpenFile;
+        let result = if let Some(path) = source.local() {
             fs_ops::open_regular_source(path)
                 .map(Self::Local)
-                .map_err(err)
+                .map_err(|error| AccessError::new(source, action, error))
         } else {
-            remote(source)?
+            remote(source)
+                .map_err(|error| AccessError::new(source, action, error))?
                 .open(source.path())
                 .map(Self::Remote)
-                .map_err(err)
-        }
+                .map_err(|error| AccessError::new(source, action, error))
+        };
+        result.map_err(Into::into)
     }
 
-    pub(super) fn metadata(&mut self) -> Result<EntryMetadata, String> {
-        match self {
+    pub(super) fn metadata(&mut self, source: &Location) -> Result<EntryMetadata, TransferError> {
+        let action = AccessAction::ReadOpenMetadata;
+        let result = match self {
             Self::Local(input) => input
                 .metadata()
                 .map(|metadata| {
                     EntryMetadata::Local(LocalEntryMetadata::from_file(input, metadata))
                 })
-                .map_err(err),
-            Self::Remote(input) => input.stat().map(EntryMetadata::Remote).map_err(|e| {
-                crate::tr_format!(
-                    "Could not verify the open SFTP source file (fstat): {e}",
-                    e = e
-                )
-            }),
-        }
+                .map_err(|error| AccessError::new(source, action, error)),
+            Self::Remote(input) => input
+                .stat()
+                .map(EntryMetadata::Remote)
+                .map_err(|error| AccessError::new(source, action, error)),
+        };
+        result.map_err(Into::into)
     }
 }
 
@@ -1993,7 +2019,7 @@ pub(super) fn copy_tree(
     let result = copy_tree_entry(source, target, local_parent, progress, manifest, observe);
     progress.results.staged(
         source,
-        result.as_ref().err().map(ToString::to_string),
+        result.as_ref().err().map(crate::i18n::file_error),
         matches!(result, Err(TransferError::Cancelled)),
     );
     result
@@ -2050,7 +2076,7 @@ pub(super) fn copy_tree_entry(
     cancel.check()?;
     let mut input = SourceReader::open(source)?;
     observe(source, CopyPhase::Opened)?;
-    let opened_metadata = input.metadata()?;
+    let opened_metadata = input.metadata(source)?;
     if progress
         .retry
         .as_ref()
@@ -2116,16 +2142,12 @@ pub(super) fn copy_tree_entry(
     if written != expected_size {
         return Err(changed_source(source).into());
     }
-    entry.verify_metadata(source, &input.metadata()?)?;
+    entry.verify_metadata(source, &input.metadata(source)?)?;
     entry.verify(source, &cancel, false)?;
     cancel.check()?;
     if let Some(source_hash) = source_hash {
-        let mut copied = if let Some(path) = target.local() {
-            SourceReader::Local(fs_ops::open_regular_source(path).map_err(err)?)
-        } else {
-            SourceReader::Remote(remote(target)?.open(target.path()).map_err(err)?)
-        };
-        if !copied.metadata()?.is_file() {
+        let mut copied = SourceReader::open(target)?;
+        if !copied.metadata(target)?.is_file() {
             return Err(crate::tr_format!(
                 "Could not verify copy of {source}: staged item is no longer a regular file",
                 source = source
