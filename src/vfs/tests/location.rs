@@ -1,6 +1,47 @@
 use super::*;
 
 #[test]
+fn address_errors_keep_parse_causes_and_redact_rejected_url_fields() {
+    use crate::file_error::{ArchiveMemberError, Failure, PathError};
+    use std::error::Error;
+
+    let local = Location::Local("/tmp".into());
+    let invalid = resolve("sftp://alice@example.com:bogus/", &local).unwrap_err();
+    assert_eq!(
+        invalid
+            .source()
+            .and_then(Error::source)
+            .and_then(|source| source.downcast_ref::<url::ParseError>()),
+        Some(&url::ParseError::InvalidPort),
+    );
+    let rejected = resolve("sftp://alice:placeholder@example.com/", &local).unwrap_err();
+    assert!(matches!(
+        rejected,
+        TransferError::Failed(Failure::Path(PathError::SftpUrlFields))
+    ));
+    assert!(!format!("{rejected:?}").contains("placeholder"));
+    assert!(crate::i18n::key!(
+        "Используйте sftp://пользователь@сервер:22/путь без пароля, query и fragment"
+    )
+    .matches(&crate::i18n::file_error(&rejected)));
+
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("fixture.zip");
+    let root = Location::Archive {
+        archive: std::sync::Arc::new(file.clone()),
+        path: PathBuf::new(),
+    };
+    let rejected_member = resolve(&format!("{root}../outside"), &local).unwrap_err();
+    assert!(matches!(
+        rejected_member,
+        TransferError::Failed(Failure::Path(PathError::ArchiveMember {
+            ref archive,
+            source: ArchiveMemberError::InvalidPath,
+        })) if archive == &file
+    ));
+}
+
+#[test]
 fn remote_addresses_round_trip_and_keep_connection_and_posix_history() {
     let local = Location::Local(PathBuf::from("/tmp"));
     let location = resolve("sftp://alice@example.com:2222/папка/two%20words", &local).unwrap();

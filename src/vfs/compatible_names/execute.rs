@@ -163,9 +163,7 @@ fn apply_root(
             copy.write(&root.item.source, &stage, OsStr::new("payload"))
                 .map_err(|error| match error {
                     // Only the private draft could have been created.
-                    TransferError::PublicationUnconfirmed(message) => {
-                        TransferError::Failed(message)
-                    }
+                    TransferError::PublicationUnconfirmed(message) => TransferError::from(message),
                     error => error,
                 })?;
             root.manifest.verify(&cancel, |_, _| {})?;

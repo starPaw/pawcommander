@@ -11,6 +11,7 @@ pub(crate) use integrity::verify_archive;
 pub(crate) use writer::{ArchiveWriter, Attributes, CreationLimits};
 
 use crate::{
+    file_error::ArchiveMemberError,
     fs_ops::ListingMetadata,
     i18n::text,
     vfs::{FileEntry, Location},
@@ -548,11 +549,18 @@ fn zip_modified(time: rawzip::time::ZipDateTimeKind) -> Option<SystemTime> {
 }
 
 pub(crate) fn member_path(raw: &[u8]) -> io::Result<PathBuf> {
+    parse_member_path(raw).map_err(|error| match error {
+        ArchiveMemberError::InvalidPath => invalid_path(),
+        ArchiveMemberError::LimitExceeded => too_large(),
+    })
+}
+
+pub(crate) fn parse_member_path(raw: &[u8]) -> Result<PathBuf, ArchiveMemberError> {
     if raw.len() > MAX_PATH_BYTES {
-        return Err(too_large());
+        return Err(ArchiveMemberError::LimitExceeded);
     }
     if raw.starts_with(b"/") || raw.contains(&b'\\') || raw.iter().any(|b| b.is_ascii_control()) {
-        return Err(invalid_path());
+        return Err(ArchiveMemberError::InvalidPath);
     }
     let mut path = PathBuf::new();
     for (depth, part) in raw
@@ -561,10 +569,10 @@ pub(crate) fn member_path(raw: &[u8]) -> io::Result<PathBuf> {
         .enumerate()
     {
         if depth >= MAX_DEPTH {
-            return Err(too_large());
+            return Err(ArchiveMemberError::LimitExceeded);
         }
         if part == b".." || part.get(1) == Some(&b':') {
-            return Err(invalid_path());
+            return Err(ArchiveMemberError::InvalidPath);
         }
         #[cfg(unix)]
         let name = {
@@ -572,12 +580,13 @@ pub(crate) fn member_path(raw: &[u8]) -> io::Result<PathBuf> {
             OsStr::from_bytes(part)
         };
         #[cfg(not(unix))]
-        let name = OsStr::new(std::str::from_utf8(part).map_err(|_| invalid_path())?);
+        let name =
+            OsStr::new(std::str::from_utf8(part).map_err(|_| ArchiveMemberError::InvalidPath)?);
         if !matches!(
             Path::new(name).components().next(),
             Some(std::path::Component::Normal(_))
         ) {
-            return Err(invalid_path());
+            return Err(ArchiveMemberError::InvalidPath);
         }
         path.push(name);
     }

@@ -706,8 +706,8 @@ pub(crate) fn copy_atomically_cancellable(
     {
         let cleanup = remove_staging(&staging);
         return Err(match cleanup {
-            Ok(()) => TransferError::Failed(error.to_string()),
-            Err(cleanup) => TransferError::Failed(crate::tr_format!(
+            Ok(()) => TransferError::from(error.to_string()),
+            Err(cleanup) => TransferError::from(crate::tr_format!(
                 "Could not register temporary copy “{}”: {error}; cleanup failed: {cleanup}",
                 staging.path.display(),
                 cleanup = cleanup,
@@ -717,7 +717,7 @@ pub(crate) fn copy_atomically_cancellable(
     }
     let check_staging = || {
         staging.ensure_owned().map_err(|error| {
-            TransferError::Failed(crate::tr_format!(
+            TransferError::from(crate::tr_format!(
                 "Temporary copy “{}” changed: {error}",
                 staging.path.display(),
                 error = error
@@ -741,7 +741,7 @@ pub(crate) fn copy_atomically_cancellable(
         .and_then(|()| cancel.check())
         .map_err(|e| {
             TransferError::io(e, |e| {
-                copy_space_error(parent, &e)
+                copy_space_error(parent, e)
                     .unwrap_or_else(|| at(crate::i18n::text!("Не удалось скопировать"), source, e))
             })
         })
@@ -1258,7 +1258,7 @@ fn remove_staging(staging: &StagingDirectory) -> io::Result<()> {
     fs::remove_dir_all(&staging.path)
 }
 
-fn at(action: &str, path: &Path, error: io::Error) -> String {
+fn at(action: &str, path: &Path, error: impl std::fmt::Display) -> String {
     format!("{action} «{}»: {error}", path.display())
 }
 

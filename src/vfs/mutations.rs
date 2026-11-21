@@ -6,7 +6,7 @@ use crate::{archive, fs_ops};
 use ssh2::{RenameFlags, Sftp};
 
 pub fn create_directory(parent: &Location, name: &str) -> Result<Location, String> {
-    validate_name(name)?;
+    validate_name(name).map_err(|error| crate::i18n::file_error(&error))?;
     if let Some(path) = parent.local() {
         return fs_ops::create_directory(path, name).map(Location::Local);
     }
@@ -16,7 +16,7 @@ pub fn create_directory(parent: &Location, name: &str) -> Result<Location, Strin
 }
 
 pub fn rename_entry(source: &Location, name: &str) -> Result<Location, String> {
-    validate_name(name)?;
+    validate_name(name).map_err(|error| crate::i18n::file_error(&error))?;
     if let Some(path) = source.local() {
         return fs_ops::rename_entry(path, name).map(Location::Local);
     }
@@ -55,7 +55,7 @@ pub(super) fn remove_remote_tree(
                     .file_name()
                     .and_then(|n| n.to_str())
                     .ok_or(crate::i18n::text!("Некорректное имя SFTP"))?;
-                validate_name(name)?;
+                validate_name(name).map_err(|error| crate::i18n::file_error(&error))?;
                 remove_remote_tree(sftp, &location.join(name), child_depth, progress, journal)?;
             }
             progress.item(path);

@@ -382,7 +382,7 @@ pub(super) fn edit_address(
             match tab.address_completion.resolve(&tab.address, &tab.path) {
                 Ok(path) => destination = Some(path),
                 Err(error) => {
-                    tab.address_error = Some(error);
+                    tab.address_error = Some(crate::i18n::file_error(&error));
                     response.request_focus();
                 }
             }

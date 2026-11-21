@@ -280,7 +280,7 @@ impl<T: Send + 'static> Phase<T> {
         *self = match worker.result.try_recv() {
             Ok(Ok(result)) => Self::Finished(result),
             Ok(Err(TransferError::Cancelled)) => Self::Stopped,
-            Ok(Err(error)) => Self::Failed(error.to_string()),
+            Ok(Err(error)) => Self::Failed(crate::i18n::file_error(&error)),
             Err(mpsc::TryRecvError::Empty) => return,
             Err(mpsc::TryRecvError::Disconnected) => {
                 Self::Failed(text!("Сравнение неожиданно завершилось").into())

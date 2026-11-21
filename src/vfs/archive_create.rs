@@ -283,7 +283,7 @@ impl ArchiveSource {
         cancel: &Cancellation,
     ) -> Result<(), TransferError> {
         self.entry.verify(&self.source, cancel, true)?;
-        let context = |error| format!("{}: {error}", self.source);
+        let context = |error: &io::Error| format!("{}: {error}", self.source);
         if self.attributes.directory {
             progress.item(self.source.path());
             return archive

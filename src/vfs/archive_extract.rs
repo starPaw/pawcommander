@@ -253,7 +253,7 @@ fn unpack_tree(
             .relative
             .iter()
             .fold(payload.clone(), |dir, part| dir.join(part));
-        let context = |error| format!("{member}: {error}");
+        let context = |error: &std::io::Error| format!("{member}: {error}");
         if entry.is_dir() {
             progress.item(member.path());
             if let Some(path) = path.local() {

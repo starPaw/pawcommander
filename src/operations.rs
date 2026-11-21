@@ -3,6 +3,7 @@
 
 mod bandwidth;
 
+use crate::file_error::{Failure, PathError};
 use crate::vfs::{Endpoint, Location};
 use bandwidth::Pacer;
 pub(crate) use bandwidth::TransferLimits;
@@ -182,7 +183,7 @@ impl Cancellation {
 #[derive(Debug)]
 pub(crate) enum TransferError {
     Cancelled,
-    Failed(String),
+    Failed(Failure),
     /// The server may have published the item before its reply was lost.
     PublicationUnconfirmed(String),
 }
@@ -192,11 +193,14 @@ impl TransferError {
         error.get_ref().is_some_and(|e| e.is::<Cancelled>())
     }
 
-    pub fn io(error: io::Error, context: impl FnOnce(io::Error) -> String) -> Self {
+    pub fn io(error: io::Error, context: impl FnOnce(&io::Error) -> String) -> Self {
         if Self::is_cancelled_io(&error) {
             Self::Cancelled
         } else {
-            Self::Failed(context(error))
+            Self::Failed(Failure::Io {
+                message: context(&error),
+                source: error,
+            })
         }
     }
 }
@@ -208,20 +212,36 @@ impl From<io::Error> for TransferError {
 }
 impl From<String> for TransferError {
     fn from(error: String) -> Self {
-        Self::Failed(error)
+        Self::Failed(Failure::Message(error))
     }
 }
 impl From<&str> for TransferError {
     fn from(error: &str) -> Self {
-        Self::Failed(error.into())
+        Self::from(error.to_owned())
     }
 }
+
+impl From<PathError> for TransferError {
+    fn from(error: PathError) -> Self {
+        Self::Failed(Failure::Path(error))
+    }
+}
+
 impl std::fmt::Display for TransferError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Cancelled => f.write_str(&crate::tr_format!("Operation cancelled")),
-            Self::Failed(error) => f.write_str(error),
+            Self::Failed(error) => std::fmt::Display::fmt(error, f),
             Self::PublicationUnconfirmed(error) => f.write_str(error),
+        }
+    }
+}
+
+impl std::error::Error for TransferError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Failed(error) => error.source(),
+            Self::Cancelled | Self::PublicationUnconfirmed(_) => None,
         }
     }
 }
@@ -787,6 +807,17 @@ fn verify_hash(path: &Path, expected: [u8; 32], actual: Option<[u8; 32]>) -> io:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contextual_io_failure_retains_the_original_error() {
+        let source = io::Error::from(io::ErrorKind::PermissionDenied);
+        let error = TransferError::io(source, |source| format!("fixture.txt: {source}"));
+        let original = std::error::Error::source(&error)
+            .and_then(|cause| cause.downcast_ref::<io::Error>())
+            .unwrap();
+        assert_eq!(original.kind(), io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().starts_with("fixture.txt: "));
+    }
 
     #[test]
     fn transfer_speed_flushes_paced_output_to_the_staged_writer() {
