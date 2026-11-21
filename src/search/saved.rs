@@ -325,12 +325,13 @@ impl SavedSearch {
         ui.horizontal(|ui| {
             let name = &self.name;
             let run_label = crate::tr_format!("Запустить поиск «{name}»", "Run search “{name}”");
+            let menu_width = ui.spacing().interact_size.x;
+            let row_height = ui.spacing().interact_size.y.max(25.0);
+            let run_width =
+                (ui.available_width() - menu_width - ui.spacing().item_spacing.x).max(0.0);
             let run = ui
                 .add_enabled_ui(can_run, |ui| {
-                    ui.add_sized(
-                        [(ui.available_width() - 34.0).max(0.0), 25.0],
-                        egui::Button::new(name).truncate(),
-                    )
+                    ui.add_sized([run_width, row_height], egui::Button::new(name).truncate())
                 })
                 .inner
                 .on_hover_text(&run_label);
@@ -340,7 +341,7 @@ impl SavedSearch {
             if run.clicked() {
                 action = Some(Action::Run(index));
             }
-            let menu = ui.button("…");
+            let menu = ui.add_sized([menu_width, row_height], egui::Button::new("…").truncate());
             let menu_label = crate::tr_format!("Действия для «{name}»", "Actions for {name}");
             ui.ctx().accesskit_node_builder(menu.id, |node| {
                 node.set_label(menu_label.clone());
@@ -596,6 +597,47 @@ mod tests {
         }))
         .unwrap();
         assert!(search.saved_candidate().is_err());
+    }
+
+    #[test]
+    fn saved_search_rows_keep_the_search_window_width_stable() {
+        let ctx = egui::Context::default();
+        crate::theme::Theme::default().apply(&ctx, false);
+        ctx.global_style_mut(|style| style.animation_time = 0.0);
+        let mut search = Search {
+            visible: true,
+            mode: Mode::Index,
+            query: "report".into(),
+            ..Default::default()
+        };
+        let draw = |search: &mut Search| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1230.0, 810.0),
+                )),
+                ..Default::default()
+            };
+            ctx.run_test_ui(input, |ui| {
+                search.show(ui.ctx(), Some(Path::new("/usr/bin/locate")));
+            });
+            ctx.memory(|memory| memory.area_rect(egui::Id::unique("file_search")))
+                .unwrap()
+                .width()
+        };
+        for _ in 0..4 {
+            draw(&mut search);
+        }
+        let width = draw(&mut search);
+        save_candidate(&mut search, &"Reports with a long name ".repeat(12));
+        for _ in 0..80 {
+            draw(&mut search);
+        }
+        let with_saved = draw(&mut search);
+        assert!(
+            with_saved <= width + 2.0,
+            "search window grew from {width} to {with_saved} points"
+        );
     }
 
     #[test]
