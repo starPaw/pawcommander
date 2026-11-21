@@ -1,15 +1,16 @@
 use super::{
-    records::{self, read_error, Records, SAMPLE_BYTES},
+    records::{self, Records, SAMPLE_BYTES},
     Codec, Position, Row, Separator,
 };
 use crate::{
-    operations::Cancellation,
+    file_error::{AccessError, Failure, PreviewError},
+    operations::{Cancellation, TransferError},
     preview::source::{Source, Version},
     vfs::Location,
 };
 use eframe::egui;
 use std::{
-    io::{self, BufRead, BufReader, Read},
+    io::{BufRead, BufReader, Read},
     sync::{mpsc, Arc, Mutex},
     thread,
     time::{Duration, Instant},
@@ -41,7 +42,7 @@ pub(super) struct Update {
     pub ready: Option<Bookmark>,
     pub rows: Vec<Row>,
     pub scanned: u64,
-    pub finished: Option<Result<Option<Position>, String>>,
+    pub finished: Option<Result<Option<Position>, TransferError>>,
 }
 
 pub(super) struct Scan {
@@ -91,7 +92,7 @@ impl Worker {
         preferred: Separator,
         encoding: Codec,
         ctx: &egui::Context,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, TransferError> {
         let (sender, incoming) = mpsc::channel::<Request>();
         let ctx = ctx.clone();
         let viewport = ctx.viewport_id();
@@ -113,12 +114,15 @@ impl Worker {
                     let result = read_page(&location, preferred, encoding, &reporter);
                     reporter.send(|update| update.finished = Some(result));
                 }
-            })
-            .map_err(read_error)?;
+            })?;
         Ok(Self(sender))
     }
 
-    pub(super) fn load(&self, settings: Settings, start: Option<Bookmark>) -> Result<Scan, String> {
+    pub(super) fn load(
+        &self,
+        settings: Settings,
+        start: Option<Bookmark>,
+    ) -> Result<Scan, TransferError> {
         let scan = Scan {
             updates: Arc::new(Mutex::new(Update::default())),
             cancel: Cancellation::default(),
@@ -130,7 +134,7 @@ impl Worker {
                 updates: scan.updates.clone(),
                 cancel: scan.cancel.clone(),
             })
-            .map_err(|_| crate::i18n::text!("Служба предпросмотра недоступна").to_owned())?;
+            .map_err(|_| PreviewError::WorkerUnavailable)?;
         Ok(scan)
     }
 }
@@ -140,11 +144,11 @@ fn read_page(
     preferred: Separator,
     encoding: Codec,
     reporter: &Reporter<'_>,
-) -> Result<Option<Position>, String> {
+) -> Result<Option<Position>, TransferError> {
     let request = reporter.request;
-    request.cancel.check().map_err(read_error)?;
+    request.cancel.check()?;
     let mut source = Source::open(location)?;
-    let version = source.version().map_err(read_error)?;
+    let version = source.version()?;
     let mut position = request
         .start
         .as_ref()
@@ -153,7 +157,7 @@ fn read_page(
     if let Some(bookmark) = &request.start
         && bookmark.layout.version != version
     {
-        return Err(changed());
+        return Err(PreviewError::ChangedWhileReading(location.clone()).into());
     }
     let known_separator = request
         .start
@@ -167,9 +171,12 @@ fn read_page(
         let limit = version
             .size
             .map_or(limit, |size| size.min(limit as u64) as usize);
-        sample = read_prefix(&mut source, limit, &request.cancel)?;
+        sample = request
+            .cancel
+            .read_up_to(&mut source, limit)
+            .map_err(|error| AccessError::read(location, error))?;
     } else {
-        source.seek_to(position.byte).map_err(read_error)?;
+        source.seek_to(position.byte)?;
     }
     let separator = known_separator.unwrap_or_else(|| {
         records::detect(
@@ -199,7 +206,9 @@ fn read_page(
     } else {
         let mut headers = Vec::new();
         if request.settings.header
-            && let Some(record) = records.next(&request.cancel)?
+            && let Some(record) = records
+                .next(&request.cancel)
+                .map_err(|error| table_access_error(location, error))?
         {
             headers.extend(record.cells().map(str::to_owned));
         }
@@ -232,15 +241,17 @@ fn read_page(
         rows: Vec::new(),
         scanned: start.records,
     };
-    let result = collect_rows(&mut records, filter.as_ref(), &mut batch, reporter);
+    let result = collect_rows(&mut records, filter.as_ref(), &mut batch, reporter)
+        .map_err(|error| table_access_error(location, error));
     batch.publish(reporter);
     drop(records);
-    request.cancel.check().map_err(read_error)?;
-    if source.version().map_err(read_error)? != version {
-        return Err(changed());
+    let next = result?;
+    request.cancel.check()?;
+    if source.version()? != version {
+        return Err(PreviewError::ChangedWhileReading(location.clone()).into());
     }
     // A full page whose last row ends at EOF has no continuation.
-    result.map(|next| next.filter(|at| version.size.is_none_or(|size| at.byte < size)))
+    Ok(next.filter(|at| version.size.is_none_or(|size| at.byte < size)))
 }
 
 struct Batch {
@@ -262,7 +273,7 @@ fn collect_rows<R: BufRead>(
     filter: Option<&regex::Regex>,
     batch: &mut Batch,
     reporter: &Reporter<'_>,
-) -> Result<Option<Position>, String> {
+) -> Result<Option<Position>, TransferError> {
     let mut count = 0;
     let mut bytes = 0;
     let mut last = Instant::now();
@@ -295,28 +306,13 @@ fn collect_rows<R: BufRead>(
     Ok(Some(records.position()))
 }
 
-fn read_prefix(
-    input: &mut impl Read,
-    limit: usize,
-    cancel: &Cancellation,
-) -> Result<Vec<u8>, String> {
-    let mut sample = vec![0; limit];
-    let mut len = 0;
-    while len < limit {
-        cancel.check().map_err(read_error)?;
-        match input.read(&mut sample[len..]) {
-            Ok(0) => break,
-            Ok(read) => len += read,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(read_error(error)),
+fn table_access_error(location: &Location, error: TransferError) -> TransferError {
+    match error {
+        TransferError::Failed(Failure::Io { source, .. }) => {
+            AccessError::read(location, source).into()
         }
+        error => error,
     }
-    sample.truncate(len);
-    Ok(sample)
-}
-
-fn changed() -> String {
-    crate::i18n::text!("Таблица изменилась. Откройте быстрый просмотр заново.").into()
 }
 
 #[cfg(test)]
@@ -330,7 +326,7 @@ mod tests {
         start: Option<Bookmark>,
         separator: Option<Separator>,
         encoding: Codec,
-    ) -> (Update, Result<Option<Position>, String>) {
+    ) -> (Update, Result<Option<Position>, TransferError>) {
         let request = Request {
             settings: Settings {
                 separator,

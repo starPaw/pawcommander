@@ -73,7 +73,7 @@ pub(crate) use permissions::{ModeRule, PermissionsPreview};
 #[cfg(target_os = "macos")]
 pub(crate) use preview::cache_media_preview;
 pub(crate) use preview::open_preview_stream;
-pub use preview::preview_data;
+pub(crate) use preview::preview_data;
 pub(crate) use retry::RetryTransfer;
 #[cfg(test)]
 pub use sftp::connect;

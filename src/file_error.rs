@@ -16,6 +16,7 @@ pub(crate) enum Failure {
     Path(PathError),
     Connection(Box<ConnectionError>),
     Access(Box<AccessError>),
+    Preview(Box<PreviewError>),
     ComparisonPane {
         right: bool,
         cause: Box<TransferError>,
@@ -47,6 +48,7 @@ impl Failure {
             Self::Path(error) => Some(error),
             Self::Connection(error) => Some(error.as_ref()),
             Self::Access(error) => Some(error.as_ref()),
+            Self::Preview(error) => Some(error.as_ref()),
             Self::ComparisonPane { cause, .. } => Some(cause.as_ref()),
             Self::Listing(error) => Some(error.as_ref()),
             Self::Mutation(error) => Some(error.as_ref()),
@@ -63,6 +65,7 @@ impl fmt::Display for Failure {
             Self::Path(error) => fmt::Display::fmt(error, f),
             Self::Connection(error) => fmt::Display::fmt(error, f),
             Self::Access(error) => fmt::Display::fmt(error, f),
+            Self::Preview(error) => fmt::Display::fmt(error, f),
             Self::ComparisonPane { right, cause } => {
                 let pane = if *right { "Right pane" } else { "Left pane" };
                 write!(f, "{pane} · {cause}")
@@ -185,12 +188,16 @@ pub(crate) enum AccessAction {
     OpenFile,
     ReadOpenMetadata,
     ReadChildren,
+    ReadFile,
+    #[cfg(target_os = "macos")]
+    WritePreviewCache,
 }
 
 #[derive(Debug)]
 pub(crate) enum AccessCause {
     Local(io::Error),
     Sftp(ssh2::Error),
+    SftpStream(io::Error),
     Connection(Box<TransferError>),
 }
 
@@ -215,7 +222,7 @@ impl From<TransferError> for AccessCause {
 impl fmt::Display for AccessCause {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Local(error) => fmt::Display::fmt(error, f),
+            Self::Local(error) | Self::SftpStream(error) => fmt::Display::fmt(error, f),
             Self::Sftp(error) => fmt::Display::fmt(error, f),
             Self::Connection(error) => fmt::Display::fmt(error, f),
         }
@@ -225,7 +232,7 @@ impl fmt::Display for AccessCause {
 impl AccessCause {
     pub(crate) fn is_absent(&self) -> bool {
         match self {
-            Self::Local(error) => error.kind() == io::ErrorKind::NotFound,
+            Self::Local(error) | Self::SftpStream(error) => error.kind() == io::ErrorKind::NotFound,
             Self::Sftp(error) => {
                 error.code() == ssh2::ErrorCode::SFTP(libssh2_sys::LIBSSH2_FX_NO_SUCH_FILE)
             }
@@ -253,6 +260,15 @@ impl AccessError {
             cause: cause.into(),
         }
     }
+
+    pub(crate) fn read(location: &Location, source: io::Error) -> Self {
+        let cause = if location.remote() {
+            AccessCause::SftpStream(source)
+        } else {
+            AccessCause::Local(source)
+        };
+        Self::new(location, AccessAction::ReadFile, cause)
+    }
 }
 
 impl fmt::Display for AccessError {
@@ -264,12 +280,46 @@ impl fmt::Display for AccessError {
 impl Error for AccessError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match &self.cause {
-            AccessCause::Local(error) => Some(error),
+            AccessCause::Local(error) | AccessCause::SftpStream(error) => Some(error),
             AccessCause::Sftp(error) => Some(error),
             AccessCause::Connection(error) => Some(error.as_ref()),
         }
     }
 }
+
+#[derive(Debug)]
+pub(crate) enum PreviewError {
+    UnsupportedFile(Location),
+    ChangedBeforeRead(Location),
+    ChangedWhileReading(Location),
+    #[cfg(target_os = "macos")]
+    MediaLimit {
+        location: Location,
+        limit: u64,
+    },
+    WorkerUnavailable,
+}
+
+impl fmt::Display for PreviewError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedFile(location) => write!(f, "Unsupported preview file: {location}"),
+            Self::ChangedBeforeRead(location) => {
+                write!(f, "File changed before reading: {location}")
+            }
+            Self::ChangedWhileReading(location) => {
+                write!(f, "File changed while reading: {location}")
+            }
+            #[cfg(target_os = "macos")]
+            Self::MediaLimit { location, limit } => {
+                write!(f, "Media preview exceeds {limit} bytes: {location}")
+            }
+            Self::WorkerUnavailable => f.write_str("Preview worker is unavailable"),
+        }
+    }
+}
+
+impl Error for PreviewError {}
 
 #[derive(Debug)]
 pub(crate) enum RecoveryNotice {

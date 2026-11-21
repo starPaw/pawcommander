@@ -18,11 +18,13 @@ mod source;
 mod table;
 
 use self::encoding::Codec;
-use crate::operations::Cancellation;
+use crate::file_error::{AccessAction, AccessError, MutationError, PreviewError};
+use crate::i18n::file_error;
+use crate::operations::{Cancellation, TransferError};
 use crate::vfs::{self, Location};
 use std::{
     fs::{self, File},
-    io::{Cursor, Read},
+    io::Cursor,
     path::Path,
     sync::mpsc::{self, Receiver, Sender},
     thread,
@@ -61,7 +63,7 @@ struct Request {
 
 struct Response {
     generation: u64,
-    result: Result<Loaded, String>,
+    result: Result<Loaded, TransferError>,
 }
 
 struct Loaded {
@@ -95,7 +97,7 @@ enum Content {
     Table(Box<table::Document>),
     LargeText(Box<large_text::Document>),
     TextError(Codec, String),
-    Message(String),
+    Unavailable(TransferError),
 }
 
 impl Content {
@@ -136,13 +138,13 @@ pub struct Preview {
     responses: Receiver<Response>,
     path: Option<Location>,
     generation: u64,
-    result: Option<Result<Loaded, String>>,
+    result: Option<Result<Loaded, TransferError>>,
     texture: Option<egui::TextureHandle>,
     text: TextView,
     encoding: Option<Codec>,
     dirty: bool,
     hex_mode: bool,
-    hex: Option<Result<Box<hex::Document>, String>>,
+    hex: Option<Result<Box<hex::Document>, TransferError>>,
     fingerprint: Option<Fingerprint>,
     cancel: Cancellation,
 }
@@ -298,7 +300,7 @@ impl Preview {
                     ui.push_id(("hex", self.generation), |ui| document.show(ui));
                 }
                 Err(error) => {
-                    ui.colored_label(ui.visuals().error_fg_color, error.as_str());
+                    ui.colored_label(ui.visuals().error_fg_color, file_error(error));
                 }
             }
             return;
@@ -359,7 +361,7 @@ impl Preview {
             .show(ui, |ui| match &self.result {
                 None => draw_loading(ui),
                 Some(Err(error)) => {
-                    ui.colored_label(ui.visuals().error_fg_color, error);
+                    ui.colored_label(ui.visuals().error_fg_color, file_error(error));
                 }
                 Some(Ok(loaded)) => match &loaded.content {
                     Content::Text {
@@ -386,8 +388,8 @@ impl Preview {
                             draw_image(ui, texture, image_height);
                         }
                     }
-                    Content::Message(message) => {
-                        ui.label(message);
+                    Content::Unavailable(error) => {
+                        ui.label(file_error(error));
                     }
                     Content::TextError(_, error) => {
                         ui.colored_label(ui.visuals().error_fg_color, error);
@@ -461,7 +463,7 @@ impl Preview {
             self.texture = None;
             if let Some(path) = path {
                 if path.is_archive() {
-                    self.result = Some(Err(crate::archive::readonly().into()));
+                    self.result = Some(Err(MutationError::ReadOnlyArchive(path.clone()).into()));
                 } else if self.hex_mode {
                     self.hex = Some(hex::Document::start(path.clone(), ctx).map(Box::new));
                 } else if self
@@ -476,9 +478,7 @@ impl Preview {
                     })
                     .is_err()
                 {
-                    self.result = Some(Err(
-                        crate::i18n::text!("Служба предпросмотра недоступна").into()
-                    ));
+                    self.result = Some(Err(PreviewError::WorkerUnavailable.into()));
                 }
             }
         }
@@ -576,7 +576,7 @@ impl Preview {
                 match &self.result {
                     None => draw_loading(ui),
                     Some(Err(error)) => {
-                        ui.colored_label(ui.visuals().error_fg_color, error);
+                        ui.colored_label(ui.visuals().error_fg_color, file_error(error));
                     }
                     Some(Ok(loaded)) => {
                         ui.colored_label(muted, &loaded.kind);
@@ -632,9 +632,9 @@ impl Preview {
                                 )
                             });
                         }
-                        Content::Message(message) => {
+                        Content::Unavailable(error) => {
                             ui.add_space(12.0);
-                            ui.colored_label(muted, message);
+                            ui.colored_label(muted, file_error(error));
                         }
                         Content::TextError(_, error) => {
                             ui.add_space(12.0);
@@ -780,7 +780,8 @@ fn load_location(
     cancel: &Cancellation,
     quick_look: bool,
     encoding: Option<Codec>,
-) -> Result<Loaded, String> {
+) -> Result<Loaded, TransferError> {
+    cancel.check()?;
     if let Some(path) = location.local() {
         return load(path, cancel, quick_look, encoding);
     }
@@ -802,7 +803,7 @@ fn load_location(
     } else {
         limit
     };
-    let (stat, bytes) = vfs::preview_data(location, limit)?;
+    let (stat, bytes) = vfs::preview_data(location, limit, cancel)?;
     let content = if stat.is_dir() {
         Content::Directory
     } else if let Some(separator) = separator {
@@ -814,7 +815,7 @@ fn load_location(
     } else {
         let length = stat.size.unwrap_or(bytes.len() as u64);
         remote_file_preview(location, bytes, length, cancel, quick_look, encoding)
-            .unwrap_or_else(Content::Message)
+            .unwrap_or_else(Content::Unavailable)
     };
     Ok(Loaded {
         kind: if stat.is_dir() {
@@ -846,7 +847,7 @@ fn remote_file_preview(
     cancel: &Cancellation,
     quick_look: bool,
     encoding: Option<Codec>,
-) -> Result<Content, String> {
+) -> Result<Content, TransferError> {
     #[cfg(target_os = "macos")]
     if media::supported(location.path()) {
         return Ok(Content::Media(Box::new(media::Player::new(
@@ -861,7 +862,7 @@ fn remote_file_preview(
         return Ok(text_content(location, bytes, quick_look, encoding));
     }
     if length > IMAGE_LIMIT {
-        return Err(image_too_large());
+        return Err(image_too_large().into());
     }
     image_content(&bytes, cancel)
 }
@@ -871,12 +872,13 @@ fn load(
     cancel: &Cancellation,
     quick_look: bool,
     encoding: Option<Codec>,
-) -> Result<Loaded, String> {
+) -> Result<Loaded, TransferError> {
+    let location = Location::Local(path.into());
     let link_metadata = fs::symlink_metadata(path)
-        .map_err(|e| crate::tr_format!("Could not read details: {e}", e = e))?;
+        .map_err(|error| AccessError::new(&location, AccessAction::ReadMetadata, error))?;
     let is_link = link_metadata.file_type().is_symlink();
-    let metadata =
-        fs::metadata(path).map_err(|e| crate::tr_format!("Could not open item: {e}", e = e))?;
+    let metadata = fs::metadata(path)
+        .map_err(|error| AccessError::new(&location, AccessAction::ReadMetadata, error))?;
     let is_dir = metadata.is_dir();
     let kind = if is_link {
         if is_dir {
@@ -904,19 +906,19 @@ fn load(
         Content::Directory
     } else if !metadata.is_file() {
         // Do not open sockets, devices or named pipes: a read may never finish.
-        Content::Message(crate::i18n::text!("Предпросмотр специальных файлов недоступен.").into())
+        Content::Unavailable(PreviewError::UnsupportedFile(location).into())
     } else if quick_look && let Some(separator) = table::Separator::from_path(path) {
-        match read_bounded(path, 3) {
+        match read_bounded(path, 3, cancel) {
             Ok(prefix) => Content::Table(Box::new(table::Document::new(
-                path.to_path_buf().into(),
+                location,
                 separator,
                 Codec::choose(encoding, &prefix),
             ))),
-            Err(error) => Content::Message(error),
+            Err(error) => Content::Unavailable(error),
         }
     } else {
         load_content(path, metadata.len(), cancel, quick_look, encoding)
-            .unwrap_or_else(Content::Message)
+            .unwrap_or_else(Content::Unavailable)
     };
     Ok(Loaded {
         kind: kind.into(),
@@ -947,8 +949,8 @@ fn load_content(
     cancel: &Cancellation,
     quick_look: bool,
     encoding: Option<Codec>,
-) -> Result<Content, String> {
-    cancel.check().map_err(|error| error.to_string())?;
+) -> Result<Content, TransferError> {
+    cancel.check()?;
     #[cfg(target_os = "macos")]
     if media::supported(path) {
         return Ok(Content::Media(Box::new(media::Player::new(
@@ -958,25 +960,21 @@ fn load_content(
     #[cfg(target_os = "macos")]
     if pdf::is_pdf(path) {
         if length > pdf::FILE_LIMIT as u64 {
-            return Err(pdf_too_large());
+            return Err(pdf_too_large().into());
         }
-        let file = open_regular(path)?;
-        let mut bytes = Vec::new();
-        file.take(pdf::FILE_LIMIT as u64 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|error| error.to_string())?;
+        let bytes = read_bounded(path, pdf::FILE_LIMIT, cancel)?;
         return pdf_content(bytes, length, cancel);
     }
     if image_path_format(path).is_some() {
         if length > IMAGE_LIMIT {
-            return Err(image_too_large());
+            return Err(image_too_large().into());
         }
-        let bytes = read_bounded(path, IMAGE_LIMIT as usize)?;
+        let bytes = read_bounded(path, IMAGE_LIMIT as usize, cancel)?;
         return image_content(&bytes, cancel);
     }
     Ok(text_content(
         &Location::Local(path.into()),
-        read_bounded(path, TEXT_LIMIT)?,
+        read_bounded(path, TEXT_LIMIT, cancel)?,
         quick_look,
         encoding,
     ))
@@ -986,11 +984,11 @@ fn image_too_large() -> String {
     crate::i18n::text!("Изображение больше 20 МиБ. Откройте его во внешнем приложении.").into()
 }
 
-fn image_content(bytes: &[u8], cancel: &Cancellation) -> Result<Content, String> {
+fn image_content(bytes: &[u8], cancel: &Cancellation) -> Result<Content, TransferError> {
     if bytes.len() > IMAGE_LIMIT as usize {
         return Err(crate::i18n::text!("Изображение больше 20 МиБ.").into());
     }
-    cancel.check().map_err(|error| error.to_string())?;
+    cancel.check()?;
     let mut reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| crate::tr_format!("Could not detect image format: {e}", e = e))?;
@@ -1004,7 +1002,7 @@ fn image_content(bytes: &[u8], cancel: &Cancellation) -> Result<Content, String>
         .map_err(|e| crate::tr_format!("Image preview unavailable: {e}", e = e))?;
     let original_size = [decoded.width(), decoded.height()];
     let thumbnail = decoded.thumbnail(1200, 1200).to_rgba8();
-    cancel.check().map_err(|error| error.to_string())?;
+    cancel.check()?;
     Ok(Content::Image {
         size: [thumbnail.width() as usize, thumbnail.height() as usize],
         original_size,
@@ -1049,11 +1047,17 @@ fn text_content(
 }
 
 #[cfg(target_os = "macos")]
-fn pdf_content(bytes: Vec<u8>, length: u64, cancel: &Cancellation) -> Result<Content, String> {
+fn pdf_content(
+    bytes: Vec<u8>,
+    length: u64,
+    cancel: &Cancellation,
+) -> Result<Content, TransferError> {
     if length > pdf::FILE_LIMIT as u64 || bytes.len() > pdf::FILE_LIMIT {
-        return Err(pdf_too_large());
+        return Err(pdf_too_large().into());
     }
-    pdf::Document::open(bytes, cancel).map(|document| Content::Pdf(Box::new(document)))
+    pdf::Document::open(bytes, cancel)
+        .map(|document| Content::Pdf(Box::new(document)))
+        .map_err(Into::into)
 }
 
 #[cfg(target_os = "macos")]
@@ -1061,7 +1065,8 @@ fn pdf_too_large() -> String {
     crate::i18n::text!("PDF больше 64 МиБ. Откройте его во внешнем приложении.").into()
 }
 
-fn open_regular(path: &Path) -> Result<File, String> {
+fn open_regular(path: &Path) -> Result<File, TransferError> {
+    let location = Location::Local(path.into());
     let mut options = fs::OpenOptions::new();
     options.read(true);
     // The name can change after the metadata lookup. Opening a FIFO must not
@@ -1071,25 +1076,29 @@ fn open_regular(path: &Path) -> Result<File, String> {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NONBLOCK);
     }
-    let file = options.open(path).map_err(|error| error.to_string())?;
+    let file = options
+        .open(path)
+        .map_err(|error| AccessError::new(&location, AccessAction::OpenFile, error))?;
     if !file
         .metadata()
-        .map_err(|error| error.to_string())?
+        .map_err(|error| AccessError::new(&location, AccessAction::ReadOpenMetadata, error))?
         .is_file()
     {
-        return Err(crate::i18n::text!("Предпросмотр специальных файлов недоступен.").into());
+        return Err(PreviewError::UnsupportedFile(location).into());
     }
     Ok(file)
 }
 
-fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
-    let file =
-        open_regular(path).map_err(|e| crate::tr_format!("Could not read file: {e}", e = e))?;
-    let mut bytes = Vec::new();
-    file.take(limit as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| crate::tr_format!("Could not read file: {e}", e = e))?;
-    Ok(bytes)
+fn read_bounded(
+    path: &Path,
+    limit: usize,
+    cancel: &Cancellation,
+) -> Result<Vec<u8>, TransferError> {
+    cancel.check()?;
+    let mut file = open_regular(path)?;
+    cancel
+        .read_up_to(&mut file, limit.saturating_add(1))
+        .map_err(|error| AccessError::read(&Location::Local(path.into()), error).into())
 }
 
 fn preview_text_chars(text: &str) -> bool {
@@ -1659,7 +1668,7 @@ mod tests {
             .save(&path)
             .unwrap();
         let loaded = load(&path, &Cancellation::default(), false, None).unwrap();
-        assert!(matches!(loaded.content, Content::Message(_)));
+        assert!(matches!(loaded.content, Content::Unavailable(_)));
     }
 
     #[test]

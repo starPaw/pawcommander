@@ -1,9 +1,10 @@
 use super::{
-    reader::{changed, read_error, PageText, Reader},
+    reader::{PageText, Reader},
     Codec, Direction, Hit, Position,
 };
 use crate::{
-    operations::Cancellation,
+    file_error::PreviewError,
+    operations::{Cancellation, TransferError},
     preview::{
         code::Code,
         read_worker,
@@ -52,11 +53,10 @@ pub(super) fn start(
     location: Location,
     encoding: Codec,
     ctx: &egui::Context,
-) -> Result<Worker, String> {
+) -> Result<Worker, TransferError> {
     Worker::start("pawcommander-text", ctx, move |(work, version), cancel| {
         run(&location, work, *version, encoding, cancel)
     })
-    .map_err(read_error)
 }
 fn run(
     location: &Location,
@@ -64,12 +64,12 @@ fn run(
     expected: Option<Version>,
     encoding: Codec,
     cancel: &Cancellation,
-) -> Result<Output, String> {
-    cancel.check().map_err(read_error)?;
+) -> Result<Output, TransferError> {
+    cancel.check()?;
     let mut source = Source::open(location)?;
-    let version = source.version().map_err(read_error)?;
+    let version = source.version()?;
     if expected.is_some_and(|expected| expected != version) {
-        return Err(changed());
+        return Err(PreviewError::ChangedWhileReading(location.clone()).into());
     }
 
     let mut reader = Reader::new(&mut source, version.size, encoding, cancel);
@@ -95,9 +95,9 @@ fn run(
             }
         }
     };
-    cancel.check().map_err(read_error)?;
-    if source.version().map_err(read_error)? != version {
-        return Err(changed());
+    cancel.check()?;
+    if source.version()? != version {
+        return Err(PreviewError::ChangedWhileReading(location.clone()).into());
     }
     let result = if let Some(mut text) = text {
         let code = Code::numbered(location.path(), &text.text, text.start.line);
@@ -132,7 +132,7 @@ mod tests {
 
     pub(crate) fn check_sftp_large_text(location: &Location) {
         let cancel = Cancellation::default();
-        let (_, prefix) = crate::vfs::preview_data(location, 3).unwrap();
+        let (_, prefix) = crate::vfs::preview_data(location, 3, &cancel).unwrap();
         let encoding = Codec::choose(None, &prefix);
         let (version, first) = run(
             location,
@@ -195,16 +195,21 @@ mod tests {
         };
         assert!(first.text.has_next);
         std::fs::write(file.path(), b"replacement").unwrap();
-        assert!(run(
+        let changed = run(
             &location,
             &Work::Page {
                 index: 1,
-                near: first.text.start
+                near: first.text.start,
             },
             Some(version),
             Codec::Utf8,
             &cancel,
         )
-        .is_err());
+        .err()
+        .expect("changed source should refuse continuation");
+        assert!(matches!(changed,
+            TransferError::Failed(crate::file_error::Failure::Preview(cause))
+            if matches!(cause.as_ref(), PreviewError::ChangedWhileReading(path) if path == &location)
+        ));
     }
 }
