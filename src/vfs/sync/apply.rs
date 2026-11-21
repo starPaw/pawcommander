@@ -2,6 +2,7 @@ use super::{
     is_link, stale, Budget, Exclusions, Kind, Observed, Snapshot, SyncChange, SyncPlan, SyncRow,
 };
 use crate::{
+    file_error::MetadataWarning,
     operations::{Cancellation, Progress, TransferError},
     result_history::Outcome,
     vfs::{
@@ -19,6 +20,11 @@ use crate::{
     },
 };
 use std::{fs, io::Read, os::unix::fs::DirBuilderExt, path::Path};
+
+struct GroupWarnings {
+    metadata: Option<MetadataWarning>,
+    cleanup: Option<TransferError>,
+}
 
 impl SyncPlan {
     pub(crate) fn folders(&self) -> &[Location; 2] {
@@ -120,10 +126,18 @@ impl Execution<'_> {
                 &self.observed[destination].root,
             );
             match self.apply_group(row, scopes, progress, staging.as_deref_mut()) {
-                Ok(warning) => {
-                    for (index, row) in group.iter().enumerate() {
+                Ok(GroupWarnings { metadata, cleanup }) => {
+                    let mut warning = metadata.as_ref().map(crate::i18n::metadata_warning);
+                    if let Some(cleanup) = cleanup {
+                        let cause = crate::i18n::file_error(&cleanup);
+                        warning = Some(match warning {
+                            Some(warning) => format!("{warning}\n{cause}"),
+                            None => cause,
+                        });
+                    }
+                    for row in group {
                         let (key, target) = self.history_row(row);
-                        let warning = (index == 0).then(|| warning.clone()).flatten();
+                        let warning = warning.take();
                         let outcome = if warning.is_some() {
                             Outcome::CompletedWithWarning
                         } else {
@@ -154,7 +168,7 @@ impl Execution<'_> {
         scopes: &[ReadScope; 2],
         progress: &mut Progress,
         notice: Option<&mut StagingNotice<'_>>,
-    ) -> Result<Option<String>, TransferError> {
+    ) -> Result<GroupWarnings, TransferError> {
         let source_scope = &scopes[1 - row.destination];
         let destination_scope = &scopes[row.destination];
         let source = &self.observed[1 - row.destination];
@@ -322,17 +336,15 @@ impl Execution<'_> {
             Some(notice) => with_tracked_staging(&target, &cancel, notice, work),
             None => with_preserved_staging(&target, &cancel, work),
         };
-        match result {
-            Ok(()) => Ok(metadata_warning),
-            Err(error) if committed => {
-                let error = crate::i18n::file_error(&error);
-                Ok(Some(match metadata_warning {
-                    Some(warning) => format!("{warning}. {error}"),
-                    None => error,
-                }))
-            }
-            Err(error) => Err(error),
-        }
+        let cleanup = match result {
+            Ok(()) => None,
+            Err(error) if committed => Some(error),
+            Err(error) => return Err(error),
+        };
+        Ok(GroupWarnings {
+            metadata: metadata_warning,
+            cleanup,
+        })
     }
 }
 
@@ -419,7 +431,7 @@ fn preserve_attributes(
     staged: &Snapshot,
     incoming: &Path,
     progress: &mut Progress,
-) -> Result<Option<String>, TransferError> {
+) -> Result<Option<MetadataWarning>, TransferError> {
     let mut warning = None;
     // Apply directory permissions after their descendants have been prepared.
     for (path, target_entry) in staged.entries.iter().rev() {

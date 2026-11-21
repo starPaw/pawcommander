@@ -7,8 +7,8 @@ pub(crate) use access_stream::{access_io, AccessStream};
 
 use crate::file_error::{
     AccessCause, AccessError, ArchiveError, ChecksumError, ConnectionError, Failure, HostKeyError,
-    ListingError, MutationError, PathError, PermissionError, PreviewError, PublicationError,
-    RecoveryNotice, ScanError, SearchError, SpaceError,
+    ListingError, MetadataError, MutationError, PathError, PermissionError, PreviewError,
+    PublicationError, RecoveryNotice, ScanError, SearchError, SpaceError,
 };
 use crate::vfs::{Endpoint, Location};
 use bandwidth::Pacer;
@@ -334,6 +334,12 @@ impl From<ArchiveError> for TransferError {
         } else {
             Self::Failed(Failure::Archive(Box::new(error)))
         }
+    }
+}
+
+impl From<MetadataError> for TransferError {
+    fn from(error: MetadataError) -> Self {
+        Self::Failed(Failure::Metadata(Box::new(error)))
     }
 }
 

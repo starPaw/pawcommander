@@ -1033,9 +1033,7 @@ fn copy_to_smb(
         )?;
         crate::smb::close_upload(file)
             .map_err(|error| target_error(AccessAction::CloseFile, error))?;
-        progress
-            .results
-            .note_metadata(&item.source, warning.as_deref());
+        progress.results.note_metadata(&item.source, warning);
         if !entry_metadata(target)?.is_some_and(|current| identity.same_object(&current)) {
             return Err(PublicationError::SmbTargetChanged(target.clone()).into());
         }

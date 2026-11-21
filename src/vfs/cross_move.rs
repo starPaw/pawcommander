@@ -180,9 +180,7 @@ fn verify_file_pair(
             children: None,
         };
         open_version.verify(target, &cancel, true)?;
-        progress
-            .results
-            .note_metadata(displayed_source, warning.as_deref());
+        progress.results.note_metadata(displayed_source, warning);
     }
     current_source.verify_metadata(source, &input.metadata(source)?)?;
     current_source.verify(source, &cancel, true)?;
@@ -476,7 +474,7 @@ pub(super) fn remove_verified_at(
                         if let Some(wanted) = attributes {
                             let warning =
                                 copy_metadata::finish_directory(&target, &wanted, copied)?;
-                            progress.results.note_metadata(original, warning.as_deref());
+                            progress.results.note_metadata(original, warning);
                             cancel.check()?;
                             if !directory_matches(&entry.metadata, &metadata(&source)?) {
                                 return Err(changed(&source).into());
