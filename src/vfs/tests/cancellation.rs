@@ -226,7 +226,7 @@ fn cancellation_and_committed_cleanup_failures_are_real_errors_with_truthful_acc
     assert!(error.to_string().contains(&retained.display().to_string()));
     assert_eq!(fs::read(&retained).unwrap(), b"cleanup obstacle");
     assert_eq!(fs::read(target.path()).unwrap(), b"payload");
-    let cancelled_error = staging_result_typed(
+    let cancelled_error = StagingCleanupError::combine(
         Err(TransferError::Cancelled),
         Err("cleanup denied".into()),
         &root,
@@ -254,17 +254,51 @@ fn replacement_critical_section_defers_cancellation_through_publication_and_clea
             staging,
             &expected,
             preserve,
-            &mut false,
             |from, to| {
-                rename_without_replacing(from, to)?;
+                rename_for_publication(from, to)?;
                 cancel.request();
                 Ok(())
             },
         )
+        .map_err(|error| crate::i18n::file_error(&error))
     })
     .unwrap();
     assert!(cancel.is_requested());
     assert_eq!(fs::read(target.path()).unwrap(), b"new payload");
     assert!(!source.path().exists());
     assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn cancellation_after_backup_restores_destination_and_stays_cancelled() {
+    use super::super::transfer::{publish_checked_replacement, with_staging_typed};
+
+    let fixture = tempfile::tempdir().unwrap();
+    let root: Location = fixture.path().to_path_buf().into();
+    let payload = root.join("new");
+    let target = root.join("existing");
+    fs::write(payload.path(), b"new bytes").unwrap();
+    fs::write(target.path(), b"old bytes").unwrap();
+    let cancel = Cancellation::default();
+    let result = with_staging_typed(&target, Some(&cancel), |staging, preserve| {
+        publish_checked_replacement(
+            &payload,
+            &target,
+            staging,
+            preserve,
+            rename_for_publication,
+            |candidate| {
+                if candidate != &target {
+                    assert_eq!(fs::read(candidate.path()).unwrap(), b"old bytes");
+                    assert!(!target.path().exists());
+                    cancel.request();
+                }
+                cancel.check().map_err(Into::into)
+            },
+        )
+    });
+    assert!(matches!(result, Err(TransferError::Cancelled)));
+    assert_eq!(fs::read(target.path()).unwrap(), b"old bytes");
+    assert_eq!(fs::read(payload.path()).unwrap(), b"new bytes");
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
 }

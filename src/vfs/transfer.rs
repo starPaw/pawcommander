@@ -4,7 +4,7 @@ use super::mutations::remove_remote_tree;
 use super::sftp::remote;
 use super::{err, TransferFailure, TransferSummary, MAX_TREE_DEPTH};
 use crate::conflict::{Answer, Conflict, Decision, EntryDetails};
-use crate::file_error::{Failure, StagingCleanupError};
+use crate::file_error::{MutationError, PublicationError, RecoveryNotice, StagingCleanupError};
 use crate::fs_ops::TransferKind;
 use crate::operations::{Cancellation, CopyReader, Progress, TransferError};
 use crate::{archive, fs_ops};
@@ -894,10 +894,11 @@ pub(super) fn copy_item_cancellable(
             target,
             progress,
             |payload, _| {
-                publish_item(
+                publish_item_typed(
                     &payload.to_path_buf().into(),
                     &item.target,
                     expected,
+                    |_| {},
                     published,
                 )
             },
@@ -1141,29 +1142,15 @@ fn copy_transfer(
             }
             cancel.check()?;
             if let Some(expected) = expected {
-                let mut attempted = false;
-                publish_replacement_with_backup_rename(
-                    &payload,
-                    &item.target,
-                    staging,
-                    expected,
-                    preserve,
-                    &mut attempted,
-                    rename_without_replacing,
-                )
-                .map_err(|error| publication_error(&item.target, attempted, error))
+                publish_replacement(&payload, &item.target, staging, expected, preserve)
             } else {
                 rename_for_publication(&payload, &item.target)
             }
         })();
         match publication {
-            Err(TransferError::PublicationUnconfirmed(error)) => {
+            Err(error @ TransferError::PublicationUnconfirmed(_)) => {
                 *preserve = true;
-                return Err(TransferError::publication_unconfirmed(crate::tr_format!(
-                    "{error}. Temporary folder retained for inspection at {staging}.",
-                    error = error,
-                    staging = staging
-                )));
+                return Err(error.with_retained_staging(staging, RecoveryNotice::InspectStaging));
             }
             Err(error) => {
                 if preserve_metadata && !*preserve {
@@ -1223,58 +1210,34 @@ pub(super) fn check_copy_space(
     fs_ops::ensure_copy_space(required, available, parent)
 }
 
-pub(super) fn rename_without_replacing(source: &Location, target: &Location) -> Result<(), String> {
-    if let (Some(source), Some(target)) = (source.local(), target.local()) {
-        fs_ops::rename_with_context(source, target).map_err(|error| crate::i18n::file_error(&error))
-    } else {
-        remote(source)?
-            .rename(source.path(), target.path(), Some(RenameFlags::empty()))
-            .map_err(err)
-    }
-}
-
 pub(super) fn rename_for_publication(
     source: &Location,
     target: &Location,
 ) -> Result<(), TransferError> {
     if let (Some(source), Some(target)) = (source.local(), target.local()) {
-        fs_ops::rename_with_context(source, target)
-    } else if target.remote() {
-        // A failed session lookup occurs before any mutation and remains a
-        // definite failure. Only an issued rename can lose its server reply.
-        remote(source)?
-            .rename(source.path(), target.path(), Some(RenameFlags::empty()))
-            .map_err(|error| TransferError::publication_unconfirmed(err(error)))
-    } else {
-        rename_without_replacing(source, target).map_err(TransferError::from)
+        return fs_ops::rename_with_context(source, target);
     }
-}
-
-pub(super) fn publish_item(
-    payload: &Location,
-    target: &Location,
-    expected: Option<&EntryMetadata>,
-    published: impl FnOnce(),
-) -> Result<(), String> {
-    if let Some(expected) = expected {
-        with_staging(target, |staging, preserve| {
-            publish_replacement(payload, target, staging, expected, preserve)?;
-            published();
-            Ok(())
+    // The session must open before we can issue a mutation. A failure in the
+    // rename call itself leaves the existing conservative SFTP outcome.
+    remote(source)
+        .map_err(|reason| MutationError::OpenSftpRename {
+            from: source.clone(),
+            to: target.clone(),
+            reason,
+        })?
+        .rename(source.path(), target.path(), Some(RenameFlags::empty()))
+        .map_err(|error| {
+            let reason = MutationError::RenameSftp {
+                from: source.clone(),
+                to: target.clone(),
+                source: error,
+            };
+            if target.remote() {
+                TransferError::PublicationUnconfirmed(reason.into())
+            } else {
+                reason.into()
+            }
         })
-    } else {
-        rename_without_replacing(payload, target)?;
-        published();
-        Ok(())
-    }
-}
-
-fn publication_error(target: &Location, attempted: bool, error: String) -> TransferError {
-    if target.remote() && attempted {
-        TransferError::publication_unconfirmed(error)
-    } else {
-        TransferError::from(error)
-    }
 }
 
 pub(super) fn publish_item_typed(
@@ -1287,17 +1250,7 @@ pub(super) fn publish_item_typed(
     if let Some(expected) = expected {
         with_staging_typed(target, None, |staging, preserve| {
             planned_backup(staging);
-            let mut attempted = false;
-            publish_replacement_with_backup_rename(
-                payload,
-                target,
-                staging,
-                expected,
-                preserve,
-                &mut attempted,
-                rename_without_replacing,
-            )
-            .map_err(|error| publication_error(target, attempted, error))?;
+            publish_replacement(payload, target, staging, expected, preserve)?;
             published();
             Ok(())
         })
@@ -1314,16 +1267,14 @@ pub(super) fn publish_replacement(
     staging: &Location,
     expected: &EntryMetadata,
     preserve: &mut bool,
-) -> Result<(), String> {
-    let mut attempted = false;
+) -> Result<(), TransferError> {
     publish_replacement_with_backup_rename(
         payload,
         target,
         staging,
         expected,
         preserve,
-        &mut attempted,
-        rename_without_replacing,
+        rename_for_publication,
     )
 }
 
@@ -1333,24 +1284,19 @@ pub(super) fn publish_replacement_with_backup_rename(
     staging: &Location,
     expected: &EntryMetadata,
     preserve: &mut bool,
-    attempted: &mut bool,
-    backup_rename: impl FnOnce(&Location, &Location) -> Result<(), String>,
-) -> Result<(), String> {
+    backup_rename: impl FnOnce(&Location, &Location) -> Result<(), TransferError>,
+) -> Result<(), TransferError> {
     publish_checked_replacement(
         payload,
         target,
         staging,
         preserve,
-        attempted,
         backup_rename,
         |candidate| {
             if entry_metadata(candidate)?.is_some_and(|meta| expected.matches_file(&meta)) {
                 Ok(())
             } else {
-                Err(crate::tr_format!(
-                    "Destination {target} changed after the conflict dialog was shown",
-                    target = target
-                ))
+                Err(PublicationError::DestinationChanged(target.clone()).into())
             }
         },
     )
@@ -1361,49 +1307,53 @@ pub(super) fn publish_checked_replacement(
     target: &Location,
     staging: &Location,
     preserve: &mut bool,
-    attempted: &mut bool,
-    backup_rename: impl FnOnce(&Location, &Location) -> Result<(), String>,
-    mut check: impl FnMut(&Location) -> Result<(), String>,
-) -> Result<(), String> {
+    backup_rename: impl FnOnce(&Location, &Location) -> Result<(), TransferError>,
+    mut check: impl FnMut(&Location) -> Result<(), TransferError>,
+) -> Result<(), TransferError> {
     check(target)?;
     let backup = staging.join("previous");
     // A lost SFTP reply can hide a successful rename. Preserve the staging
     // directory until the old file is either restored or safely replaced.
-    *preserve = target.remote();
-    *attempted = true;
-    backup_rename(target, &backup).map_err(|e| {
-        crate::i18n::initial_backup_rename_failed(&e, target, &backup, target.remote())
-    })?;
+    if let Err(error) = backup_rename(target, &backup) {
+        *preserve = matches!(error, TransferError::PublicationUnconfirmed(_));
+        return Err(
+            error.with_publication_context(|cause| PublicationError::Backup {
+                target: target.clone(),
+                backup,
+                cause,
+            }),
+        );
+    }
     *preserve = true;
     let result = (|| {
         check(&backup)?;
         if !entry_metadata(payload)?.is_some_and(|meta| meta.is_file()) {
-            return Err(crate::tr_format!(
-                "Source item {payload} is no longer a regular file",
-                payload = payload
-            ));
+            return Err(PublicationError::PayloadNotRegular(payload.clone()).into());
         }
-        *attempted = true;
-        rename_without_replacing(payload, target)
+        rename_for_publication(payload, target)
     })();
-    if let Err(error) = result {
-        *attempted = true;
-        if let Err(rollback) = rename_without_replacing(&backup, target) {
-            return Err(crate::i18n::replacement_rollback_failed(
-                &error,
-                &rollback,
-                target,
-                &backup,
-                target.remote(),
-            ));
+    if let Err(cause) = result {
+        if let Err(restore) = rename_for_publication(&backup, target) {
+            let reason = PublicationError::Rollback {
+                target: target.clone(),
+                backup,
+                cause,
+                restore,
+            };
+            return if target.remote() {
+                Err(TransferError::PublicationUnconfirmed(reason.into()))
+            } else {
+                Err(reason.into())
+            };
         }
         *preserve = false;
-        return Err(error);
+        return Err(cause);
     }
     *preserve = false;
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn with_staging(
     target: &Location,
     work: impl FnOnce(&Location, &mut bool) -> Result<(), String>,
@@ -1534,7 +1484,7 @@ pub(super) fn staging_result(
     staging: &Location,
     target: &Location,
 ) -> Result<(), String> {
-    staging_result_typed(
+    StagingCleanupError::combine(
         result.map_err(Into::into),
         cleanup.map_err(Into::into),
         staging,
@@ -1610,7 +1560,7 @@ fn staging_typed(
         let location = Location::Local(staging.path().into());
         if use_operation_marker && let Err(error) = crate::recovery::register_staging(&location) {
             let cleanup = staging.close().map_err(Into::into);
-            return staging_result_typed(Err(err(error).into()), cleanup, &location, target);
+            return StagingCleanupError::combine(Err(error.into()), cleanup, &location, target);
         }
         if preserve {
             staging.keep();
@@ -1620,7 +1570,7 @@ fn staging_typed(
             staging.keep();
             return result;
         }
-        return staging_result_typed(
+        return StagingCleanupError::combine(
             result,
             staging.close().map_err(Into::into),
             &location,
@@ -1650,7 +1600,7 @@ fn staging_typed(
     }
     if use_operation_marker && let Err(error) = crate::recovery::register_staging(&staging) {
         let cleanup = remove_remote_tree(&sftp, &staging, MAX_TREE_DEPTH + 1);
-        return staging_result_typed(Err(err(error).into()), cleanup, &staging, target);
+        return StagingCleanupError::combine(Err(error.into()), cleanup, &staging, target);
     }
     let result = work(&staging, &mut preserve);
     if preserve {
@@ -1659,32 +1609,7 @@ fn staging_typed(
     // The private staging directory adds one level above the payload, whose
     // source tree may already use all 128 supported descendant levels.
     let cleanup = remove_remote_tree(&sftp, &staging, MAX_TREE_DEPTH + 1);
-    staging_result_typed(result, cleanup, &staging, target)
-}
-
-pub(super) fn staging_result_typed(
-    result: Result<(), TransferError>,
-    cleanup: Result<(), TransferError>,
-    staging: &Location,
-    target: &Location,
-) -> Result<(), TransferError> {
-    match cleanup {
-        Ok(()) => result,
-        Err(cleanup) => {
-            let unconfirmed = matches!(result, Err(TransferError::PublicationUnconfirmed(_)));
-            let reason = Failure::StagingCleanup(Box::new(StagingCleanupError {
-                operation: result.err(),
-                cleanup,
-                staging: staging.clone(),
-                target: target.clone(),
-            }));
-            Err(if unconfirmed {
-                TransferError::PublicationUnconfirmed(reason)
-            } else {
-                TransferError::Failed(reason)
-            })
-        }
-    }
+    StagingCleanupError::combine(result, cleanup, &staging, target)
 }
 
 #[cfg(test)]

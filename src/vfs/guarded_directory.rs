@@ -6,6 +6,7 @@ use super::{
     },
     Location,
 };
+use crate::file_error::{PublicationError, RecoveryNotice};
 use crate::operations::{Cancellation, TransferError};
 use std::{ffi::OsStr, fs, io, os::fd::OwnedFd, path::Path};
 
@@ -176,11 +177,14 @@ fn held_metadata(descriptor: &OwnedFd) -> Result<EntryMetadata, TransferError> {
 }
 
 pub(super) fn retained(error: TransferError, staging: &Location) -> TransferError {
-    TransferError::publication_unconfirmed(crate::tr_format!(
-        "{error}. Temporary folder retained for inspection: {staging}.",
-        error = crate::i18n::file_error(&error),
-        staging = staging
-    ))
+    TransferError::PublicationUnconfirmed(
+        PublicationError::Retained {
+            staging: staging.clone(),
+            notice: RecoveryNotice::InspectStaging,
+            cause: error,
+        }
+        .into(),
+    )
 }
 
 pub(super) fn open_staging(location: &Location) -> Result<ReadScope, TransferError> {

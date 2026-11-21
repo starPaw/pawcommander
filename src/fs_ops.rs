@@ -2,7 +2,7 @@
 //! volume before publication. This does not snapshot a changing filesystem.
 
 use crate::file_error::{
-    ListingError, ListingErrorKind, LocalPathAction, MutationError, PathError,
+    ListingError, ListingErrorKind, LocalPathAction, MutationError, PathError, StagingCleanupError,
 };
 use crate::operations::{Cancellation, CopyReader, Progress, TransferError};
 use crate::vfs::DeletionFailure;
@@ -603,15 +603,21 @@ fn copy_atomically_checked(
     publish: impl FnOnce(&Path, &Path) -> Result<(), String>,
     after_entry: &mut impl FnMut(&Path) -> io::Result<()>,
 ) -> Result<(), String> {
-    copy_atomically_cancellable(source, destination, progress, publish, after_entry)
-        .map_err(|error| error.to_string())
+    copy_atomically_cancellable(
+        source,
+        destination,
+        progress,
+        |payload, target| publish(payload, target).map_err(Into::into),
+        after_entry,
+    )
+    .map_err(|error| crate::i18n::file_error(&error))
 }
 
 pub(crate) fn copy_atomically_cancellable(
     source: &Path,
     destination: &Path,
     progress: &mut Progress,
-    publish: impl FnOnce(&Path, &Path) -> Result<(), String>,
+    publish: impl FnOnce(&Path, &Path) -> Result<(), TransferError>,
     after_entry: &mut impl FnMut(&Path) -> io::Result<()>,
 ) -> Result<(), TransferError> {
     progress.checkpoint()?;
@@ -700,19 +706,13 @@ pub(crate) fn copy_atomically_cancellable(
         })
         .and_then(|()| check_staging())
         // No cancellation inside publication, rollback, or staging cleanup.
-        .and_then(|()| publish(&payload, destination).map_err(Into::into));
-    match (result, remove_staging(&staging)) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), Ok(())) => Err(error),
-        (Err(error), Err(cleanup)) => Err(crate::tr_format!(
-            "{error}. Temporary copy remains at “{}”: {cleanup}",
-            staging.path.display(), cleanup = cleanup, error = error
-        ).into()),
-        (Ok(()), Err(cleanup)) => Err(crate::tr_format!(
-            "Copy “{}” is ready, but its empty temporary folder “{}” could not be removed: {cleanup}",
-            destination.display(), staging.path.display(), cleanup = cleanup
-        ).into()),
-    }
+        .and_then(|()| publish(&payload, destination));
+    StagingCleanupError::combine(
+        result,
+        remove_staging(&staging).map_err(Into::into),
+        &staging.path.into(),
+        &target_location,
+    )
 }
 
 #[cfg(unix)]
@@ -1475,7 +1475,7 @@ mod tests {
             &source,
             &target,
             &mut progress,
-            |payload, target| fs::rename(payload, target).map_err(|e| e.to_string()),
+            |payload, target| fs::rename(payload, target).map_err(Into::into),
             &mut |_| Ok(()),
         )
         .unwrap();

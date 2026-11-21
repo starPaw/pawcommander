@@ -43,7 +43,7 @@ fn unknown_publication_survives_staging_cleanup_failure() {
 
     let staging: Location = PathBuf::from("/private-staging").into();
     let target: Location = PathBuf::from("/destination").into();
-    let result = staging_result_typed(
+    let result = StagingCleanupError::combine(
         Err(TransferError::publication_unconfirmed("reply lost".into())),
         Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied).into()),
         &staging,
@@ -70,6 +70,9 @@ fn unknown_publication_survives_staging_cleanup_failure() {
 
 #[test]
 fn failed_initial_backup_rename_retains_original_destination_and_cleans_staging() {
+    use super::super::transfer::with_staging_typed;
+    use crate::file_error::{Failure, PublicationError};
+
     let fixture = tempfile::tempdir().unwrap();
     let root: Location = fixture.path().to_path_buf().into();
     let source = root.join("report.txt");
@@ -81,20 +84,19 @@ fn failed_initial_backup_rename_retains_original_destination_and_cleans_staging(
     let mut backup_path = None;
     let mut rename_calls = 0;
 
-    let error = fs_ops::copy_atomically_with_progress(
+    let error = fs_ops::copy_atomically_cancellable(
         source.path(),
         target.path(),
         &mut Progress::default(),
         |payload, _| {
             assert_eq!(fs::read(payload).unwrap(), b"new source payload");
-            with_staging(&target, |staging, preserve| {
+            with_staging_typed(&target, None, |staging, preserve| {
                 publish_replacement_with_backup_rename(
                     &payload.to_path_buf().into(),
                     &target,
                     staging,
                     &expected,
                     preserve,
-                    &mut false,
                     |from, to| {
                         rename_calls += 1;
                         assert_eq!(from, &target);
@@ -105,6 +107,7 @@ fn failed_initial_backup_rename_retains_original_destination_and_cleans_staging(
                 )
             })
         },
+        &mut |_| Ok(()),
     )
     .unwrap_err();
 
@@ -115,6 +118,15 @@ fn failed_initial_backup_rename_retains_original_destination_and_cleans_staging(
     assert_eq!(fs::read(source.path()).unwrap(), b"new source payload");
     assert_eq!(fs::read(target.path()).unwrap(), b"previous destination");
     assert_eq!(fs::read_dir(target_dir.path()).unwrap().count(), 1);
+    assert!(matches!(
+        &error,
+        TransferError::Failed(Failure::Publication(reason))
+            if matches!(reason.as_ref(), PublicationError::Backup {
+                target: location, backup, cause: TransferError::Failed(Failure::Message(cause)),
+            } if location == &target && backup == &backup_path
+                && cause == "injected first backup rename denial")
+    ));
+    let error = crate::i18n::file_error(&error);
     assert!(error.starts_with("injected first backup rename denial"));
     assert!(error.contains(&target.display().to_string()), "{error}");
     assert!(
@@ -125,6 +137,9 @@ fn failed_initial_backup_rename_retains_original_destination_and_cleans_staging(
 
 #[test]
 fn replacement_rollback_preserves_backup_when_target_is_recreated() {
+    use super::super::transfer::with_staging_typed;
+    use crate::file_error::{Failure, MutationError, PublicationError};
+
     let fixture = tempfile::tempdir().unwrap();
     let root: Location = fixture.path().to_path_buf().into();
     let source = root.join("report.txt");
@@ -135,21 +150,20 @@ fn replacement_rollback_preserves_backup_when_target_is_recreated() {
     let expected = entry_metadata(&target).unwrap().unwrap();
     let mut backup_path = None;
 
-    let error = fs_ops::copy_atomically_with_progress(
+    let error = fs_ops::copy_atomically_cancellable(
         source.path(),
         target.path(),
         &mut Progress::default(),
         |payload, _| {
-            with_staging(&target, |staging, preserve| {
+            with_staging_typed(&target, None, |staging, preserve| {
                 let result = publish_replacement_with_backup_rename(
                     &payload.to_path_buf().into(),
                     &target,
                     staging,
                     &expected,
                     preserve,
-                    &mut false,
                     |from, to| {
-                        rename_without_replacing(from, to)?;
+                        rename_for_publication(from, to)?;
                         backup_path = Some(to.clone());
                         // Another writer wins the now-vacant pathname. Both
                         // publication and rollback must refuse to overwrite it.
@@ -162,6 +176,7 @@ fn replacement_rollback_preserves_backup_when_target_is_recreated() {
                 result
             })
         },
+        &mut |_| Ok(()),
     )
     .unwrap_err();
 
@@ -170,6 +185,30 @@ fn replacement_rollback_preserves_backup_when_target_is_recreated() {
     assert_eq!(fs::read(target.path()).unwrap(), b"external writer");
     assert_eq!(fs::read(backup.path()).unwrap(), b"previous destination");
     assert!(backup.parent().unwrap().path().is_dir());
+    let TransferError::Failed(Failure::Publication(reason)) = &error else {
+        panic!("expected a typed rollback error: {error:?}");
+    };
+    let PublicationError::Rollback {
+        target: location,
+        backup: saved,
+        cause,
+        restore,
+    } = reason.as_ref()
+    else {
+        panic!("expected both rename causes: {reason:?}");
+    };
+    assert_eq!(location, &target);
+    assert_eq!(saved, &backup);
+    for (failure, source_path) in [(cause, "payload"), (restore, "previous")] {
+        assert!(matches!(
+            failure,
+            TransferError::Failed(Failure::Mutation(reason))
+                if matches!(reason.as_ref(), MutationError::RenameLocal { from, to, source }
+                    if from.file_name().is_some_and(|name| name == source_path)
+                        && to == target.path() && source.kind() == std::io::ErrorKind::AlreadyExists)
+        ));
+    }
+    let error = crate::i18n::file_error(&error);
     assert!(error.contains(&backup.display().to_string()), "{error}");
     // Only the retained recovery directory remains; outer payload staging
     // was cleaned without deleting the separately preserved backup.

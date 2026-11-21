@@ -10,12 +10,19 @@ pub(crate) enum Failure {
     Listing(Box<ListingError>),
     ConflictClosed,
     Mutation(Box<MutationError>),
+    Publication(Box<PublicationError>),
     StagingCleanup(Box<StagingCleanupError>),
 }
 
 impl From<MutationError> for Failure {
     fn from(error: MutationError) -> Self {
         Self::Mutation(Box::new(error))
+    }
+}
+
+impl From<PublicationError> for Failure {
+    fn from(error: PublicationError) -> Self {
+        Self::Publication(Box::new(error))
     }
 }
 
@@ -27,6 +34,7 @@ impl Failure {
             Self::Path(error) => Some(error),
             Self::Listing(error) => Some(error.as_ref()),
             Self::Mutation(error) => Some(error.as_ref()),
+            Self::Publication(error) => Some(error.as_ref()),
             Self::StagingCleanup(error) => Some(error.as_ref()),
         }
     }
@@ -40,7 +48,94 @@ impl fmt::Display for Failure {
             Self::Listing(error) => fmt::Display::fmt(error, f),
             Self::ConflictClosed => f.write_str("Conflict dialog closed"),
             Self::Mutation(error) => fmt::Display::fmt(error, f),
+            Self::Publication(error) => fmt::Display::fmt(error, f),
             Self::StagingCleanup(error) => fmt::Display::fmt(error, f),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum RecoveryNotice {
+    InspectStaging,
+    #[cfg(target_os = "macos")]
+    ResumeCopy,
+    #[cfg(target_os = "macos")]
+    ExternalEditor,
+}
+
+#[derive(Debug)]
+pub(crate) enum PublicationError {
+    DestinationChanged(Location),
+    PayloadNotRegular(Location),
+    Backup {
+        target: Location,
+        backup: Location,
+        cause: TransferError,
+    },
+    Rollback {
+        target: Location,
+        backup: Location,
+        cause: TransferError,
+        restore: TransferError,
+    },
+    Retained {
+        staging: Location,
+        notice: RecoveryNotice,
+        cause: TransferError,
+    },
+}
+
+impl fmt::Display for PublicationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DestinationChanged(target) => write!(
+                f,
+                "Destination {target} changed after the conflict dialog was shown"
+            ),
+            Self::PayloadNotRegular(payload) => {
+                write!(f, "Source item {payload} is no longer a regular file")
+            }
+            Self::Backup {
+                target,
+                backup,
+                cause,
+            } => {
+                write!(
+                    f,
+                    "Could not move the previous item from {target} to {backup}: {cause}"
+                )
+            }
+            Self::Rollback {
+                target,
+                backup,
+                cause,
+                restore,
+            } => write!(
+                f,
+                "{cause}. Could not restore the previous item from {backup} to {target}: {restore}"
+            ),
+            Self::Retained { staging, cause, .. } => {
+                write!(
+                    f,
+                    "{cause}. Temporary folder retained for inspection at {staging}"
+                )
+            }
+        }
+    }
+}
+
+impl Error for PublicationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Backup { cause, .. } | Self::Retained { cause, .. } => Some(cause),
+            Self::Rollback { cause, restore, .. } => {
+                if matches!(cause, TransferError::Cancelled) {
+                    Some(restore)
+                } else {
+                    Some(cause)
+                }
+            }
+            Self::DestinationChanged(_) | Self::PayloadNotRegular(_) => None,
         }
     }
 }
@@ -51,6 +146,31 @@ pub(crate) struct StagingCleanupError {
     pub(crate) target: Location,
     pub(crate) operation: Option<TransferError>,
     pub(crate) cleanup: TransferError,
+}
+
+impl StagingCleanupError {
+    pub(crate) fn combine(
+        result: Result<(), TransferError>,
+        cleanup: Result<(), TransferError>,
+        staging: &Location,
+        target: &Location,
+    ) -> Result<(), TransferError> {
+        let Err(cleanup) = cleanup else {
+            return result;
+        };
+        let unconfirmed = matches!(result, Err(TransferError::PublicationUnconfirmed(_)));
+        let reason = Failure::StagingCleanup(Box::new(Self {
+            operation: result.err(),
+            cleanup,
+            staging: staging.clone(),
+            target: target.clone(),
+        }));
+        Err(if unconfirmed {
+            TransferError::PublicationUnconfirmed(reason)
+        } else {
+            TransferError::Failed(reason)
+        })
+    }
 }
 
 impl fmt::Display for StagingCleanupError {
@@ -124,6 +244,16 @@ pub(crate) enum MutationError {
         to: PathBuf,
         source: io::Error,
     },
+    OpenSftpRename {
+        from: Location,
+        to: Location,
+        reason: String,
+    },
+    RenameSftp {
+        from: Location,
+        to: Location,
+        source: ssh2::Error,
+    },
     CreateSftp {
         destination: Location,
         source: ssh2::Error,
@@ -187,6 +317,12 @@ impl fmt::Display for MutationError {
                     "Could not rename {from:?} to {to:?} without replacement: {source}"
                 )
             }
+            Self::OpenSftpRename { from, to, reason } => {
+                write!(f, "Could not open SFTP to rename {from} to {to}: {reason}")
+            }
+            Self::RenameSftp { from, to, source } => {
+                write!(f, "SFTP rename from {from} to {to}: {source}")
+            }
             Self::CreateSftp {
                 destination,
                 source,
@@ -227,7 +363,9 @@ impl Error for MutationError {
             Self::LocalIo { source, .. }
             | Self::CurrentDirectory { source, .. }
             | Self::RenameLocal { source, .. } => Some(source),
-            Self::CreateSftp { source, .. } | Self::RemoveSftp { source, .. } => Some(source),
+            Self::CreateSftp { source, .. }
+            | Self::RemoveSftp { source, .. }
+            | Self::RenameSftp { source, .. } => Some(source),
             Self::Trash { source, .. } => Some(source),
             _ => None,
         }

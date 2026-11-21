@@ -1,7 +1,7 @@
 use super::text;
 use crate::file_error::{
     ArchiveMemberError, Failure, ListingError, ListingErrorKind, LocalPathAction, MutationError,
-    PathError, StagingCleanupError,
+    PathError, PublicationError, RecoveryNotice, StagingCleanupError,
 };
 use crate::operations::TransferError;
 use crate::vfs::{DeletionFailure, TransferFailure};
@@ -13,20 +13,11 @@ pub(crate) fn file_error(error: &TransferError) -> String {
                 Failure::Path(error) => path_error(error),
                 Failure::Listing(error) => listing_error(error),
                 Failure::ConflictClosed => text!("Диалог конфликта закрыт").into(),
-                Failure::Mutation(reason) => {
-                    if matches!(error, TransferError::PublicationUnconfirmed(_))
-                        && let MutationError::RemoveSftp {
-                            location, source, ..
-                        } = reason.as_ref()
-                    {
-                        return crate::tr_format!(
-                            "SFTP deletion at {location} is unconfirmed: {error}. Check the folder before trying again",
-                            error = source,
-                            location = location
-                        );
-                    }
-                    mutation_error(reason)
-                }
+                Failure::Mutation(reason) => mutation_error(
+                    reason,
+                    matches!(error, TransferError::PublicationUnconfirmed(_)),
+                ),
+                Failure::Publication(reason) => publication_error(reason),
                 Failure::StagingCleanup(error) => staging_cleanup_error(error),
                 _ => error.to_string(),
             }
@@ -132,7 +123,7 @@ pub(crate) fn path_error(error: &PathError) -> String {
     message.into()
 }
 
-fn mutation_error(error: &MutationError) -> String {
+fn mutation_error(error: &MutationError, unconfirmed: bool) -> String {
     use MutationError::*;
     match error {
         LocalIo {
@@ -185,6 +176,24 @@ fn mutation_error(error: &MutationError) -> String {
                 error = source
             )
         }
+        OpenSftpRename { from, to, reason } => crate::tr_format!(
+            "Could not open SFTP to rename {from} to {to}: {error}",
+            from = from,
+            to = to,
+            error = reason
+        ),
+        RenameSftp { from, to, source } if unconfirmed => crate::tr_format!(
+            "The server did not confirm the rename from {from} to {to}: {error}",
+            from = from,
+            to = to,
+            error = source
+        ),
+        RenameSftp { from, to, source } => crate::tr_format!(
+            "Could not rename SFTP item {from} to {to}: {error}",
+            from = from,
+            to = to,
+            error = source
+        ),
         CreateSftp {
             destination,
             source,
@@ -213,13 +222,77 @@ fn mutation_error(error: &MutationError) -> String {
             error = reason,
             location = location
         ),
-        RemoveSftp {
-            location, source, ..
-        } => crate::tr_format!(
+        RemoveSftp { location, source, .. } if unconfirmed => crate::tr_format!(
+            "SFTP deletion at {location} is unconfirmed: {error}. Check the folder before trying again",
+            error = source,
+            location = location
+        ),
+        RemoveSftp { location, source, .. } => crate::tr_format!(
             "Could not delete SFTP item {location}: {error}",
             error = source,
             location = location
         ),
+    }
+}
+
+fn publication_error(error: &PublicationError) -> String {
+    match error {
+        PublicationError::DestinationChanged(target) => crate::tr_format!(
+            "Destination {target} changed after the conflict dialog was shown",
+            target = target
+        ),
+        PublicationError::PayloadNotRegular(payload) => crate::tr_format!(
+            "Source item {payload} is no longer a regular file",
+            payload = payload
+        ),
+        PublicationError::Backup {
+            target,
+            backup,
+            cause,
+        } => super::initial_backup_rename_failed(
+            &file_error(cause),
+            target,
+            backup,
+            matches!(cause, TransferError::PublicationUnconfirmed(_)),
+        ),
+        PublicationError::Rollback {
+            target,
+            backup,
+            cause,
+            restore,
+        } => super::replacement_rollback_failed(
+            &file_error(cause),
+            &file_error(restore),
+            target,
+            backup,
+            target.remote(),
+        ),
+        PublicationError::Retained {
+            staging,
+            notice,
+            cause,
+        } => {
+            let message = file_error(cause);
+            match notice {
+                RecoveryNotice::InspectStaging => crate::tr_format!(
+                    "{error}. Temporary folder retained for inspection at {staging}.",
+                    error = message,
+                    staging = staging
+                ),
+                #[cfg(target_os = "macos")]
+                RecoveryNotice::ResumeCopy => crate::tr_format!(
+                    "{message} Partial copy retained at {stage}. See Crash recovery.",
+                    message = message,
+                    stage = staging
+                ),
+                #[cfg(target_os = "macos")]
+                RecoveryNotice::ExternalEditor => crate::tr_format!(
+                    "{error}. Inspect the destination and retained folder {staging}.",
+                    error = message,
+                    staging = staging
+                ),
+            }
+        }
     }
 }
 
