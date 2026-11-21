@@ -47,7 +47,7 @@ block2 = "=0.6.2"
 apple-native-keyring-store = { version = "=1.0.2", features = ["keychain"] }
 objc2 = "=0.6.5"
 objc2-foundation = { version = "=0.3.2", features = ["NSArray", "NSDictionary", "NSError", "NSFileCoordinator", "NSGeometry", "NSObject", "NSOperation", "NSString", "NSThread", "NSURL"] }
-objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "block2", "NSApplication", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSEvent", "NSFilePromiseProvider", "NSGraphicsContext", "NSImage", "NSMenu", "NSMenuItem", "NSPasteboard", "NSPasteboardItem", "NSResponder", "NSView", "NSWindow", "NSWorkspace"] }
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "block2", "NSApplication", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSEvent", "NSFilePromiseProvider", "NSGraphicsContext", "NSImage", "NSMenu", "NSMenuItem", "NSOpenPanel", "NSPanel", "NSPasteboard", "NSPasteboardItem", "NSResponder", "NSSavePanel", "NSView", "NSWindow", "NSWorkspace"] }
 ron = "=0.12.3"
 
 [target.'cfg(target_os = "windows")'.dependencies]

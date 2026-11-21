@@ -65,6 +65,7 @@ impl PaneOrientation {
 }
 
 #[derive(Serialize, Deserialize)]
+#[cfg_attr(target_os = "macos", derive(Clone, Debug, PartialEq))]
 #[serde(default)]
 pub(super) struct PaneLayout {
     pub(super) orientation: PaneOrientation,

@@ -44,6 +44,8 @@ mod pickers;
 mod quick_look;
 mod search;
 mod selection;
+#[cfg(target_os = "macos")]
+mod settings_transfer;
 mod sidebar;
 #[cfg(target_os = "macos")]
 mod smb_connections;
