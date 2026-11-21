@@ -351,12 +351,7 @@ impl Results {
             Err(TransferError::Failed(_)) => Outcome::Failed,
         };
         if self.active_source.as_ref() == Some(source) {
-            self.record(
-                source,
-                None,
-                outcome,
-                result.as_ref().err().map(crate::i18n::file_error),
-            );
+            self.record_with_error(source, outcome, result.as_ref().err());
         } else if self.observed_group
             && let Some(&index) = self.nested_index.get(source)
         {
@@ -532,6 +527,15 @@ impl Results {
             self.finish_group(index, outcome);
         }
         self.clear_active();
+    }
+
+    pub(crate) fn record_with_error(
+        &mut self,
+        source: &Location,
+        outcome: Outcome,
+        error: Option<&TransferError>,
+    ) {
+        self.record(source, None, outcome, error.map(crate::i18n::file_error));
     }
 
     pub fn finish(

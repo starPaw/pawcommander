@@ -7,14 +7,17 @@ import subprocess
 import sys
 
 
+LSTAT = 7
+SETSTAT = 9
 REMOVE = 13
 RENAME = 18
 STATUS = 101
-BEFORE = {"lost-before.bin"}
+BEFORE = {"lost-before.bin", "lost-permissions-before.bin"}
 AFTER = {
     "lost-after.bin", "lost-move-dir", "lost-replacement.bin", "lost-conflict.bin",
-    "lost-held-after", "lost-remove.bin",
+    "lost-held-after", "lost-remove.bin", "lost-permissions-after.bin",
 }
+PERMISSIONS_READBACK = "lost-permissions-readback.bin"
 
 
 def read_packet(stream):
@@ -51,11 +54,19 @@ def rename_target(packet):
     return target.name
 
 
+def path_name(packet):
+    size, = struct.unpack_from(">I", packet, 5)
+    return Path(os.fsdecode(packet[9:9 + size])).name
+
+
 def mutation_name(packet):
     if packet[0] == REMOVE:
-        size, = struct.unpack_from(">I", packet, 5)
-        name = Path(os.fsdecode(packet[9:9 + size])).name
+        name = path_name(packet)
         return name if name == "lost-remove.bin" else None
+    if packet[0] == SETSTAT:
+        name = path_name(packet)
+        if name in {"lost-permissions-before.bin", "lost-permissions-after.bin", PERMISSIONS_READBACK}:
+            return name
     return rename_target(packet)
 
 
@@ -63,18 +74,26 @@ def run(fixture, sftp_server):
     with subprocess.Popen(
         [sftp_server], stdin=subprocess.PIPE, stdout=subprocess.PIPE
     ) as backend:
+        permissions_changed = False
         try:
             while (request := read_packet(sys.stdin.buffer)) is not None:
                 name = mutation_name(request)
-                marker = fixture / ("held-" + name) if name in BEFORE | AFTER else None
+                readback = permissions_changed and request[0] == LSTAT and path_name(request) == PERMISSIONS_READBACK
+                if readback:
+                    name = PERMISSIONS_READBACK
+                marker = fixture / ("held-" + name) if readback or name in BEFORE | AFTER else None
                 hold = marker is not None and not marker.exists()
-                if hold and name in BEFORE:
-                    condition = "before"
+                if hold and (readback or name in BEFORE):
+                    condition = "readback" if readback else "before"
                 else:
                     write_packet(backend.stdin, request)
                     response = read_packet(backend.stdout)
                     if response is None:
                         raise RuntimeError("The SFTP server returned no response")
+                    if request[0] == SETSTAT and name == PERMISSIONS_READBACK:
+                        if response[0] != STATUS or response[1:5] != request[1:5] or response[5:9] != b"\0" * 4:
+                            raise RuntimeError("The disposable server did not set permissions")
+                        permissions_changed = True
                     if not hold:
                         write_packet(sys.stdout.buffer, response)
                         continue

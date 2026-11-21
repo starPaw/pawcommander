@@ -1,5 +1,5 @@
-use crate::i18n::text;
-use crate::operations::{Cancellation, TransferError};
+use crate::i18n::{file_error, text};
+use crate::operations::{Cancellation, Progress, TransferError};
 use crate::vfs::{Location, ModeRule, PermissionsPreview};
 use eframe::egui;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -97,7 +97,8 @@ impl PermissionsDialog {
                                     ));
                                 }
                                 Err(error) => {
-                                    let label = egui::RichText::new(error)
+                                    let error = file_error(error);
+                                    let label = egui::RichText::new(&error)
                                         .color(columns[1].visuals().error_fg_color);
                                     columns[1]
                                         .add(egui::Label::new(label).truncate())
@@ -125,7 +126,7 @@ impl PermissionsDialog {
         let rule = match ModeRule::parse(&self.draft) {
             Ok(rule) => rule,
             Err(error) => {
-                self.error = Some(error.into());
+                self.error = Some(file_error(&error));
                 return;
             }
         };
@@ -156,7 +157,7 @@ impl PermissionsDialog {
         };
         match pending.receive.try_recv() {
             Ok(Ok(preview)) => self.preview = Some(preview),
-            Ok(Err(error)) => self.error = Some(crate::i18n::file_error(&error)),
+            Ok(Err(error)) => self.error = Some(file_error(&error)),
             Err(TryRecvError::Empty) => return,
             Err(TryRecvError::Disconnected) => {
                 self.error =
@@ -164,6 +165,30 @@ impl PermissionsDialog {
             }
         }
         self.pending = None;
+    }
+}
+
+pub(super) fn apply(plan: PermissionsPreview, progress: &mut Progress) -> Result<String, String> {
+    let report = match plan.apply(progress) {
+        Ok(report) => report,
+        Err(TransferError::Cancelled) => {
+            return Ok(text!("Операция остановлена пользователем").into())
+        }
+        Err(error) => return Err(file_error(&error)),
+    };
+    let mut summary = crate::tr_format!(
+        "Changed {}. With warnings {}. Skipped {}. Failed {}.",
+        report.completed,
+        report.warned,
+        report.skipped,
+        report.failed
+    );
+    if report.cancelled {
+        summary = format!("{}. {summary}", text!("Операция остановлена пользователем"));
+    }
+    match report.error {
+        Some(error) => Err(format!("{summary} {}", file_error(&error))),
+        None => Ok(summary),
     }
 }
 

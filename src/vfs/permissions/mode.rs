@@ -1,3 +1,6 @@
+use crate::file_error::PermissionError;
+use crate::operations::TransferError;
+
 pub(super) const MODE_BITS: u32 = 0o7777;
 const USER: u32 = 0o4700;
 const GROUP: u32 = 0o2070;
@@ -28,12 +31,8 @@ enum Permissions {
 }
 
 impl ModeRule {
-    pub(crate) fn parse(input: &str) -> Result<Self, &'static str> {
-        parse(input.trim()).map_err(|()| {
-            crate::i18n::text!(
-                "Введите восьмеричные или символьные права, например 0644 или u+rw,go-w.",
-            )
-        })
+    pub(crate) fn parse(input: &str) -> Result<Self, TransferError> {
+        parse(input.trim()).map_err(|()| PermissionError::InvalidRule.into())
     }
 
     pub(super) fn evaluate(&self, original: u32, is_dir: bool) -> u32 {

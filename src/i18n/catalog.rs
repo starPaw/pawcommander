@@ -990,6 +990,7 @@ catalog! {
     "Сервер SFTP не сообщил права доступа." => ("The SFTP server did not return permissions.", "Server SFTP neposkytl oprávnění."),
     "Изменение прав доступно для обычных файлов и папок." => ("Permission changes are available for regular files and folders.", "Oprávnění lze změnit u běžných souborů a složek."),
     "Сервер SFTP отказал в доступе." => ("The SFTP server denied permission.", "Server SFTP odepřel přístup."),
+    "Не удалось изменить права доступа." => ("Could not change permissions.", "Oprávnění se nepodařilo změnit."),
     "Действующие сочетания показаны в разделе Настройки → Горячие клавиши." => ("See active bindings in Settings → Keyboard Shortcuts.", "Aktivní zkratky najdete v Nastavení → Klávesové zkratky."),
     "Горячие клавиши" => ("Keyboard Shortcuts", "Klávesové zkratky"),
     "Палитра команд" => ("Command Palette", "Paleta příkazů"),

@@ -1023,8 +1023,7 @@ impl PawCommander {
                     let label = Command::ChangePermissions.label();
                     let description = format!("{label} ({}) · {}", plan.changes, plan.directory());
                     self.start_stoppable_job(ctx, label, description, move |progress| {
-                        plan.apply(progress)
-                            .map_err(|error| crate::i18n::file_error(&error))
+                        super::permissions::apply(plan, progress)
                     });
                 }
             }
