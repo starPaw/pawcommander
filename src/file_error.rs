@@ -198,6 +198,7 @@ pub(crate) enum AccessAction {
     ReadOpenMetadata,
     ReadChildren,
     ReadFile,
+    ReadLink,
     CheckSearchResult,
     #[cfg(target_os = "macos")]
     WritePreviewCache,
@@ -382,20 +383,29 @@ pub(crate) enum ScanError {
     PropertiesStart(io::Error),
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     DirectoryChanged(Location),
-    #[cfg(target_os = "macos")]
     InvalidSftpEntry {
         directory: Location,
         name: PathBuf,
     },
-    #[cfg(target_os = "macos")]
     DepthLimit(Location),
+    FolderUnavailable(Location),
+    DuplicateEntry {
+        directory: Location,
+        name: std::ffi::OsString,
+    },
+    UnsupportedComparisonType(Location),
+    MissingComparisonMetadata(Location),
+    ComparisonLimit,
+    FileChanged(Location),
+    ExpectedRegularFile(Location),
+    MissingFileVersion(Location),
+    #[cfg(target_os = "macos")]
+    MissingLocalFileSize,
     #[cfg(target_os = "macos")]
     MissingSftpFileSize(Location),
     MissingSftpFileType(Location),
     #[cfg(target_os = "macos")]
     DiskUsageRequiresLocalFolder,
-    #[cfg(target_os = "macos")]
-    DiskUsageFolderUnavailable(Location),
     #[cfg(target_os = "macos")]
     DiskUsageLimit,
 }
@@ -408,12 +418,35 @@ impl fmt::Display for ScanError {
             Self::DirectoryChanged(location) => {
                 write!(f, "Folder {location} changed during calculation")
             }
-            #[cfg(target_os = "macos")]
             Self::InvalidSftpEntry { directory, name } => {
                 write!(f, "Invalid entry {name:?} in {directory}")
             }
-            #[cfg(target_os = "macos")]
             Self::DepthLimit(location) => write!(f, "Folder nesting limit reached at {location}"),
+            Self::FolderUnavailable(location) => {
+                write!(f, "Folder {location} changed or is unavailable")
+            }
+            Self::DuplicateEntry { directory, name } => {
+                write!(f, "Duplicate entry {name:?} in {directory}")
+            }
+            Self::UnsupportedComparisonType(location) => {
+                write!(f, "Cannot compare this item type at {location}")
+            }
+            Self::MissingComparisonMetadata(location) => {
+                write!(f, "Missing file size or modified time for {location}")
+            }
+            Self::ComparisonLimit => {
+                f.write_str("Folder comparison exceeded its entry or path limit")
+            }
+            Self::FileChanged(location) => write!(f, "File {location} changed while reading"),
+            Self::ExpectedRegularFile(location) => {
+                write!(f, "Expected a regular file at {location}")
+            }
+            Self::MissingFileVersion(location) => write!(
+                f,
+                "The server omitted the size or modification time for {location}"
+            ),
+            #[cfg(target_os = "macos")]
+            Self::MissingLocalFileSize => f.write_str("File size is unavailable"),
             #[cfg(target_os = "macos")]
             Self::MissingSftpFileSize(location) => {
                 write!(f, "Missing SFTP file size for {location}")
@@ -424,10 +457,6 @@ impl fmt::Display for ScanError {
             #[cfg(target_os = "macos")]
             Self::DiskUsageRequiresLocalFolder => {
                 f.write_str("Disk usage analysis needs a local folder")
-            }
-            #[cfg(target_os = "macos")]
-            Self::DiskUsageFolderUnavailable(location) => {
-                write!(f, "Folder {location} changed or is unavailable")
             }
             #[cfg(target_os = "macos")]
             Self::DiskUsageLimit => f.write_str("Disk usage analysis reached its scan limit"),

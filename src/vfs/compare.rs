@@ -3,18 +3,18 @@ pub(super) mod scan;
 #[cfg(test)]
 mod tests;
 #[cfg(all(test, target_os = "macos"))]
-pub(super) use tests::comparison_round_trip;
+pub(super) use tests::{comparison_round_trip, comparison_sftp_denials};
 
 use super::{read_scope::ReadScope, transfer::canonical, Location, MAX_TREE_DEPTH};
 use crate::{
-    file_error::{Failure, MutationError},
-    i18n::text,
+    file_error::{Failure, ScanError},
     operations::{Cancellation, Progress, TransferError},
 };
 use scan::{Entry, FileInfo};
 use std::{
     collections::BTreeMap,
     ffi::OsString,
+    fmt,
     path::{Path, PathBuf},
 };
 
@@ -28,14 +28,14 @@ pub(crate) enum ComparisonMode {
     Contents,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub(crate) enum ComparisonStatus {
     Same,
     LeftOnly,
     RightOnly,
     Changed,
     TypeChanged,
-    Unreadable(String),
+    Unreadable(Box<TransferError>),
 }
 
 #[derive(Debug)]
@@ -59,12 +59,12 @@ pub(crate) struct Comparison {
 impl Comparison {
     fn add(&mut self, path: PathBuf, status: ComparisonStatus) -> Result<(), TransferError> {
         let reason_bytes = match &status {
-            ComparisonStatus::Unreadable(reason) => reason.len(),
+            ComparisonStatus::Unreadable(error) => diagnostic_bytes(error),
             _ => 0,
         };
         self.path_bytes += path.as_os_str().len() + reason_bytes;
         if self.path_bytes > MAX_PATH_BYTES {
-            return Err(limit());
+            return Err(ScanError::ComparisonLimit.into());
         }
         match &status {
             ComparisonStatus::Same => self.same += 1,
@@ -73,7 +73,7 @@ impl Comparison {
             ComparisonStatus::Changed | ComparisonStatus::TypeChanged => self.changed += 1,
             ComparisonStatus::Unreadable(_) => self.unreadable += 1,
         }
-        if status != ComparisonStatus::Same {
+        if !matches!(status, ComparisonStatus::Same) {
             self.differences.push(self.rows.len());
         }
         self.rows.push(ComparisonRow { path, status });
@@ -104,21 +104,16 @@ pub(crate) fn compare_folders(
     scan.walk(PathBuf::new(), [true, true], 0)?;
     for (side, (scope, folder)) in scopes.iter().zip(folders).enumerate() {
         scan.cancel.check()?;
-        scope.parent.verify().map_err(|error| {
-            let error = match error {
-                TransferError::Failed(Failure::Mutation(ref reason))
-                    if matches!(reason.as_ref(), MutationError::UndoUnavailable(_)) =>
-                {
-                    scan::folder_changed()
-                }
-                error => error,
-            };
-            side_error(side, error)
-        })?;
+        scope
+            .verify_root()
+            .map_err(|error| side_error(side, error))?;
         if canonical(folder).map_err(|error| side_error(side, error))?
             != scope.parent.location.path()
         {
-            return Err(side_error(side, scan::folder_changed()));
+            return Err(side_error(
+                side,
+                ScanError::FolderUnavailable(folder.clone()).into(),
+            ));
         }
     }
     Ok(scan.result)
@@ -128,16 +123,14 @@ pub(crate) fn compare_folders(
 struct Budget {
     entries: usize,
     bytes: usize,
-    exhausted: bool,
 }
 
 impl Budget {
     fn visit(&mut self, bytes: usize) -> Result<(), TransferError> {
         self.entries += 1;
         self.bytes += bytes;
-        self.exhausted = self.entries > MAX_ENTRIES || self.bytes > MAX_PATH_BYTES;
-        if self.exhausted {
-            return Err(limit());
+        if self.entries > MAX_ENTRIES || self.bytes > MAX_PATH_BYTES {
+            return Err(ScanError::ComparisonLimit.into());
         }
         Ok(())
     }
@@ -161,10 +154,14 @@ impl Compare<'_> {
     ) -> Result<(), TransferError> {
         self.cancel.check()?;
         if depth > MAX_TREE_DEPTH {
-            return self.result.add(
-                relative,
-                ComparisonStatus::Unreadable(text!("Достигнут предел вложенности папок").into()),
-            );
+            let location = self.scopes[usize::from(!present[0])]
+                .parent
+                .location
+                .join(&relative);
+            let error = TransferError::from(ScanError::DepthLimit(location));
+            return self
+                .result
+                .add(relative, ComparisonStatus::Unreadable(Box::new(error)));
         }
         let mut children: BTreeMap<OsString, [Option<Entry>; 2]> = BTreeMap::new();
         for (side, scope) in self
@@ -173,25 +170,36 @@ impl Compare<'_> {
             .enumerate()
             .filter(|(side, _)| present[*side])
         {
-            self.progress
-                .item(scope.parent.location.join(&relative).path());
+            let folder = scope.parent.location.join(&relative);
+            self.progress.item(folder.path());
             let result = scan::visit(scope, &relative, &self.cancel, &mut |name, entry| {
                 self.budget.visit(name.len() + entry.extra_path_bytes())?;
-                let slot = &mut children.entry(name).or_default()[side];
-                if slot.is_some() {
-                    return Err(text!("Папка содержит повторяющиеся имена").into());
-                }
-                *slot = Some(entry);
+                let ends = match children.entry(name) {
+                    std::collections::btree_map::Entry::Occupied(entry)
+                        if entry.get()[side].is_some() =>
+                    {
+                        return Err(ScanError::DuplicateEntry {
+                            directory: folder.clone(),
+                            name: entry.key().clone(),
+                        }
+                        .into());
+                    }
+                    entry => entry.or_default(),
+                };
+                ends[side] = Some(entry);
                 Ok(())
             });
             if let Err(error) = result {
-                if self.budget.exhausted || matches!(error, TransferError::Cancelled) {
+                if matches!(error, TransferError::Cancelled)
+                    || matches!(&error, TransferError::Failed(Failure::Scan(reason))
+                        if matches!(reason.as_ref(), ScanError::ComparisonLimit))
+                {
                     return Err(error);
                 }
                 let error = side_error(side, error);
                 return self
                     .result
-                    .add(relative, ComparisonStatus::Unreadable(error.to_string()));
+                    .add(relative, ComparisonStatus::Unreadable(Box::new(error)));
             }
         }
         if present[0] != present[1] {
@@ -218,12 +226,8 @@ impl Compare<'_> {
         use ComparisonStatus::{Changed, LeftOnly, RightOnly, Same, TypeChanged, Unreadable};
 
         let status = match pair {
-            [Some(Entry::Unreadable(reason)), _] => {
-                Unreadable(side_error(0, reason.into()).to_string())
-            }
-            [_, Some(Entry::Unreadable(reason))] => {
-                Unreadable(side_error(1, reason.into()).to_string())
-            }
+            [Some(Entry::Unreadable(error)), _] => Unreadable(Box::new(side_error(0, error))),
+            [_, Some(Entry::Unreadable(error))] => Unreadable(Box::new(side_error(1, error))),
             [Some(Entry::Directory), Some(Entry::Directory)] => {
                 return self.walk(path, [true, true], depth + 1)
             }
@@ -236,7 +240,7 @@ impl Compare<'_> {
                     Ok(true) => Same,
                     Ok(false) => Changed,
                     Err(TransferError::Cancelled) => return Err(TransferError::Cancelled),
-                    Err(error) => Unreadable(error.to_string()),
+                    Err(error) => Unreadable(Box::new(error)),
                 }
             }
             [Some(Entry::Link(left)), Some(Entry::Link(right))] => {
@@ -263,16 +267,34 @@ impl Compare<'_> {
             return Ok(false);
         }
         if self.mode == ComparisonMode::Metadata {
-            return match left.modified.as_ref().zip(right.modified.as_ref()) {
-                Some((left, right)) if !left.matches(right) => Ok(false),
-                Some(_) if sizes.is_some() => Ok(true),
-                _ => Err(text!("Не удалось получить размер или время изменения").into()),
-            };
+            if left
+                .modified
+                .as_ref()
+                .zip(right.modified.as_ref())
+                .is_some_and(|(left, right)| !left.matches(right))
+            {
+                return Ok(false);
+            }
+            for (side, info) in [left, right].into_iter().enumerate() {
+                if info.size.is_none() || info.modified.is_none() {
+                    let source = self.scopes[side].parent.location.join(path);
+                    return Err(side_error(
+                        side,
+                        ScanError::MissingComparisonMetadata(source).into(),
+                    ));
+                }
+            }
+            return Ok(true);
         }
         let mut digest = |side: usize| {
-            self.scopes[side]
+            let scope = &self.scopes[side];
+            scope
                 .digest(path, self.progress, &self.cancel)
-                .and_then(|digest| digest.ok_or_else(super::read_scope::changed_during_read))
+                .and_then(|digest| {
+                    digest.ok_or_else(|| {
+                        ScanError::FileChanged(scope.parent.location.join(path)).into()
+                    })
+                })
                 .map_err(|error| side_error(side, error))
         };
         Ok(digest(0)? == digest(1)?)
@@ -289,6 +311,18 @@ fn side_error(side: usize, error: TransferError) -> TransferError {
     })
 }
 
-fn limit() -> TransferError {
-    text!("Достигнут предел сравнения: 100 000 объектов или 32 МиБ данных о путях").into()
+fn diagnostic_bytes(error: &TransferError) -> usize {
+    struct Counter(usize);
+
+    impl fmt::Write for Counter {
+        fn write_str(&mut self, text: &str) -> fmt::Result {
+            self.0 += text.len();
+            Ok(())
+        }
+    }
+
+    // Bound stored diagnostics along with paths before the UI renders them.
+    let mut counter = Counter(0);
+    let _ = fmt::write(&mut counter, format_args!("{error:?}"));
+    counter.0
 }

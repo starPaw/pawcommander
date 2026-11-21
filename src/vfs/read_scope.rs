@@ -5,7 +5,10 @@ use super::{
     Location,
 };
 use crate::{
-    file_error::{AccessAction, AccessError},
+    file_error::{
+        AccessAction, AccessError, Failure, ListingError, ListingErrorKind, MutationError,
+        ScanError,
+    },
     i18n::text,
     operations::{Cancellation, Progress, TransferError},
 };
@@ -40,31 +43,36 @@ impl CheckedFile<'_> {
 
     pub(super) fn verify(&mut self, cancel: &Cancellation) -> Result<(), TransferError> {
         cancel.check()?;
-        self.stamp
-            .verify_metadata(&self.source, &self.input.metadata(&self.source)?)
-            .map_err(|_| changed_during_read())?;
-        let Some(mut current) = self.scope.input(self.path, cancel)? else {
-            return Err(changed_during_read());
+        verify_version(
+            &self.stamp,
+            &self.source,
+            &self.input.metadata(&self.source)?,
+        )?;
+        let Some((source, mut current)) = self.scope.input(self.path, cancel)? else {
+            return Err(ScanError::FileChanged(self.source.clone()).into());
         };
-        self.stamp
-            .verify_metadata(&self.source, &current.metadata(&self.source)?)
-            .map_err(|_| changed_during_read())
+        verify_version(&self.stamp, &source, &current.metadata(&source)?)
     }
 }
 
 impl ReadScope {
     pub(super) fn open(location: &Location) -> Result<Self, TransferError> {
         if location.is_archive() {
-            return Err(crate::archive::readonly().into());
+            return Err(MutationError::ReadOnlyArchive(location.clone()).into());
         }
-        let parent = Parent::capture(location)?;
+        let parent = Parent::capture(location).map_err(folder_error)?;
         #[cfg(unix)]
         let descriptor = parent
             .location
             .local()
             .map(|path| {
                 use rustix::fs::{open, Mode};
-                open(path, directory_flags(), Mode::empty()).map_err(io::Error::from)
+                open(path, directory_flags(), Mode::empty()).map_err(|error| {
+                    TransferError::from(ListingError::new(
+                        parent.location.clone(),
+                        ListingErrorKind::OpenLocal(error.into()),
+                    ))
+                })
             })
             .transpose()?;
         Ok(Self {
@@ -72,6 +80,10 @@ impl ReadScope {
             #[cfg(unix)]
             descriptor,
         })
+    }
+
+    pub(super) fn verify_root(&self) -> Result<(), TransferError> {
+        self.parent.verify().map_err(folder_error)
     }
 
     pub(super) fn digest(
@@ -82,8 +94,9 @@ impl ReadScope {
     ) -> Result<Option<[u8; 32]>, TransferError> {
         self.read_checked(path, cancel, |source, size, input| {
             progress
-                .hash_file(source.path(), size, input)?
-                .ok_or_else(changed_during_read)
+                .hash_file(source.path(), size, input)
+                .map_err(|error| AccessError::read(source, error))?
+                .ok_or_else(|| ScanError::FileChanged(source.clone()).into())
         })
     }
 
@@ -107,17 +120,16 @@ impl ReadScope {
         path: &'a Path,
         cancel: &Cancellation,
     ) -> Result<Option<CheckedFile<'a>>, TransferError> {
-        let Some(mut input) = self.input(path, cancel)? else {
+        let Some((source, mut input)) = self.input(path, cancel)? else {
             return Ok(None);
         };
-        let source = self.parent.location.join(path);
         let metadata = input.metadata(&source)?;
         if !metadata.is_file() {
-            return Err(unsupported());
+            return Err(ScanError::ExpectedRegularFile(source).into());
         }
         if matches!(&metadata, EntryMetadata::Remote(stat) if stat.size.is_none() || stat.mtime.is_none())
         {
-            return Err(text!("Сервер не передал размер или время изменения файла").into());
+            return Err(ScanError::MissingFileVersion(source).into());
         }
         Ok(Some(CheckedFile {
             scope: self,
@@ -135,22 +147,21 @@ impl ReadScope {
         &self,
         path: &Path,
         cancel: &Cancellation,
-    ) -> Result<Option<SourceReader>, TransferError> {
+    ) -> Result<Option<(Location, SourceReader)>, TransferError> {
         cancel.check()?;
         #[cfg(unix)]
         if let Some(root) = &self.descriptor {
-            return match local_input(root, path, cancel) {
-                Ok(file) => Ok(Some(SourceReader::Local(file))),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-                Err(error) => Err(AccessError::new(
-                    &self.parent.location.join(path),
-                    AccessAction::OpenFile,
-                    error,
-                )
-                .into()),
+            let source = self.parent.location.join(path);
+            return match local_input(root, path, &source, cancel) {
+                Ok(file) => Ok(Some((source, SourceReader::Local(file)))),
+                Err(TransferError::Failed(Failure::Access(error))) if error.cause.is_absent() => {
+                    Ok(None)
+                }
+                Err(error) => Err(error),
             };
         }
 
+        let unsupported = || ScanError::ExpectedRegularFile(self.parent.location.join(path));
         let parent = path.parent().ok_or_else(unsupported)?;
         let Some(directory) = self.checked_directory(parent, cancel)? else {
             return Ok(None);
@@ -160,7 +171,7 @@ impl ReadScope {
             return Ok(None);
         };
         if !metadata.is_file() {
-            return Err(unsupported());
+            return Err(ScanError::ExpectedRegularFile(source).into());
         }
         cancel.check()?;
         let mut input = SourceReader::open(&source)?;
@@ -168,10 +179,8 @@ impl ReadScope {
             metadata,
             children: None,
         };
-        entry
-            .verify_metadata(&source, &input.metadata(&source)?)
-            .map_err(|_| changed_during_read())?;
-        Ok(Some(input))
+        verify_version(&entry, &source, &input.metadata(&source)?)?;
+        Ok(Some((source, input)))
     }
 
     pub(super) fn checked_directory(
@@ -183,7 +192,9 @@ impl ReadScope {
         for component in relative.components() {
             cancel.check()?;
             let Component::Normal(name) = component else {
-                return Err(unsupported());
+                return Err(
+                    ScanError::FolderUnavailable(self.parent.location.join(relative)).into(),
+                );
             };
             directory = directory.join(name);
             let Some(metadata) = entry_metadata(&directory)? else {
@@ -194,11 +205,34 @@ impl ReadScope {
                 EntryMetadata::Remote(stat) => stat.is_dir(),
             };
             if !is_directory {
-                return Err(unsupported());
+                return Err(ScanError::FolderUnavailable(directory).into());
             }
         }
         Ok(Some(directory))
     }
+}
+
+fn verify_version(
+    stamp: &TransferSourceEntry,
+    source: &Location,
+    actual: &EntryMetadata,
+) -> Result<(), TransferError> {
+    let matches = stamp
+        .matches_metadata(actual)
+        .map_err(|error| AccessError::new(source, AccessAction::ReadOpenMetadata, error))?;
+    if !matches {
+        return Err(ScanError::FileChanged(source.clone()).into());
+    }
+    Ok(())
+}
+
+fn folder_error(error: TransferError) -> TransferError {
+    if let TransferError::Failed(Failure::Mutation(reason)) = &error
+        && let MutationError::UndoUnavailable(location) = reason.as_ref()
+    {
+        return ScanError::FolderUnavailable(location.clone()).into();
+    }
+    error
 }
 
 #[cfg(unix)]
@@ -236,9 +270,9 @@ pub(super) fn local_subdirectory(
 
 #[cfg(unix)]
 pub(super) fn visit_local_entries(
+    folder: &Location,
     descriptor: &OwnedFd,
     cancel: &Cancellation,
-    directory_changed: impl FnOnce() -> TransferError,
     mut visit: impl FnMut(
         &std::ffi::OsStr,
         rustix::io::Result<rustix::fs::Stat>,
@@ -247,11 +281,28 @@ pub(super) fn visit_local_entries(
     use rustix::fs::{fstat, statat, AtFlags, Dir};
     use std::os::unix::ffi::OsStrExt;
 
-    let before = fstat(descriptor).map_err(io::Error::from)?;
-    let entries = Dir::read_from(descriptor).map_err(io::Error::from)?;
+    let read_metadata = || -> Result<_, TransferError> {
+        fstat(descriptor).map_err(|error| {
+            AccessError::new(
+                folder,
+                AccessAction::ReadOpenMetadata,
+                io::Error::from(error),
+            )
+            .into()
+        })
+    };
+    let before = read_metadata()?;
+    let entries = Dir::read_from(descriptor).map_err(|error| {
+        ListingError::new(folder.clone(), ListingErrorKind::OpenLocal(error.into()))
+    })?;
     for item in entries {
         cancel.check()?;
-        let item = item.map_err(io::Error::from)?;
+        let item = item.map_err(|error| {
+            ListingError::new(
+                folder.clone(),
+                ListingErrorKind::ReadLocalEntry(error.into()),
+            )
+        })?;
         let name = std::ffi::OsStr::from_bytes(item.file_name().to_bytes());
         if name == "." || name == ".." {
             continue;
@@ -259,41 +310,43 @@ pub(super) fn visit_local_entries(
         visit(name, statat(descriptor, name, AtFlags::SYMLINK_NOFOLLOW))?;
     }
     cancel.check()?;
-    let after = fstat(descriptor).map_err(io::Error::from)?;
+    let after = read_metadata()?;
     if before.st_mtime != after.st_mtime
         || before.st_mtime_nsec != after.st_mtime_nsec
         || before.st_ctime != after.st_ctime
         || before.st_ctime_nsec != after.st_ctime_nsec
     {
-        return Err(directory_changed());
+        return Err(ScanError::FolderUnavailable(folder.clone()).into());
     }
     Ok(())
 }
 
 #[cfg(unix)]
-fn local_input(root: &OwnedFd, path: &Path, cancel: &Cancellation) -> io::Result<std::fs::File> {
+fn local_input(
+    root: &OwnedFd,
+    path: &Path,
+    source: &Location,
+    cancel: &Cancellation,
+) -> Result<std::fs::File, TransferError> {
     use rustix::fs::{openat, statat, AtFlags, FileType, Mode, OFlags};
-    let relative = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
-    let directory = local_subdirectory(root, relative, cancel)?;
+    let unsupported = || ScanError::ExpectedRegularFile(source.clone());
+    let open_error = |error| AccessError::new(source, AccessAction::OpenFile, error);
+    let relative = path.parent().ok_or_else(unsupported)?;
+    let directory = local_subdirectory(root, relative, cancel).map_err(open_error)?;
     let parent = directory.as_ref().unwrap_or(root);
-    let name = path.file_name().ok_or(io::ErrorKind::InvalidInput)?;
-    let stat = statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(io::Error::from)?;
+    let name = path.file_name().ok_or_else(unsupported)?;
+    let stat = statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|error| {
+        AccessError::new(source, AccessAction::ReadMetadata, io::Error::from(error))
+    })?;
     if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            text!("Для проверки подходят только обычные файлы без ссылок"),
-        ));
+        return Err(unsupported().into());
     }
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
     openat(parent, name, flags, Mode::empty())
         .map(std::fs::File::from)
-        .map_err(io::Error::from)
+        .map_err(|error| open_error(error.into()).into())
 }
 
 pub(super) fn changed_during_read() -> TransferError {
     text!("Файл изменился во время чтения").into()
-}
-
-fn unsupported() -> TransferError {
-    text!("Для проверки подходят только обычные файлы без ссылок").into()
 }

@@ -1632,10 +1632,12 @@ fn openssh_round_trip_and_host_verification() {
         fs::remove_dir_all(checksum_directory.path()).unwrap();
         let local_compare = tempfile::tempdir().unwrap();
         let remote_compare = uploaded.join("comparison fixtures");
-        super::super::compare::comparison_round_trip(&[
+        let comparison_folders = [
             local_compare.path().to_path_buf().into(),
             remote_compare.clone(),
-        ]);
+        ];
+        super::super::compare::comparison_round_trip(&comparison_folders);
+        super::super::compare::comparison_sftp_denials(&comparison_folders);
         super::super::file_compare::file_comparison_round_trip(&[
             local_compare.path().join("left compare.txt").into(),
             remote_compare.join("right compare.txt"),

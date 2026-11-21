@@ -162,9 +162,10 @@ fn show_result(ui: &mut egui::Ui, result: &Comparison, show_matches: &mut bool, 
                     ComparisonStatus::Changed => (crate::i18n::text!("Различаются"), None),
                     ComparisonStatus::TypeChanged => (crate::i18n::text!("Разные типы"), None),
                     ComparisonStatus::Same => (crate::i18n::text!("Совпали"), None),
-                    ComparisonStatus::Unreadable(reason) => {
-                        (crate::i18n::text!("Ошибка чтения"), Some(reason))
-                    }
+                    ComparisonStatus::Unreadable(reason) => (
+                        crate::i18n::text!("Ошибка чтения"),
+                        Some(crate::i18n::file_error(reason)),
+                    ),
                 };
                 ui.horizontal(|ui| {
                     let color = if detail.is_some() {
