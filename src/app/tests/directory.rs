@@ -70,7 +70,7 @@ fn archive_edit_dialogs_run_the_queue_and_refresh_the_pane() {
         assert!(app.dialog.is_none());
     };
     let finish = |app: &mut PawCommander| {
-        poll_queue_until(app, &ctx, |app| app.job.is_none());
+        poll_queue_until(app, &ctx, |app| app.jobs.current.is_none());
         wait_for_directory(app.tab_mut());
         assert!(app.notice.as_ref().is_some_and(|(_, error)| !error));
     };

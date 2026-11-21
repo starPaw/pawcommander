@@ -8,6 +8,7 @@ use crate::operations::{Cancellation, Progress, ProgressView};
 use crate::vfs as fs_ops;
 use crate::vfs::Location;
 use eframe::egui;
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::sync::{mpsc, Arc, Mutex};
@@ -51,6 +52,8 @@ pub(super) struct TransferInteraction {
 }
 
 pub(super) struct Job {
+    pub(super) transfer: Option<TransferInteraction>,
+    pub(super) cut: Option<CutRequest>,
     pub(super) label: String,
     pub(super) started: Instant,
     pub(super) result: Receiver<Result<String, String>>,
@@ -74,6 +77,31 @@ pub(super) struct PendingJob {
     undo_origin: Option<UndoJob>,
     #[cfg(target_os = "macos")]
     native_completion: Option<mpsc::Sender<Result<(), String>>>,
+}
+
+#[derive(Default)]
+pub(super) struct JobQueue {
+    pub(super) current: Option<Job>,
+    pub(super) pending: VecDeque<PendingJob>,
+    pub(super) retries: VecDeque<RetryJob>,
+    pub(super) undo: VecDeque<UndoJob>,
+    pub(super) start_failed: bool,
+    #[cfg(test)]
+    pub(super) fail_spawn: bool,
+}
+
+impl JobQueue {
+    pub(super) fn is_busy(&self) -> bool {
+        self.current.is_some() || !self.pending.is_empty()
+    }
+
+    pub(super) fn transfer(&self) -> Option<&TransferInteraction> {
+        self.current.as_ref().and_then(|job| job.transfer.as_ref())
+    }
+
+    pub(super) fn transfer_mut(&mut self) -> Option<&mut TransferInteraction> {
+        self.current.as_mut().and_then(|job| job.transfer.as_mut())
+    }
 }
 
 pub(super) const MAX_PENDING_JOBS: usize = 100;
@@ -253,7 +281,7 @@ impl PawCommander {
         }) = self.native_drag.next_promise()
         {
             let label = crate::i18n::text!("Скачивание для принимающего приложения");
-            if self.queue_start_failed || self.pending_jobs.len() >= MAX_PENDING_JOBS {
+            if self.jobs.start_failed || self.jobs.pending.len() >= MAX_PENDING_JOBS {
                 let error = crate::i18n::text!("Очередь файловых операций недоступна.").to_owned();
                 let _ = completion.send(Err(error.clone()));
                 self.notice = Some((error, true));
@@ -374,7 +402,7 @@ impl PawCommander {
 
     pub(super) fn submit_job(&mut self, ctx: &egui::Context, job: PendingJob) {
         let rejection =
-            (self.pending_jobs.len() >= MAX_PENDING_JOBS).then_some(crate::i18n::text!(
+            (self.jobs.pending.len() >= MAX_PENDING_JOBS).then_some(crate::i18n::text!(
             "Очередь заполнена (100 заданий). Дождитесь завершения или удалите ожидающее задание."
         ));
         #[cfg(target_os = "macos")]
@@ -397,19 +425,19 @@ impl PawCommander {
             self.notice = Some((message.into(), true));
             return;
         }
-        if self.job.is_none() && self.pending_jobs.is_empty() {
+        if !self.jobs.is_busy() {
             self.notice = None;
         }
-        self.pending_jobs.push_back(job);
+        self.jobs.pending.push_back(job);
         self.start_next_job(ctx);
         ctx.request_repaint();
     }
 
     pub(super) fn start_next_job(&mut self, ctx: &egui::Context) {
-        if self.queue_start_failed {
+        if self.jobs.start_failed {
             return;
         }
-        while self.job.is_none() {
+        while self.jobs.current.is_none() {
             let Some(PendingJob {
                 label,
                 description,
@@ -421,11 +449,10 @@ impl PawCommander {
                 #[cfg(target_os = "macos")]
                 native_completion,
                 ..
-            }) = self.pending_jobs.pop_front()
+            }) = self.jobs.pending.pop_front()
             else {
                 break;
             };
-            debug_assert!(self.transfer.is_none());
             let (tx, rx) = mpsc::channel();
             let (undo_send, undo_receive) = mpsc::channel();
             let undo_id = undo_origin.as_ref().map(|job| job.id.clone());
@@ -543,7 +570,7 @@ impl PawCommander {
             };
             let builder = std::thread::Builder::new().name("pawcommander-file-operation".into());
             #[cfg(test)]
-            let spawn_result = if self.fail_job_spawn {
+            let spawn_result = if self.jobs.fail_spawn {
                 Err(std::io::Error::other("injected worker spawn failure"))
             } else {
                 builder.spawn(worker)
@@ -558,7 +585,7 @@ impl PawCommander {
                     self.notice = Some((error, true));
                     continue;
                 }
-                self.pending_jobs.push_front(PendingJob {
+                self.jobs.pending.push_front(PendingJob {
                     label,
                     description,
                     work: work.lock().unwrap().take().unwrap(),
@@ -569,19 +596,19 @@ impl PawCommander {
                     #[cfg(target_os = "macos")]
                     native_completion: None,
                 });
-                self.queue_start_failed = true;
+                self.jobs.start_failed = true;
                 self.notice = Some((error, true));
                 break;
             }
-            self.job = Some(Job {
+            self.jobs.current = Some(Job {
+                transfer,
+                cut,
                 label,
                 started,
                 result: rx,
                 progress,
                 undo: Some(undo_receive),
             });
-            self.transfer = transfer;
-            self.active_cut = cut;
             ctx.request_repaint();
         }
     }
@@ -634,16 +661,16 @@ impl PawCommander {
     }
 
     pub(super) fn retry_transfer(&mut self, ctx: &egui::Context, id: &str) {
-        if self.pending_jobs.len() >= MAX_PENDING_JOBS {
+        if self.jobs.pending.len() >= MAX_PENDING_JOBS {
             self.notice = Some((crate::i18n::text!("Очередь заполнена (100 заданий). Дождитесь завершения или удалите ожидающее задание.").into(), true));
             return;
         }
-        let Some(index) = self.retry_jobs.iter().position(|job| job.id == id) else {
+        let Some(index) = self.jobs.retries.iter().position(|job| job.id == id) else {
             return;
         };
         // Move ownership before enqueueing: a second click cannot repeat the
         // same attempt, even while this job waits behind another operation.
-        let job = self.retry_jobs.remove(index).unwrap();
+        let job = self.jobs.retries.remove(index).unwrap();
         self.history.retryable.remove(id);
         self.history.inspectable.remove(id);
         self.show_history = false;
@@ -764,9 +791,11 @@ impl PawCommander {
                         })
                     })
             };
-            if self.active_cut.as_ref().is_some_and(overlaps)
+            let active_cut = self.jobs.current.as_ref().and_then(|job| job.cut.as_ref());
+            if active_cut.is_some_and(overlaps)
                 || self
-                    .pending_jobs
+                    .jobs
+                    .pending
                     .iter()
                     .filter_map(|job| job.cut.as_ref())
                     .any(overlaps)
@@ -882,26 +911,29 @@ impl PawCommander {
     }
 
     fn remember_retry(&mut self, job: RetryJob) {
-        self.retry_jobs.retain(|saved| saved.id != job.id);
-        self.retry_jobs.push_back(job);
-        while self.retry_jobs.len() > 100
+        self.jobs.retries.retain(|saved| saved.id != job.id);
+        self.jobs.retries.push_back(job);
+        while self.jobs.retries.len() > 100
             || self
-                .retry_jobs
+                .jobs
+                .retries
                 .iter()
                 .map(|job| job.transfer.weight())
                 .sum::<usize>()
                 > 100_000
         {
-            self.retry_jobs.pop_front();
+            self.jobs.retries.pop_front();
         }
         self.history.retryable = self
-            .retry_jobs
+            .jobs
+            .retries
             .iter()
             .filter(|job| !job.transfer.needs_inspection())
             .map(|job| job.id.clone())
             .collect();
         self.history.inspectable = self
-            .retry_jobs
+            .jobs
+            .retries
             .iter()
             .filter(|job| job.transfer.needs_inspection())
             .map(|job| job.id.clone())
@@ -909,34 +941,36 @@ impl PawCommander {
     }
 
     fn remember_undo(&mut self, job: UndoJob) {
-        self.undo_jobs.retain(|saved| saved.id != job.id);
-        self.undo_jobs.push_back(job);
-        while self.undo_jobs.len() > 100
+        self.jobs.undo.retain(|saved| saved.id != job.id);
+        self.jobs.undo.push_back(job);
+        while self.jobs.undo.len() > 100
             || self
-                .undo_jobs
+                .jobs
+                .undo
                 .iter()
                 .map(|job| job.batch.weight())
                 .sum::<usize>()
                 > 100_000
         {
-            self.undo_jobs.pop_front();
+            self.jobs.undo.pop_front();
         }
         self.history.undoable = self
-            .undo_jobs
+            .jobs
+            .undo
             .iter()
             .map(|job| (job.id.clone(), job.batch.len()))
             .collect();
     }
 
     pub(super) fn undo_operation(&mut self, ctx: &egui::Context, id: &str) {
-        if self.pending_jobs.len() >= MAX_PENDING_JOBS {
+        if self.jobs.pending.len() >= MAX_PENDING_JOBS {
             self.notice = Some((crate::i18n::text!("Очередь заполнена (100 заданий). Дождитесь завершения или удалите ожидающее задание.").into(), true));
             return;
         }
-        let Some(index) = self.undo_jobs.iter().position(|job| job.id == id) else {
+        let Some(index) = self.jobs.undo.iter().position(|job| job.id == id) else {
             return;
         };
-        let job = self.undo_jobs.remove(index).unwrap();
+        let job = self.jobs.undo.remove(index).unwrap();
         self.history.undoable.remove(id);
         self.show_history = false;
         let mut batch = job.batch.clone();
@@ -988,7 +1022,7 @@ impl PawCommander {
     }
 
     pub(super) fn remove_pending_job(&mut self, index: usize) {
-        if let Some(job) = self.pending_jobs.remove(index) {
+        if let Some(job) = self.jobs.pending.remove(index) {
             if let Some(retry) = job.retry_origin {
                 self.remember_retry(retry);
             }
@@ -996,20 +1030,18 @@ impl PawCommander {
                 self.remember_undo(undo);
             }
         }
-        if self.pending_jobs.is_empty() {
-            self.queue_start_failed = false;
+        if self.jobs.pending.is_empty() {
+            self.jobs.start_failed = false;
         }
     }
 
     pub(super) fn poll_transfer(&mut self) {
-        while let Some(transfer) = &mut self.transfer {
+        while let Some(job) = &mut self.jobs.current
+            && let Some(transfer) = &mut job.transfer
+        {
             match transfer.events.try_recv() {
                 Ok(TransferEvent::Conflict(dialog)) => {
-                    if !self
-                        .job
-                        .as_ref()
-                        .is_some_and(|job| job.progress.cancel.is_requested())
-                    {
+                    if !job.progress.cancel.is_requested() {
                         transfer.conflict = Some(dialog);
                     }
                 }
@@ -1030,26 +1062,20 @@ impl PawCommander {
     }
 
     pub(super) fn request_transfer_stop(&mut self, ctx: &egui::Context) {
-        if self.transfer.is_none() {
-            return;
-        }
-        if let Some(job) = &self.job {
-            if job.progress.cancel.is_requested() {
-                return;
-            }
+        if let Some(job) = &mut self.jobs.current
+            && let Some(transfer) = &mut job.transfer
+            && !job.progress.cancel.is_requested()
+        {
             job.progress.cancel.request();
-            if let Some(transfer) = &mut self.transfer {
-                // Dropping a dialog releases its answer sender too. The worker also
-                // observes the token if a conflict event is still in flight.
-                transfer.conflict = None;
-            }
+            // Dropping a dialog releases its answer sender too. The worker also
+            // observes the token if a conflict event is still in flight.
+            transfer.conflict = None;
             ctx.request_repaint();
         }
     }
 
     pub(super) fn transfer_stop_shortcut(&mut self, ctx: &egui::Context) {
-        if self.transfer.is_some()
-            && self.job.is_some()
+        if self.jobs.transfer().is_some()
             && ctx.input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, egui::Key::Escape))
         {
             self.request_transfer_stop(ctx);
@@ -1057,8 +1083,8 @@ impl PawCommander {
     }
 
     pub(super) fn conflict_open(&self) -> bool {
-        self.transfer
-            .as_ref()
+        self.jobs
+            .transfer()
             .is_some_and(|transfer| transfer.conflict.is_some())
     }
 
@@ -1133,7 +1159,7 @@ impl PawCommander {
         let can_reorder = !self.native_drag.active()
             && !ctx.input(|input| input.pointer.any_down() || input.pointer.any_released())
             && !egui::DragAndDrop::has_any_payload(ctx);
-        let automatic_allowed = self.job.is_none() && self.transfer.is_none() && can_reorder;
+        let automatic_allowed = self.jobs.current.is_none() && can_reorder;
         // Hold automatic refresh results while a rule examines this tab's visible rows.
         let scanning_tab = match &self.dialog {
             Some(Dialog::SelectionRule {
@@ -1196,7 +1222,7 @@ impl PawCommander {
             pane.columns
                 .update(ctx, columns.then_some(tab), can_read, now);
         }
-        if let Some(job) = &self.job {
+        if let Some(job) = &self.jobs.current {
             let result = match job.result.try_recv() {
                 Ok(result) => Some(result),
                 Err(mpsc::TryRecvError::Disconnected) => Some(Err(crate::i18n::text!(
@@ -1220,9 +1246,7 @@ impl PawCommander {
                 // Moved events can arrive between the first event poll and the
                 // result. Consume them before releasing transfer ownership.
                 self.poll_transfer();
-                self.transfer = None;
-                self.active_cut = None;
-                self.job = None;
+                self.jobs.current = None;
                 self.refresh(ctx);
             }
         }
@@ -1231,10 +1255,10 @@ impl PawCommander {
 
     pub(super) fn move_pending_job(&mut self, index: usize, direction: isize) {
         if let Some(other) = index.checked_add_signed(direction)
-            && index < self.pending_jobs.len()
-            && other < self.pending_jobs.len()
+            && index < self.jobs.pending.len()
+            && other < self.jobs.pending.len()
         {
-            self.pending_jobs.swap(index, other);
+            self.jobs.pending.swap(index, other);
         }
     }
 }

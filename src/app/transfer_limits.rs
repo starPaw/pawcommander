@@ -12,7 +12,8 @@ impl PawCommander {
             return;
         }
         let active = self
-            .job
+            .jobs
+            .current
             .as_ref()
             .map(|job| job.progress.transfer_endpoints())
             .unwrap_or_default();
@@ -44,7 +45,7 @@ impl PawCommander {
 
     pub(super) fn apply_transfer_limits(&mut self, limits: TransferLimits, ctx: &egui::Context) {
         self.settings.transfer_limits = limits;
-        if let Some(job) = &self.job {
+        if let Some(job) = &self.jobs.current {
             job.progress
                 .set_transfer_limits(&self.settings.transfer_limits);
         }

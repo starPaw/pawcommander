@@ -151,7 +151,7 @@ impl PawCommander {
         {
             actions.push(Action::ConnectSmb);
         }
-        let can_disconnect = !self.smb.busy() && self.job.is_none() && self.pending_jobs.is_empty();
+        let can_disconnect = !self.smb.busy() && !self.jobs.is_busy();
         for (index, share) in self.smb.shares.iter().enumerate() {
             let endpoint = share.endpoint();
             let selected = current
@@ -210,7 +210,7 @@ impl PawCommander {
     }
 
     pub(super) fn disconnect_smb(&mut self, index: usize, ctx: &egui::Context) {
-        if self.smb.busy() || self.job.is_some() || !self.pending_jobs.is_empty() {
+        if self.smb.busy() || self.jobs.is_busy() {
             return;
         }
         if let Some(share) = self.smb.shares.get(index).cloned() {

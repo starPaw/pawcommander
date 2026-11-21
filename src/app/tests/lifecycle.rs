@@ -47,9 +47,9 @@ fn hidden_close_waits_for_active_and_queued_jobs_without_ui() {
             .map_err(|error| error.to_string())?;
         Ok("second done".into())
     });
-    assert_eq!(app.pending_jobs.len(), 1);
+    assert_eq!(app.jobs.pending.len(), 1);
     assert!(hidden_close_tick(&mut app, &ctx));
-    assert_eq!(app.job.as_ref().unwrap().label, "first");
+    assert_eq!(app.jobs.current.as_ref().unwrap().label, "first");
     assert_eq!(
         app.notice.as_ref().unwrap().0,
         crate::i18n::text!("Дождитесь завершения файловой операции, затем закройте окно.")
@@ -57,20 +57,25 @@ fn hidden_close_waits_for_active_and_queued_jobs_without_ui() {
 
     release_first.send(()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(3);
-    while app.job.as_ref().is_none_or(|job| job.label != "second") {
+    while app
+        .jobs
+        .current
+        .as_ref()
+        .is_none_or(|job| job.label != "second")
+    {
         assert!(hidden_close_tick(&mut app, &ctx));
         assert!(Instant::now() < deadline, "hidden queue did not advance");
         std::thread::sleep(Duration::from_millis(1));
     }
     assert_eq!(observed.recv_timeout(Duration::from_secs(2)).unwrap(), 1);
-    assert!(app.pending_jobs.is_empty());
+    assert!(app.jobs.pending.is_empty());
     assert!(hidden_close_tick(&mut app, &ctx));
 
     release_second.send(()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         let canceled = hidden_close_tick(&mut app, &ctx);
-        if app.job.is_none() {
+        if app.jobs.current.is_none() {
             assert!(!canceled, "completed hidden operations must allow closing");
             break;
         }
@@ -88,13 +93,13 @@ fn hidden_close_protects_a_paused_queue_but_allows_an_idle_app() {
     let mut app = PawCommander::new(&cc, Some(root.path().into()));
     assert!(!hidden_close_tick(&mut app, &ctx));
 
-    app.queue_start_failed = true;
+    app.jobs.start_failed = true;
     app.start_progress_job(&ctx, "pending", |_| Ok("done".into()));
-    assert!(app.job.is_none());
-    assert_eq!(app.pending_jobs.len(), 1);
+    assert!(app.jobs.current.is_none());
+    assert_eq!(app.jobs.pending.len(), 1);
     assert!(hidden_close_tick(&mut app, &ctx));
-    assert_eq!(app.pending_jobs.len(), 1);
+    assert_eq!(app.jobs.pending.len(), 1);
 
-    app.pending_jobs.clear();
+    app.jobs.pending.clear();
     assert!(!hidden_close_tick(&mut app, &ctx));
 }

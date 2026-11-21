@@ -314,7 +314,7 @@ impl PawCommander {
             return;
         };
         form.poll_ssh_config();
-        let busy = self.job.is_some();
+        let busy = self.jobs.current.is_some();
         let loading_config = form.ssh_config_job.is_some();
         let mut submit = false;
         let mut cancel = false;

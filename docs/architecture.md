@@ -96,7 +96,7 @@ Hex mode reads aligned 4 KiB pages through the shared seekable source. Literal b
 2. The job queue starts a worker and writes a recovery record before mutation. `vfs::transfer_with_conflicts` validates and plans the transfer against current filesystem state.
 3. Conflicts travel to the UI through a channel. The worker waits for a reply while observing cancellation; `conflict.rs` owns the choices and dialog.
 4. Local copies use `fs_ops.rs`; remote copies use the SFTP transfer path. Staging, source/destination checks and publication logic protect existing data. Replacement and cleanup errors must remain visible in the result.
-5. Progress and committed move events return to the UI. Cut entries are consumed only for confirmed moves of the matching clipboard generation. The worker records results, completes the recovery record when appropriate, and the UI refreshes affected views.
+5. Progress and committed move events return to the UI. Cut entries are consumed only for confirmed moves of the matching clipboard generation. The worker records results and completes the recovery record when appropriate. The running job holds the conflict channel and cut reservation until the UI receives its terminal result and drains any final move events. The UI then releases the job and refreshes the affected views before advancing the queue.
 
 The copy and move worker acknowledges a pause at checkpoints in preparation, between I/O calls, and before final publication. It keeps the transfer plan, private staging, and stream positions while waiting on a condition variable. Resume and cancellation wake the worker. Publication, rollback, and cleanup proceed without pausing.
 

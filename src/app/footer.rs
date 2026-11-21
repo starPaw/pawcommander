@@ -118,7 +118,7 @@ impl PawCommander {
                     .inner_margin(egui::Margin::symmetric(18, 10)),
             )
             .show(ui, |ui| {
-                if let Some(job) = &mut self.job {
+                if let Some(job) = &mut self.jobs.current {
                     let stopping = job.progress.cancel.is_requested();
                     let pause = job.progress.pause_state();
                     let paused = pause == Some(PauseState::Paused);
@@ -153,7 +153,7 @@ impl PawCommander {
                             paint_focus(ui, &speed, 5);
                             speed_requested = speed.clicked();
                         }
-                        if self.transfer.is_some() {
+                        if job.transfer.is_some() {
                             let response = ui
                                 .add_enabled(
                                     !stopping,
@@ -260,7 +260,7 @@ impl PawCommander {
             });
         if stop_requested {
             self.request_transfer_stop(ctx);
-        } else if let (Some(paused), Some(job)) = (pause_requested, &self.job) {
+        } else if let (Some(paused), Some(job)) = (pause_requested, &self.jobs.current) {
             job.progress.set_paused(paused);
             ctx.request_repaint();
         } else if speed_requested {
@@ -272,15 +272,15 @@ impl PawCommander {
     }
 
     pub(super) fn pending_queue_ui(&mut self, ui: &mut egui::Ui) {
-        if self.pending_jobs.is_empty() {
-            self.queue_start_failed = false;
+        if self.jobs.pending.is_empty() {
+            self.jobs.start_failed = false;
             return;
         }
-        if self.queue_start_failed {
+        if self.jobs.start_failed {
             let retry = ui.button(crate::i18n::text!("Повторить запуск очереди"));
             paint_focus(ui, &retry, 5);
             if retry.clicked() {
-                self.queue_start_failed = false;
+                self.jobs.start_failed = false;
                 self.start_next_job(ui.ctx());
             }
         }
@@ -288,19 +288,19 @@ impl PawCommander {
         let mut reorder = None;
         egui::CollapsingHeader::new(crate::tr_format!(
             "Queued: {} · concurrency: 1",
-            self.pending_jobs.len()
+            self.jobs.pending.len()
         ))
         .id_salt("pending_file_jobs")
         .show(ui, |ui| {
             ui.label(crate::i18n::text!("Остановка действует только на текущее задание. Ожидающие задания хранятся до закрытия приложения."));
             egui::ScrollArea::vertical().id_salt("pending_jobs_scroll").max_height(120.0).show(ui, |ui| {
-                for (index, job) in self.pending_jobs.iter().enumerate() {
+                for (index, job) in self.jobs.pending.iter().enumerate() {
                     ui.push_id(index, |ui| {
                         ui.horizontal(|ui| {
                             let up = ui.add_enabled(index > 0, egui::Button::new("↑")).on_hover_text(crate::i18n::text!("Раньше"));
                             paint_focus(ui, &up, 5);
                             if up.clicked() { reorder = Some((index, -1)); }
-                            let down = ui.add_enabled(index + 1 < self.pending_jobs.len(), egui::Button::new("↓")).on_hover_text(crate::i18n::text!("Позже"));
+                            let down = ui.add_enabled(index + 1 < self.jobs.pending.len(), egui::Button::new("↓")).on_hover_text(crate::i18n::text!("Позже"));
                             paint_focus(ui, &down, 5);
                             if down.clicked() { reorder = Some((index, 1)); }
                             let cancel = ui.button(crate::i18n::text!("Удалить из очереди"));

@@ -124,8 +124,8 @@ mod macos_input {
             let _ = ctx.run_test_ui(input, |ui| {
                 app.keyboard(ui.ctx());
             });
-            assert!(app.job.is_none());
-            assert!(app.pending_jobs.is_empty());
+            assert!(app.jobs.current.is_none());
+            assert!(app.jobs.pending.is_empty());
             assert!(app.notice.is_none());
             assert!(!app.conflict_open());
             assert_eq!(
@@ -222,8 +222,8 @@ mod macos_input {
                 ui.add(egui::TextEdit::singleline(&mut text).id(id));
             });
             assert_eq!(text, "Привет text");
-            assert!(app.job.is_none());
-            assert!(app.pending_jobs.is_empty());
+            assert!(app.jobs.current.is_none());
+            assert!(app.jobs.pending.is_empty());
             assert!(app.notice.is_none());
             assert!(!app.conflict_open());
             assert_eq!(

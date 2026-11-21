@@ -2,6 +2,7 @@ use super::bookmarks::{
     reserve_bookmark_ids, validate_bookmark_shortcuts, Bookmark, SavedBookmark,
 };
 use super::directory::FolderVisit;
+use super::jobs::JobQueue;
 use super::state::{NamedWorkspace, SavedFolderView, Settings, WorkspaceSession};
 use super::tabs::{Pane, Tab};
 use super::PawCommander;
@@ -12,7 +13,6 @@ use crate::result_history::History;
 use crate::thumbnails::Thumbnails;
 use crate::vfs::Location;
 use eframe::egui;
-use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 pub(crate) enum Startup {
@@ -225,15 +225,7 @@ impl PawCommander {
             dialog: None,
             dialog_focus: false,
             dialog_file_focus: None,
-            job: None,
-            pending_jobs: VecDeque::new(),
-            retry_jobs: VecDeque::new(),
-            undo_jobs: VecDeque::new(),
-            queue_start_failed: false,
-            #[cfg(test)]
-            fail_job_spawn: false,
-            active_cut: None,
-            transfer: None,
+            jobs: JobQueue::default(),
             notice: bookmark_shortcut_conflict.then(|| {
                 (
                     crate::i18n::text!(

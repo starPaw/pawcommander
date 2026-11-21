@@ -58,8 +58,8 @@ fn checksum_commands_save_a_manifest_and_keep_distinct_results_in_history() {
             |ui| app.dialogs(ui.ctx()),
         );
     }
-    assert!(app.dialog.is_none() && app.job.is_some());
-    poll_queue_until(&mut app, &ctx, |app| app.job.is_none());
+    assert!(app.dialog.is_none() && app.jobs.current.is_some());
+    poll_queue_until(&mut app, &ctx, |app| app.jobs.current.is_none());
     wait_for_directory(app.tab_mut());
     let manifest = folder.join("SHA256SUMS");
     assert!(manifest.is_file());
@@ -77,12 +77,12 @@ fn checksum_commands_save_a_manifest_and_keep_distinct_results_in_history() {
     assert_eq!(app.selected(), [listed]);
     choose(&mut app, Command::VerifyChecksumManifest);
     assert!(
-        app.job.is_some(),
+        app.jobs.current.is_some(),
         "notice={:?}, address_open={}",
         app.notice,
         app.tab().edit_address
     );
-    poll_queue_until(&mut app, &ctx, |app| app.job.is_none());
+    poll_queue_until(&mut app, &ctx, |app| app.jobs.current.is_none());
     assert!(app.notice.as_ref().is_some_and(|(_, error)| *error));
     let history: serde_json::Value =
         serde_json::from_slice(&fs::read(history_path).unwrap()).unwrap();
@@ -135,9 +135,9 @@ fn history_retry_owns_one_queued_attempt_and_keeps_completed_files_untouched() {
     );
     poll_queue_until(&mut app, &ctx, PawCommander::conflict_open);
     answer_queue_conflict(&mut app, &ctx, crate::i18n::text!("Пропустить"));
-    poll_queue_until(&mut app, &ctx, |app| app.job.is_none());
-    assert_eq!(app.retry_jobs.len(), 1);
-    let id = app.retry_jobs[0].id.clone();
+    poll_queue_until(&mut app, &ctx, |app| app.jobs.current.is_none());
+    assert_eq!(app.jobs.retries.len(), 1);
+    let id = app.jobs.retries[0].id.clone();
     assert!(app.history.retryable.contains(&id));
     std::fs::write(source.join("b"), "new source content").unwrap();
     app.settings.verify_copies = false;
@@ -145,28 +145,28 @@ fn history_retry_owns_one_queued_attempt_and_keeps_completed_files_untouched() {
     app.retry_transfer(&ctx, &id);
     app.retry_transfer(&ctx, &id);
     assert_eq!(
-        app.pending_jobs.len(),
+        app.jobs.pending.len(),
         1,
         "a repeated click cannot enqueue twice"
     );
     assert!(
-        app.pending_jobs[0].description.contains("SHA-256"),
+        app.jobs.pending[0].description.contains("SHA-256"),
         "retry retains the original verification setting"
     );
     assert!(!app.history.retryable.contains(&id));
-    assert!(app.retry_jobs.is_empty());
+    assert!(app.jobs.retries.is_empty());
     app.remove_pending_job(0);
     assert!(
         app.history.retryable.contains(&id),
         "removing an unstarted retry restores its action"
     );
     app.retry_transfer(&ctx, &id);
-    assert_eq!(app.pending_jobs.len(), 1);
+    assert_eq!(app.jobs.pending.len(), 1);
     held.send(Ok("release".into())).unwrap();
     poll_queue_until(&mut app, &ctx, PawCommander::conflict_open);
     answer_queue_conflict(&mut app, &ctx, crate::i18n::text!("Сохранить обе версии"));
-    poll_queue_until(&mut app, &ctx, |app| app.job.is_none());
-    assert!(app.retry_jobs.is_empty());
+    poll_queue_until(&mut app, &ctx, |app| app.jobs.current.is_none());
+    assert!(app.jobs.retries.is_empty());
     assert_eq!(std::fs::read(target.join("a")).unwrap(), b"existing target");
     assert_eq!(std::fs::read(target.join("a (2)")).unwrap(), b"retry me");
     assert_eq!(
@@ -187,7 +187,7 @@ fn history_retry_owns_one_queued_attempt_and_keeps_completed_files_untouched() {
     assert_eq!(records[1]["items"].as_array().unwrap().len(), 1);
     let restarted = PawCommander::new(&cc, Some(source));
     assert!(
-        restarted.retry_jobs.is_empty(),
+        restarted.jobs.retries.is_empty(),
         "saved display paths are not retry authority after restart"
     );
 }
@@ -226,7 +226,7 @@ fn copy_verification_defaults_off_persists_and_is_captured_per_queued_job() {
     }
     app.settings.verify_copies = true;
     for (name, verify) in [("verified", true), ("ordinary", false), ("moved", false)] {
-        let job = app.pending_jobs.pop_front().unwrap();
+        let job = app.jobs.pending.pop_front().unwrap();
         assert_eq!(job.description.contains("SHA-256"), verify);
         let mut progress = Progress::default();
         (job.work)(&mut progress).unwrap();
@@ -299,19 +299,17 @@ fn queue_serializes_workers_reorders_removes_and_continues_after_panic_without_u
             Ok(format!("done {index}"))
         });
     }
-    assert_eq!(app.pending_jobs.len(), 3);
+    assert_eq!(app.jobs.pending.len(), 3);
     assert!(
         observed.try_recv().is_err(),
         "pending workers must not start"
     );
     app.move_pending_job(1, -1);
     app.move_pending_job(0, -1); // Out-of-range controls cannot reorder the active job.
-    app.pending_jobs.remove(2);
-    assert_eq!(app.pending_jobs[0].label, "queued 2");
+    app.jobs.pending.remove(2);
+    assert_eq!(app.jobs.pending[0].label, "queued 2");
     release.send(()).unwrap();
-    poll_queue_until(&mut app, &ctx, |app| {
-        app.job.is_none() && app.pending_jobs.is_empty()
-    });
+    poll_queue_until(&mut app, &ctx, |app| !app.jobs.is_busy());
     assert_eq!(observed.try_iter().collect::<Vec<_>>(), vec![2, 1]);
     assert_eq!(app.notice, Some(("done 1".into(), false)));
 }
@@ -331,13 +329,13 @@ fn queue_is_bounded_and_removing_pending_work_has_no_side_effects() {
             Ok("done".into())
         });
     }
-    assert_eq!(app.pending_jobs.len(), MAX_PENDING_JOBS);
+    assert_eq!(app.jobs.pending.len(), MAX_PENDING_JOBS);
     assert!(app.notice.as_ref().unwrap().0.contains("100"));
     assert!(app.notice.as_ref().unwrap().1);
-    app.pending_jobs.clear();
+    app.jobs.pending.clear();
     held.send(Ok("done".into())).unwrap();
     app.poll(&ctx);
-    assert!(app.job.is_none());
+    assert!(app.jobs.current.is_none());
     assert!(observed.try_recv().is_err());
 }
 
@@ -359,20 +357,20 @@ fn queue_spawn_failure_preserves_work_and_order_until_explicit_retry() {
             Ok(format!("done {index}"))
         });
     }
-    app.fail_job_spawn = true;
+    app.jobs.fail_spawn = true;
     held.send(Ok("released".into())).unwrap();
     app.poll(&ctx);
-    assert!(app.job.is_none());
-    assert!(app.queue_start_failed);
-    assert_eq!(app.pending_jobs.len(), 2);
-    assert_eq!(app.pending_jobs[0].label, "job 0");
-    assert_eq!(app.pending_jobs[1].label, "job 1");
+    assert!(app.jobs.current.is_none());
+    assert!(app.jobs.start_failed);
+    assert_eq!(app.jobs.pending.len(), 2);
+    assert_eq!(app.jobs.pending[0].label, "job 0");
+    assert_eq!(app.jobs.pending[1].label, "job 1");
     assert!(observed.try_recv().is_err());
     assert!(!root.path().join("job-0").exists());
-    app.fail_job_spawn = false;
+    app.jobs.fail_spawn = false;
     app.poll(&ctx);
     assert!(
-        app.job.is_none(),
+        app.jobs.current.is_none(),
         "OS recovery does not cause unbounded automatic retries"
     );
     operation_footer_frame(&mut app, &ctx, vec![]);
@@ -404,9 +402,7 @@ fn queue_spawn_failure_preserves_work_and_order_until_explicit_retry() {
             ],
         );
     }
-    poll_queue_until(&mut app, &ctx, |app| {
-        app.job.is_none() && app.pending_jobs.is_empty()
-    });
+    poll_queue_until(&mut app, &ctx, |app| !app.jobs.is_busy());
     assert_eq!(observed.try_iter().collect::<Vec<_>>(), vec![0, 1]);
     for index in 0..2 {
         assert_eq!(
@@ -449,14 +445,14 @@ fn queued_same_target_copies_revalidate_conflicts_capture_destination_and_save_o
             );
         }
         assert!(
-            app.transfer.is_none(),
+            app.jobs.transfer().is_none(),
             "a pending transfer cannot take active interaction ownership"
         );
         assert!(!target.join("same.txt").exists());
         app.action(Action::Navigate(0, other.clone().into()), &ctx);
         held.send(Ok("released".into())).unwrap();
         poll_queue_until(&mut app, &ctx, PawCommander::conflict_open);
-        assert_eq!(app.job.as_ref().unwrap().label, "second");
+        assert_eq!(app.jobs.current.as_ref().unwrap().label, "second");
         assert_eq!(
             std::fs::read(target.join("same.txt")).unwrap(),
             b"first payload"
@@ -470,7 +466,7 @@ fn queued_same_target_copies_revalidate_conflicts_capture_destination_and_save_o
         );
         assert_eq!(saved["records"][0]["label"], "first");
         answer_queue_conflict(&mut app, &ctx, decision);
-        poll_queue_until(&mut app, &ctx, |app| app.job.is_none());
+        poll_queue_until(&mut app, &ctx, |app| app.jobs.current.is_none());
         assert_eq!(
             std::fs::read(target.join("same.txt")).unwrap(),
             if keep_both {
@@ -537,18 +533,16 @@ fn queued_transfer_failure_and_conflict_stop_release_only_the_active_job() {
     }
     held.send(Ok("released".into())).unwrap();
     poll_queue_until(&mut app, &ctx, PawCommander::conflict_open);
-    assert_eq!(app.job.as_ref().unwrap().label, "conflict.txt");
-    assert_eq!(app.pending_jobs.len(), 1);
+    assert_eq!(app.jobs.current.as_ref().unwrap().label, "conflict.txt");
+    assert_eq!(app.jobs.pending.len(), 1);
     assert!(!target.join("next.txt").exists());
     app.request_transfer_stop(&ctx);
     assert_eq!(
-        app.job.as_ref().unwrap().label,
+        app.jobs.current.as_ref().unwrap().label,
         "conflict.txt",
         "Stop waits for terminal handoff"
     );
-    poll_queue_until(&mut app, &ctx, |app| {
-        app.job.is_none() && app.pending_jobs.is_empty()
-    });
+    poll_queue_until(&mut app, &ctx, |app| !app.jobs.is_busy());
     assert_eq!(std::fs::read(target.join("conflict.txt")).unwrap(), b"old");
     assert_eq!(std::fs::read(source.join("conflict.txt")).unwrap(), b"new");
     assert_eq!(std::fs::read(target.join("next.txt")).unwrap(), b"next");
@@ -594,9 +588,7 @@ fn queued_copy_waits_for_destination_creation_and_source_rename() {
         "queued operations must not mutate the destination"
     );
     held.send(Ok("released".into())).unwrap();
-    poll_queue_until(&mut app, &ctx, |app| {
-        app.job.is_none() && app.pending_jobs.is_empty()
-    });
+    poll_queue_until(&mut app, &ctx, |app| !app.jobs.is_busy());
     assert_eq!(
         std::fs::read(target.join("source.txt")).unwrap(),
         b"source payload"
@@ -639,7 +631,7 @@ fn queued_cut_moves_reserve_sources_and_do_not_consume_replaced_clipboard() {
             true,
         );
     }
-    assert_eq!(app.pending_jobs.len(), 1, "duplicate cut move is rejected");
+    assert_eq!(app.jobs.pending.len(), 1, "duplicate cut move is rejected");
     assert!(source.exists());
     let replacement: Location = root.path().join("new clipboard.txt").into();
     app.clipboard = Some(Clipboard::new(
@@ -648,16 +640,14 @@ fn queued_cut_moves_reserve_sources_and_do_not_consume_replaced_clipboard() {
         ClipboardOrigin::App(None),
     ));
     held.send(Ok("released".into())).unwrap();
-    poll_queue_until(&mut app, &ctx, |app| {
-        app.job.is_none() && app.pending_jobs.is_empty()
-    });
+    poll_queue_until(&mut app, &ctx, |app| !app.jobs.is_busy());
     assert!(!source.exists());
     assert_eq!(
         std::fs::read(target.join("cut.txt")).unwrap(),
         b"cut payload"
     );
     assert_eq!(app.clipboard.as_ref().unwrap().paths, vec![replacement]);
-    assert!(app.active_cut.is_none());
+    assert!(app.jobs.current.is_none());
 }
 
 #[test]
@@ -819,7 +809,7 @@ fn queue_active_notice_stays_bounded_and_keeps_stop_visible() {
     let mut app = PawCommander::new(&cc, Some(root.path().into()));
     let _held = hold_queue(&mut app);
     let (_events, events) = mpsc::channel();
-    app.transfer = Some(TransferInteraction {
+    app.jobs.current.as_mut().unwrap().transfer = Some(TransferInteraction {
         events,
         cut_generation: None,
         conflict: None,
@@ -877,7 +867,9 @@ fn transfer_stop_button_keeps_pending_ownership_and_navigation_until_result() {
     let mut app = PawCommander::new(&cc, Some(root.path().into()));
     let (result, receiver) = mpsc::channel();
     let (reporter, progress) = Progress::tracked();
-    app.job = Some(Job {
+    app.jobs.current = Some(Job {
+        transfer: None,
+        cut: None,
         label: "test operation".into(),
         started: Instant::now(),
         result: receiver,
@@ -893,7 +885,7 @@ fn transfer_stop_button_keeps_pending_ownership_and_navigation_until_result() {
     );
 
     let (events, receiver) = mpsc::channel();
-    app.transfer = Some(TransferInteraction {
+    app.jobs.current.as_mut().unwrap().transfer = Some(TransferInteraction {
         events: receiver,
         cut_generation: None,
         conflict: None,
@@ -902,7 +894,7 @@ fn transfer_stop_button_keeps_pending_ownership_and_navigation_until_result() {
     // A disconnected events channel precedes terminal-result publication.
     drop(events);
     app.poll(&ctx);
-    assert!(app.transfer.is_some());
+    assert!(app.jobs.transfer().is_some());
     let focus = ctx.memory(|memory| memory.focused());
     operation_footer_frame(&mut app, &ctx, vec![]);
     assert_eq!(
@@ -943,7 +935,7 @@ fn transfer_stop_button_keeps_pending_ownership_and_navigation_until_result() {
     app.action(Action::Navigate(0, other.clone().into()), &ctx);
     assert_eq!(app.tab().path.path(), other);
     app.poll(&ctx);
-    assert!(app.job.is_some() && app.transfer.is_some());
+    assert!(app.jobs.transfer().is_some());
     assert!(
         app.drop_enabled(),
         "new work may queue while the active transfer stops"
@@ -954,7 +946,7 @@ fn transfer_stop_button_keeps_pending_ownership_and_navigation_until_result() {
         .send(Err("cleanup failed: /retained/private-staging".into()))
         .unwrap();
     app.poll(&ctx);
-    assert!(app.job.is_none() && app.transfer.is_none());
+    assert!(app.jobs.current.is_none());
     assert_eq!(
         app.notice,
         Some(("cleanup failed: /retained/private-staging".into(), true))
@@ -990,7 +982,8 @@ fn transfer_pause_controls_resume_or_stop_the_active_job_before_the_queue_advanc
         let (reached, boundary) = mpsc::channel();
         let (release, checkpoint) = mpsc::channel();
         let mut checkpoint = Some(checkpoint);
-        app.job
+        app.jobs
+            .current
             .as_ref()
             .unwrap()
             .progress
@@ -1005,8 +998,12 @@ fn transfer_pause_controls_resume_or_stop_the_active_job_before_the_queue_advanc
         answer_queue_conflict(&mut app, &ctx, crate::i18n::text!("Заменить"));
         boundary.recv_timeout(Duration::from_secs(5)).unwrap();
 
-        let pause_state =
-            |app: &PawCommander| app.job.as_ref().and_then(|job| job.progress.pause_state());
+        let pause_state = |app: &PawCommander| {
+            app.jobs
+                .current
+                .as_ref()
+                .and_then(|job| job.progress.pause_state())
+        };
         let click = |app: &mut PawCommander, label| {
             operation_footer_frame(app, &ctx, vec![]);
             let output = operation_footer_frame(app, &ctx, vec![]);
@@ -1059,11 +1056,9 @@ fn transfer_pause_controls_resume_or_stop_the_active_job_before_the_queue_advanc
             observed.try_recv(),
             Err(mpsc::TryRecvError::Empty)
         ));
-        assert_eq!(app.pending_jobs.len(), 1);
+        assert_eq!(app.jobs.pending.len(), 1);
         click(&mut app, if stop { "Stop" } else { "Resume" });
-        poll_queue_until(&mut app, &ctx, |app| {
-            app.job.is_none() && app.pending_jobs.is_empty()
-        });
+        poll_queue_until(&mut app, &ctx, |app| !app.jobs.is_busy());
         let transferred = observed.recv_timeout(Duration::from_secs(5)).unwrap();
         let expected = if stop { b"old content" } else { b"new content" };
         assert_eq!(transferred, expected);
@@ -1193,7 +1188,7 @@ fn transfer_speed_dialog_updates_the_running_job_and_persists_connection_limits(
     dialog_frame(&mut app, vec![request(save, AxAction::Click, None)]);
     assert_eq!(app.settings.transfer_limits.global_kib, 0);
     assert!(app.dialog.is_none());
-    poll_queue_until(&mut app, &ctx, |app| app.job.is_none());
+    poll_queue_until(&mut app, &ctx, |app| app.jobs.current.is_none());
     assert!(fs::read(to.join(source.file_name().unwrap())).unwrap() == data);
 
     let saved = serde_json::to_string(&app.settings.transfer_limits).unwrap();
@@ -1242,15 +1237,19 @@ fn shift_escape_stops_a_conflict_without_starting_the_batch() {
         }],
     );
     assert!(!app.conflict_open());
-    assert!(app.job.as_ref().unwrap().progress.cancel.is_requested());
-    while app.job.is_some() && Instant::now() < deadline {
+    assert!(app
+        .jobs
+        .current
+        .as_ref()
+        .unwrap()
+        .progress
+        .cancel
+        .is_requested());
+    while app.jobs.current.is_some() && Instant::now() < deadline {
         app.poll(&ctx);
         std::thread::yield_now();
     }
-    assert!(
-        app.job.is_none() && app.transfer.is_none(),
-        "conflict worker must return"
-    );
+    assert!(app.jobs.current.is_none(), "conflict worker must return");
     let (notice, error) = app.notice.as_ref().unwrap();
     assert!(!error);
     assert!(
@@ -1315,7 +1314,9 @@ fn late_stop_keeps_final_success_and_consumes_committed_cut_events() {
     app.clipboard = Some(clipboard);
     let (result, receiver) = mpsc::channel();
     let (_, progress) = Progress::tracked();
-    app.job = Some(Job {
+    app.jobs.current = Some(Job {
+        transfer: None,
+        cut: None,
         label: "test move".into(),
         started: Instant::now(),
         result: receiver,
@@ -1323,7 +1324,7 @@ fn late_stop_keeps_final_success_and_consumes_committed_cut_events() {
         progress,
     });
     let (events, receiver) = mpsc::channel();
-    app.transfer = Some(TransferInteraction {
+    app.jobs.current.as_mut().unwrap().transfer = Some(TransferInteraction {
         events: receiver,
         cut_generation: Some(generation),
         conflict: None,
@@ -1352,11 +1353,11 @@ fn late_stop_keeps_final_success_and_consumes_committed_cut_events() {
     app.poll(&ctx);
     assert_eq!(app.notice, Some((success, false)));
     assert_eq!(app.clipboard.as_ref().unwrap().paths, vec![pending]);
-    assert_eq!(app.job.as_ref().unwrap().label, "next job");
-    assert!(app.transfer.is_none());
+    assert_eq!(app.jobs.current.as_ref().unwrap().label, "next job");
+    assert!(app.jobs.transfer().is_none());
     next_observed.recv_timeout(Duration::from_secs(2)).unwrap();
     next_release.send(()).unwrap();
-    poll_queue_until(&mut app, &ctx, |app| app.job.is_none());
+    poll_queue_until(&mut app, &ctx, |app| app.jobs.current.is_none());
 }
 
 #[test]
@@ -1445,14 +1446,14 @@ fn operation_center_stays_live_during_a_stalled_copy_and_reports_the_error() {
     assert!(active.contains("File remaining: ≈"), "{active}");
     app.action(Action::Navigate(0, other.clone().into()), &ctx);
     assert_eq!(app.tab().path.path(), other);
-    assert!(app.job.is_some());
+    assert!(app.jobs.current.is_some());
 
     resume.send(()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
-    while app.job.is_some() && Instant::now() < deadline {
+    while app.jobs.current.is_some() && Instant::now() < deadline {
         app.poll(&ctx);
         std::thread::yield_now();
     }
-    assert!(app.job.is_none());
+    assert!(app.jobs.current.is_none());
     assert!(draw_footer(&mut app, &ctx).contains("test disconnect"));
 }

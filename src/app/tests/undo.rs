@@ -14,9 +14,9 @@ fn history_undo_owns_one_queued_request_survives_remove_and_spawn_failure() {
     app.start_progress_job(&ctx, "rename", move |progress| {
         crate::vfs::rename_with_undo(&original, "renamed", progress).map(|path| path.display())
     });
-    poll_queue_until(&mut app, &ctx, |app| app.job.is_none());
-    assert_eq!(app.undo_jobs.len(), 1);
-    let id = app.undo_jobs[0].id.clone();
+    poll_queue_until(&mut app, &ctx, |app| app.jobs.current.is_none());
+    assert_eq!(app.jobs.undo.len(), 1);
+    let id = app.jobs.undo[0].id.clone();
     assert_eq!(app.history.undoable[&id], 1);
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&history_path).unwrap()).unwrap();
@@ -24,30 +24,30 @@ fn history_undo_owns_one_queued_request_survives_remove_and_spawn_failure() {
     let held = hold_queue(&mut app);
     app.undo_operation(&ctx, &id);
     app.undo_operation(&ctx, &id);
-    assert_eq!(app.pending_jobs.len(), 1);
+    assert_eq!(app.jobs.pending.len(), 1);
     assert!(!app.history.undoable.contains_key(&id));
     app.remove_pending_job(0);
     assert_eq!(app.history.undoable[&id], 1);
     app.undo_operation(&ctx, &id);
-    app.fail_job_spawn = true;
+    app.jobs.fail_spawn = true;
     held.send(Ok("release".into())).unwrap();
-    poll_queue_until(&mut app, &ctx, |app| app.queue_start_failed);
-    assert_eq!(app.pending_jobs.len(), 1);
+    poll_queue_until(&mut app, &ctx, |app| app.jobs.start_failed);
+    assert_eq!(app.jobs.pending.len(), 1);
     assert!(!source.path().exists());
-    app.fail_job_spawn = false;
-    app.queue_start_failed = false;
+    app.jobs.fail_spawn = false;
+    app.jobs.start_failed = false;
     app.start_next_job(&ctx);
-    poll_queue_until(&mut app, &ctx, |app| app.job.is_none());
+    poll_queue_until(&mut app, &ctx, |app| app.jobs.current.is_none());
     assert_eq!(std::fs::read(source.path()).unwrap(), b"original bytes");
     assert!(!root.path().join("renamed").exists());
-    assert!(app.undo_jobs.is_empty());
+    assert!(app.jobs.undo.is_empty());
     assert!(!app.history.undoable.contains_key(&id));
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&history_path).unwrap()).unwrap();
     assert_eq!(saved["records"].as_array().unwrap().len(), 2);
     assert_eq!(saved["records"][1]["items"][0]["outcome"], "Completed");
     let restarted = PawCommander::new(&cc, Some(root.path().into()));
-    assert!(restarted.undo_jobs.is_empty() && restarted.history.undoable.is_empty());
+    assert!(restarted.jobs.undo.is_empty() && restarted.history.undoable.is_empty());
 }
 
 #[test]
@@ -71,16 +71,14 @@ fn history_undo_rechecks_at_dispatch_and_retains_only_failed_work() {
         TransferKind::Move,
         false,
     );
-    poll_queue_until(&mut app, &ctx, |app| app.job.is_none());
-    assert_eq!(app.undo_jobs.len(), 1);
-    let id = app.undo_jobs[0].id.clone();
+    poll_queue_until(&mut app, &ctx, |app| app.jobs.current.is_none());
+    assert_eq!(app.jobs.undo.len(), 1);
+    let id = app.jobs.undo[0].id.clone();
     let held = hold_queue(&mut app);
     app.undo_operation(&ctx, &id);
     std::fs::write(source.join("a").path(), b"external occupant").unwrap();
     held.send(Ok("release".into())).unwrap();
-    poll_queue_until(&mut app, &ctx, |app| {
-        app.job.is_none() && app.pending_jobs.is_empty()
-    });
+    poll_queue_until(&mut app, &ctx, |app| !app.jobs.is_busy());
     assert_eq!(
         std::fs::read(source.join("a").path()).unwrap(),
         b"external occupant"
@@ -91,14 +89,14 @@ fn history_undo_rechecks_at_dispatch_and_retains_only_failed_work() {
     std::fs::remove_file(source.join("a").path()).unwrap();
     std::fs::write(source.join("b").path(), b"edited after successful undo").unwrap();
     app.undo_operation(&ctx, &id);
-    poll_queue_until(&mut app, &ctx, |app| app.job.is_none());
+    poll_queue_until(&mut app, &ctx, |app| app.jobs.current.is_none());
     assert_eq!(std::fs::read(source.join("a").path()).unwrap(), b"a");
     assert_eq!(
         std::fs::read(source.join("b").path()).unwrap(),
         b"edited after successful undo"
     );
     assert_eq!(std::fs::read_dir(target.path()).unwrap().count(), 0);
-    assert!(app.undo_jobs.is_empty());
+    assert!(app.jobs.undo.is_empty());
 }
 
 #[test]
@@ -115,8 +113,8 @@ fn history_undo_is_not_offered_when_result_persistence_failed() {
     app.start_progress_job(&ctx, "rename", move |progress| {
         crate::vfs::rename_with_undo(&source, "renamed", progress).map(|path| path.display())
     });
-    poll_queue_until(&mut app, &ctx, |app| app.job.is_none());
-    assert!(app.undo_jobs.is_empty() && app.history.undoable.is_empty());
+    poll_queue_until(&mut app, &ctx, |app| app.jobs.current.is_none());
+    assert!(app.jobs.undo.is_empty() && app.history.undoable.is_empty());
     assert_eq!(std::fs::read(root.path().join("renamed")).unwrap(), b"data");
     assert_eq!(std::fs::read(blocker).unwrap(), b"unrelated");
 }

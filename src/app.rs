@@ -91,7 +91,7 @@ use dialogs::{ConnectionJob, Dialog, SftpForm};
 use directory::DirectoryEntries;
 use eframe::egui;
 use entry_widget::{entry_widget, EntryOptions, COMPACT_FILE_ROW_HEIGHT};
-use jobs::{CutRequest, Job, PendingJob, RetryJob, TransferInteraction, UndoJob};
+use jobs::JobQueue;
 use pane_view::{list_notice, render_pane, workspace_card, PaneOptions};
 pub(crate) use persistence::Startup;
 #[cfg(target_os = "macos")]
@@ -102,7 +102,6 @@ use state::{
     Settings, WorkspaceSession,
 };
 pub(crate) use state::{SavedLocation, SavedPath};
-use std::collections::VecDeque;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 use tabs::{move_tab, Pane, Tab};
@@ -139,15 +138,7 @@ pub struct PawCommander {
     dialog: Option<Dialog>,
     dialog_focus: bool,
     dialog_file_focus: Option<(u64, Location)>,
-    job: Option<Job>,
-    pending_jobs: VecDeque<PendingJob>,
-    retry_jobs: VecDeque<RetryJob>,
-    undo_jobs: VecDeque<UndoJob>,
-    queue_start_failed: bool,
-    #[cfg(test)]
-    fail_job_spawn: bool,
-    active_cut: Option<CutRequest>,
-    transfer: Option<TransferInteraction>,
+    jobs: JobQueue,
     notice: Option<(String, bool)>,
     history: History,
     recovery: crate::recovery::Recovery,
@@ -255,7 +246,7 @@ impl eframe::App for PawCommander {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 return;
             }
-            if self.job.is_some() || !self.pending_jobs.is_empty() {
+            if self.jobs.is_busy() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.notice = Some((
                     crate::i18n::text!(
@@ -563,11 +554,10 @@ impl eframe::App for PawCommander {
                 self.active = destination;
             }
         }
-        if let Some(Err(error)) = self.native_drag.handoff(
-            ctx,
-            frame,
-            enabled && self.job.is_none() && self.pending_jobs.is_empty(),
-        ) {
+        if let Some(Err(error)) =
+            self.native_drag
+                .handoff(ctx, frame, enabled && !self.jobs.is_busy())
+        {
             self.notice = Some((error, true));
         }
         if let Some(result) = drop_targets.finish(ctx, enabled) {
@@ -580,7 +570,7 @@ impl eframe::App for PawCommander {
             self.dispatch_search_result(action, ctx);
         }
         if self.dialog.is_none()
-            && let Some(transfer) = &mut self.transfer
+            && let Some(transfer) = self.jobs.transfer_mut()
             && let Some(conflict) = &mut transfer.conflict
         {
             if conflict.show(ctx) {
@@ -671,7 +661,7 @@ impl eframe::App for PawCommander {
         if let Some(path) = self.search.show(ctx, self.tools.locate.as_deref()) {
             self.reveal_search_result(path, ctx);
         }
-        if self.job.is_some()
+        if self.jobs.current.is_some()
             || self.application_job.is_some()
             || self.connection.is_some()
             || self

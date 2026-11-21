@@ -34,7 +34,7 @@ fn recovery_worker_tracks_active_operation_and_clears_known_completion() {
         assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
         assert!(crate::recovery::scan(&directory).unfinished.is_empty());
         release.send(()).unwrap();
-        poll_queue_until(&mut app, &ctx, |app| app.job.is_none());
+        poll_queue_until(&mut app, &ctx, |app| app.jobs.current.is_none());
         assert!(crate::recovery::scan(&directory).unfinished.is_empty());
         assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
         assert_eq!(app.notice.as_ref().unwrap().1, fail);
@@ -50,7 +50,7 @@ fn recovery_worker_preserves_marker_after_caught_panic() {
     let mut app = PawCommander::new(&cc, Some(root.path().into()));
     app.recovery = crate::recovery::Recovery::for_test(directory.clone(), &ctx);
     app.start_progress_job(&ctx, "panicked job", |_| panic!("injected worker panic"));
-    poll_queue_until(&mut app, &ctx, |app| app.job.is_none());
+    poll_queue_until(&mut app, &ctx, |app| app.jobs.current.is_none());
     let report = crate::recovery::scan(&directory);
     assert!(report.errors.is_empty());
     assert_eq!(report.unfinished.len(), 1);
@@ -73,7 +73,7 @@ fn recovery_worker_refuses_to_start_without_persisted_marker() {
         std::fs::write(worker_changed, b"unexpected work").unwrap();
         Ok("done".into())
     });
-    poll_queue_until(&mut app, &ctx, |app| app.job.is_none());
+    poll_queue_until(&mut app, &ctx, |app| app.jobs.current.is_none());
     assert!(!changed.exists());
     assert_eq!(std::fs::read(directory).unwrap(), b"foreign file");
     assert!(app.notice.as_ref().unwrap().1);
@@ -94,7 +94,7 @@ fn recovery_worker_retains_marker_when_history_cannot_be_saved() {
             .plan([(Location::Local(PathBuf::from("source")), None)]);
         Ok("finished operation".into())
     });
-    poll_queue_until(&mut app, &ctx, |app| app.job.is_none());
+    poll_queue_until(&mut app, &ctx, |app| app.jobs.current.is_none());
     assert_eq!(crate::recovery::scan(&directory).unfinished.len(), 1);
     assert!(app.notice.as_ref().unwrap().1);
 }
@@ -141,6 +141,6 @@ fn recovery_report_suspends_existing_new_folder_dialog_enter() {
     );
     assert!(app.recovery.is_open());
     assert!(matches!(app.dialog, Some(Dialog::NewFolder { .. })));
-    assert!(app.job.is_none());
+    assert!(app.jobs.current.is_none());
     assert!(!root.path().join("must-not-be-created").exists());
 }
