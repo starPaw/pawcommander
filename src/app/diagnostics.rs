@@ -331,11 +331,16 @@ fn save_to(path: &Path, draft: &str) -> Result<(), String> {
 
 impl PawCommander {
     pub(super) fn open_diagnostics(&mut self, focus: egui::Id, ctx: &egui::Context) {
+        let history_error = self
+            .history
+            .error
+            .as_deref()
+            .map(crate::i18n::history_error);
         let snapshot = Snapshot::capture(
             self.settings.language,
             self.settings.ui_scale,
             self.history.diagnostics_loaded(),
-            self.history.error.as_deref(),
+            history_error.as_deref(),
             self.notice
                 .as_ref()
                 .and_then(|(message, failed)| failed.then_some(message.as_str())),

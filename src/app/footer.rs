@@ -107,7 +107,10 @@ impl PawCommander {
             let response = ui.button(crate::i18n::text!("Журнал результатов"));
             paint_focus(ui, &response, 5);
             if history_error {
-                ui.colored_label(colors.error, crate::i18n::text!("История не сохранена"));
+                ui.colored_label(
+                    colors.error,
+                    crate::i18n::text!("Ошибка журнала результатов"),
+                );
             }
             response.clicked()
         };
