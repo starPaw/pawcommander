@@ -73,7 +73,7 @@ impl Document {
             .add(
                 egui::TextEdit::singleline(&mut self.settings.query)
                     .id(filter_id)
-                    .hint_text(text("Фильтр строк…"))
+                    .hint_text(text!("Фильтр строк…"))
                     .desired_width(f32::INFINITY)
                     .char_limit(256),
             )
@@ -101,11 +101,11 @@ impl Document {
         if let Some(error) = &self.page.error {
             ui.colored_label(ui.visuals().error_fg_color, error);
         } else if self.scan.is_none() && self.filter_due.is_none() && self.page.rows.is_empty() {
-            ui.label(text(if self.settings.query.is_empty() {
-                "В таблице нет строк данных."
+            ui.label(if self.settings.query.is_empty() {
+                text!("В таблице нет строк данных.")
             } else {
-                "Нет строк, подходящих под фильтр."
-            }));
+                text!("Нет строк, подходящих под фильтр.")
+            });
         }
         if let Some(start) = &self.page.start
             && self.page.columns != 0
@@ -119,11 +119,11 @@ impl Document {
         let previous = self.settings.separator;
         let mut header_changed = false;
         ui.horizontal_wrapped(|ui| {
-            let label = ui.label(text("Разделитель"));
+            let label = ui.label(text!("Разделитель"));
             let caption = match self.settings.separator {
                 Some(separator) => separator.label().into(),
                 None => self.page.start.as_ref().map_or_else(
-                    || text("Авто").into(),
+                    || text!("Авто").into(),
                     |start| {
                         crate::tr_format!("Авто ({})", "Auto ({})", start.layout.separator.label())
                     },
@@ -132,7 +132,7 @@ impl Document {
             egui::ComboBox::from_id_salt("table-separator")
                 .selected_text(caption)
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.settings.separator, None, text("Авто"));
+                    ui.selectable_value(&mut self.settings.separator, None, text!("Авто"));
                     for separator in Separator::ALL {
                         ui.selectable_value(
                             &mut self.settings.separator,
@@ -144,7 +144,10 @@ impl Document {
                 .response
                 .labelled_by(label.id);
             header_changed = ui
-                .checkbox(&mut self.settings.header, text("Первая строка — заголовки"))
+                .checkbox(
+                    &mut self.settings.header,
+                    text!("Первая строка — заголовки"),
+                )
                 .changed();
         });
         previous != self.settings.separator || header_changed
@@ -156,11 +159,11 @@ impl Document {
             .horizontal_wrapped(|ui| {
                 let previous = ui.add_enabled(
                     !waiting && self.page.start.is_some() && !self.previous.is_empty(),
-                    egui::Button::new(text("Предыдущие строки")),
+                    egui::Button::new(text!("Предыдущие строки")),
                 );
                 let next = ui.add_enabled(
                     !waiting && self.page.next.is_some(),
-                    egui::Button::new(text("Следующие строки")),
+                    egui::Button::new(text!("Следующие строки")),
                 );
                 if waiting {
                     ui.spinner();
@@ -173,7 +176,7 @@ impl Document {
                         self.page.scanned,
                     ));
                 } else if waiting {
-                    ui.label(text("Чтение таблицы…"));
+                    ui.label(text!("Чтение таблицы…"));
                 }
                 (previous.clicked(), next.clicked())
             })

@@ -225,7 +225,7 @@ impl PawCommander {
             transfer: None,
             notice: bookmark_shortcut_conflict.then(|| {
                 (
-                    crate::i18n::text(
+                    crate::i18n::text!(
                         "Сочетание избранного очищено: клавиша занята другой командой",
                     )
                     .into(),
@@ -273,7 +273,7 @@ impl PawCommander {
         };
         let Some(folders) = workspace.locations() else {
             self.notice = Some((
-                crate::i18n::text("Пути этого рабочего пространства несовместимы с системой.")
+                crate::i18n::text!("Пути этого рабочего пространства несовместимы с системой.")
                     .into(),
                 true,
             ));

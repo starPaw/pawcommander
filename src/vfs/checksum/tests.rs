@@ -45,16 +45,24 @@ pub(crate) fn checksum_round_trip(directory: &Location) {
         .message()
     );
     for (row, path, reason) in [
-        (&after.results.items[0], &unchanged, "SHA-256 совпала"),
+        (
+            &after.results.items[0],
+            &unchanged,
+            crate::i18n::text!("SHA-256 совпала"),
+        ),
         (
             &after.results.items[1],
             &edited,
-            "Файл изменён (SHA-256 не совпала)",
+            crate::i18n::text!("Файл изменён (SHA-256 не совпала)"),
         ),
-        (&after.results.items[2], &absent, "Файл отсутствует"),
+        (
+            &after.results.items[2],
+            &absent,
+            crate::i18n::text!("Файл отсутствует"),
+        ),
     ] {
         assert_eq!(row.source, path.display());
-        assert_eq!(row.reason.as_deref(), Some(text(reason)));
+        assert_eq!(row.reason.as_deref(), Some(reason));
     }
     assert_eq!(fs::read(unchanged.path()).unwrap(), b"abc");
     assert_eq!(fs::read(edited.path()).unwrap(), b"xyz");

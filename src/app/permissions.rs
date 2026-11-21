@@ -31,7 +31,7 @@ impl PermissionsDialog {
     pub(super) fn show(&mut self, ui: &mut egui::Ui, focus: bool) {
         self.poll();
         ui.horizontal(|ui| {
-            let label = ui.label(text("Права доступа"));
+            let label = ui.label(text!("Права доступа"));
             let edit = ui
                 .add_enabled(
                     self.pending.is_none(),
@@ -51,21 +51,21 @@ impl PermissionsDialog {
             if ui
                 .add_enabled(
                     self.pending.is_none() && !self.draft.trim().is_empty(),
-                    egui::Button::new(text("Предпросмотр")),
+                    egui::Button::new(text!("Предпросмотр")),
                 )
                 .clicked()
             {
                 self.start(ui.ctx());
             }
         });
-        ui.label(text(
+        ui.label(text!(
             "Если класс не указан, правило применяется ко всем (a).",
         ));
 
         if self.pending.is_some() {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label(text("Чтение прав SFTP…"));
+                ui.label(text!("Чтение прав SFTP…"));
             });
         }
         if let Some(error) = &self.error {
@@ -161,7 +161,8 @@ impl PermissionsDialog {
             Ok(Err(error)) => self.error = Some(error),
             Err(TryRecvError::Empty) => return,
             Err(TryRecvError::Disconnected) => {
-                self.error = Some(text("Предпросмотр прав прервался. Запустите его снова.").into());
+                self.error =
+                    Some(text!("Предпросмотр прав прервался. Запустите его снова.").into());
             }
         }
         self.pending = None;

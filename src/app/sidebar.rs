@@ -122,7 +122,7 @@ impl PawCommander {
                     .show(ui, |ui| {
                         let jump = ui.add_enabled(
                             !self.keyboard_blocked(ctx),
-                            egui::Button::new(crate::i18n::text("К папке…")),
+                            egui::Button::new(crate::i18n::text!("К папке…")),
                         );
                         paint_focus(ui, &jump, 5);
                         if jump
@@ -158,18 +158,18 @@ impl PawCommander {
                         }
                         self.workspace_places(ui, actions);
                         ui.add_space(6.0);
-                        egui::CollapsingHeader::new(crate::i18n::text("Ваши файлы"))
+                        egui::CollapsingHeader::new(crate::i18n::text!("Ваши файлы"))
                             .id_salt("places_group")
                             .default_open(true)
                             .show_unindented(ui, |ui| {
                                 let places = [
-                                    (crate::i18n::text("Домашняя"), dirs::home_dir()),
-                                    (crate::i18n::text("Рабочий стол"), dirs::desktop_dir()),
-                                    (crate::i18n::text("Документы"), dirs::document_dir()),
-                                    (crate::i18n::text("Загрузки"), dirs::download_dir()),
-                                    (crate::i18n::text("Изображения"), dirs::picture_dir()),
-                                    (crate::i18n::text("Музыка"), dirs::audio_dir()),
-                                    (crate::i18n::text("Видео"), dirs::video_dir()),
+                                    (crate::i18n::text!("Домашняя"), dirs::home_dir()),
+                                    (crate::i18n::text!("Рабочий стол"), dirs::desktop_dir()),
+                                    (crate::i18n::text!("Документы"), dirs::document_dir()),
+                                    (crate::i18n::text!("Загрузки"), dirs::download_dir()),
+                                    (crate::i18n::text!("Изображения"), dirs::picture_dir()),
+                                    (crate::i18n::text!("Музыка"), dirs::audio_dir()),
+                                    (crate::i18n::text!("Видео"), dirs::video_dir()),
                                 ];
                                 for (label, path) in places {
                                     if let Some(path) = path
@@ -184,13 +184,13 @@ impl PawCommander {
                                 }
                             });
                         ui.add_space(6.0);
-                        egui::CollapsingHeader::new(crate::i18n::text("Подключения"))
+                        egui::CollapsingHeader::new(crate::i18n::text!("Подключения"))
                             .id_salt("remote_group")
                             .default_open(true)
                             .show_unindented(ui, |ui| {
                                 if place_button(
                                     ui,
-                                    crate::i18n::text("SFTP · Подключиться"),
+                                    crate::i18n::text!("SFTP · Подключиться"),
                                     current.remote(),
                                 ) {
                                     actions.push(Action::ConnectSftp);
@@ -208,7 +208,7 @@ impl PawCommander {
                                 self.smb_sidebar(ui, &current, actions);
                             });
                         ui.add_space(6.0);
-                        egui::CollapsingHeader::new(crate::i18n::text("Избранное"))
+                        egui::CollapsingHeader::new(crate::i18n::text!("Избранное"))
                             .id_salt("bookmarks_group")
                             .default_open(true)
                             .show_unindented(ui, |ui| {
@@ -284,7 +284,9 @@ impl PawCommander {
                                             let (menu, _) = menu_button.ui(ui, |ui| {
                                                 self.bookmark_menu_open = Some(id);
                                                 if ui
-                                                    .button(crate::i18n::text("Изменить избранное"))
+                                                    .button(crate::i18n::text!(
+                                                        "Изменить избранное"
+                                                    ))
                                                     .clicked()
                                                 {
                                                     self.bookmark_editor = Some(
@@ -294,14 +296,14 @@ impl PawCommander {
                                                 }
                                                 ui.separator();
                                                 ui.menu_button(
-                                                    crate::i18n::text("Сочетание"),
+                                                    crate::i18n::text!("Сочетание"),
                                                     |ui| {
                                                         if ui
                                                             .selectable_label(
                                                                 self.bookmarks[i]
                                                                     .shortcut
                                                                     .is_none(),
-                                                                crate::i18n::text("Не назначено"),
+                                                                crate::i18n::text!("Не назначено"),
                                                             )
                                                             .clicked()
                                                         {
@@ -360,7 +362,7 @@ impl PawCommander {
                                                     if ui
                                                         .add_enabled(
                                                             previous.is_some(),
-                                                            egui::Button::new(crate::i18n::text(
+                                                            egui::Button::new(crate::i18n::text!(
                                                                 "Вверх",
                                                             )),
                                                         )
@@ -374,7 +376,7 @@ impl PawCommander {
                                                     if ui
                                                         .add_enabled(
                                                             next.is_some(),
-                                                            egui::Button::new(crate::i18n::text(
+                                                            egui::Button::new(crate::i18n::text!(
                                                                 "Вниз",
                                                             )),
                                                         )
@@ -385,7 +387,7 @@ impl PawCommander {
                                                     }
                                                 });
                                                 if ui
-                                                    .button(crate::i18n::text(
+                                                    .button(crate::i18n::text!(
                                                         "Убрать из избранного",
                                                     ))
                                                     .clicked()
@@ -414,7 +416,7 @@ impl PawCommander {
                                 if ui
                                     .add(
                                         egui::Button::new(
-                                            RichText::new(crate::i18n::text("+ Текущая папка"))
+                                            RichText::new(crate::i18n::text!("+ Текущая папка"))
                                                 .color(colors.muted),
                                         )
                                         .frame(false),
@@ -425,14 +427,14 @@ impl PawCommander {
                                 }
                             });
                         ui.add_space(6.0);
-                        egui::CollapsingHeader::new(crate::i18n::text("Устройства"))
+                        egui::CollapsingHeader::new(crate::i18n::text!("Устройства"))
                             .id_salt("devices_group")
                             .default_open(true)
                             .show_unindented(ui, |ui| {
                                 #[cfg(not(target_os = "windows"))]
                                 if place_button(
                                     ui,
-                                    crate::i18n::text("Файловая система"),
+                                    crate::i18n::text!("Файловая система"),
                                     current.local() == Some(Path::new("/")),
                                 ) {
                                     actions.push(Action::Navigate(
@@ -443,7 +445,7 @@ impl PawCommander {
                                 #[cfg(target_os = "macos")]
                                 if place_button(
                                     ui,
-                                    crate::i18n::text("Тома и диски"),
+                                    crate::i18n::text!("Тома и диски"),
                                     current.local() == Some(Path::new("/Volumes")),
                                 ) {
                                     actions.push(Action::Navigate(
@@ -454,7 +456,7 @@ impl PawCommander {
                                 #[cfg(target_os = "linux")]
                                 if place_button(
                                     ui,
-                                    crate::i18n::text("Носители"),
+                                    crate::i18n::text!("Носители"),
                                     current.local() == Some(Path::new("/media")),
                                 ) {
                                     actions.push(Action::Navigate(
@@ -489,7 +491,7 @@ impl PawCommander {
                     ui.add_space(10.0);
                     let mut hidden = self.folder_view(self.active).hidden;
                     let response = ui
-                        .checkbox(&mut hidden, crate::i18n::text("Скрытые файлы"))
+                        .checkbox(&mut hidden, crate::i18n::text!("Скрытые файлы"))
                         .on_hover_text(self.settings.shortcuts.hint(
                             ctx,
                             Command::Hidden,
@@ -507,12 +509,12 @@ impl PawCommander {
     }
 
     pub(super) fn workspace_places(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
-        egui::CollapsingHeader::new(crate::i18n::text("Пространства"))
+        egui::CollapsingHeader::new(crate::i18n::text!("Пространства"))
             .id_salt("workspaces_group")
             .default_open(true)
             .show_unindented(ui, |ui| {
                 ui.add_enabled_ui(self.drop_enabled(), |ui| {
-                    let save = ui.button(crate::i18n::text("Сохранить пару папок…"));
+                    let save = ui.button(crate::i18n::text!("Сохранить пару папок…"));
                     paint_focus(ui, &save, 5);
                     if save.clicked() {
                         actions.push(Action::SaveWorkspace);
@@ -534,13 +536,13 @@ impl PawCommander {
                                     actions.push(Action::OpenWorkspace(index));
                                 }
                                 let menu = ui.menu_button("…", |ui| {
-                                    if ui.button(crate::i18n::text("Переименовать…")).clicked()
+                                    if ui.button(crate::i18n::text!("Переименовать…")).clicked()
                                     {
                                         actions.push(Action::RenameWorkspace(index));
                                         ui.close();
                                     }
                                     if ui
-                                        .button(crate::i18n::text("Удалить пространство"))
+                                        .button(crate::i18n::text!("Удалить пространство"))
                                         .clicked()
                                     {
                                         actions.push(Action::RemoveWorkspace(index));

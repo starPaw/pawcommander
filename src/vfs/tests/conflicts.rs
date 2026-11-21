@@ -319,7 +319,7 @@ fn same_folder_move_stops_before_conflicts_but_copy_can_keep_both() {
         .unwrap_err();
         assert_eq!(
             error,
-            crate::i18n::text("Элементы уже находятся в этой папке")
+            crate::i18n::text!("Элементы уже находятся в этой папке")
         );
         assert_eq!(fs::read(outside.path()).unwrap(), b"outside");
         assert_eq!(fs::read(existing.path()).unwrap(), b"existing");

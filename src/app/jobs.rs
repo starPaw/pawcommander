@@ -108,7 +108,7 @@ fn ask_conflict(
     let dialog = ConflictDialog::new(conflict, reply);
     events
         .send(TransferEvent::Conflict(Box::new(dialog)))
-        .map_err(|_| crate::i18n::text("Диалог конфликта закрыт"))?;
+        .map_err(|_| crate::i18n::text!("Диалог конфликта закрыт"))?;
     ctx.request_repaint();
     Ok(wait_for_conflict_answer(&answer, cancellation))
 }
@@ -160,7 +160,7 @@ impl PawCommander {
         ctx: &egui::Context,
         plan: crate::vfs::BatchRenamePreview,
     ) {
-        let label = crate::i18n::text("Массовое переименование");
+        let label = crate::i18n::text!("Массовое переименование");
         let folder = plan.directory().display();
         let description = format!("{label} ({}) · {folder}", plan.changes);
         self.start_stoppable_job(ctx, label, description, move |progress| {
@@ -175,7 +175,7 @@ impl PawCommander {
         completion: mpsc::Sender<Result<(), String>>,
         ctx: &egui::Context,
     ) {
-        let label = crate::i18n::text("Создание файла");
+        let label = crate::i18n::text!("Создание файла");
         let description = format!("{label} · {}", job.target().display().escape_debug());
         let (_events, receive) = mpsc::channel();
         self.submit_job(
@@ -252,9 +252,9 @@ impl PawCommander {
             completion,
         }) = self.native_drag.next_promise()
         {
-            let label = crate::i18n::text("Скачивание для принимающего приложения");
+            let label = crate::i18n::text!("Скачивание для принимающего приложения");
             if self.queue_start_failed || self.pending_jobs.len() >= MAX_PENDING_JOBS {
-                let error = crate::i18n::text("Очередь файловых операций недоступна.").to_owned();
+                let error = crate::i18n::text!("Очередь файловых операций недоступна.").to_owned();
                 let _ = completion.send(Err(error.clone()));
                 self.notice = Some((error, true));
                 continue;
@@ -303,11 +303,11 @@ impl PawCommander {
             return;
         };
         let (_, events) = mpsc::channel();
-        let label = crate::i18n::text(if offer.moving {
-            "Продолжение переноса"
+        let label = if offer.moving {
+            crate::i18n::text!("Продолжение переноса")
         } else {
-            "Продолжение копирования"
-        });
+            crate::i18n::text!("Продолжение копирования")
+        };
         let description = format!("{label} · {} → {}", offer.source, offer.target);
         self.submit_job(
             ctx,
@@ -380,7 +380,7 @@ impl PawCommander {
             if let Some(undo) = job.undo_origin {
                 self.remember_undo(undo);
             }
-            self.notice = Some((crate::i18n::text("Очередь заполнена (100 заданий). Дождитесь завершения или удалите ожидающее задание.").into(), true));
+            self.notice = Some((crate::i18n::text!("Очередь заполнена (100 заданий). Дождитесь завершения или удалите ожидающее задание.").into(), true));
             return;
         }
         if self.job.is_none() && self.pending_jobs.is_empty() {
@@ -490,7 +490,7 @@ impl PawCommander {
                 }));
                 let panicked = outcome.is_err();
                 let mut result = outcome.unwrap_or_else(|_| {
-                    Err(crate::i18n::text(
+                    Err(crate::i18n::text!(
                         "Фоновая операция неожиданно завершилась. Проверьте файлы в обеих папках.",
                     )
                     .into())
@@ -628,7 +628,7 @@ impl PawCommander {
 
     pub(super) fn retry_transfer(&mut self, ctx: &egui::Context, id: &str) {
         if self.pending_jobs.len() >= MAX_PENDING_JOBS {
-            self.notice = Some((crate::i18n::text("Очередь заполнена (100 заданий). Дождитесь завершения или удалите ожидающее задание.").into(), true));
+            self.notice = Some((crate::i18n::text!("Очередь заполнена (100 заданий). Дождитесь завершения или удалите ожидающее задание.").into(), true));
             return;
         }
         let Some(index) = self.retry_jobs.iter().position(|job| job.id == id) else {
@@ -662,7 +662,7 @@ impl PawCommander {
         let (publish, events) = mpsc::channel();
         let repaint = ctx.clone();
         let retry_origin = Some(job.clone());
-        let label = crate::i18n::text("Проверка прерванной операции SFTP");
+        let label = crate::i18n::text!("Проверка прерванной операции SFTP");
         let description = format!("{label} · {}", job.transfer.destination);
         self.submit_job(
             ctx,
@@ -702,7 +702,7 @@ impl PawCommander {
                             send(job);
                             progress.results.cancelled = true;
                             Ok(
-                                crate::i18n::text("Проверка прерванной операции SFTP отменена.")
+                                crate::i18n::text!("Проверка прерванной операции SFTP отменена.")
                                     .into(),
                             )
                         }
@@ -767,7 +767,7 @@ impl PawCommander {
                     self.remember_retry(retry);
                 }
                 self.notice = Some((
-                    crate::i18n::text("Эти вырезанные объекты уже ожидают перемещения.").into(),
+                    crate::i18n::text!("Эти вырезанные объекты уже ожидают перемещения.").into(),
                     true,
                 ));
                 return;
@@ -848,7 +848,7 @@ impl PawCommander {
             );
             if summary.metadata_warnings != 0 {
                 message.push('\n');
-                message.push_str(crate::i18n::text("Даты или права доступа сохранены частично. Подробности указаны в строках журнала."));
+                message.push_str(crate::i18n::text!("Даты или права доступа сохранены частично. Подробности указаны в строках журнала."));
             }
             Ok(message)
         };
@@ -922,7 +922,7 @@ impl PawCommander {
 
     pub(super) fn undo_operation(&mut self, ctx: &egui::Context, id: &str) {
         if self.pending_jobs.len() >= MAX_PENDING_JOBS {
-            self.notice = Some((crate::i18n::text("Очередь заполнена (100 заданий). Дождитесь завершения или удалите ожидающее задание.").into(), true));
+            self.notice = Some((crate::i18n::text!("Очередь заполнена (100 заданий). Дождитесь завершения или удалите ожидающее задание.").into(), true));
             return;
         }
         let Some(index) = self.undo_jobs.iter().position(|job| job.id == id) else {
@@ -932,7 +932,7 @@ impl PawCommander {
         self.history.undoable.remove(id);
         self.show_history = false;
         let mut batch = job.batch.clone();
-        let label = crate::i18n::text("Отмена изменений");
+        let label = crate::i18n::text!("Отмена изменений");
         let description = format!("{label}: {}", batch.len());
         // A transfer interaction exposes Stop and keeps the normal queue/close
         // lifecycle even though Undo never offers an overwrite conflict dialog.
@@ -1061,9 +1061,10 @@ impl PawCommander {
         if let Some(rx) = &self.application_job {
             let result = match rx.try_recv() {
                 Ok(result) => Some(result),
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    Some(Err(crate::i18n::text("Запуск приложения прервался.").into()))
-                }
+                Err(mpsc::TryRecvError::Disconnected) => Some(Err(crate::i18n::text!(
+                    "Запуск приложения прервался."
+                )
+                .into())),
                 Err(mpsc::TryRecvError::Empty) => None,
             };
             if let Some(result) = result {
@@ -1077,7 +1078,7 @@ impl PawCommander {
         if let Some(job) = &self.connection {
             let result = match job.result.try_recv() {
                 Ok(result) => Some(result),
-                Err(mpsc::TryRecvError::Disconnected) => Some(Err(crate::i18n::text(
+                Err(mpsc::TryRecvError::Disconnected) => Some(Err(crate::i18n::text!(
                     "Задача подключения завершилась",
                 )
                 .into())),
@@ -1189,7 +1190,7 @@ impl PawCommander {
         if let Some(job) = &self.job {
             let result = match job.result.try_recv() {
                 Ok(result) => Some(result),
-                Err(mpsc::TryRecvError::Disconnected) => Some(Err(crate::i18n::text(
+                Err(mpsc::TryRecvError::Disconnected) => Some(Err(crate::i18n::text!(
                     "Фоновая операция неожиданно завершилась. Проверьте файлы в обеих папках.",
                 )
                 .into())),

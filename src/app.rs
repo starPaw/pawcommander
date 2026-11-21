@@ -234,7 +234,7 @@ impl eframe::App for PawCommander {
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.notice = Some((
-                crate::i18n::text("Дождитесь завершения файловой операции, затем закройте окно.")
+                crate::i18n::text!("Дождитесь завершения файловой операции, затем закройте окно.")
                     .into(),
                 false,
             ));
@@ -248,7 +248,7 @@ impl eframe::App for PawCommander {
             && accepted
         {
             self.notice = Some((
-                crate::i18n::text("Файлы переданы принимающему приложению").into(),
+                crate::i18n::text!("Файлы переданы принимающему приложению").into(),
                 false,
             ));
         }
@@ -643,7 +643,7 @@ impl eframe::App for PawCommander {
         }
         if validate_bookmark_shortcuts(&mut self.bookmarks, &self.settings.shortcuts) {
             self.notice = Some((
-                crate::i18n::text("Сочетание избранного очищено: клавиша занята другой командой")
+                crate::i18n::text!("Сочетание избранного очищено: клавиша занята другой командой")
                     .into(),
                 false,
             ));

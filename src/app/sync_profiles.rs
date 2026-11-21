@@ -74,8 +74,8 @@ impl ProfilePicker {
         let mut pair_changed = false;
         let name = self.selected.map(|index| profiles[index].name.as_str());
         ui.horizontal_wrapped(|ui| {
-            ui.label(text("Профиль"));
-            let selector = format!("{} ▾", name.unwrap_or_else(|| text("Без профиля")));
+            ui.label(text!("Профиль"));
+            let selector = format!("{} ▾", name.unwrap_or_else(|| text!("Без профиля")));
             if ui
                 .add(egui::Button::new(selector).selected(self.list_open))
                 .clicked()
@@ -85,18 +85,18 @@ impl ProfilePicker {
                 self.error = None;
             }
             let save_label = if name.is_some() {
-                "Обновить профиль…"
+                crate::i18n::text!("Обновить профиль…")
             } else {
-                "Сохранить профиль…"
+                crate::i18n::text!("Сохранить профиль…")
             };
-            if ui.button(text(save_label)).clicked() {
+            if ui.button(save_label).clicked() {
                 self.list_open = false;
                 self.edit = Some(Edit::Save(name.unwrap_or_default().to_owned()));
                 self.error = None;
             }
             if let Some(current) = self.current.as_ref()
                 && current != folders
-                && ui.button(text("Взять папки из панелей")).clicked()
+                && ui.button(text!("Взять папки из панелей")).clicked()
             {
                 *folders = current.clone();
                 self.list_open = false;
@@ -104,7 +104,7 @@ impl ProfilePicker {
                 self.error = None;
                 pair_changed = true;
             }
-            if name.is_some() && ui.button(text("Удалить профиль…")).clicked() {
+            if name.is_some() && ui.button(text!("Удалить профиль…")).clicked() {
                 self.list_open = false;
                 self.edit = Some(Edit::Remove);
                 self.error = None;
@@ -127,7 +127,7 @@ impl ProfilePicker {
                     .unwrap_or_default();
                 pair_changed = true;
             } else {
-                self.error = Some(text("Папки профиля несовместимы с этой системой.").to_owned());
+                self.error = Some(text!("Папки профиля несовместимы с этой системой.").to_owned());
             }
         }
 
@@ -137,10 +137,10 @@ impl ProfilePicker {
         match &mut self.edit {
             Some(Edit::Save(name)) => {
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(text("Название профиля"));
+                    ui.label(text!("Название профиля"));
                     ui.add(egui::TextEdit::singleline(name).char_limit(80));
-                    save = ui.button(text("Сохранить")).clicked();
-                    cancel = ui.button(text("Отмена")).clicked();
+                    save = ui.button(text!("Сохранить")).clicked();
+                    cancel = ui.button(text!("Отмена")).clicked();
                 });
             }
             Some(Edit::Remove) => {
@@ -150,8 +150,8 @@ impl ProfilePicker {
                         "Удалить профиль «{name}»?",
                         "Remove profile “{name}”?"
                     ));
-                    remove = ui.button(text("Удалить")).clicked();
-                    cancel = ui.button(text("Отмена")).clicked();
+                    remove = ui.button(text!("Удалить")).clicked();
+                    cancel = ui.button(text!("Отмена")).clicked();
                 });
             }
             None => {}
@@ -190,7 +190,7 @@ impl ProfilePicker {
                         self.current.is_some(),
                         egui::Button::selectable(
                             self.selected.is_none(),
-                            text("Текущая пара папок"),
+                            text!("Текущая пара папок"),
                         ),
                     )
                     .clicked()
@@ -219,7 +219,7 @@ fn save_profile(
 ) -> Result<usize, String> {
     let name = name.trim();
     if name.is_empty() || name.chars().any(char::is_control) {
-        return Err(text("Введите название профиля.").into());
+        return Err(text!("Введите название профиля.").into());
     }
     let key = normalize(name);
     if profiles
@@ -227,10 +227,10 @@ fn save_profile(
         .enumerate()
         .any(|(index, other)| Some(index) != editing && normalize(&other.name) == key)
     {
-        return Err(text("Профиль с таким названием уже существует.").into());
+        return Err(text!("Профиль с таким названием уже существует.").into());
     }
     if folders[0] == folders[1] {
-        return Err(text("Выберите две разные папки для профиля.").into());
+        return Err(text!("Выберите две разные папки для профиля.").into());
     }
     Exclusions::parse(&options.exclusions).map_err(|error| error.to_string())?;
     let profile = SyncProfile {

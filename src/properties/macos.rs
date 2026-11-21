@@ -60,11 +60,11 @@ pub(super) fn describe(path: &Path, metadata: &Metadata, cancel: &AtomicBool) ->
     // If a root changed while these calls ran, discard the whole extended
     // snapshot. This also disambiguates ENOENT for a missing ACL and a vanished file.
     if !fs::symlink_metadata(path).is_ok_and(|current| same_item(metadata, &current)) {
-        return Some(text("Объект изменился во время чтения метаданных.").into());
+        return Some(text!("Объект изменился во время чтения метаданных.").into());
     }
 
     let links = if !metadata.is_file() {
-        Ok(Some(text("Не применяется").into()))
+        Ok(Some(text!("Не применяется").into()))
     } else if volume.hard_links == Some(false) {
         Err(io::ErrorKind::Unsupported.into())
     } else {
@@ -72,16 +72,16 @@ pub(super) fn describe(path: &Path, metadata: &Metadata, cancel: &AtomicBool) ->
     };
     let mut description = format!(
         "{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}",
-        text("Файловая система"),
+        text!("Файловая система"),
         volume
             .filesystem
             .as_deref()
-            .unwrap_or_else(|| text("Недоступно")),
-        text("Жёсткие ссылки"),
+            .unwrap_or_else(|| text!("Недоступно")),
+        text!("Жёсткие ссылки"),
         display(links),
-        text("Теги Finder"),
+        text!("Теги Finder"),
         display(tags),
-        text("Расширенные атрибуты"),
+        text!("Расширенные атрибуты"),
         display(attributes),
         "ACL",
         display(acl),
@@ -105,12 +105,12 @@ fn same_item(before: &Metadata, after: &Metadata) -> bool {
 fn display(value: io::Result<Option<String>>) -> String {
     match value {
         Ok(Some(value)) => value,
-        Ok(None) => text("Отсутствуют").into(),
+        Ok(None) => text!("Отсутствуют").into(),
         Err(error)
             if error.kind() == io::ErrorKind::Unsupported
                 || matches!(error.raw_os_error(), Some(libc::ENOTSUP | libc::EOPNOTSUPP)) =>
         {
-            text("Не поддерживается на этом томе").into()
+            text!("Не поддерживается на этом томе").into()
         }
         Err(error) => crate::tr_format!("Недоступно ({error})", "Unavailable ({error})"),
     }
@@ -238,7 +238,7 @@ fn bounded_attribute(read: impl FnOnce(&mut [u8]) -> libc::ssize_t) -> io::Resul
 }
 
 fn attribute_limit() -> io::Error {
-    io::Error::other(text("Превышен лимит предпросмотра атрибутов"))
+    io::Error::other(text!("Превышен лимит предпросмотра атрибутов"))
 }
 
 fn attribute_names(path: &CStr) -> io::Result<Option<String>> {
@@ -292,7 +292,7 @@ fn decode_tags(bytes: &[u8]) -> io::Result<Option<String>> {
     let malformed = || {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            text("Не удалось прочитать формат тегов Finder"),
+            text!("Не удалось прочитать формат тегов Finder"),
         )
     };
     autoreleasepool(|_| {
@@ -405,7 +405,7 @@ mod tests {
         let changed = describe(&hard, &snapshot, &AtomicBool::new(false));
         assert_eq!(
             changed.as_deref(),
-            Some(text("Объект изменился во время чтения метаданных."))
+            Some(text!("Объект изменился во время чтения метаданных."))
         );
         assert_eq!(fs::read(&file).unwrap(), b"unchanged");
     }

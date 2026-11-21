@@ -17,7 +17,7 @@ pub(crate) struct Exclusions {
 
 impl Exclusions {
     pub(crate) fn parse(input: &str) -> Result<Self, TransferError> {
-        let too_many = || text("Используйте до 64 исключений общим размером до 8 КиБ.").into();
+        let too_many = || text!("Используйте до 64 исключений общим размером до 8 КиБ.").into();
         if input.len() > MAX_TEXT_BYTES {
             return Err(too_many());
         }

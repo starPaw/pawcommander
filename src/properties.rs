@@ -123,7 +123,7 @@ impl Properties {
             });
         if let Err(error) = result {
             let mut summary = state.lock().unwrap();
-            summary.error(Path::new(crate::i18n::text("Подсчёт не запущен")), error);
+            summary.error(Path::new(crate::i18n::text!("Подсчёт не запущен")), error);
             summary.done = true;
         }
         Self {
@@ -138,11 +138,11 @@ impl Properties {
     pub fn show(&self, ctx: &egui::Context) -> bool {
         let summary = self.state.lock().unwrap().clone();
         let mut open = true;
-        egui::Window::new(crate::i18n::text(if self.remote {
-            "Свойства файлов SFTP"
+        egui::Window::new(if self.remote {
+            crate::i18n::text!("Свойства файлов SFTP")
         } else {
-            "Свойства локальных файлов"
-        }))
+            crate::i18n::text!("Свойства локальных файлов")
+        })
             .id(egui::Id::unique("local-properties"))
             .open(&mut open)
             .default_width(580.0)
@@ -151,11 +151,11 @@ impl Properties {
                     ui.horizontal(|ui| {
                         ui.spinner();
                         ui.label(if self.cancel.load(Ordering::Relaxed) {
-                            crate::i18n::text("Остановка подсчёта…")
+                            crate::i18n::text!("Остановка подсчёта…")
                         } else {
-                            crate::i18n::text("Подсчёт…")
+                            crate::i18n::text!("Подсчёт…")
                         });
-                        let stop = ui.button(crate::i18n::text("Остановить подсчёт"));
+                        let stop = ui.button(crate::i18n::text!("Остановить подсчёт"));
                         if !ui.is_sizing_pass() && self.focus_stop.replace(false) {
                             stop.request_focus();
                         }
@@ -165,18 +165,18 @@ impl Properties {
                     });
                 } else {
                     ui.label(if summary.cancelled {
-                        crate::i18n::text("Подсчёт остановлен — частичный результат")
+                        crate::i18n::text!("Подсчёт остановлен — частичный результат")
                     } else if summary.errors > 0 {
-                        crate::i18n::text("Подсчёт завершён с ошибками — частичный результат")
+                        crate::i18n::text!("Подсчёт завершён с ошибками — частичный результат")
                     } else {
-                        crate::i18n::text("Подсчёт завершён")
+                        crate::i18n::text!("Подсчёт завершён")
                     });
                 }
                 ui.label(crate::tr_format!("Размер файлов: {} байт", "File size: {} bytes", summary.bytes));
                 ui.label(crate::tr_format!("Файлов: {} · Папок: {} · Ссылок: {} · Других: {}", "Files: {} · Folders: {} · Links: {} · Other: {}",
                     summary.files, summary.directories, summary.links, summary.other
                 ));
-                ui.small(crate::i18n::text("Включая выбранные объекты и скрытые файлы. Ссылки не раскрываются. Размер — сумма длин обычных файлов, не занятое место на диске."));
+                ui.small(crate::i18n::text!("Включая выбранные объекты и скрытые файлы. Ссылки не раскрываются. Размер — сумма длин обычных файлов, не занятое место на диске."));
                 egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
                     for (path, details) in &summary.details {
                         ui.separator();
@@ -201,7 +201,7 @@ impl Properties {
 
 fn date(value: Option<SystemTime>) -> String {
     value.map_or_else(
-        || crate::i18n::text("недоступно").into(),
+        || crate::i18n::text!("недоступно").into(),
         |time| {
             DateTime::<Local>::from(time)
                 .format("%Y-%m-%d %H:%M:%S %:z")

@@ -130,7 +130,7 @@ impl Worker {
                 updates: scan.updates.clone(),
                 cancel: scan.cancel.clone(),
             })
-            .map_err(|_| crate::i18n::text("Служба предпросмотра недоступна").to_owned())?;
+            .map_err(|_| crate::i18n::text!("Служба предпросмотра недоступна").to_owned())?;
         Ok(scan)
     }
 }
@@ -316,7 +316,7 @@ fn read_prefix(
 }
 
 fn changed() -> String {
-    crate::i18n::text("Таблица изменилась. Откройте быстрый просмотр заново.").into()
+    crate::i18n::text!("Таблица изменилась. Откройте быстрый просмотр заново.").into()
 }
 
 #[cfg(test)]

@@ -185,7 +185,7 @@ impl<F: FnMut(PropertyEvent<'_>)> Scanner<'_, F> {
         if depth >= MAX_TREE_DEPTH {
             return self.report(
                 location,
-                ReadError::Path(text("Достигнут предел вложенности папок").into()),
+                ReadError::Path(text!("Достигнут предел вложенности папок").into()),
             );
         }
         let mut directory = match self.open_directory(location, stat) {
@@ -207,7 +207,7 @@ impl<F: FnMut(PropertyEvent<'_>)> Scanner<'_, F> {
             {
                 self.report(
                     location,
-                    ReadError::Path(text("Папка содержит недопустимое имя").into()),
+                    ReadError::Path(text!("Папка содержит недопустимое имя").into()),
                 );
                 continue;
             }
@@ -225,7 +225,7 @@ impl<F: FnMut(PropertyEvent<'_>)> Scanner<'_, F> {
 }
 
 fn changed_directory() -> ReadError {
-    ReadError::Path(text("Папка изменилась во время подсчёта").into())
+    ReadError::Path(text!("Папка изменилась во время подсчёта").into())
 }
 
 fn differs<T: PartialEq>(left: Option<T>, right: Option<T>) -> bool {

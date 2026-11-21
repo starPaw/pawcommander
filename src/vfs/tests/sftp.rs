@@ -116,7 +116,7 @@ fn check_sftp_editor(local_root: &Location, remote_root: &Location, setstat_deni
     } else {
         assert_eq!(
             result.unwrap(),
-            crate::i18n::text("Правка сохранена на сервере.")
+            crate::i18n::text!("Правка сохранена на сервере.")
         );
         assert_eq!(fs::read(source.path()).unwrap(), b"edited!!");
         assert_eq!(
@@ -125,7 +125,7 @@ fn check_sftp_editor(local_root: &Location, remote_root: &Location, setstat_deni
         );
         assert_eq!(
             edit.save(&mut Progress::default()).unwrap(),
-            crate::i18n::text("На сервере уже сохранена эта версия.")
+            crate::i18n::text!("На сервере уже сохранена эта версия.")
         );
         let modified = fs::metadata(source.path()).unwrap().modified().unwrap();
         fs::write(source.path(), b"external").unwrap();
@@ -138,7 +138,9 @@ fn check_sftp_editor(local_root: &Location, remote_root: &Location, setstat_deni
         fs::write(edit.copy(), b"new edit").unwrap();
         assert_eq!(
             edit.save(&mut Progress::default()).unwrap_err(),
-            crate::i18n::text("Файл на сервере изменился или недоступен. Рабочая копия сохранена.")
+            crate::i18n::text!(
+                "Файл на сервере изменился или недоступен. Рабочая копия сохранена."
+            )
         );
         assert_eq!(fs::read(source.path()).unwrap(), b"external");
     }
@@ -939,7 +941,7 @@ fn openssh_round_trip_and_host_verification() {
         connect(&endpoint, "", "test-passphrase", &empty)
             .err()
             .unwrap(),
-        crate::i18n::text(
+        crate::i18n::text!(
             "Ключ сервера SSH не подтверждён. Откройте форму SFTP и проверьте отпечаток."
         ),
     );
@@ -953,7 +955,7 @@ fn openssh_round_trip_and_host_verification() {
     assert!(connect(&endpoint, "", "test-passphrase", &mismatch)
         .err()
         .unwrap()
-        .starts_with(crate::i18n::text("Ключ сервера SSH изменился.")));
+        .starts_with(crate::i18n::text!("Ключ сервера SSH изменился.")));
     assert!(connect(&endpoint, "", "wrong-passphrase", &known).is_err());
     let memory_key = fs::read_to_string(root.join("client")).unwrap();
     let absent_key = Endpoint {
@@ -1055,7 +1057,7 @@ fn openssh_round_trip_and_host_verification() {
         .unwrap_err();
         assert_eq!(
             error,
-            crate::i18n::text("Элементы уже находятся в этой папке")
+            crate::i18n::text!("Элементы уже находятся в этой папке")
         );
         assert_eq!(fs::read(refresh_file.path()).unwrap(), b"external edit");
     }

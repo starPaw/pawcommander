@@ -20,7 +20,7 @@ pub(crate) struct SftpSearchConnection {
 
 impl SftpSearchConnection {
     pub(crate) fn open(location: &Location) -> Result<Self, String> {
-        let unavailable = || text("Для поиска подключитесь к серверу по SFTP.").to_owned();
+        let unavailable = || text!("Для поиска подключитесь к серверу по SFTP.").to_owned();
         let endpoint = location.sftp_endpoint().ok_or_else(unavailable)?;
         let channel = cached(endpoint)?.ok_or_else(unavailable)?;
         Ok(Self {
@@ -35,7 +35,7 @@ impl SftpSearchConnection {
         follow_link: bool,
     ) -> Result<Option<bool>, String> {
         if location.sftp_endpoint() != Some(&self.endpoint) {
-            return Err(text("Результаты относятся к разным подключениям SFTP.").into());
+            return Err(text!("Результаты относятся к разным подключениям SFTP.").into());
         }
         let path = location.path();
         let entry = match self.channel.lstat(path) {
@@ -113,7 +113,7 @@ pub(crate) fn walk(
         }
     }
     if cancelled() {
-        return Err(text("Поиск отменён").into());
+        return Err(text!("Поиск отменён").into());
     }
     coverage.timed_out = timed_out.get();
     Ok(coverage)

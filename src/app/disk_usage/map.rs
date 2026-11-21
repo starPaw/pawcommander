@@ -15,7 +15,7 @@ pub(super) fn show(ui: &mut egui::Ui, analysis: &Analysis, folder: NodeId, run: 
     let mut selected = folder;
     ui.horizontal(|ui| {
         if let Some(parent) = node.parent
-            && ui.button(text("В родительскую папку")).clicked()
+            && ui.button(text!("В родительскую папку")).clicked()
         {
             selected = parent;
         }
@@ -30,7 +30,7 @@ pub(super) fn show(ui: &mut egui::Ui, analysis: &Analysis, folder: NodeId, run: 
     });
     let tiles = tiles(analysis, folder);
     if tiles.is_empty() {
-        ui.label(text("В этой папке пока нет учтённых блоков"));
+        ui.label(text!("В этой папке пока нет учтённых блоков"));
         return selected;
     }
     let size = Vec2::new(ui.available_width(), (body_height(ui) - 36.0).max(60.0));
@@ -146,14 +146,14 @@ fn tiles(analysis: &Analysis, folder: NodeId) -> Vec<Tile> {
         tiles.push(Tile {
             id: None,
             bytes: other,
-            caption: text("Остальные объекты").into(),
+            caption: text!("Остальные объекты").into(),
         });
     }
     if node.own_blocks > 0 {
         tiles.push(Tile {
             id: None,
             bytes: node.own_blocks,
-            caption: text("Блоки самой папки").into(),
+            caption: text!("Блоки самой папки").into(),
         });
     }
     tiles

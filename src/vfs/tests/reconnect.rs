@@ -282,7 +282,7 @@ fn sftp_reconnect_checks_lost_publication_replies() {
         Outcome::PublicationUnconfirmed
     );
     assert!(review.results.items[0].reason.as_ref().unwrap().contains(
-        crate::i18n::text("Источник отсутствует. Состав и метаданные назначения совпадают с записанными перед переносом.")
+        crate::i18n::text!("Источник отсутствует. Состав и метаданные назначения совпадают с записанными перед переносом.")
     ));
     assert!(!source.path().exists());
     assert_eq!(

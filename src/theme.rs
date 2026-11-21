@@ -21,7 +21,7 @@ impl Theme {
             Self::Frappe | Self::Dark => "Frappé",
             Self::Macchiato => "Macchiato",
             Self::Mocha => "Mocha",
-            Self::System => crate::i18n::text("Как в системе"),
+            Self::System => crate::i18n::text!("Как в системе"),
         }
     }
 
@@ -214,7 +214,7 @@ pub fn appearance_menu(ui: &mut egui::Ui, theme: &mut Theme, high_contrast: bool
         other => other,
     };
     ui.label(egui::RichText::new("CATPPUCCIN").strong());
-    ui.weak(crate::i18n::text("Мягкие цвета для ваших файлов"));
+    ui.weak(crate::i18n::text!("Мягкие цвета для ваших файлов"));
     ui.add_space(6.0);
     for value in [
         Theme::Latte,

@@ -311,16 +311,16 @@ impl Recovery {
                 egui::ScrollArea::both().show(ui, |ui| {
                     #[cfg(target_os = "macos")]
                     if !self.report.copies.is_empty() {
-                        ui.heading(crate::i18n::text("Прерванные копирования и переносы"));
-                        ui.small(crate::i18n::text("Перед продолжением PawCommander сверяет источник, назначение и временную копию."));
+                        ui.heading(crate::i18n::text!("Прерванные копирования и переносы"));
+                        ui.small(crate::i18n::text!("Перед продолжением PawCommander сверяет источник, назначение и временную копию."));
                         for (index, offer) in self.report.copies.iter().enumerate() {
                             ui.push_id(&offer.id, |ui| {
                                 ui.label(format!("{} → {}", offer.source, offer.target));
-                                let action = if offer.moving { "Проверить и продолжить перенос" } else { "Проверить и продолжить" };
+                                let action = if offer.moving { crate::i18n::text!("Проверить и продолжить перенос") } else { crate::i18n::text!("Проверить и продолжить") };
                                 if offer.moving {
-                                    ui.small(crate::i18n::text("Источник удаляется после проверки полной копии."));
+                                    ui.small(crate::i18n::text!("Источник удаляется после проверки полной копии."));
                                 }
-                                if ui.add_enabled(self.receive.is_none(), egui::Button::new(crate::i18n::text(action))).clicked() {
+                                if ui.add_enabled(self.receive.is_none(), egui::Button::new(action)).clicked() {
                                     resume = Some(index);
                                 }
                             });

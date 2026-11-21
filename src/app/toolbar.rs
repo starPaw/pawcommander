@@ -38,9 +38,9 @@ impl PawCommander {
                     ui.separator();
                     let search_width = (ui.available_width() - 432.0).clamp(icons::TOOLBAR_BUTTON_SIZE, 420.0);
                     let search_label = if search_width >= 150.0 {
-                        crate::i18n::text("Поиск файлов…")
+                        crate::i18n::text!("Поиск файлов…")
                     } else if search_width >= 95.0 {
-                        crate::i18n::text("Поиск…")
+                        crate::i18n::text!("Поиск…")
                     } else {
                         ""
                     };
@@ -50,13 +50,13 @@ impl PawCommander {
                         self.open_search();
                     }
                     if ui.add_enabled_ui(self.job.is_none(), |ui| icons::button(ui, Icon::Server, "SFTP", self.tab().path.remote())).inner
-                        .on_hover_text(crate::i18n::text("Подключиться по SFTP")).clicked() {
+                        .on_hover_text(crate::i18n::text!("Подключиться по SFTP")).clicked() {
                         actions.push(Action::ConnectSftp);
                     }
                     for (icon, tip, enabled, action) in [
                         (Icon::NewFolder, self.settings.shortcuts.hint(ctx, Command::NewFolder, Command::NewFolder.label()), writable && !self.conflict_open(), Action::NewFolder),
-                        (Icon::Copy, crate::i18n::text("Копировать · ⌘/Ctrl+C").into(), writable && !self.tab().selected.is_empty(), Action::Copy(false)),
-                        (Icon::Paste, crate::i18n::text("Вставить · ⌘/Ctrl+V").into(), writable && !self.conflict_open(), Action::Paste(false)),
+                        (Icon::Copy, crate::i18n::text!("Копировать · ⌘/Ctrl+C").into(), writable && !self.tab().selected.is_empty(), Action::Copy(false)),
+                        (Icon::Paste, crate::i18n::text!("Вставить · ⌘/Ctrl+V").into(), writable && !self.conflict_open(), Action::Paste(false)),
                     ] {
                         if ui.add_enabled_ui(enabled, |ui| icons::button(ui, icon, "", false)).inner.on_hover_text(tip).clicked() {
                             actions.push(action);
@@ -65,7 +65,7 @@ impl PawCommander {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let menu_id = ui.scope_id().with("settings_menu");
                         let settings_label = if ctx.content_rect().width() >= 760.0 {
-                            crate::i18n::text("Настройки")
+                            crate::i18n::text!("Настройки")
                         } else {
                             ""
                         };
@@ -84,7 +84,7 @@ impl PawCommander {
                             data.get_temp::<bool>(menu_id.with("focus_entry")).unwrap_or(false)
                         });
                         let settings_items = |ui: &mut egui::Ui| {
-                            let response = ui.button(crate::i18n::text("Доступность"));
+                            let response = ui.button(crate::i18n::text!("Доступность"));
                             if focus_entry && !ui.is_sizing_pass() {
                                 response.request_focus();
                                 ui.data_mut(|data| data.remove::<bool>(menu_id.with("focus_entry")));
@@ -95,7 +95,7 @@ impl PawCommander {
                                 self.accessibility_focus = true;
                                 ui.close();
                             }
-                            let shortcuts = ui.button(crate::i18n::text("Горячие клавиши"));
+                            let shortcuts = ui.button(crate::i18n::text!("Горячие клавиши"));
                             paint_focus(ui, &shortcuts, 5);
                             if shortcuts.clicked() {
                                 self.shortcut_editor = Some(ShortcutEditor::new(&self.settings.shortcuts));
@@ -146,7 +146,7 @@ impl PawCommander {
                                     ui.close();
                                 }
                             }
-                            let about = ui.button(crate::i18n::text("О PawCommander"));
+                            let about = ui.button(crate::i18n::text!("О PawCommander"));
                             paint_focus(ui, &about, 5);
                             if about.clicked() { self.show_help = true; ui.close(); }
                             let language_menu = ui.menu_button("Язык / Language", |ui| {
@@ -163,7 +163,7 @@ impl PawCommander {
                             });
                             paint_focus(ui, &language_menu.response, 5);
                             ui.separator();
-                            let speed = ui.button(crate::i18n::text("Скорость передачи…"));
+                            let speed = ui.button(crate::i18n::text!("Скорость передачи…"));
                             paint_focus(ui, &speed, 5);
                             if speed.clicked() {
                                 self.open_transfer_limits(ctx);
@@ -171,13 +171,13 @@ impl PawCommander {
                             }
                             let verification = ui.checkbox(
                                 &mut self.settings.verify_copies,
-                                crate::i18n::text("Проверять копии (SHA-256)"),
-                            ).on_hover_text(crate::i18n::text("Повторно читает временные файлы перед публикацией. Применяется к новым заданиям копирования; перемещение использует переименование."));
+                                crate::i18n::text!("Проверять копии (SHA-256)"),
+                            ).on_hover_text(crate::i18n::text!("Повторно читает временные файлы перед публикацией. Применяется к новым заданиям копирования; перемещение использует переименование."));
                             paint_focus(ui, &verification, 5);
                             ui.separator();
                             appearance_menu(ui, &mut self.settings.theme, self.settings.high_contrast);
                             ui.separator();
-                            ui.label(crate::i18n::text("Расположение панелей"));
+                            ui.label(crate::i18n::text!("Расположение панелей"));
                             ui.horizontal(|ui| {
                                 for orientation in [PaneOrientation::SideBySide, PaneOrientation::Stacked] {
                                     let response = ui.radio_value(
@@ -194,16 +194,16 @@ impl PawCommander {
                                 ui.close();
                             }
                             ui.separator();
-                            ui.label(crate::i18n::text("Вид текущей папки"));
+                            ui.label(crate::i18n::text!("Вид текущей папки"));
                             let view = self.folder_view(self.active);
                             let mut hidden = view.hidden;
-                            let response = ui.checkbox(&mut hidden, crate::i18n::text("Скрытые файлы"));
+                            let response = ui.checkbox(&mut hidden, crate::i18n::text!("Скрытые файлы"));
                             paint_focus(ui, &response, 5);
                             if response.changed() {
                                 actions.push(self.folder_view_action(self.active, FolderViewChange::Hidden(hidden)));
                             }
                             ui.horizontal(|ui| {
-                                ui.label(crate::i18n::text("Плотность"));
+                                ui.label(crate::i18n::text!("Плотность"));
                                 for density in [Density::Standard, Density::Compact] {
                                     let response = ui.radio(view.density == density, density.label());
                                     paint_focus(ui, &response, 5);
@@ -213,12 +213,12 @@ impl PawCommander {
                                 }
                             });
                             ui.horizontal(|ui| {
-                                ui.label(crate::i18n::text("Сортировка"));
+                                ui.label(crate::i18n::text!("Сортировка"));
                                 sort_controls(ui, view.order, |sort| {
                                     actions.push(self.folder_view_action(self.active, FolderViewChange::Sort(sort)));
                                 });
                             });
-                            let columns = ui.button(crate::i18n::text("Столбцы списка"));
+                            let columns = ui.button(crate::i18n::text!("Столбцы списка"));
                             paint_focus(ui, &columns, 5);
                             if columns.clicked() {
                                 self.show_list_columns = true;
@@ -226,19 +226,19 @@ impl PawCommander {
                                 ui.close();
                             }
                             ui.separator();
-                            let tools_menu = ui.menu_button(crate::i18n::text("Инструменты"), |ui| {
+                            let tools_menu = ui.menu_button(crate::i18n::text!("Инструменты"), |ui| {
                                 #[cfg(target_os = "macos")]
-                                if ui.button(crate::i18n::text("Пользовательские действия…")).clicked() {
+                                if ui.button(crate::i18n::text!("Пользовательские действия…")).clicked() {
                                     actions.push(Action::ManageCustomActions);
                                     ui.close();
                                 }
                                 #[cfg(target_os = "macos")]
-                                if ui.button(crate::i18n::text("Внешние редакторы…")).clicked() {
+                                if ui.button(crate::i18n::text!("Внешние редакторы…")).clicked() {
                                     actions.push(Action::ConfigureExternalEditors);
                                     ui.close();
                                 }
                                 #[cfg(target_os = "macos")]
-                                if self.remote_editor.available() && ui.button(crate::i18n::text("Правка SFTP")).clicked() {
+                                if self.remote_editor.available() && ui.button(crate::i18n::text!("Правка SFTP")).clicked() {
                                     self.remote_editor.reveal();
                                     ui.close();
                                 }
@@ -249,17 +249,17 @@ impl PawCommander {
                                         ui.colored_label(ui.visuals().warn_fg_color, crate::tr_format!("{name}: не найден", "{name}: not found"));
                                     }
                                 }
-                                ui.small(crate::i18n::text("locate: установите locate/plocate и создайте индекс средствами ОС."));
-                                ui.small(crate::i18n::text("Zed: установите редактор; для нестандартного пути — cli: install cli binary."));
-                                let diff = ui.label(crate::i18n::text("Внешний инструмент сравнения"));
+                                ui.small(crate::i18n::text!("locate: установите locate/plocate и создайте индекс средствами ОС."));
+                                ui.small(crate::i18n::text!("Zed: установите редактор; для нестандартного пути — cli: install cli binary."));
+                                let diff = ui.label(crate::i18n::text!("Внешний инструмент сравнения"));
                                 ui.add(egui::TextEdit::singleline(&mut self.settings.diff_tool)
-                                    .hint_text(crate::i18n::text("Авто (FileMerge при наличии)"))
+                                    .hint_text(crate::i18n::text!("Авто (FileMerge при наличии)"))
                                     .desired_width(290.0)).labelled_by(diff.id);
                                 let configured = self.settings.diff_tool.trim();
                                 if !configured.is_empty() && !std::path::Path::new(configured).is_absolute() {
-                                    ui.colored_label(ui.visuals().warn_fg_color, crate::i18n::text("Укажите абсолютный путь к исполняемому файлу"));
+                                    ui.colored_label(ui.visuals().warn_fg_color, crate::i18n::text!("Укажите абсолютный путь к исполняемому файлу"));
                                 }
-                                if ui.button(crate::i18n::text("Проверить снова")).clicked() { self.tools = crate::tools::Tools::detect(); }
+                                if ui.button(crate::i18n::text!("Проверить снова")).clicked() { self.tools = crate::tools::Tools::detect(); }
                             });
                             paint_focus(ui, &tools_menu.response, 5);
                             let focused = ui.memory(|memory| memory.focused());
@@ -299,11 +299,11 @@ impl PawCommander {
                             self.toggle_split();
                         }
                         let sidebar = self.settings.pane_layout.sidebar_visible;
-                        let hint = crate::i18n::text(if sidebar {
-                            "Скрыть боковую панель"
+                        let hint = if sidebar {
+                            crate::i18n::text!("Скрыть боковую панель")
                         } else {
-                            "Показать боковую панель"
-                        });
+                            crate::i18n::text!("Показать боковую панель")
+                        };
                         if icons::button(ui, Icon::Sidebar, "", sidebar).on_hover_text(hint).clicked() {
                             self.settings.pane_layout.sidebar_visible = !sidebar;
                         }

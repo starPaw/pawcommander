@@ -108,29 +108,29 @@ pub fn button_width(
     );
     let accessible_label = if label.is_empty() {
         match icon {
-            Icon::Back => crate::i18n::text("Назад"),
-            Icon::Forward => crate::i18n::text("Вперёд"),
-            Icon::Up => crate::i18n::text("Родительская папка"),
-            Icon::Refresh => crate::i18n::text("Обновить"),
-            Icon::Search => crate::i18n::text("Поиск файлов"),
-            Icon::NewFolder => crate::i18n::text("Создать папку"),
-            Icon::Copy => crate::i18n::text("Копировать"),
-            Icon::Paste => crate::i18n::text("Вставить"),
-            Icon::Grid => crate::i18n::text("Сетка"),
-            Icon::List => crate::i18n::text("Список"),
-            Icon::Split | Icon::SplitStacked => crate::i18n::text("Две панели"),
-            Icon::Sidebar => crate::i18n::text("Боковая панель"),
-            Icon::Info => crate::i18n::text("Сведения"),
-            _ => crate::i18n::text("Действие"),
+            Icon::Back => crate::i18n::text!("Назад"),
+            Icon::Forward => crate::i18n::text!("Вперёд"),
+            Icon::Up => crate::i18n::text!("Родительская папка"),
+            Icon::Refresh => crate::i18n::text!("Обновить"),
+            Icon::Search => crate::i18n::text!("Поиск файлов"),
+            Icon::NewFolder => crate::i18n::text!("Создать папку"),
+            Icon::Copy => crate::i18n::text!("Копировать"),
+            Icon::Paste => crate::i18n::text!("Вставить"),
+            Icon::Grid => crate::i18n::text!("Сетка"),
+            Icon::List => crate::i18n::text!("Список"),
+            Icon::Split | Icon::SplitStacked => crate::i18n::text!("Две панели"),
+            Icon::Sidebar => crate::i18n::text!("Боковая панель"),
+            Icon::Info => crate::i18n::text!("Сведения"),
+            _ => crate::i18n::text!("Действие"),
         }
     } else {
         label
     };
     let accessible_label = match icon {
-        Icon::Server => crate::i18n::text("Подключиться по SFTP"),
-        Icon::Settings => crate::i18n::text("Настройки"),
-        Icon::Search => crate::i18n::text("Поиск файлов"),
-        Icon::Info => crate::i18n::text("Панель сведений"),
+        Icon::Server => crate::i18n::text!("Подключиться по SFTP"),
+        Icon::Settings => crate::i18n::text!("Настройки"),
+        Icon::Search => crate::i18n::text!("Поиск файлов"),
+        Icon::Info => crate::i18n::text!("Панель сведений"),
         _ => accessible_label,
     };
     button_info(ui, &response, icon, accessible_label, selected);

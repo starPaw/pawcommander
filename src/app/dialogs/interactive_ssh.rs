@@ -94,10 +94,10 @@ impl ConnectionJob {
         let can_cancel = self.control.can_cancel();
         let action = match &self.prompt {
             Some(PendingPrompt::HostKey(request)) => {
-                Some((text("Доверять и подключиться"), request.deadline))
+                Some((text!("Доверять и подключиться"), request.deadline))
             }
             Some(PendingPrompt::Authentication(form)) if !form.answers.is_empty() => {
-                Some((text("Отправить ответы"), form.request.deadline))
+                Some((text!("Отправить ответы"), form.request.deadline))
             }
             _ => None,
         };
@@ -112,14 +112,14 @@ impl ConnectionJob {
                 ui.heading(request.title);
                 ui.label(format!("{} · {}", request.key.address, request.key.algorithm));
                 ui.monospace(&request.key.fingerprint);
-                let copy = ui.button(text("Копировать отпечаток"));
+                let copy = ui.button(text!("Копировать отпечаток"));
                 paint_focus(ui, &copy, 5);
                 if copy.clicked() {
                     ctx.copy_text(request.key.fingerprint.clone());
                 }
-                ui.label(text("Сверьте отпечаток с администратором сервера. PawCommander запомнит его для этого адреса."));
+                ui.label(text!("Сверьте отпечаток с администратором сервера. PawCommander запомнит его для этого адреса."));
             } else {
-                ui.heading(text("Подключение SFTP"));
+                ui.heading(text!("Подключение SFTP"));
                 let server = match &self.prompt {
                     Some(PendingPrompt::Authentication(form)) => &form.request.server,
                     _ => &self.target,
@@ -168,11 +168,11 @@ impl ConnectionJob {
             if action.is_none() {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label(text("Подключение…"));
+                    ui.label(text!("Подключение…"));
                 });
             }
             ui.horizontal(|ui| {
-                let response = ui.add_enabled(can_cancel, egui::Button::new(text("Отмена")));
+                let response = ui.add_enabled(can_cancel, egui::Button::new(text!("Отмена")));
                 paint_focus(ui, &response, 5);
                 cancel = response.clicked();
                 if let Some((label, _)) = action {

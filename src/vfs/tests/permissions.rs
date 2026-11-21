@@ -26,7 +26,7 @@ pub(super) fn check(remote_root: &Location, server_denies: bool) {
         let plan =
             PermissionsPreview::load(std::slice::from_ref(&file), &numeric, &cancel).unwrap();
         let mut progress = Progress::default();
-        let reason = text("Сервер SFTP отказал в доступе.");
+        let reason = text!("Сервер SFTP отказал в доступе.");
         assert!(plan.apply(&mut progress).unwrap_err().contains(reason));
         assert_eq!(progress.results.items[0].outcome, Outcome::Failed);
         assert_eq!(progress.results.items[0].reason.as_deref(), Some(reason));
@@ -72,7 +72,7 @@ pub(super) fn check(remote_root: &Location, server_denies: bool) {
 
     fs::write(stale.path(), b"independent edit after preview").unwrap();
     let mut progress = Progress::default();
-    let stale_reason = text("Объект SFTP изменился. Обновите предпросмотр прав.");
+    let stale_reason = text!("Объект SFTP изменился. Обновите предпросмотр прав.");
     assert!(plan
         .apply(&mut progress)
         .unwrap_err()

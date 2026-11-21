@@ -52,7 +52,7 @@ fn hidden_close_waits_for_active_and_queued_jobs_without_ui() {
     assert_eq!(app.job.as_ref().unwrap().label, "first");
     assert_eq!(
         app.notice.as_ref().unwrap().0,
-        crate::i18n::text("Дождитесь завершения файловой операции, затем закройте окно.")
+        crate::i18n::text!("Дождитесь завершения файловой операции, затем закройте окно.")
     );
 
     release_first.send(()).unwrap();

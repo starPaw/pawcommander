@@ -21,16 +21,16 @@ pub(crate) enum Reason {
 
 impl Reason {
     pub(crate) fn label(self) -> &'static str {
-        text(match self {
-            Self::Encoding => "Некорректный UTF-8",
-            Self::Characters => "Недопустимые символы",
-            Self::Trailing => "Точки или пробелы в конце",
-            Self::Reserved => "Зарезервированное имя",
-            Self::Unicode => "Нормализация Unicode (NFC)",
-            Self::Length => "Ограничение длины",
-            Self::Collision => "Совпадение имён или регистра",
-            Self::MetadataName => "Имя зарезервировано для метаданных macOS",
-        })
+        match self {
+            Self::Encoding => text!("Некорректный UTF-8"),
+            Self::Characters => text!("Недопустимые символы"),
+            Self::Trailing => text!("Точки или пробелы в конце"),
+            Self::Reserved => text!("Зарезервированное имя"),
+            Self::Unicode => text!("Нормализация Unicode (NFC)"),
+            Self::Length => text!("Ограничение длины"),
+            Self::Collision => text!("Совпадение имён или регистра"),
+            Self::MetadataName => text!("Имя зарезервировано для метаданных macOS"),
+        }
     }
 }
 
@@ -113,7 +113,7 @@ impl Name {
                 return Ok(self);
             }
         }
-        Err(text("Не удалось подобрать совместимое свободное имя").into())
+        Err(text!("Не удалось подобрать совместимое свободное имя").into())
     }
 }
 
@@ -240,5 +240,5 @@ fn prefix(value: &str, bytes: usize, units: usize, apple_double: bool) -> &str {
 }
 
 pub(super) fn path_limit() -> TransferError {
-    text("Путь назначения слишком длинный. Выберите папку ближе к корню.").into()
+    text!("Путь назначения слишком длинный. Выберите папку ближе к корню.").into()
 }

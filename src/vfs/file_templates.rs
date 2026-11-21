@@ -51,9 +51,9 @@ impl TextEncoding {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Utf8 => "UTF-8",
-            Self::Utf8Bom => text("UTF-8 с BOM"),
-            Self::Utf16Le => text("UTF-16 LE с BOM"),
-            Self::Utf16Be => text("UTF-16 BE с BOM"),
+            Self::Utf8Bom => text!("UTF-8 с BOM"),
+            Self::Utf16Le => text!("UTF-16 LE с BOM"),
+            Self::Utf16Be => text!("UTF-16 BE с BOM"),
             Self::Windows1251 => "Windows-1251",
             Self::Windows1252 => "Windows-1252",
         }
@@ -110,7 +110,7 @@ impl Source {
                 }
                 let bytes = STANDARD
                     .decode(encoded.as_bytes())
-                    .map_err(|_| text("Не удалось прочитать сохранённый шаблон"))?;
+                    .map_err(|_| text!("Не удалось прочитать сохранённый шаблон"))?;
                 if bytes.len() > MAX_BYTES {
                     return Err(too_large());
                 }
@@ -136,7 +136,7 @@ impl Library {
     pub(crate) fn check_title(&self, title: &str) -> Result<(), String> {
         let title = title.trim();
         if title.is_empty() || title.chars().count() > 80 || title.chars().any(char::is_control) {
-            return Err(text("Введите название шаблона до 80 символов").into());
+            return Err(text!("Введите название шаблона до 80 символов").into());
         }
         let key = title.to_lowercase();
         if self
@@ -144,7 +144,7 @@ impl Library {
             .iter()
             .any(|template| template.title.to_lowercase() == key)
         {
-            return Err(text("Шаблон с таким названием уже есть").into());
+            return Err(text!("Шаблон с таким названием уже есть").into());
         }
         Ok(())
     }
@@ -159,7 +159,7 @@ impl Library {
         let index = self.templates.len();
         if index >= MAX_TEMPLATES || size.saturating_add(template.payload.len()) > MAX_LIBRARY_BYTES
         {
-            return Err(text("Достигнут предел сохранённых шаблонов").into());
+            return Err(text!("Достигнут предел сохранённых шаблонов").into());
         }
         self.templates.push(template);
         Ok(index)
@@ -274,7 +274,7 @@ impl NewFile {
 }
 
 pub(crate) fn validate_filename(name: &str) -> Result<(), String> {
-    validate_name(name).map_err(|_| text("Введите имя файла без разделителей пути").into())
+    validate_name(name).map_err(|_| text!("Введите имя файла без разделителей пути").into())
 }
 
 fn require_absent(destination: &Directory, target: &Location) -> Result<(), TransferError> {
@@ -286,23 +286,23 @@ fn require_absent(destination: &Directory, target: &Location) -> Result<(), Tran
 }
 
 fn conflict() -> TransferError {
-    text("В этой папке уже есть объект с таким именем. Введите другое имя.").into()
+    text!("В этой папке уже есть объект с таким именем. Введите другое имя.").into()
 }
 
 fn read_source(source: &Location, progress: &mut Progress) -> Result<Vec<u8>, TransferError> {
     let parent = source
         .parent()
-        .ok_or_else(|| text("Выберите один обычный файл для шаблона"))?;
+        .ok_or_else(|| text!("Выберите один обычный файл для шаблона"))?;
     let name = source
         .path()
         .file_name()
-        .ok_or_else(|| text("Выберите один обычный файл для шаблона"))?;
+        .ok_or_else(|| text!("Выберите один обычный файл для шаблона"))?;
     progress.item(source.path());
     let cancel = progress.cancellation();
     let scope = ReadScope::open(&parent)?;
     let mut input = scope
         .open_file(Path::new(name), &cancel)?
-        .ok_or_else(|| text("Исходный файл шаблона отсутствует"))?;
+        .ok_or_else(|| text!("Исходный файл шаблона отсутствует"))?;
     let mut bytes = Vec::new();
     {
         let (_, length, reader) = input.stream();
@@ -329,7 +329,7 @@ fn read_source(source: &Location, progress: &mut Progress) -> Result<Vec<u8>, Tr
 }
 
 fn too_large() -> TransferError {
-    text("Шаблон файла превышает 4 МиБ").into()
+    text!("Шаблон файла превышает 4 МиБ").into()
 }
 
 #[cfg(test)]

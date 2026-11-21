@@ -22,7 +22,7 @@ fn terminal_command_uses_the_current_folder_and_reports_a_launch_error() {
     assert_eq!(
         app.notice,
         Some((
-            crate::i18n::text("Выберите папку для открытия терминала.").into(),
+            crate::i18n::text!("Выберите папку для открытия терминала.").into(),
             true
         ))
     );

@@ -136,7 +136,7 @@ impl PawCommander {
                 }
                 if self.tools.zed.is_none() {
                     self.notice = Some((
-                        crate::i18n::text("Zed не найден. Установите редактор и выберите Настройки → Инструменты → Проверить снова.").into(),
+                        crate::i18n::text!("Zed не найден. Установите редактор и выберите Настройки → Инструменты → Проверить снова.").into(),
                         true,
                     ));
                     return;

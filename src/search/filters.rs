@@ -19,12 +19,12 @@ enum EntryType {
 
 impl EntryType {
     fn label(self) -> &'static str {
-        text(match self {
-            Self::Any => "Любой тип",
-            Self::File => "Обычные файлы",
-            Self::Directory => "Только папки",
-            Self::Other => "Ссылки и прочие",
-        })
+        match self {
+            Self::Any => text!("Любой тип"),
+            Self::File => text!("Обычные файлы"),
+            Self::Directory => text!("Только папки"),
+            Self::Other => text!("Ссылки и прочие"),
+        }
     }
 }
 
@@ -39,12 +39,12 @@ enum SizeUnit {
 
 impl SizeUnit {
     fn label(self) -> &'static str {
-        text(match self {
-            Self::Bytes => "Б",
-            Self::KiB => "КиБ",
-            Self::MiB => "МиБ",
-            Self::GiB => "ГиБ",
-        })
+        match self {
+            Self::Bytes => text!("Б"),
+            Self::KiB => text!("КиБ"),
+            Self::MiB => text!("МиБ"),
+            Self::GiB => text!("ГиБ"),
+        }
     }
 
     fn bytes(self) -> u64 {
@@ -155,11 +155,11 @@ impl FilterInput {
 
     pub fn show(&mut self, ui: &mut egui::Ui, target: FolderTarget) -> (bool, bool) {
         let active = self.active(target);
-        let heading = text(if active {
-            "Фильтры (активны)"
+        let heading = if active {
+            text!("Фильтры (активны)")
         } else {
-            "Фильтры"
-        });
+            text!("Фильтры")
+        };
         egui::CollapsingHeader::new(heading)
             .id_salt("local_search_filters")
             .show(ui, |ui| {
@@ -169,7 +169,7 @@ impl FilterInput {
                 egui::Grid::new("local_search_filter_fields")
                     .num_columns(2)
                     .show(ui, |ui| {
-                        let type_label = text("Тип объекта");
+                        let type_label = text!("Тип объекта");
                         ui.label(type_label);
                         if target == FolderTarget::Name {
                             let selected = self.entry_type;
@@ -200,15 +200,15 @@ impl FilterInput {
                         ui.end_row();
 
                         for (label, input, hint, width) in [
-                            ("Расширение", &mut self.extension, text("например txt"), 135.0),
-                            ("Минимальный размер", &mut self.minimum_size, "", 135.0),
-                            ("Максимальный размер", &mut self.maximum_size, "", 135.0),
-                            ("Изменено с", &mut self.modified_from, "YYYY-MM-DD", 135.0),
-                            ("Изменено по", &mut self.modified_through, "YYYY-MM-DD", 135.0),
+                            (crate::i18n::key!("Расширение"), &mut self.extension, text!("например txt"), 135.0),
+                            (crate::i18n::key!("Минимальный размер"), &mut self.minimum_size, "", 135.0),
+                            (crate::i18n::key!("Максимальный размер"), &mut self.maximum_size, "", 135.0),
+                            (crate::i18n::key!("Изменено с"), &mut self.modified_from, "YYYY-MM-DD", 135.0),
+                            (crate::i18n::key!("Изменено по"), &mut self.modified_through, "YYYY-MM-DD", 135.0),
                             (
-                                "Максимальная глубина",
+                                crate::i18n::key!("Максимальная глубина"),
                                 &mut self.depth,
-                                text("1 = прямые потомки"),
+                                text!("1 = прямые потомки"),
                                 150.0,
                             ),
                         ] {
@@ -226,7 +226,7 @@ impl FilterInput {
                             submit |= response.lost_focus() && enter;
                             ui.end_row();
                         }
-                        let unit_label = text("Единица размера");
+                        let unit_label = text!("Единица размера");
                         ui.label(unit_label);
                         let unit = self.size_unit;
                         let response = egui::ComboBox::from_id_salt("search_size_unit")
@@ -248,8 +248,8 @@ impl FilterInput {
                         changed |= unit != self.size_unit;
                         ui.end_row();
                     });
-                ui.small(text("Размер и расширение относятся к обычным файлам. Границы включены. Даты местные."));
-                if ui.button(text("Сбросить фильтры")).clicked() {
+                ui.small(text!("Размер и расширение относятся к обычным файлам. Границы включены. Даты местные."));
+                if ui.button(text!("Сбросить фильтры")).clicked() {
                     *self = Self::default();
                     changed = true;
                 }

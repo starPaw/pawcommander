@@ -272,19 +272,21 @@ impl NativeDrag {
         frame: &eframe::Frame,
         entries: &[DragItem],
     ) -> Result<(), String> {
-        let mtm = MainThreadMarker::new().ok_or(crate::i18n::text(
+        let mtm = MainThreadMarker::new().ok_or(crate::i18n::text!(
             "Системное перетаскивание требует главного потока",
         ))?;
         let handle = frame.window_handle().map_err(|e| {
             crate::tr_format!("Не удалось получить окно: {e}", "Could not get window: {e}")
         })?;
         let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
-            return Err(crate::i18n::text("Окно не поддерживает AppKit").into());
+            return Err(crate::i18n::text!("Окно не поддерживает AppKit").into());
         };
         // SAFETY: eframe's borrowed handle points to its live NSView; all AppKit
         // operations below run on the main thread while the frame is borrowed.
         let view = unsafe { &*handle.ns_view.cast::<NSView>().as_ptr() };
-        let window = view.window().ok_or(crate::i18n::text("Окно уже закрыто"))?;
+        let window = view
+            .window()
+            .ok_or(crate::i18n::text!("Окно уже закрыто"))?;
         let app = NSApplication::sharedApplication(mtm);
         let event = self
             .mouse_monitor
@@ -294,14 +296,14 @@ impl NativeDrag {
             .filter(|event| {
                 drag_event_matches(event.r#type(), event.windowNumber(), window.windowNumber())
             })
-            .ok_or(crate::i18n::text(
+            .ok_or(crate::i18n::text!(
                 "Не удалось получить событие перетаскивания",
             ))?;
         let result = Arc::new(AtomicU8::new(0));
         let position = Arc::new(Mutex::new(None));
         // SAFETY: the bridge returns an owned token for this window or null.
         let token = unsafe { Retained::from_raw(paw_drag_escape_start(window.windowNumber())) }
-            .ok_or(crate::i18n::text(
+            .ok_or(crate::i18n::text!(
                 "Не удалось получить событие перетаскивания",
             ))?;
         let source = DragSource::alloc(mtm).set_ivars(SourceState {
@@ -310,7 +312,7 @@ impl NativeDrag {
             ctx: ctx.clone(),
             // SAFETY: the borrowed live NSView is retained for the session.
             view: unsafe { Retained::retain(view as *const NSView as *mut NSView) }
-                .ok_or(crate::i18n::text("Окно уже закрыто"))?,
+                .ok_or(crate::i18n::text!("Окно уже закрыто"))?,
             position: position.clone(),
         });
         // SAFETY: init initializes the allocated NSObject subclass; all other
@@ -318,9 +320,10 @@ impl NativeDrag {
         unsafe {
             let source: Retained<DragSource> = msg_send![super(source), init];
             if NSEvent::pressedMouseButtons() & 1 == 0 {
-                return Err(
-                    crate::i18n::text("Перетаскивание отменено: кнопка мыши уже отпущена").into(),
-                );
+                return Err(crate::i18n::text!(
+                    "Перетаскивание отменено: кнопка мыши уже отпущена"
+                )
+                .into());
             }
             let location = window.convertPointFromScreen(NSEvent::mouseLocation());
             let point = view.convertPoint_fromView(location, None);
@@ -334,7 +337,7 @@ impl NativeDrag {
                             let url = file_url(path)?;
                             let file_path = url
                                 .path()
-                                .ok_or(crate::i18n::text("Не удалось прочитать путь файла"))?;
+                                .ok_or(crate::i18n::text!("Не удалось прочитать путь файла"))?;
                             (
                                 ProtocolObject::from_retained(url),
                                 Some(workspace.iconForFile(&file_path)),
@@ -392,7 +395,7 @@ fn drag_items(payload: &DragFiles) -> Result<Vec<DragItem>, String> {
     }
     if payload.promise_kinds.len() != payload.paths.len() {
         return Err(
-            crate::i18n::text("Не удалось подготовить SFTP-объекты для перетаскивания.").into(),
+            crate::i18n::text!("Не удалось подготовить SFTP-объекты для перетаскивания.").into(),
         );
     }
     payload
@@ -402,7 +405,7 @@ fn drag_items(payload: &DragFiles) -> Result<Vec<DragItem>, String> {
         .map(|(path, kind)| match kind {
             Some(kind) if path.remote() => Ok(DragItem::Remote(path.clone(), *kind)),
             _ => {
-                Err(crate::i18n::text("Из SFTP можно перетаскивать обычные файлы и папки.").into())
+                Err(crate::i18n::text!("Из SFTP можно перетаскивать обычные файлы и папки.").into())
             }
         })
         .collect()
@@ -482,10 +485,10 @@ fn release_pointer(
 
 fn local_paths(sources: &[Location]) -> Result<Vec<PathBuf>, String> {
     if sources.is_empty() {
-        return Err(crate::i18n::text("Не выбраны файлы для перетаскивания").into());
+        return Err(crate::i18n::text!("Не выбраны файлы для перетаскивания").into());
     }
     sources.iter().map(|source| {
-        let path = source.local().ok_or(crate::i18n::text("Для переноса SFTP-файлов во внешнее приложение сначала скопируйте их в локальную папку"))?;
+        let path = source.local().ok_or(crate::i18n::text!("Для переноса SFTP-файлов во внешнее приложение сначала скопируйте их в локальную папку"))?;
         let path = if path.is_absolute() { path.to_path_buf() } else { std::env::current_dir().map_err(|e| e.to_string())?.join(path) };
         std::fs::symlink_metadata(&path).map_err(|e| crate::tr_format!("Не удалось передать {}: {e}", "Could not transfer {}: {e}", path.display()))?;
         Ok(path)
@@ -494,7 +497,7 @@ fn local_paths(sources: &[Location]) -> Result<Vec<PathBuf>, String> {
 
 fn file_url(path: &std::path::Path) -> Result<Retained<NSURL>, String> {
     let bytes = CString::new(path.as_os_str().as_bytes())
-        .map_err(|_| crate::i18n::text("Недопустимый путь файла"))?;
+        .map_err(|_| crate::i18n::text!("Недопустимый путь файла"))?;
     let metadata = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
     // SAFETY: the NUL-terminated filesystem byte string remains live for the
     // call. NSURL copies it. lstat preserves directory symlinks as symlinks.

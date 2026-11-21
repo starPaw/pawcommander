@@ -710,7 +710,7 @@ pub(crate) fn resume(
     }
     let ticket = Ticket::open(receipts(directory).join(id))
         .map_err(|err| err.to_string())?
-        .ok_or_else(|| text("Эта копия уже обрабатывается другим заданием."))?;
+        .ok_or_else(|| text!("Эта копия уже обрабатывается другим заданием."))?;
     let paths = ticket.receipt.paths().map_err(|err| err.to_string())?;
     progress
         .results
@@ -756,7 +756,7 @@ pub(crate) fn resume(
     let mut reason = result.as_ref().err().map(ToString::to_string);
     let metadata_warning = progress.results.active_metadata_warning();
     let partial_metadata =
-        text("Даты или права доступа сохранены частично. Подробности указаны в строках журнала.");
+        text!("Даты или права доступа сохранены частично. Подробности указаны в строках журнала.");
     let outcome = match (&result, committed) {
         (_, true) if moving && !removed => Outcome::CopiedSourceRemaining,
         (_, true) if result.is_err() || metadata_warning => Outcome::CompletedWithWarning,
@@ -785,14 +785,14 @@ pub(crate) fn resume(
                 "Folder move completed. Reused {bytes} staged bytes."
             ),
             (true, Completion::AlreadyPresent) => {
-                text("Перенос завершён после сверки копии.").into()
+                text!("Перенос завершён после сверки копии.").into()
             }
             (false, Completion::Copied(offset)) => crate::tr_format!(
                 "Копирование продолжено с позиции {offset} байт и завершено.",
                 "Copy resumed at byte {offset} and completed."
             ),
             (false, Completion::AlreadyPresent) => {
-                text("В назначении подтверждена полная копия.").into()
+                text!("В назначении подтверждена полная копия.").into()
             }
             (false, Completion::FolderCopied(bytes)) => crate::tr_format!(
                 "Копирование папки завершено. Использовано сохранённых байтов: {bytes}.",
@@ -1175,15 +1175,15 @@ fn discard_stage(
 }
 
 pub(super) fn changed_copy() -> TransferError {
-    text("Временная копия изменилась или недоступна. Проверьте файлы перед продолжением.").into()
+    text!("Временная копия изменилась или недоступна. Проверьте файлы перед продолжением.").into()
 }
 
 fn changed_source() -> TransferError {
-    text("Источник изменился со времени начала копирования.").into()
+    text!("Источник изменился со времени начала копирования.").into()
 }
 
 fn changed_target() -> TransferError {
-    text("Файл назначения изменился со времени начала копирования.").into()
+    text!("Файл назначения изменился со времени начала копирования.").into()
 }
 
 fn retained(stage: &Location, message: &str) -> String {

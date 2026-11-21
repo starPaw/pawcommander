@@ -191,7 +191,7 @@ impl Session {
                 Err(mpsc::TryRecvError::Disconnected) => {
                     if !self.state.finished() {
                         self.state =
-                            State::Failed(crate::i18n::text("Сеанс терминала прервался.").into());
+                            State::Failed(crate::i18n::text!("Сеанс терминала прервался.").into());
                     }
                     break;
                 }

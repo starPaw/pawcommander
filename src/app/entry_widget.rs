@@ -364,13 +364,13 @@ pub(super) fn entry_widget(
     }
     response.widget_info(|| {
         let entry = &tab.entries[index];
-        let kind = crate::i18n::text(if entry.is_symlink {
-            "Символическая ссылка"
+        let kind = if entry.is_symlink {
+            crate::i18n::text!("Символическая ссылка")
         } else if entry.is_dir {
-            "Папка"
+            crate::i18n::text!("Папка")
         } else {
-            "Файл"
-        });
+            crate::i18n::text!("Файл")
+        };
         let mut label = format!("{}, {kind}", entry.name);
         if let Some(status) = git_label {
             label.push_str(", ");
@@ -401,7 +401,7 @@ pub(super) fn entry_widget(
     response
         .on_hover_text(tooltip)
         .context_menu(|ui| {
-            if (!archive_member || is_dir) && ui.button(crate::i18n::text("Открыть")).clicked() {
+            if (!archive_member || is_dir) && ui.button(crate::i18n::text!("Открыть")).clicked() {
                 actions.push(open());
                 ui.close();
             }
@@ -410,58 +410,58 @@ pub(super) fn entry_widget(
                 && tab.selected.contains(&path)
                 && path.local().and_then(crate::archive::Format::from_path).is_some();
             if (archive_member || local_archive)
-                && ui.add_enabled(idle, egui::Button::new(crate::i18n::text("Проверить архив…"))).clicked()
+                && ui.add_enabled(idle, egui::Button::new(crate::i18n::text!("Проверить архив…"))).clicked()
             {
                 actions.push(Action::Focus(pane));
                 actions.push(Action::VerifyArchive);
                 ui.close();
             }
             if archive_member {
-                if ui.add_enabled(idle && !tab.selected.is_empty(), egui::Button::new(crate::i18n::text("Распаковать…"))).clicked() {
+                if ui.add_enabled(idle && !tab.selected.is_empty(), egui::Button::new(crate::i18n::text!("Распаковать…"))).clicked() {
                     actions.push(Action::Focus(pane));
                     actions.push(Action::ExtractArchive);
                     ui.close();
                 }
                 for (label, action, enabled) in [
-                    ("Переименовать…", Action::Rename, tab.selected.len() == 1),
-                    ("Удалить из архива…", Action::RemoveFromArchive, !tab.selected.is_empty()),
-                    ("Добавить из соседней панели…", Action::AddToArchive, split),
+                    (crate::i18n::text!("Переименовать…"), Action::Rename, tab.selected.len() == 1),
+                    (crate::i18n::text!("Удалить из архива…"), Action::RemoveFromArchive, !tab.selected.is_empty()),
+                    (crate::i18n::text!("Добавить из соседней панели…"), Action::AddToArchive, split),
                 ] {
-                    if ui.add_enabled(idle && enabled, egui::Button::new(crate::i18n::text(label))).clicked() {
+                    if ui.add_enabled(idle && enabled, egui::Button::new(label)).clicked() {
                         actions.push(Action::Focus(pane));
                         actions.push(action);
                         ui.close();
                     }
                 }
-                if ui.button(crate::i18n::text("Копировать путь")).clicked() {
+                if ui.button(crate::i18n::text!("Копировать путь")).clicked() {
                     actions.push(Action::Focus(pane));
                     actions.push(Action::CopyPath);
                     ui.close();
                 }
                 return;
             }
-            if !is_dir && ui.add_enabled(zed_available, egui::Button::new(crate::i18n::text("Открыть в Zed")))
-                .on_disabled_hover_text(crate::i18n::text("Zed не найден. Установите редактор и выберите Настройки → Инструменты → Проверить снова."))
+            if !is_dir && ui.add_enabled(zed_available, egui::Button::new(crate::i18n::text!("Открыть в Zed")))
+                .on_disabled_hover_text(crate::i18n::text!("Zed не найден. Установите редактор и выберите Настройки → Инструменты → Проверить снова."))
                 .clicked() {
                 actions.push(Action::OpenInZed(pane, path.clone()));
                 ui.close();
             }
             #[cfg(target_os = "macos")]
-            if !is_dir && ui.button(crate::i18n::text("Открыть во внешнем редакторе")).clicked() {
+            if !is_dir && ui.button(crate::i18n::text!("Открыть во внешнем редакторе")).clicked() {
                 actions.push(Action::Focus(pane));
                 actions.push(Action::OpenExternalEditor(path.clone()));
                 ui.close();
             }
             #[cfg(target_os = "macos")]
             if path.local().is_some()
-                && ui.button(crate::i18n::text("Пользовательские действия…")).clicked()
+                && ui.button(crate::i18n::text!("Пользовательские действия…")).clicked()
             {
                 actions.push(Action::Focus(pane));
                 actions.push(Action::CustomActions);
                 ui.close();
             }
             if let Some(count) = tab.selected_file_count(visible) {
-                if ui.add_enabled(idle, egui::Button::new(crate::i18n::text("Создать манифест SHA-256…"))).clicked() {
+                if ui.add_enabled(idle, egui::Button::new(crate::i18n::text!("Создать манифест SHA-256…"))).clicked() {
                     actions.push(Action::Focus(pane));
                     actions.push(Action::CreateChecksumManifest);
                     ui.close();
@@ -469,7 +469,7 @@ pub(super) fn entry_widget(
                 if count == 1
                     && tab.selected.contains(&path)
                     && crate::vfs::looks_like_checksum_manifest(path.path())
-                    && ui.add_enabled(idle, egui::Button::new(crate::i18n::text("Проверить манифест SHA-256"))).clicked()
+                    && ui.add_enabled(idle, egui::Button::new(crate::i18n::text!("Проверить манифест SHA-256"))).clicked()
                 {
                     actions.push(Action::Focus(pane));
                     actions.push(Action::VerifyChecksumManifest);
@@ -478,8 +478,8 @@ pub(super) fn entry_widget(
             }
             ui.separator();
             if split {
-            ui.menu_button(crate::i18n::text("В соседнюю панель"), |ui| {
-                for (label, kind) in [(crate::i18n::text("Копировать"), TransferKind::Copy), (crate::i18n::text("Переместить"), TransferKind::Move)] {
+            ui.menu_button(crate::i18n::text!("В соседнюю панель"), |ui| {
+                for (label, kind) in [(crate::i18n::text!("Копировать"), TransferKind::Copy), (crate::i18n::text!("Переместить"), TransferKind::Move)] {
                     if ui.add_enabled(idle, egui::Button::new(label)).clicked() {
                         actions.push(Action::Focus(pane));
                         actions.push(Action::Transfer(kind));
@@ -490,31 +490,31 @@ pub(super) fn entry_widget(
             }
             #[cfg(target_os = "macos")]
             if path.local().is_some()
-                && ui.add_enabled(idle, egui::Button::new(crate::i18n::text("Создать ссылку…"))).clicked()
+                && ui.add_enabled(idle, egui::Button::new(crate::i18n::text!("Создать ссылку…"))).clicked()
             {
                 actions.push(Action::Focus(pane));
                 actions.push(Action::CreateLink);
                 ui.close();
             }
             for (label, action, enabled) in [
-                (crate::i18n::text("Копировать"), Action::Copy(false), true),
-                (crate::i18n::text("Вырезать"), Action::Copy(true), true),
-                (crate::i18n::text("Вставить"), Action::Paste(false), idle),
+                (crate::i18n::text!("Копировать"), Action::Copy(false), true),
+                (crate::i18n::text!("Вырезать"), Action::Copy(true), true),
+                (crate::i18n::text!("Вставить"), Action::Paste(false), idle),
                 (
-                    crate::i18n::text("Переименовать…"),
+                    crate::i18n::text!("Переименовать…"),
                     Action::Rename,
                     idle && !tab.selected.is_empty(),
                 ),
                 (
-                    crate::i18n::text("Создать архив…"),
+                    crate::i18n::text!("Создать архив…"),
                     Action::CreateArchive,
                     !tab.selected.is_empty(),
                 ),
                 (
                     if path.remote() {
-                        crate::i18n::text("Удалить навсегда…")
+                        crate::i18n::text!("Удалить навсегда…")
                     } else {
-                        crate::i18n::text("В корзину…")
+                        crate::i18n::text!("В корзину…")
                     },
                     Action::Trash,
                     idle,
@@ -523,21 +523,21 @@ pub(super) fn entry_widget(
             .into_iter()
             .chain((!path.remote() || cfg!(target_os = "macos")).then(|| {
                 (
-                    crate::i18n::text("Свойства…"),
+                    crate::i18n::text!("Свойства…"),
                     Action::Properties,
                     crate::properties::Properties::available(&tab.selected),
                 )
             }))
             .chain(path.remote().then(|| {
                 (
-                    crate::i18n::text("Изменить права доступа…"),
+                    crate::i18n::text!("Изменить права доступа…"),
                     Action::ChangePermissions,
                     idle && !tab.selected.is_empty(),
                 )
             }))
             .chain([
-                (crate::i18n::text("Копировать путь"), Action::CopyPath, true),
-                (crate::i18n::text("Показать в системе"), Action::Reveal, !path.remote()),
+                (crate::i18n::text!("Копировать путь"), Action::CopyPath, true),
+                (crate::i18n::text!("Показать в системе"), Action::Reveal, !path.remote()),
             ]) {
                 if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
                     actions.push(Action::Focus(pane));

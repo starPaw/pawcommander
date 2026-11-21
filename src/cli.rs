@@ -32,7 +32,7 @@ impl Error {
         };
         eprintln!("pawcommander: {message}");
         if code == 2 {
-            eprintln!("{}", text("Справка доступна через pawcommander --help."));
+            eprintln!("{}", text!("Справка доступна через pawcommander --help."));
         }
         ExitCode::from(code)
     }
@@ -101,13 +101,13 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Request, Error
         {
             Some(name) => Ok(Request::Workspace(name.to_owned())),
             None => Err(Error::Usage(
-                text("Введите имя рабочего пространства в UTF-8.").into(),
+                text!("Введите имя рабочего пространства в UTF-8.").into(),
             )),
         },
         ("search", [query] | [query, _]) => {
             let query = query
                 .to_str()
-                .ok_or_else(|| Error::Usage(text("Введите запрос поиска в UTF-8.").into()))?;
+                .ok_or_else(|| Error::Usage(text!("Введите запрос поиска в UTF-8.").into()))?;
             crate::search::validate_name_query(query).map_err(Error::Usage)?;
             let folder = operands
                 .get(1)
@@ -130,7 +130,7 @@ fn is_option(argument: &OsStr) -> bool {
 }
 
 fn bad_arguments() -> Error {
-    Error::Usage(text("Неизвестная команда, отсутствующие или лишние аргументы.").into())
+    Error::Usage(text!("Неизвестная команда, отсутствующие или лишние аргументы.").into())
 }
 
 fn execute(request: Request) -> Result<(), Error> {
@@ -161,7 +161,7 @@ fn execute(request: Request) -> Result<(), Error> {
 
 fn checked_folder(folder: &Path) -> Result<PathBuf, Error> {
     if folder.as_os_str().is_empty() {
-        return Err(Error::Usage(text("Укажите путь к папке.").into()));
+        return Err(Error::Usage(text!("Укажите путь к папке.").into()));
     }
     let path = std::path::absolute(folder).map_err(|error| {
         Error::Startup(crate::tr_format!(
@@ -205,7 +205,7 @@ fn workspace_error(error: WorkspaceError, name: &str) -> Error {
             "Workspace {name:?} contains incompatible paths"
         )),
         WorkspaceError::Corrupt => {
-            Error::Startup(text("Не удалось прочитать сохранённые рабочие пространства.").into())
+            Error::Startup(text!("Не удалось прочитать сохранённые рабочие пространства.").into())
         }
     }
 }

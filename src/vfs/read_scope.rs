@@ -116,7 +116,7 @@ impl ReadScope {
         }
         if matches!(&metadata, EntryMetadata::Remote(stat) if stat.size.is_none() || stat.mtime.is_none())
         {
-            return Err(text("Сервер не передал размер или время изменения файла").into());
+            return Err(text!("Сервер не передал размер или время изменения файла").into());
         }
         Ok(Some(CheckedFile {
             scope: self,
@@ -258,7 +258,7 @@ pub(super) fn visit_local_entries(
         || before.st_ctime != after.st_ctime
         || before.st_ctime_nsec != after.st_ctime_nsec
     {
-        return Err(text("Папка изменилась или недоступна").into());
+        return Err(text!("Папка изменилась или недоступна").into());
     }
     Ok(())
 }
@@ -274,7 +274,7 @@ fn local_input(root: &OwnedFd, path: &Path, cancel: &Cancellation) -> io::Result
     if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            text("Для проверки подходят только обычные файлы без ссылок"),
+            text!("Для проверки подходят только обычные файлы без ссылок"),
         ));
     }
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
@@ -284,9 +284,9 @@ fn local_input(root: &OwnedFd, path: &Path, cancel: &Cancellation) -> io::Result
 }
 
 pub(super) fn changed_during_read() -> TransferError {
-    text("Файл изменился во время чтения").into()
+    text!("Файл изменился во время чтения").into()
 }
 
 fn unsupported() -> TransferError {
-    text("Для проверки подходят только обычные файлы без ссылок").into()
+    text!("Для проверки подходят только обычные файлы без ссылок").into()
 }

@@ -57,10 +57,10 @@ impl PaneOrientation {
     }
 
     pub(super) fn label(self) -> &'static str {
-        crate::i18n::text(match self {
-            Self::SideBySide => "Рядом",
-            Self::Stacked => "Одна над другой",
-        })
+        match self {
+            Self::SideBySide => crate::i18n::text!("Рядом"),
+            Self::Stacked => crate::i18n::text!("Одна над другой"),
+        }
     }
 }
 
@@ -235,10 +235,10 @@ pub(super) enum Density {
 
 impl Density {
     pub(super) fn label(self) -> &'static str {
-        crate::i18n::text(match self {
-            Self::Standard => "Обычная",
-            Self::Compact => "Компактная",
-        })
+        match self {
+            Self::Standard => crate::i18n::text!("Обычная"),
+            Self::Compact => crate::i18n::text!("Компактная"),
+        }
     }
 }
 
@@ -268,11 +268,11 @@ impl FolderMode {
     }
 
     pub(super) fn label(self) -> &'static str {
-        crate::i18n::text(match self {
-            Self::List => "Список",
-            Self::Grid => "Сетка",
-            Self::Columns => "Колоночный режим",
-        })
+        match self {
+            Self::List => crate::i18n::text!("Список"),
+            Self::Grid => crate::i18n::text!("Сетка"),
+            Self::Columns => crate::i18n::text!("Колоночный режим"),
+        }
     }
 
     pub(super) fn icon(self) -> Icon {

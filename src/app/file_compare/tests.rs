@@ -97,7 +97,7 @@ fn file_comparison_dialog_shows_changes_and_passes_literal_paths_to_external_too
 
     let click_external = |app: &mut PawCommander| {
         draw(app, vec![]);
-        let label = text("Открыть во внешнем инструменте");
+        let label = text!("Открыть во внешнем инструменте");
         let pos = draw(app, vec![])
             .into_iter()
             .find(|(name, _)| name == label)
@@ -118,7 +118,7 @@ fn file_comparison_dialog_shows_changes_and_passes_literal_paths_to_external_too
     };
     click_external(&mut app);
     wait(&mut app, "tool handoff", &|label| {
-        label == text("Сравнение передано внешнему инструменту")
+        label == text!("Сравнение передано внешнему инструменту")
     });
     let received = fs::read(tool.with_extension("args")).unwrap();
     let mut expected = Vec::from(b"2\0".as_slice());

@@ -13,7 +13,7 @@ use std::{collections::BTreeSet, io, path::Path, time::UNIX_EPOCH};
 pub(crate) fn archive_file_name(name: &str, format: Format) -> Result<String, String> {
     let name = name.trim();
     validate_name(name)
-        .map_err(|_| crate::i18n::text("Введите допустимое имя архива").to_owned())?;
+        .map_err(|_| crate::i18n::text!("Введите допустимое имя архива").to_owned())?;
     if Format::from_path(Path::new(name)) == Some(format) {
         Ok(name.to_owned())
     } else {
@@ -71,7 +71,7 @@ pub(crate) fn create_archive(
         )),
         Err(TransferError::Cancelled) => {
             progress.results.cancelled = true;
-            Ok(crate::i18n::text("Создание архива остановлено").into())
+            Ok(crate::i18n::text!("Создание архива остановлено").into())
         }
         Err(error) => Err(error.to_string()),
     }
@@ -90,14 +90,14 @@ fn write_archive(
         return Err(crate::archive::readonly().into());
     }
     if format == Format::Tar && password.is_some() {
-        return Err(crate::i18n::text("Пароль можно задать только для ZIP").into());
+        return Err(crate::i18n::text!("Пароль можно задать только для ZIP").into());
     }
     if sources.is_empty()
         || sources
             .iter()
             .any(|source| source.parent().as_ref() != Some(directory))
     {
-        return Err(crate::i18n::text("Выберите файлы или папки из текущей папки").into());
+        return Err(crate::i18n::text!("Выберите файлы или папки из текущей папки").into());
     }
     let cancel = progress.cancellation();
     cancel.check()?;
@@ -137,7 +137,7 @@ fn write_archive(
 }
 
 fn invalid_name() -> &'static str {
-    crate::i18n::text("Для создания архива нужны имена файлов в UTF-8")
+    crate::i18n::text!("Для создания архива нужны имена файлов в UTF-8")
 }
 
 fn ensure_absent(target: &Location) -> Result<(), TransferError> {

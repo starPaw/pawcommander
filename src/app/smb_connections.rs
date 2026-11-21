@@ -24,7 +24,7 @@ impl Form {
     }
 
     pub(super) fn show(&mut self, ui: &mut egui::Ui, focus: bool) {
-        let label = ui.label(text("Адрес SMB"));
+        let label = ui.label(text!("Адрес SMB"));
         let address = ui
             .add(
                 egui::TextEdit::singleline(&mut self.address.url)
@@ -35,20 +35,23 @@ impl Form {
         if focus && !ui.is_sizing_pass() {
             address.request_focus();
         }
-        ui.checkbox(&mut self.address.guest, text("Гостевой доступ"));
+        ui.checkbox(&mut self.address.guest, text!("Гостевой доступ"));
         ui.add_enabled_ui(!self.address.guest, |ui| {
-            let name = ui.label(text("Имя пользователя"));
+            let name = ui.label(text!("Имя пользователя"));
             ui.add(egui::TextEdit::singleline(&mut self.address.user).desired_width(f32::INFINITY))
                 .labelled_by(name.id);
-            let password = ui.label(text("Пароль"));
+            let password = ui.label(text!("Пароль"));
             ui.add(
                 egui::TextEdit::singleline(&mut *self.password)
                     .password(true)
                     .desired_width(f32::INFINITY),
             )
             .labelled_by(password.id);
-            ui.checkbox(&mut self.remember, text("Сохранить пароль в Связке ключей"));
-            ui.small(text(
+            ui.checkbox(
+                &mut self.remember,
+                text!("Сохранить пароль в Связке ключей"),
+            );
+            ui.small(text!(
                 "Пустое поле пароля использует сохранённый пароль для этого адреса и пользователя.",
             ));
         });
@@ -142,7 +145,7 @@ impl PawCommander {
         if ui
             .add_enabled(
                 !self.smb.busy(),
-                egui::Button::new(text("SMB · Подключиться")),
+                egui::Button::new(text!("SMB · Подключиться")),
             )
             .clicked()
         {
@@ -166,7 +169,7 @@ impl PawCommander {
             }
             response.context_menu(|ui| {
                 if ui
-                    .add_enabled(can_disconnect, egui::Button::new(text("Отключить SMB")))
+                    .add_enabled(can_disconnect, egui::Button::new(text!("Отключить SMB")))
                     .clicked()
                 {
                     actions.push(Action::DisconnectSmb(index));
@@ -200,7 +203,7 @@ impl PawCommander {
             tab: self.tab().id,
             folder: self.tab().path.clone(),
         };
-        self.start_smb(ctx, text("Подключение к SMB…"), move || {
+        self.start_smb(ctx, text!("Подключение к SMB…"), move || {
             smb::connect(endpoint, password, remember)
                 .map(|share| Change::Connected(Box::new(share), target))
         });
@@ -211,7 +214,7 @@ impl PawCommander {
             return;
         }
         if let Some(share) = self.smb.shares.get(index).cloned() {
-            self.start_smb(ctx, text("Отключение SMB…"), move || {
+            self.start_smb(ctx, text!("Отключение SMB…"), move || {
                 let warning = share.disconnect()?;
                 Ok(Change::Disconnected(share.path, warning))
             });
@@ -261,7 +264,7 @@ impl PawCommander {
             Ok(result) => result,
             Err(TryRecvError::Empty) => return,
             Err(TryRecvError::Disconnected) => {
-                Err(text("Задача SMB завершилась без результата.").into())
+                Err(text!("Задача SMB завершилась без результата.").into())
             }
         };
         self.smb.pending = None;
@@ -278,7 +281,7 @@ impl PawCommander {
                 }
                 self.notice = Some(match connected.warning {
                     Some(warning) => (warning, true),
-                    None => (text("Папка SMB подключена.").into(), false),
+                    None => (text!("Папка SMB подключена.").into(), false),
                 });
             }
             Ok(Change::Disconnected(path, warning)) => {
@@ -296,7 +299,7 @@ impl PawCommander {
                 }
                 self.notice = Some(match warning {
                     Some(warning) => (warning, true),
-                    None => (text("Папка SMB отключена.").into(), false),
+                    None => (text!("Папка SMB отключена.").into(), false),
                 });
             }
             Err(error) => self.notice = Some((error, true)),

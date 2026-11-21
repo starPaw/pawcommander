@@ -70,7 +70,7 @@ impl PermissionsPreview {
         rule: &ModeRule,
         cancel: &Cancellation,
     ) -> Result<Self, String> {
-        let invalid = || text("Выберите файлы или папки в одной папке SFTP.").to_owned();
+        let invalid = || text!("Выберите файлы или папки в одной папке SFTP.").to_owned();
         let directory = sources
             .first()
             .filter(|source| source.remote())
@@ -126,7 +126,7 @@ impl PermissionsPreview {
         let cancel = progress.cancellation();
         if cancel.check().is_err() {
             progress.results.cancelled = true;
-            return Ok(text("Операция остановлена пользователем").into());
+            return Ok(text!("Операция остановлена пользователем").into());
         }
         let channel = remote(&self.directory)?;
         if channel
@@ -134,7 +134,7 @@ impl PermissionsPreview {
             .map_err(server_error)?
             != self.canonical_directory
         {
-            return Err(text("Папка SFTP изменилась. Обновите предпросмотр прав.").into());
+            return Err(text!("Папка SFTP изменилась. Обновите предпросмотр прав.").into());
         }
 
         let (mut completed, mut warned, mut skipped, mut failed) = (0, 0, 0, 0);
@@ -199,7 +199,7 @@ impl PermissionsPreview {
         } else if progress.results.cancelled {
             Ok(format!(
                 "{}. {summary}",
-                text("Операция остановлена пользователем")
+                text!("Операция остановлена пользователем")
             ))
         } else {
             Ok(summary)
@@ -229,7 +229,7 @@ impl PermissionChange {
         })?;
         if current != self.before {
             return Err(ChangeError::Failed(
-                text("Объект SFTP изменился. Обновите предпросмотр прав.").into(),
+                text!("Объект SFTP изменился. Обновите предпросмотр прав.").into(),
             ));
         }
         cancel.check().map_err(|_| ChangeError::Cancelled)?;
@@ -271,11 +271,11 @@ impl PermissionChange {
 impl Stamp {
     fn read(channel: &Sftp, path: &Path) -> Result<Self, ReadError> {
         let stat = channel.lstat(path).map_err(ReadError::Server)?;
-        let perm = stat
-            .perm
-            .ok_or_else(|| ReadError::Unsupported(text("Сервер SFTP не сообщил права доступа.")))?;
+        let perm = stat.perm.ok_or_else(|| {
+            ReadError::Unsupported(text!("Сервер SFTP не сообщил права доступа."))
+        })?;
         if !stat.is_file() && !stat.is_dir() {
-            return Err(ReadError::Unsupported(text(
+            return Err(ReadError::Unsupported(text!(
                 "Изменение прав доступно для обычных файлов и папок.",
             )));
         }
@@ -291,12 +291,12 @@ impl Stamp {
 }
 
 fn unconfirmed_change() -> String {
-    text("Связь с SFTP прервалась. Изменение прав не подтверждено.").into()
+    text!("Связь с SFTP прервалась. Изменение прав не подтверждено.").into()
 }
 
 fn server_error(error: Error) -> String {
     if error.code() == ErrorCode::SFTP(LIBSSH2_FX_PERMISSION_DENIED) {
-        text("Сервер SFTP отказал в доступе.").into()
+        text!("Сервер SFTP отказал в доступе.").into()
     } else {
         error.to_string()
     }

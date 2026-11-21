@@ -72,7 +72,7 @@ impl DirectoryTree {
         );
         let was_open = state.is_open();
         let mut header = state.show_header(ui, |ui| {
-            let response = ui.selectable_label(was_open, text("Дерево папок"));
+            let response = ui.selectable_label(was_open, text!("Дерево папок"));
             paint_focus(ui, &response, 4);
             title_clicked = response.clicked();
         });
@@ -191,7 +191,7 @@ impl DirectoryTree {
             Ok(children) => children,
             Err(mpsc::TryRecvError::Empty) => return,
             Err(mpsc::TryRecvError::Disconnected) => {
-                Err(text("Не удалось прочитать папку: фоновая задача завершилась").to_owned())
+                Err(text!("Не удалось прочитать папку: фоновая задача завершилась").to_owned())
             }
         };
         if !job.cancelled.load(Ordering::Relaxed) {
@@ -328,9 +328,9 @@ impl DirectoryTree {
                         TreeRow::Folder(location) => {
                             let expanded = self.expanded.contains(location);
                             let hint = if expanded {
-                                "Свернуть папку"
+                                crate::i18n::text!("Свернуть папку")
                             } else {
-                                "Раскрыть папку"
+                                crate::i18n::text!("Раскрыть папку")
                             };
                             let label = location.name();
                             let disclosure = tree_button(
@@ -338,10 +338,10 @@ impl DirectoryTree {
                                 21.0,
                                 ("disclosure", location),
                                 if expanded { "▾" } else { "▸" },
-                                &format!("{}: {label}", text(hint)),
+                                &format!("{hint}: {label}"),
                                 None,
                             );
-                            if disclosure.on_hover_text(text(hint)).clicked() {
+                            if disclosure.on_hover_text(hint).clicked() {
                                 click = Some(TreeClick::Toggle(location.clone()));
                             }
 
@@ -361,12 +361,12 @@ impl DirectoryTree {
                         TreeRow::Loading => {
                             ui.add_sized(
                                 [ui.available_width().max(0.0), ROW_HEIGHT],
-                                egui::Label::new(text("Чтение вложенных папок…")).truncate(),
+                                egui::Label::new(text!("Чтение вложенных папок…")).truncate(),
                             );
                         }
                         TreeRow::Error(location) => {
                             let error = self.children[location].as_ref().unwrap_err();
-                            let retry = text("Повторить чтение папки");
+                            let retry = text!("Повторить чтение папки");
                             let response = tree_button(
                                 ui,
                                 ui.available_width(),

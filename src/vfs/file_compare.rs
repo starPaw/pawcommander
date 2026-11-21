@@ -197,7 +197,7 @@ fn difference_at(left: &[u8], right: &[u8]) -> Option<usize> {
 }
 
 fn missing() -> TransferError {
-    text("Файл отсутствует").into()
+    text!("Файл отсутствует").into()
 }
 
 fn side_error(side: usize, error: TransferError) -> TransferError {
@@ -205,9 +205,9 @@ fn side_error(side: usize, error: TransferError) -> TransferError {
         return error;
     }
     let pane = if side == 0 {
-        text("Левая панель")
+        text!("Левая панель")
     } else {
-        text("Правая панель")
+        text!("Правая панель")
     };
     format!("{pane} · {error}").into()
 }

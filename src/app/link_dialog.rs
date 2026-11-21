@@ -27,25 +27,25 @@ impl LinkDialog {
             ui.radio_value(
                 &mut self.kind,
                 links::Kind::Symbolic,
-                text("Символическая ссылка"),
+                text!("Символическая ссылка"),
             );
-            ui.radio_value(&mut self.kind, links::Kind::Hard, text("Жёсткая ссылка"));
+            ui.radio_value(&mut self.kind, links::Kind::Hard, text!("Жёсткая ссылка"));
         });
-        let name = ui.label(text("Имя ссылки"));
+        let name = ui.label(text!("Имя ссылки"));
         let name_edit = ui
             .add(egui::TextEdit::singleline(&mut self.name).desired_width(f32::INFINITY))
             .labelled_by(name.id);
         if focus_name {
             name_edit.request_focus();
         }
-        let target = ui.label(text("Путь к цели ссылки"));
+        let target = ui.label(text!("Путь к цели ссылки"));
         ui.add(egui::TextEdit::singleline(&mut self.target).desired_width(f32::INFINITY))
             .labelled_by(target.id);
-        ui.small(text(
+        ui.small(text!(
             "Относительный путь отсчитывается от папки, где создаётся ссылка.",
         ));
         if self.kind == links::Kind::Hard {
-            ui.small(text(
+            ui.small(text!(
                 "Для жёсткой ссылки выберите обычный файл на том же томе.",
             ));
         }
@@ -57,7 +57,7 @@ impl LinkDialog {
 
     pub(super) fn submit(self, app: &mut PawCommander, ctx: &egui::Context) {
         let target = self.directory.join(&self.name);
-        let label = text("Создание ссылки");
+        let label = text!("Создание ссылки");
         let description = format!("{label} · {} → {}", target.display(), self.target);
         app.start_described_job(ctx, label, description, move |progress| {
             let path = Location::Local(target);

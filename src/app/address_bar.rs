@@ -42,13 +42,13 @@ pub(super) fn address_bar(
             for (icon, label, delta, enabled) in [
                 (
                     Icon::Back,
-                    crate::i18n::text("Назад"),
+                    crate::i18n::text!("Назад"),
                     -1,
                     tab.history_index > 0,
                 ),
                 (
                     Icon::Forward,
-                    crate::i18n::text("Вперёд"),
+                    crate::i18n::text!("Вперёд"),
                     1,
                     tab.history_index + 1 < tab.history.len(),
                 ),
@@ -102,13 +102,13 @@ pub(super) fn address_bar(
                                             .as_deref()
                                             .is_some_and(|home| path.local() == Some(home));
                                         let (label, icon) = if home {
-                                            (crate::i18n::text("Домой").into(), Some(Icon::Home))
+                                            (crate::i18n::text!("Домой").into(), Some(Icon::Home))
                                         } else if path.parent().is_none() && !path.remote() {
                                             (
                                                 if cfg!(windows) {
                                                     file_name(path)
                                                 } else {
-                                                    crate::i18n::text("Диск").into()
+                                                    crate::i18n::text!("Диск").into()
                                                 },
                                                 Some(Icon::Drive),
                                             )
@@ -184,7 +184,7 @@ pub(super) fn address_bar(
                         if icons::compact_button(
                             ui,
                             Icon::ChevronDown,
-                            crate::i18n::text("Ввести путь вручную"),
+                            crate::i18n::text!("Ввести путь вручную"),
                             false,
                         )
                         .clicked()
@@ -226,7 +226,7 @@ pub(super) fn edit_address(
     let breadcrumbs = icons::compact_button(
         ui,
         Icon::Breadcrumbs,
-        crate::i18n::text("Вернуться к хлебным крошкам · Esc"),
+        crate::i18n::text!("Вернуться к хлебным крошкам · Esc"),
         false,
     );
     let cancel = breadcrumbs.clicked();
@@ -255,7 +255,7 @@ pub(super) fn edit_address(
     let mut output = egui::TextEdit::singleline(&mut tab.address)
         .id(field_id)
         .font(egui::TextStyle::Body)
-        .hint_text(crate::i18n::text("Путь к папке или sftp://сервер/папка"))
+        .hint_text(crate::i18n::text!("Путь к папке или sftp://сервер/папка"))
         .align(egui::Align2::LEFT_CENTER)
         .frame(egui::Frame::NONE)
         .margin(margin)
@@ -266,7 +266,7 @@ pub(super) fn edit_address(
         .show(ui);
     let response = &output.response;
     ui.ctx().accesskit_node_builder(response.id, |node| {
-        node.set_label(crate::i18n::text("Путь к папке"));
+        node.set_label(crate::i18n::text!("Путь к папке"));
     });
     let mut cursor_range = None;
     if tab.focus_address {
@@ -326,7 +326,7 @@ pub(super) fn edit_address(
     let go_button = icons::compact_button(
         ui,
         Icon::Forward,
-        crate::i18n::text("Перейти по введённому пути · Enter"),
+        crate::i18n::text!("Перейти по введённому пути · Enter"),
         false,
     );
     let go = go_button.clicked();
@@ -351,11 +351,11 @@ pub(super) fn edit_address(
             .show(|ui| {
                 ui.set_width(ui.available_width().max(148.0));
                 ui.label(
-                    egui::RichText::new(crate::i18n::text("Подсказки пути"))
+                    egui::RichText::new(crate::i18n::text!("Подсказки пути"))
                         .small()
                         .weak(),
                 )
-                .on_hover_text(crate::i18n::text(
+                .on_hover_text(crate::i18n::text!(
                     "↑↓ выбрать · Tab дополнить · Enter открыть",
                 ));
                 for (i, item) in suggestions.iter().enumerate() {

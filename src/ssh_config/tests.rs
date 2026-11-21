@@ -212,7 +212,7 @@ fn ssh_config_loads_the_requested_home_and_bounds_reads() {
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o662)).unwrap();
         assert_eq!(
             load_config(fixture.path(), "alias", "local").unwrap_err(),
-            text("Проверьте владельца и права записи ~/.ssh/config")
+            text!("Проверьте владельца и права записи ~/.ssh/config")
         );
         std::fs::set_permissions(&config, original).unwrap();
     }

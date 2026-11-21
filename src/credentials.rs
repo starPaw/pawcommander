@@ -29,7 +29,7 @@ pub(crate) fn system_entry(service: &str, account: &str) -> Result<keyring::Entr
 fn account(endpoint: &Endpoint) -> Result<String, String> {
     // Structured identity avoids delimiter collisions and isolates users, ports and keys.
     serde_json::to_string(endpoint)
-        .map_err(|_| crate::i18n::text("Не удалось определить профиль SFTP").into())
+        .map_err(|_| crate::i18n::text!("Не удалось определить профиль SFTP").into())
 }
 fn vault_error(error: keyring::Error) -> String {
     if let keyring::Error::TooLong(field, limit) = &error
@@ -48,7 +48,7 @@ pub fn load(endpoint: &Endpoint) -> Result<Option<SavedKey>, String> {
 fn load_entry(entry: &keyring::Entry) -> Result<Option<SavedKey>, String> {
     match entry.get_secret() {
         Ok(secret) => decode_saved_key(&secret).map(Some).map_err(|_| {
-            crate::i18n::text("Сохранённый ключ повреждён; удалите его и сохраните заново").into()
+            crate::i18n::text!("Сохранённый ключ повреждён; удалите его и сохраните заново").into()
         }),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(error) => Err(vault_error(error)),
@@ -78,7 +78,7 @@ fn save_entry(entry: &keyring::Entry, secret: &SavedKey) -> Result<(), String> {
     // Keep JSON as UTF-8 bytes: Windows doubles ASCII password strings to
     // UTF-16, unnecessarily exceeding its credential-blob limit for RSA keys.
     let encoded = serde_json::to_vec(secret)
-        .map_err(|_| crate::i18n::text("Не удалось подготовить ключ к сохранению"))?;
+        .map_err(|_| crate::i18n::text!("Не удалось подготовить ключ к сохранению"))?;
     entry.set_secret(&encoded).map_err(vault_error)
 }
 pub fn forget(endpoint: &Endpoint) -> Result<(), String> {

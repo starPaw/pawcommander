@@ -139,69 +139,69 @@ impl Command {
     ];
 
     pub fn label(self) -> &'static str {
-        text(match self {
-            Self::EditPath => "Ввести путь",
-            Self::Filter => "Фильтр текущей папки",
-            Self::Search => "Поиск файлов",
-            Self::NewTab => "Новая вкладка",
-            Self::CloseTab => "Закрыть вкладку",
-            Self::TogglePinTab => "Закрепить или открепить вкладку",
-            Self::DuplicateTab => "Дублировать вкладку",
-            Self::ReopenTab => "Восстановить закрытую вкладку",
-            Self::Back => "Назад",
-            Self::Forward => "Вперёд",
-            Self::Parent => "Родительская папка",
-            Self::Open => "Открыть",
-            Self::SelectAll => "Выделить всё",
-            Self::SelectByMask => "Выделить по маске",
-            Self::SelectByExtension => "Выделить по расширению",
-            Self::InvertSelection => "Инвертировать выделение",
-            Self::RestoreSelection => "Восстановить выделение",
-            Self::Hidden => "Скрытые файлы",
-            Self::Split => "Две панели",
-            Self::OtherPane => "Переключить панель",
-            Self::Preview => "Панель сведений",
-            Self::QuickLook => "Быстрый просмотр",
-            Self::EditInZed => "Открыть в Zed",
-            Self::OpenTerminal => "Открыть терминал здесь",
-            Self::OpenEmbeddedTerminal => "Открыть встроенный терминал",
+        match self {
+            Self::EditPath => text!("Ввести путь"),
+            Self::Filter => text!("Фильтр текущей папки"),
+            Self::Search => text!("Поиск файлов"),
+            Self::NewTab => text!("Новая вкладка"),
+            Self::CloseTab => text!("Закрыть вкладку"),
+            Self::TogglePinTab => text!("Закрепить или открепить вкладку"),
+            Self::DuplicateTab => text!("Дублировать вкладку"),
+            Self::ReopenTab => text!("Восстановить закрытую вкладку"),
+            Self::Back => text!("Назад"),
+            Self::Forward => text!("Вперёд"),
+            Self::Parent => text!("Родительская папка"),
+            Self::Open => text!("Открыть"),
+            Self::SelectAll => text!("Выделить всё"),
+            Self::SelectByMask => text!("Выделить по маске"),
+            Self::SelectByExtension => text!("Выделить по расширению"),
+            Self::InvertSelection => text!("Инвертировать выделение"),
+            Self::RestoreSelection => text!("Восстановить выделение"),
+            Self::Hidden => text!("Скрытые файлы"),
+            Self::Split => text!("Две панели"),
+            Self::OtherPane => text!("Переключить панель"),
+            Self::Preview => text!("Панель сведений"),
+            Self::QuickLook => text!("Быстрый просмотр"),
+            Self::EditInZed => text!("Открыть в Zed"),
+            Self::OpenTerminal => text!("Открыть терминал здесь"),
+            Self::OpenEmbeddedTerminal => text!("Открыть встроенный терминал"),
             #[cfg(target_os = "macos")]
-            Self::CustomActions => "Пользовательские действия",
-            Self::Refresh => "Обновить",
-            Self::Properties => "Свойства",
-            Self::ChangePermissions => "Изменить права доступа",
-            Self::Rename => "Переименовать",
-            Self::CreateArchive => "Создать архив",
-            Self::ExtractArchive => "Распаковать выбранное",
-            Self::VerifyArchive => "Проверить архив",
-            Self::CreateChecksumManifest => "Создать манифест SHA-256",
-            Self::VerifyChecksumManifest => "Проверить манифест SHA-256",
-            Self::CompareFolders => "Сравнить папки",
-            Self::CompareFiles => "Сравнить файлы",
+            Self::CustomActions => text!("Пользовательские действия"),
+            Self::Refresh => text!("Обновить"),
+            Self::Properties => text!("Свойства"),
+            Self::ChangePermissions => text!("Изменить права доступа"),
+            Self::Rename => text!("Переименовать"),
+            Self::CreateArchive => text!("Создать архив"),
+            Self::ExtractArchive => text!("Распаковать выбранное"),
+            Self::VerifyArchive => text!("Проверить архив"),
+            Self::CreateChecksumManifest => text!("Создать манифест SHA-256"),
+            Self::VerifyChecksumManifest => text!("Проверить манифест SHA-256"),
+            Self::CompareFolders => text!("Сравнить папки"),
+            Self::CompareFiles => text!("Сравнить файлы"),
             #[cfg(target_os = "macos")]
-            Self::FindDuplicates => "Найти дубликаты",
+            Self::FindDuplicates => text!("Найти дубликаты"),
             #[cfg(target_os = "macos")]
-            Self::DiskUsage => "Анализ занятого места",
+            Self::DiskUsage => text!("Анализ занятого места"),
             #[cfg(target_os = "macos")]
-            Self::Collections => "Теги и коллекции",
+            Self::Collections => text!("Теги и коллекции"),
             #[cfg(target_os = "macos")]
-            Self::SyncFolders => "План синхронизации папок",
-            Self::AddToArchive => "Добавить в архив",
-            Self::RemoveFromArchive => "Удалить из архива",
-            Self::NewFolder => "Создать папку",
+            Self::SyncFolders => text!("План синхронизации папок"),
+            Self::AddToArchive => text!("Добавить в архив"),
+            Self::RemoveFromArchive => text!("Удалить из архива"),
+            Self::NewFolder => text!("Создать папку"),
             #[cfg(target_os = "macos")]
-            Self::NewFile => "Новый файл",
+            Self::NewFile => text!("Новый файл"),
             #[cfg(target_os = "macos")]
-            Self::CreateLink => "Создать ссылку",
-            Self::Trash => "В корзину с подтверждением",
-            Self::CopyToPane => "Копировать в соседнюю панель",
+            Self::CreateLink => text!("Создать ссылку"),
+            Self::Trash => text!("В корзину с подтверждением"),
+            Self::CopyToPane => text!("Копировать в соседнюю панель"),
             #[cfg(target_os = "macos")]
-            Self::CompatibleNames => "Перенос с совместимыми именами",
-            Self::MoveToPane => "Переместить в соседнюю панель",
-            Self::FocusToolbar => "Фокус на панели инструментов",
-            Self::Palette => "Палитра команд",
-            Self::FolderJump => "Быстрый переход к папке",
-        })
+            Self::CompatibleNames => text!("Перенос с совместимыми именами"),
+            Self::MoveToPane => text!("Переместить в соседнюю панель"),
+            Self::FocusToolbar => text!("Фокус на панели инструментов"),
+            Self::Palette => text!("Палитра команд"),
+            Self::FolderJump => text!("Быстрый переход к папке"),
+        }
     }
 
     // Only dedicated default navigation chords may leave a text field.
@@ -302,7 +302,7 @@ impl Profile {
 
     fn label(self) -> &'static str {
         match self {
-            Self::Default => text("Стандартный"),
+            Self::Default => text!("Стандартный"),
             Self::Commander => "Commander",
         }
     }
@@ -523,7 +523,7 @@ impl ShortcutEditor {
                         .err()
                         .map(|error| match error {
                             BindingError::Reserved => {
-                                text("Это сочетание зарезервировано. Выберите другое.").into()
+                                text!("Это сочетание зарезервировано. Выберите другое.").into()
                             }
                             BindingError::Conflict(other) => {
                                 let keys = ctx.format_shortcut(&chord);
@@ -545,9 +545,9 @@ impl ShortcutEditor {
         let mut cancel = false;
         let modal = egui::Modal::new(egui::Id::unique("shortcut_editor")).show(ctx, |ui| {
             ui.set_width(490.0);
-            ui.heading(text("Горячие клавиши"));
+            ui.heading(text!("Горячие клавиши"));
             ui.horizontal(|ui| {
-                ui.label(text("Профиль"));
+                ui.label(text!("Профиль"));
                 for profile in [Profile::Default, Profile::Commander] {
                     if ui
                         .selectable_label(self.draft.profile == profile, profile.label())
@@ -562,14 +562,14 @@ impl ShortcutEditor {
                         self.error = None;
                     }
                 }
-                if ui.button(text("Сбросить настройки клавиш")).clicked() {
+                if ui.button(text!("Сбросить настройки клавиш")).clicked() {
                     self.draft = Shortcuts::default();
                     self.recording = None;
                     self.error = None;
                 }
             });
-            ui.small(text("Смена профиля или сброс очищает изменения клавиш."));
-            ui.label(text(
+            ui.small(text!("Смена профиля или сброс очищает изменения клавиш."));
+            ui.label(text!(
                 "Нажмите на клавишу действия для записи сочетания. Esc отменяет запись.",
             ));
             if let Some(error) = &self.error {
@@ -589,9 +589,9 @@ impl ShortcutEditor {
                                 let keys = self.draft.keys(ctx, command);
                                 let recording = self.recording == Some(command);
                                 let button = if recording {
-                                    text("Нажмите сочетание…")
+                                    text!("Нажмите сочетание…")
                                 } else if keys.is_empty() {
-                                    text("Не назначено")
+                                    text!("Не назначено")
                                 } else {
                                     &keys
                                 };
@@ -604,7 +604,7 @@ impl ShortcutEditor {
                                 if ui
                                     .add_enabled(
                                         !keys.is_empty(),
-                                        egui::Button::new(text("Очистить")),
+                                        egui::Button::new(text!("Очистить")),
                                     )
                                     .on_hover_text(command.label())
                                     .clicked()
@@ -618,17 +618,17 @@ impl ShortcutEditor {
                         });
                 });
             ui.separator();
-            ui.small(text(
+            ui.small(text!(
                 "Системные сочетания буфера обмена, стрелки ↑/↓ и Esc закреплены.",
             ));
             ui.horizontal(|ui| {
                 save = ui
                     .add_enabled(
                         self.recording.is_none(),
-                        egui::Button::new(text("Сохранить")),
+                        egui::Button::new(text!("Сохранить")),
                     )
                     .clicked();
-                cancel = ui.button(text("Отмена")).clicked();
+                cancel = ui.button(text!("Отмена")).clicked();
             });
         });
         if save {

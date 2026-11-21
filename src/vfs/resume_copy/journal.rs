@@ -39,7 +39,7 @@ pub(super) struct AccessTimesSection {
 }
 
 fn invalid_access_times() -> io::Error {
-    io::Error::other(crate::i18n::text(
+    io::Error::other(crate::i18n::text!(
         "Некорректная запись времени доступа для переноса",
     ))
 }

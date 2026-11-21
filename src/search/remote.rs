@@ -73,17 +73,17 @@ pub(super) fn run(
     let mut warnings = Vec::new();
     if coverage.timed_out {
         warnings.push(
-            text("Лимит времени поиска SFTP достигнут. Показаны собранные результаты.").into(),
+            text!("Лимит времени поиска SFTP достигнут. Показаны собранные результаты.").into(),
         );
     }
     if coverage.entries_limited {
-        warnings.push(text("Лимит обхода SFTP достигнут. Показаны собранные результаты.").into());
+        warnings.push(text!("Лимит обхода SFTP достигнут. Показаны собранные результаты.").into());
     }
     if coverage.depth_limited {
-        warnings.push(text("Поиск достиг выбранной глубины вложенности.").into());
+        warnings.push(text!("Поиск достиг выбранной глубины вложенности.").into());
     }
     if coverage.disconnected {
-        warnings.push(text("Связь с SFTP прервалась во время поиска.").into());
+        warnings.push(text!("Связь с SFTP прервалась во время поиска.").into());
     }
     let skipped = coverage.unreadable + missing_metadata;
     if skipped > 0 {

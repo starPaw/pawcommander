@@ -176,7 +176,7 @@ fn extract(
                 }
                 Decision::Replace if can_replace => replace = Some(existing),
                 Decision::Replace => {
-                    return Err(crate::i18n::text(
+                    return Err(crate::i18n::text!(
                         "Замена доступна только для двух разных обычных файлов.",
                     )
                     .into())

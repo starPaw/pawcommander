@@ -16,8 +16,8 @@ use zeroize::Zeroizing;
 const SERVICE: &str = "dev.pawcommander.smb.v1";
 const RECORD: &str = "connection.json";
 const MOUNT_DIR: &str = "mount";
-pub(crate) const REPLACE_UNAVAILABLE: &str =
-    "Безопасная замена файла на SMB недоступна. Выберите свободное имя.";
+pub(crate) const REPLACE_UNAVAILABLE: crate::i18n::MessageKey =
+    crate::i18n::key!("Безопасная замена файла на SMB недоступна. Выберите свободное имя.");
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Endpoint {
@@ -29,7 +29,7 @@ pub(crate) struct Endpoint {
 impl Endpoint {
     pub(crate) fn parse(address: &str, user: &str, guest: bool) -> Result<Self, String> {
         let invalid =
-            || text("Введите SMB-адрес вида smb://сервер/папка без учётных данных.").to_owned();
+            || text!("Введите SMB-адрес вида smb://сервер/папка без учётных данных.").to_owned();
         let mut url = url::Url::parse(address.trim()).map_err(|_| invalid())?;
         if url.scheme() != "smb"
             || url.host_str().is_none_or(str::is_empty)
@@ -68,7 +68,7 @@ impl Endpoint {
         }
         let user = user.trim();
         if !guest && (user.is_empty() || user.chars().any(char::is_control)) {
-            return Err(text("Введите имя пользователя SMB.").into());
+            return Err(text!("Введите имя пользователя SMB.").into());
         }
         Ok(Self {
             address: url.into(),
@@ -88,7 +88,7 @@ impl Endpoint {
 }
 
 fn smb_keychain_error() -> String {
-    text("Не удалось открыть или обновить пароль SMB в Связке ключей.").into()
+    text!("Не удалось открыть или обновить пароль SMB в Связке ключей.").into()
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -118,7 +118,9 @@ impl MountedShare {
                 )
             })?,
             Some(_) => {
-                return Err(text("Подключение SMB изменилось. Обновите список подключений.").into())
+                return Err(
+                    text!("Подключение SMB изменилось. Обновите список подключений.").into(),
+                )
             }
             None => {}
         }
@@ -141,7 +143,7 @@ pub(crate) struct Connected {
 fn root() -> io::Result<PathBuf> {
     dirs::data_local_dir()
         .map(|root| root.join("PawCommander").join("smb"))
-        .ok_or_else(|| io::Error::other(text("Нет папки данных для подключения SMB.")))
+        .ok_or_else(|| io::Error::other(text!("Нет папки данных для подключения SMB.")))
 }
 
 pub(crate) fn connect(
@@ -169,7 +171,7 @@ fn connect_in(
                 warning: None,
             });
         }
-        return Err(text("Папка уже подключена. Отключите её перед сменой пароля.").into());
+        return Err(text!("Папка уже подключена. Отключите её перед сменой пароля.").into());
     }
     if endpoint.user.is_some() && password.is_empty() {
         match endpoint.credential()?.get_secret() {
@@ -183,7 +185,7 @@ fn connect_in(
         }
     }
     if password.contains('\0') {
-        return Err(text("Пароль SMB содержит нулевой байт.").into());
+        return Err(text!("Пароль SMB содержит нулевой байт.").into());
     }
     fs::create_dir_all(root).map_err(mount_error)?;
     let root = root.canonicalize().map_err(mount_error)?;
@@ -216,7 +218,7 @@ fn mount_new(
     mount(&endpoint, path, password)?;
     let id = mount_id(path, true)
         .map_err(mount_error)?
-        .ok_or_else(|| text("macOS не вернула ожидаемую точку монтирования SMB.").to_owned())?;
+        .ok_or_else(|| text!("macOS не вернула ожидаемую точку монтирования SMB.").to_owned())?;
     // This handle still refers to the empty local directory underneath the mount.
     covered
         .set_permissions(Permissions::from_mode(0o100))

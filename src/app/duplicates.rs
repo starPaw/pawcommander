@@ -70,7 +70,9 @@ impl DuplicateSearch {
             ui.separator();
             match &mut self.phase {
                 Phase::Ready => {}
-                Phase::Running(worker) => show_progress(ui, worker, "Ищем дубликаты…"),
+                Phase::Running(worker) => {
+                    show_progress(ui, worker, crate::i18n::key!("Ищем дубликаты…"))
+                }
                 Phase::Finished(result) => {
                     show_results(
                         ui,
@@ -83,7 +85,7 @@ impl DuplicateSearch {
                     );
                 }
                 Phase::Stopped => {
-                    ui.label(text("Поиск дубликатов остановлен"));
+                    ui.label(text!("Поиск дубликатов остановлен"));
                 }
                 Phase::Failed(error) => {
                     ui.colored_label(ui.visuals().error_fg_color, error);
@@ -97,10 +99,10 @@ impl DuplicateSearch {
                     "Move the marked files to the system Trash? Selected: {count}."
                 ));
                 ui.horizontal(|ui| {
-                    if ui.button(text("Назад")).clicked() {
+                    if ui.button(text!("Назад")).clicked() {
                         self.reviewing = false;
                     }
-                    confirm = ui.button(text("В корзину")).clicked();
+                    confirm = ui.button(text!("В корзину")).clicked();
                 });
             } else {
                 ui.horizontal(|ui| {
@@ -108,11 +110,11 @@ impl DuplicateSearch {
                         stop = ui
                             .add_enabled(
                                 !worker.progress.cancel.is_requested(),
-                                egui::Button::new(text("Остановить")),
+                                egui::Button::new(text!("Остановить")),
                             )
                             .clicked();
                     } else {
-                        let scan = ui.button(text("Найти дубликаты"));
+                        let scan = ui.button(text!("Найти дубликаты"));
                         if self.focus_start && !ui.is_sizing_pass() {
                             scan.request_focus();
                             self.focus_start = false;
@@ -129,7 +131,7 @@ impl DuplicateSearch {
                         {
                             self.reviewing = true;
                         }
-                        close = ui.button(text("Закрыть")).clicked();
+                        close = ui.button(text!("Закрыть")).clicked();
                     }
                 });
             }
@@ -180,10 +182,10 @@ fn show_results(
         .on_hover_text(result.examples.join("\n"));
     }
     if result.groups.is_empty() {
-        ui.label(text("Дубликаты не найдены"));
+        ui.label(text!("Дубликаты не найдены"));
         return;
     }
-    ui.label(text(
+    ui.label(text!(
         "Оставьте один файл в каждой группе и отметьте копии для корзины.",
     ));
     let row_height = ui
@@ -220,7 +222,7 @@ fn show_results(
                     ui.horizontal(|ui| {
                         let keep = ui.add_enabled(
                             !reviewing,
-                            egui::RadioButton::new(original, text("Оставить")),
+                            egui::RadioButton::new(original, text!("Оставить")),
                         );
                         if keep.clicked() {
                             keepers[group] = member;
@@ -229,7 +231,7 @@ fn show_results(
                         }
                         let mark = ui.add_enabled(
                             !reviewing && keepers[group] != member,
-                            egui::Checkbox::new(&mut checked, text("В корзину")),
+                            egui::Checkbox::new(&mut checked, text!("В корзину")),
                         );
                         if mark.changed() {
                             if checked {
@@ -263,7 +265,7 @@ impl PawCommander {
     }
 
     pub(super) fn enqueue_duplicate_trash(&mut self, plan: TrashPlan, ctx: &egui::Context) {
-        let label = text("Перемещение дубликатов в корзину");
+        let label = text!("Перемещение дубликатов в корзину");
         let description = format!("{label} ({}) · {}", plan.count(), plan.root().display());
         self.start_stoppable_job(ctx, label, description, move |progress| {
             plan.apply(progress)

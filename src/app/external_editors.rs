@@ -32,17 +32,17 @@ impl Default for EditorCommand {
 impl EditorCommand {
     fn check(&self) -> Result<(), &'static str> {
         if !Path::new(&self.program).is_absolute() || self.program.contains('\0') {
-            return Err(text("Укажите абсолютный путь к исполняемому файлу"));
+            return Err(text!("Укажите абсолютный путь к исполняемому файлу"));
         }
         if self.arguments.contains('\0') {
-            return Err(text("Аргумент содержит нулевой байт."));
+            return Err(text!("Аргумент содержит нулевой байт."));
         }
         Ok(())
     }
 
     fn invocation(self, file: &Path) -> Result<Invocation, String> {
         self.check()?;
-        let folder = file.parent().ok_or_else(|| text("Недопустимый путь"))?;
+        let folder = file.parent().ok_or_else(|| text!("Недопустимый путь"))?;
         let arguments = self
             .arguments
             .lines()
@@ -50,7 +50,7 @@ impl EditorCommand {
             .chain([file.as_os_str().to_owned()])
             .collect();
         Ok(Invocation {
-            name: text("Внешний редактор").into(),
+            name: text!("Внешний редактор").into(),
             program: self.program.into(),
             folder: folder.to_owned(),
             arguments,
@@ -64,22 +64,22 @@ impl Editors {
     }
 
     pub(super) fn show(&mut self, ui: &mut egui::Ui) {
-        ui.small(text(
+        ui.small(text!(
             "Укажите путь к программе и по одному аргументу на строке. Путь к файлу добавляется последним.",
         ));
         for (label, command) in [
-            ("Локальные файлы", &mut self.local),
-            ("Рабочие копии SFTP", &mut self.sftp),
+            (crate::i18n::key!("Локальные файлы"), &mut self.local),
+            (crate::i18n::key!("Рабочие копии SFTP"), &mut self.sftp),
         ] {
             ui.push_id(label, |ui| {
                 ui.add_space(8.0);
                 ui.label(egui::RichText::new(text(label)).strong());
-                let program = ui.label(text("Исполняемый файл"));
+                let program = ui.label(text!("Исполняемый файл"));
                 ui.add(
                     egui::TextEdit::singleline(&mut command.program).desired_width(f32::INFINITY),
                 )
                 .labelled_by(program.id);
-                let args = ui.label(text("Аргументы"));
+                let args = ui.label(text!("Аргументы"));
                 ui.add(
                     egui::TextEdit::multiline(&mut command.arguments)
                         .desired_width(f32::INFINITY)
@@ -137,7 +137,7 @@ impl PawCommander {
         if let Some(edit) = &self.remote_editor.edit {
             if edit.target() != &path {
                 self.notice = Some((
-                    text("Завершите текущую правку SFTP, чтобы открыть другую.").into(),
+                    text!("Завершите текущую правку SFTP, чтобы открыть другую.").into(),
                     false,
                 ));
             }
@@ -153,16 +153,16 @@ impl PawCommander {
             self.configure_external_editors(ctx);
             return;
         }
-        let label = text("Подготовка рабочей копии SFTP");
+        let label = text!("Подготовка рабочей копии SFTP");
         let (send, receive) = mpsc::channel();
         self.remote_editor.work = Some(receive);
         self.start_stoppable_job(ctx, label, format!("{label} · {path}"), move |progress| {
             let copies = dirs::data_local_dir()
-                .ok_or_else(|| text("Не найдена папка данных приложения."))?
+                .ok_or_else(|| text!("Не найдена папка данных приложения."))?
                 .join("PawCommander/Editor Copies");
             let edit = RemoteEdit::download(path, &copies, progress).map_err(|e| e.to_string())?;
             let _ = send.send(Finished::Downloaded(edit, command));
-            Ok(text("Рабочая копия готова.").into())
+            Ok(text!("Рабочая копия готова.").into())
         });
     }
 
@@ -177,12 +177,12 @@ impl PawCommander {
         let path = file.to_owned();
         self.launch_application(
             ctx,
-            text("Открытие внешнего редактора…"),
+            text!("Открытие внешнего редактора…"),
             move |report| {
                 if path.is_file() {
                     invocation.launch(report);
                 } else {
-                    report(Err(text("Файл для редактирования недоступен.").into()));
+                    report(Err(text!("Файл для редактирования недоступен.").into()));
                 }
             },
         );
@@ -216,7 +216,7 @@ impl PawCommander {
     }
 
     fn save_remote_edit(&mut self, mut edit: RemoteEdit, ctx: &egui::Context) {
-        let label = text("Сохранение правки SFTP");
+        let label = text!("Сохранение правки SFTP");
         let (send, receive) = mpsc::channel();
         self.remote_editor.work = Some(receive);
         self.remote_editor.feedback = None;
@@ -242,7 +242,7 @@ impl PawCommander {
         let mut reopen = false;
         let mut reveal = false;
         let mut finish = false;
-        egui::Window::new(text("Правка SFTP"))
+        egui::Window::new(text!("Правка SFTP"))
             .id(egui::Id::unique("remote_editor"))
             .open(&mut session.open)
             .default_width(460.0)
@@ -252,7 +252,7 @@ impl PawCommander {
                         .wrap()
                         .selectable(true),
                 );
-                ui.small(text(
+                ui.small(text!(
                     "Сохраните файл в редакторе, затем отправьте правку на сервер.",
                 ));
                 if let Some(result) = &session.feedback {
@@ -268,15 +268,15 @@ impl PawCommander {
                 ui.horizontal_wrapped(|ui| {
                     let available = session.work.is_none();
                     save = ui
-                        .add_enabled(available, egui::Button::new(text("Сохранить на сервере")))
+                        .add_enabled(available, egui::Button::new(text!("Сохранить на сервере")))
                         .clicked();
-                    reopen = ui.button(text("Открыть рабочую копию")).clicked();
-                    reveal = ui.button(text("Показать в Finder")).clicked();
+                    reopen = ui.button(text!("Открыть рабочую копию")).clicked();
+                    reveal = ui.button(text!("Показать в Finder")).clicked();
                     finish = ui
-                        .add_enabled(available, egui::Button::new(text("Завершить сеанс")))
+                        .add_enabled(available, egui::Button::new(text!("Завершить сеанс")))
                         .clicked();
                 });
-                ui.small(text(
+                ui.small(text!(
                     "После завершения сеанса рабочая копия остаётся на Mac.",
                 ));
             });

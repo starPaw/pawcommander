@@ -28,7 +28,7 @@ impl BuiltIn {
 
     fn label(self) -> &'static str {
         match self {
-            Self::Empty => text("Пустой текстовый файл"),
+            Self::Empty => text!("Пустой текстовый файл"),
             Self::Markdown => "Markdown",
             Self::Json => "JSON",
             Self::Csv => "CSV",
@@ -42,7 +42,7 @@ impl BuiltIn {
             Self::Json => "json",
             Self::Csv => "csv",
         };
-        format!("{}.{extension}", text("Без названия"))
+        format!("{}.{extension}", text!("Без названия"))
     }
 
     fn contents(self) -> &'static str {
@@ -134,7 +134,7 @@ impl FileTemplatesDialog {
                 .show(ui, |ui| {
                     ui.add_enabled_ui(!busy, |ui| {
                         self.show_template(ui, library);
-                        let label = text("Имя файла");
+                        let label = text!("Имя файла");
                         ui.label(label);
                         let name = ui.add(
                             egui::TextEdit::singleline(&mut self.filename)
@@ -149,7 +149,7 @@ impl FileTemplatesDialog {
                         match self.choice {
                             Choice::BuiltIn(_) => self.show_body(ui),
                             Choice::Selected | Choice::Saved(_) => {
-                                ui.small(text(
+                                ui.small(text!(
                                     "Содержимое и кодировка исходного шаблона сохраняются.",
                                 ));
                             }
@@ -166,11 +166,16 @@ impl FileTemplatesDialog {
                 });
             ui.add_space(6.0);
             if let Phase::Running(worker) = &mut self.capture {
-                show_progress_with_stop(ui, worker, "Сохраняем шаблон…", "Остановка…");
+                show_progress_with_stop(
+                    ui,
+                    worker,
+                    crate::i18n::key!("Сохраняем шаблон…"),
+                    crate::i18n::key!("Остановка…"),
+                );
                 if ui
                     .add_enabled(
                         !worker.progress.cancel.is_requested(),
-                        egui::Button::new(text("Остановить")),
+                        egui::Button::new(text!("Остановить")),
                     )
                     .clicked()
                 {
@@ -179,15 +184,15 @@ impl FileTemplatesDialog {
             } else if self.creating.is_some() {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label(text("Создаём файл…"));
-                    close = ui.button(text("Закрыть")).clicked();
+                    ui.label(text!("Создаём файл…"));
+                    close = ui.button(text!("Закрыть")).clicked();
                 });
             } else {
                 ui.horizontal(|ui| {
                     let valid = file_templates::validate_filename(&self.filename).is_ok();
                     if ui
-                        .add_enabled(valid, egui::Button::new(text("Создать")))
-                        .on_disabled_hover_text(text("Введите имя файла без разделителей пути"))
+                        .add_enabled(valid, egui::Button::new(text!("Создать")))
+                        .on_disabled_hover_text(text!("Введите имя файла без разделителей пути"))
                         .clicked()
                     {
                         let job = NewFile {
@@ -203,7 +208,7 @@ impl FileTemplatesDialog {
                         self.notice = None;
                         new_file = Some(ComparisonResponse::CreateFile(job, reply));
                     }
-                    close = ui.button(text("Отмена")).clicked();
+                    close = ui.button(text!("Отмена")).clicked();
                 });
             }
         });
@@ -223,12 +228,12 @@ impl FileTemplatesDialog {
     fn show_template(&mut self, ui: &mut egui::Ui, library: &Library) {
         let label = match self.choice {
             Choice::BuiltIn(kind) => kind.label(),
-            Choice::Selected => text("Выделенный файл"),
+            Choice::Selected => text!("Выделенный файл"),
             Choice::Saved(index) => &library.templates[index].title,
         };
         let mut choice = self.choice;
         ui.horizontal_wrapped(|ui| {
-            ui.label(text("Шаблон файла"));
+            ui.label(text!("Шаблон файла"));
             egui::ComboBox::from_id_salt("file-template")
                 .selected_text(label)
                 .show_ui(ui, |ui| {
@@ -259,7 +264,7 @@ impl FileTemplatesDialog {
 
     fn show_body(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            ui.label(text("Кодировка"));
+            ui.label(text!("Кодировка"));
             egui::ComboBox::from_id_salt("new-file-encoding")
                 .selected_text(self.encoding.label())
                 .show_ui(ui, |ui| {
@@ -268,7 +273,7 @@ impl FileTemplatesDialog {
                     }
                 });
         });
-        let label = text("Содержимое файла");
+        let label = text!("Содержимое файла");
         ui.label(label);
         let field = ui.add(
             egui::TextEdit::multiline(&mut self.body)
@@ -282,17 +287,17 @@ impl FileTemplatesDialog {
 
     fn show_template_actions(&mut self, ui: &mut egui::Ui, library: &mut Library) {
         if let Choice::Saved(index) = self.choice {
-            if ui.button(text("Удалить сохранённый шаблон")).clicked() {
+            if ui.button(text!("Удалить сохранённый шаблон")).clicked() {
                 self.confirm_removal = true;
             }
             if self.confirm_removal {
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(text("Удалить этот шаблон?"));
-                    if ui.button(text("Удалить")).clicked() {
+                    ui.label(text!("Удалить этот шаблон?"));
+                    if ui.button(text!("Удалить")).clicked() {
                         library.templates.remove(index);
                         self.choose(Choice::BuiltIn(BuiltIn::Empty), library);
                     }
-                    if ui.button(text("Отмена")).clicked() {
+                    if ui.button(text!("Отмена")).clicked() {
                         self.confirm_removal = false;
                     }
                 });
@@ -300,7 +305,7 @@ impl FileTemplatesDialog {
         } else {
             let valid = file_templates::validate_filename(&self.filename).is_ok();
             if ui
-                .add_enabled(valid, egui::Button::new(text("Сохранить как шаблон")))
+                .add_enabled(valid, egui::Button::new(text!("Сохранить как шаблон")))
                 .clicked()
             {
                 self.template_title = Some(self.filename.clone());
@@ -311,12 +316,12 @@ impl FileTemplatesDialog {
             let mut save = false;
             let mut cancel = false;
             ui.horizontal_wrapped(|ui| {
-                let label = text("Название шаблона");
+                let label = text!("Название шаблона");
                 let field = ui.add(egui::TextEdit::singleline(title).hint_text(label));
                 ui.ctx()
                     .accesskit_node_builder(field.id, |node| node.set_label(label));
-                save = ui.button(text("Сохранить")).clicked();
-                cancel = ui.button(text("Отмена")).clicked();
+                save = ui.button(text!("Сохранить")).clicked();
+                cancel = ui.button(text!("Отмена")).clicked();
             });
             if cancel {
                 self.template_title = None;
@@ -374,12 +379,12 @@ impl FileTemplatesDialog {
             Phase::Finished(template) => match library.insert(template) {
                 Ok(index) => {
                     self.choose(Choice::Saved(index), library);
-                    (text("Шаблон сохранён").into(), false)
+                    (text!("Шаблон сохранён").into(), false)
                 }
                 Err(error) => (error, true),
             },
             Phase::Failed(error) => (error, true),
-            Phase::Stopped => (text("Операция остановлена").into(), false),
+            Phase::Stopped => (text!("Операция остановлена").into(), false),
             Phase::Ready | Phase::Running(_) => unreachable!(),
         });
     }
@@ -390,7 +395,7 @@ impl FileTemplatesDialog {
             Ok(Ok(())) => return Some(self.creating.take().unwrap().target),
             Ok(Err(error)) => error,
             Err(TryRecvError::Empty) => return None,
-            Err(TryRecvError::Disconnected) => text("Создание файла снято с очереди").into(),
+            Err(TryRecvError::Disconnected) => text!("Создание файла снято с очереди").into(),
         };
         self.creating = None;
         self.notice = Some((error, true));

@@ -66,7 +66,7 @@ impl TwoWayPlan {
         progress: &mut Progress,
     ) -> Result<Self, TransferError> {
         let data =
-            dirs::data_local_dir().ok_or_else(|| text("Папка данных приложения недоступна"))?;
+            dirs::data_local_dir().ok_or_else(|| text!("Папка данных приложения недоступна"))?;
         Self::build_in(
             folders,
             data.join("PawCommander/sync-baselines"),
@@ -166,7 +166,7 @@ impl TwoWayPlan {
                 .iter()
                 .any(|row| row.path == path && matches!(row.outcome, Reconcile::Conflict(_)))
         {
-            return Err(text("Конфликт изменился. Постройте план заново.").into());
+            return Err(text!("Конфликт изменился. Постройте план заново.").into());
         }
         let mut choices = self.choices.clone();
         choices.insert(path, side);
@@ -189,7 +189,7 @@ impl TwoWayPlan {
         self.store.check_roots(&self.observed)?;
         if self.store.read(&cancel)? != self.baseline || self.store.read_run()? != self.interrupted
         {
-            return Err(text("Общее состояние изменилось. Постройте план заново.").into());
+            return Err(text!("Общее состояние изменилось. Постройте план заново.").into());
         }
         if let Some(run) = &self.interrupted {
             self.store.check_stage(run, &self.observed)?;
@@ -203,7 +203,7 @@ impl TwoWayPlan {
 
     pub(crate) fn remember(&mut self, progress: &mut Progress) -> Result<(), TransferError> {
         if !self.can_remember() {
-            return Err(text(
+            return Err(text!(
                 "Чтобы сохранить общее состояние, содержимое папок должно совпадать.",
             )
             .into());
@@ -226,7 +226,7 @@ impl TwoWayPlan {
 
     pub(crate) fn apply(&self, progress: &mut Progress) -> Result<String, String> {
         if !self.can_apply() {
-            return Err(text("Для применения нужен план без нерешённых конфликтов.").into());
+            return Err(text!("Для применения нужен план без нерешённых конфликтов.").into());
         }
         let rows: Vec<_> = self
             .rows
@@ -271,7 +271,7 @@ impl TwoWayPlan {
             let (_, final_state) = observe_folders(&self.folders, &self.exclusions, progress)?;
             self.store.check_roots(&final_state)?;
             if !final_state.iter().all(|side| matches_tree(side, &target)) {
-                return Err(text(
+                return Err(text!(
                     "После применения содержимое папок отличается от плана. Постройте план заново.",
                 )
                 .into());

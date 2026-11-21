@@ -108,7 +108,7 @@ impl Columns {
                 Ok(listing) => listing,
                 Err(mpsc::TryRecvError::Empty) => return,
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    Err(text("Не удалось прочитать папку: фоновая задача завершилась").into())
+                    Err(text!("Не удалось прочитать папку: фоновая задача завершилась").into())
                 }
             };
             if !read.cancelled.load(Ordering::Relaxed) {
@@ -317,7 +317,7 @@ fn show_ancestor(
         .then(|| ColumnNavigation::Reveal(child.clone()));
 
     let Some(listing) = listing else {
-        column_notice(ui, text("Чтение папки…"));
+        column_notice(ui, text!("Чтение папки…"));
         return navigation;
     };
     let entries = match listing {
@@ -339,7 +339,7 @@ fn show_ancestor(
         .map_or(defaults, |view| view.resolve(defaults));
     let visible = entries.visible(view.hidden, "", view.order.key, view.order.descending);
     if visible.is_empty() {
-        column_notice(ui, text("Папка пуста"));
+        column_notice(ui, text!("Папка пуста"));
         return navigation;
     }
     let height = ui.available_height().max(0.0);

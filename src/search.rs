@@ -338,7 +338,7 @@ impl Search {
             };
             let result = match job.result.try_recv() {
                 Ok(result) => Some(result),
-                Err(mpsc::TryRecvError::Disconnected) => Some(Err(crate::i18n::text(
+                Err(mpsc::TryRecvError::Disconnected) => Some(Err(crate::i18n::text!(
                     "Задача поиска завершилась неожиданно",
                 )
                 .into())),
@@ -417,7 +417,7 @@ impl Search {
     fn check_index_reveal(&mut self, path: PathBuf, ctx: &egui::Context) {
         if self.index_reveal.is_some() {
             self.error = Some(
-                crate::i18n::text("Предыдущая проверка пути ещё ждёт ответа файловой системы.")
+                crate::i18n::text!("Предыдущая проверка пути ещё ждёт ответа файловой системы.")
                     .into(),
             );
             ctx.request_repaint();
@@ -461,7 +461,7 @@ impl Search {
             Err(mpsc::TryRecvError::Empty) => {
                 if check.started.elapsed() >= INDEX_REVEAL_WAIT && check.path.take().is_some() {
                     self.error = Some(
-                        crate::i18n::text(
+                        crate::i18n::text!(
                             "Файловая система не ответила на проверку пути из индекса.",
                         )
                         .into(),
@@ -496,7 +496,7 @@ impl Search {
             }
             Err(error) => {
                 self.error = Some(if error.kind() == io::ErrorKind::TimedOut {
-                    crate::i18n::text("Файловая система не ответила на проверку пути из индекса.")
+                    crate::i18n::text!("Файловая система не ответила на проверку пути из индекса.")
                         .into()
                 } else {
                     crate::tr_format!(
@@ -528,7 +528,7 @@ impl Search {
         let mut dock_results = false;
         // egui closes an open popup while drawing it, leaving Escape unconsumed.
         let popup_was_open = egui::Popup::is_any_open(ctx);
-        let window = egui::Window::new(crate::i18n::text("Поиск файлов"))
+        let window = egui::Window::new(crate::i18n::text!("Поиск файлов"))
             .id(egui::Id::unique("file_search"))
             .open(&mut visible)
             .default_width(720.0)
@@ -537,8 +537,8 @@ impl Search {
             .show(ctx, |ui| {
                 let previous_mode = self.mode;
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.mode, Mode::Folder, crate::i18n::text("В папке и подпапках"));
-                    ui.selectable_value(&mut self.mode, Mode::Index, crate::i18n::text("Индекс locate"));
+                    ui.selectable_value(&mut self.mode, Mode::Folder, crate::i18n::text!("В папке и подпапках"));
+                    ui.selectable_value(&mut self.mode, Mode::Index, crate::i18n::text!("Индекс locate"));
                 });
                 if self.mode != previous_mode {
                     self.clear();
@@ -553,23 +553,23 @@ impl Search {
                             ui.add(egui::Label::new(&label).truncate()).on_hover_text(label);
                             let exclusions = ui.add(
                                 egui::TextEdit::singleline(&mut self.exclusions)
-                                    .hint_text(crate::i18n::text("Исключить имена через запятую, например .git, target, *.tmp"))
+                                    .hint_text(crate::i18n::text!("Исключить имена через запятую, например .git, target, *.tmp"))
                                     .desired_width(ui.available_width()),
                             );
                             ctx.accesskit_node_builder(exclusions.id, |node| {
-                                node.set_label(crate::i18n::text("Исключения поиска"));
+                                node.set_label(crate::i18n::text!("Исключения поиска"));
                             });
                             if exclusions.changed() {
                                 self.clear();
                             }
                             submit = exclusions.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                         } else {
-                            ui.label(crate::i18n::text("Откройте локальную папку или папку SFTP для поиска."));
+                            ui.label(crate::i18n::text!("Откройте локальную папку или папку SFTP для поиска."));
                         }
                         if self.sftp_scope() {
                             let mut seconds = self.remote_time_limit();
                             ui.horizontal(|ui| {
-                                let label = ui.label(crate::i18n::text("Время поиска по SFTP, с"));
+                                let label = ui.label(crate::i18n::text!("Время поиска по SFTP, с"));
                                 ui.add(egui::DragValue::new(&mut seconds).range(1..=remote::MAX_SECONDS)).labelled_by(label.id);
                                 let depth = remote::DEFAULT_DEPTH;
                                 ui.small(crate::tr_format!("Глубина по умолчанию — {depth}. Меняется в фильтрах.", "Default depth is {depth}. Change it in Filters."));
@@ -581,9 +581,9 @@ impl Search {
                         } else {
                             let previous_target = self.folder_target;
                             ui.horizontal(|ui| {
-                                ui.selectable_value(&mut self.folder_target, FolderTarget::Name, crate::i18n::text("Имя файла"));
-                                ui.selectable_value(&mut self.folder_target, FolderTarget::Text, crate::i18n::text("Текст файла"));
-                                ui.selectable_value(&mut self.folder_target, FolderTarget::Regex, crate::i18n::text("Регулярное выражение"));
+                                ui.selectable_value(&mut self.folder_target, FolderTarget::Name, crate::i18n::text!("Имя файла"));
+                                ui.selectable_value(&mut self.folder_target, FolderTarget::Text, crate::i18n::text!("Текст файла"));
+                                ui.selectable_value(&mut self.folder_target, FolderTarget::Regex, crate::i18n::text!("Регулярное выражение"));
                             });
                             if self.folder_target != previous_target {
                                 self.clear();
@@ -592,30 +592,30 @@ impl Search {
                         }
                         let target = self.target();
                         if target != FolderTarget::Name {
-                            ui.small(crate::i18n::text("Поиск по строкам в файлах UTF-8 до 1 МиБ, с учётом регистра по умолчанию."));
+                            ui.small(crate::i18n::text!("Поиск по строкам в файлах UTF-8 до 1 МиБ, с учётом регистра по умолчанию."));
                         }
                         if target == FolderTarget::Regex {
-                            ui.small(crate::i18n::text("При поиске по выражению строки больше 64 КиБ пропускаются."));
+                            ui.small(crate::i18n::text!("При поиске по выражению строки больше 64 КиБ пропускаются."));
                         }
-                        crate::i18n::text(match target {
+                        match target {
                             FolderTarget::Name if self.filters.active(target) => {
-                                "Имя необязательно при заданных фильтрах"
+                                crate::i18n::text!("Имя необязательно при заданных фильтрах")
                             }
-                            FolderTarget::Name => "Часть имени или маска: отчёт, *.rs, фото?.jpg",
-                            FolderTarget::Text => "Текст для поиска, например TODO",
-                            FolderTarget::Regex => "Регулярное выражение, например TODO\\s*:",
-                        })
+                            FolderTarget::Name => crate::i18n::text!("Часть имени или маска: отчёт, *.rs, фото?.jpg"),
+                            FolderTarget::Text => crate::i18n::text!("Текст для поиска, например TODO"),
+                            FolderTarget::Regex => crate::i18n::text!("Регулярное выражение, например TODO\\s*:"),
+                        }
                     }
                     Mode::Index => {
-                        ui.label(crate::i18n::text("Поиск по полному пути в локальном индексе, без учёта регистра."));
-                        ui.label(crate::i18n::text("База может отставать от файловой системы; SFTP не индексируется."));
+                        ui.label(crate::i18n::text!("Поиск по полному пути в локальном индексе, без учёта регистра."));
+                        ui.label(crate::i18n::text!("База может отставать от файловой системы; SFTP не индексируется."));
                         if let Some(cli) = cli {
                             ui.small(format!("locate: {}", cli.display()));
                         } else {
-                            ui.colored_label(ui.visuals().error_fg_color, crate::i18n::text("locate не найден"));
-                            ui.label(crate::i18n::text("На Linux установите locate/plocate; на macOS используется /usr/bin/locate. Затем: Настройки → Инструменты → Проверить снова."));
+                            ui.colored_label(ui.visuals().error_fg_color, crate::i18n::text!("locate не найден"));
+                            ui.label(crate::i18n::text!("На Linux установите locate/plocate; на macOS используется /usr/bin/locate. Затем: Настройки → Инструменты → Проверить снова."));
                         }
-                        crate::i18n::text("Часть пути или маска: Cargo, *.rs, */Documents/*")
+                        crate::i18n::text!("Часть пути или маска: Cargo, *.rs, */Documents/*")
                     }
                 };
                 ui.horizontal(|ui| {
@@ -625,7 +625,7 @@ impl Search {
                             .desired_width((ui.available_width() - 175.0).max(120.0)),
                     );
                     ctx.accesskit_node_builder(response.id, |node| {
-                        node.set_label(crate::i18n::text("Запрос поиска"));
+                        node.set_label(crate::i18n::text!("Запрос поиска"));
                     });
                     if self.focus {
                         response.request_focus();
@@ -637,22 +637,22 @@ impl Search {
                     submit |= response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     submit |= ui.add_enabled(
                         self.can_start(cli),
-                        egui::Button::new(crate::i18n::text("Найти")),
+                        egui::Button::new(crate::i18n::text!("Найти")),
                     ).clicked();
                     if let Some(job) = self.job() {
                         ui.spinner();
                         if job.cancelled() {
-                            ui.label(crate::i18n::text("Остановка поиска…"));
-                        } else if ui.button(crate::i18n::text("Отмена")).clicked() {
+                            ui.label(crate::i18n::text!("Остановка поиска…"));
+                        } else if ui.button(crate::i18n::text!("Отмена")).clicked() {
                             self.cancel_work();
-                            self.error = Some(crate::i18n::text("Поиск отменён").into());
+                            self.error = Some(crate::i18n::text!("Поиск отменён").into());
                         }
                     }
                 });
                 if self.mode == Mode::Folder && self.job().is_some_and(|job| !job.cancelled())
                     && self.remote_deadline.is_some_and(|deadline| Instant::now() >= deadline)
                 {
-                    ui.small(crate::i18n::text("Лимит времени достигнут. Завершается текущий запрос SFTP…"));
+                    ui.small(crate::i18n::text!("Лимит времени достигнут. Завершается текущий запрос SFTP…"));
                 }
                 if self.mode == Mode::Folder && self.folder.is_some() {
                     let target = self.target();
@@ -675,13 +675,13 @@ impl Search {
                         ui.small(&info.source);
                         ui.small(&info.freshness);
                     }
-                    ui.small(crate::i18n::text("Если база отсутствует или устарела, обновите её средствами ОС (locate.updatedb / updatedb)."));
+                    ui.small(crate::i18n::text!("Если база отсутствует или устарела, обновите её средствами ОС (locate.updatedb / updatedb)."));
                 }
                 if let Some(results) = &self.results {
                     ui.separator();
                     let has_context = self.mode == Mode::Folder && self.target() != FolderTarget::Name;
                     let count = results.matches.len();
-                    let limit = if results.limited { crate::i18n::text("+ · Уточните запрос, показаны первые 1000") } else { "" };
+                    let limit = if results.limited { crate::i18n::text!("+ · Уточните запрос, показаны первые 1000") } else { "" };
                     ui.label(if has_context {
                         crate::tr_format!("Строк с совпадениями: {count}{limit}", "Matching lines: {count}{limit}")
                     } else {
@@ -692,9 +692,9 @@ impl Search {
                     }
                     if results.matches.is_empty() && self.error.is_none() {
                         ui.label(match self.mode {
-                            Mode::Folder if has_context => crate::i18n::text("В просмотренных файлах совпадений нет."),
-                            Mode::Folder => crate::i18n::text("В просмотренных папках совпадений нет."),
-                            Mode::Index => crate::i18n::text("Совпадений в индексе нет. Проверьте запрос и актуальность базы locate."),
+                            Mode::Folder if has_context => crate::i18n::text!("В просмотренных файлах совпадений нет."),
+                            Mode::Folder => crate::i18n::text!("В просмотренных папках совпадений нет."),
+                            Mode::Index => crate::i18n::text!("Совпадений в индексе нет. Проверьте запрос и актуальность базы locate."),
                         });
                     }
                     let excerpt_height = ui.text_style_height(&egui::TextStyle::Body);
@@ -702,7 +702,7 @@ impl Search {
                     let can_reveal = !self.checking_index_reveal();
                     let dock = ui.add_enabled(
                         can_reveal,
-                        egui::Button::new(crate::i18n::text("Показать результаты отдельной панелью")),
+                        egui::Button::new(crate::i18n::text!("Показать результаты отдельной панелью")),
                     );
                     if dock.clicked() {
                         dock.surrender_focus();
@@ -745,16 +745,16 @@ impl Search {
                                 });
                             }
                         });
-                    if ui.add_enabled(self.selected.is_some() && can_reveal, egui::Button::new(crate::i18n::text("Показать в панели"))).clicked() {
+                    if ui.add_enabled(self.selected.is_some() && can_reveal, egui::Button::new(crate::i18n::text!("Показать в панели"))).clicked() {
                         reveal = self.selected.map(|index| results.matches[index].path.clone());
                     }
                     if !can_reveal {
                         ui.horizontal(|ui| {
                             ui.spinner();
-                            ui.label(crate::i18n::text("Проверка пути из индекса…"));
+                            ui.label(crate::i18n::text!("Проверка пути из индекса…"));
                         });
                     }
-                    ui.small(crate::i18n::text("Двойной щелчок — перейти к результату в активной панели."));
+                    ui.small(crate::i18n::text!("Двойной щелчок — перейти к результату в активной панели."));
                 }
             });
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
@@ -826,13 +826,13 @@ fn validate_folder_query(
         FolderTarget::Text | FolderTarget::Regex => query.is_empty(),
     };
     if missing_query || query.contains('\0') {
-        return Err(crate::i18n::text("Введите непустой запрос без NUL").into());
+        return Err(crate::i18n::text!("Введите непустой запрос без NUL").into());
     }
     if query.len() > MAX_PATTERN_BYTES
         || exclusions.len() > MAX_PATTERN_BYTES
         || exclusions.contains('\0')
     {
-        return Err(crate::i18n::text("Укоротите запрос или список исключений.").into());
+        return Err(crate::i18n::text!("Укоротите запрос или список исключений.").into());
     }
     Ok(())
 }
@@ -918,7 +918,7 @@ impl<'a> FolderSearch<'a> {
 
 fn check_cancelled(cancelled: &impl Fn() -> bool) -> Result<(), String> {
     if cancelled() {
-        Err(crate::i18n::text("Поиск отменён").into())
+        Err(crate::i18n::text!("Поиск отменён").into())
     } else {
         Ok(())
     }
@@ -1054,7 +1054,8 @@ fn run_folder(
         ));
     }
     if depth_limited {
-        warnings.push(crate::i18n::text("Поиск пропустил слишком глубоко вложенные папки.").into());
+        warnings
+            .push(crate::i18n::text!("Поиск пропустил слишком глубоко вложенные папки.").into());
     }
     if too_large > 0 {
         warnings.push(crate::tr_format!(
@@ -1096,7 +1097,7 @@ fn read_capped(reader: impl Read, limit: usize) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     reader.take(limit as u64 + 1).read_to_end(&mut bytes)?;
     if bytes.len() > limit {
-        return Err(io::Error::other(crate::i18n::text(
+        return Err(io::Error::other(crate::i18n::text!(
             "Превышен лимит вывода locate; уточните запрос",
         )));
     }
@@ -1105,7 +1106,7 @@ fn read_capped(reader: impl Read, limit: usize) -> io::Result<Vec<u8>> {
 
 fn validate_index_query(query: &str) -> Result<(), String> {
     if query.trim().is_empty() || query.contains('\0') {
-        return Err(crate::i18n::text("Введите непустой запрос без NUL").into());
+        return Err(crate::i18n::text!("Введите непустой запрос без NUL").into());
     }
     Ok(())
 }
@@ -1126,13 +1127,13 @@ fn run(cli: &Path, query: &str, cancel: &AtomicBool, timeout: Duration) -> Resul
     let started = Instant::now();
     let status = loop {
         if cancel.load(Ordering::Relaxed) {
-            break Err(crate::i18n::text("Поиск отменён").to_string());
+            break Err(crate::i18n::text!("Поиск отменён").to_string());
         }
         if started.elapsed() >= timeout {
-            break Err(
-                crate::i18n::text("locate не ответил за 15 секунд; проверьте базу индекса")
-                    .to_string(),
-            );
+            break Err(crate::i18n::text!(
+                "locate не ответил за 15 секунд; проверьте базу индекса"
+            )
+            .to_string());
         }
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
@@ -1151,10 +1152,10 @@ fn run(cli: &Path, query: &str, cancel: &AtomicBool, timeout: Duration) -> Resul
     }
     let stdout = out
         .join()
-        .map_err(|_| crate::i18n::text("Ошибка чтения вывода locate"))?;
+        .map_err(|_| crate::i18n::text!("Ошибка чтения вывода locate"))?;
     let stderr = err
         .join()
-        .map_err(|_| crate::i18n::text("Ошибка чтения ошибок locate"))?;
+        .map_err(|_| crate::i18n::text!("Ошибка чтения ошибок locate"))?;
     let status = status?;
     let stdout = stdout.map_err(|e| e.to_string())?;
     let stderr = stderr.map_err(|e| e.to_string())?;
@@ -1193,7 +1194,7 @@ fn path_from_bytes(bytes: &[u8]) -> Result<PathBuf, String> {
     {
         String::from_utf8(bytes.to_vec())
             .map(PathBuf::from)
-            .map_err(|_| crate::i18n::text("locate вернул путь не в UTF-8").into())
+            .map_err(|_| crate::i18n::text!("locate вернул путь не в UTF-8").into())
     }
 }
 
@@ -1281,9 +1282,9 @@ mod tests {
             })]
         };
         let _ = draw(vec![]);
-        let open_filters = click(draw(vec![]), crate::i18n::text("Фильтры"));
+        let open_filters = click(draw(vec![]), crate::i18n::text!("Фильтры"));
         let filters = draw(open_filters);
-        let open_type_menu = click(filters, crate::i18n::text("Тип объекта"));
+        let open_type_menu = click(filters, crate::i18n::text!("Тип объекта"));
         let _ = draw(open_type_menu);
         assert!(egui::Popup::is_any_open(&ctx));
 
@@ -1296,12 +1297,12 @@ mod tests {
         };
         let after_popup = draw(vec![escape(true), escape(false)]);
         assert!(!egui::Popup::is_any_open(&ctx));
-        let _ = click(after_popup, crate::i18n::text("Тип объекта"));
+        let _ = click(after_popup, crate::i18n::text!("Тип объекта"));
         // Changing the search target can remove a combo box before it processes Escape.
         egui::Popup::open_id(&ctx, egui::Id::unique("removed_filter_popup"));
         let after_removed_popup = draw(vec![escape(true), escape(false)]);
         assert!(!egui::Popup::is_any_open(&ctx));
-        let _ = click(after_removed_popup, crate::i18n::text("Тип объекта"));
+        let _ = click(after_removed_popup, crate::i18n::text!("Тип объекта"));
         let _ = draw(vec![escape(true)]);
         assert!(!search.visible);
     }
@@ -1589,7 +1590,7 @@ mod tests {
             run_folder(root.path(), FolderTarget::Name, "file", "", &cancelled)
                 .err()
                 .unwrap(),
-            crate::i18n::text("Поиск отменён")
+            crate::i18n::text!("Поиск отменён")
         );
     }
 

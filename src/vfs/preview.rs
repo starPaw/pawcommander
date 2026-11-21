@@ -21,7 +21,7 @@ pub fn preview_data(
 pub(crate) fn open_preview_stream(location: &Location) -> Result<ssh2::File, String> {
     preview_input(location)?
         .1
-        .ok_or_else(|| crate::i18n::text("Файл изменился перед чтением").into())
+        .ok_or_else(|| crate::i18n::text!("Файл изменился перед чтением").into())
 }
 
 fn preview_input(location: &Location) -> Result<(ssh2::FileStat, Option<ssh2::File>), String> {
@@ -48,15 +48,16 @@ pub(crate) fn cache_media_preview(
     limit: u64,
     cancel: &crate::operations::Cancellation,
 ) -> Result<(), String> {
-    let too_large =
-        || crate::i18n::text("Медиафайл SFTP больше 128 МиБ. Откройте локальную копию.").to_owned();
+    let too_large = || {
+        crate::i18n::text!("Медиафайл SFTP больше 128 МиБ. Откройте локальную копию.").to_owned()
+    };
     cancel.check().map_err(err)?;
     let (stat, input) = preview_input(location)?;
     if stat.size.is_some_and(|size| size > limit) {
         return Err(too_large());
     }
     let mut input = input
-        .ok_or_else(|| crate::i18n::text("Файл изменился перед чтением").to_owned())?
+        .ok_or_else(|| crate::i18n::text!("Файл изменился перед чтением").to_owned())?
         .take(limit + 1);
     let mut copied = 0;
     let mut buffer = [0; 64 * 1024];
@@ -74,12 +75,12 @@ pub(crate) fn cache_media_preview(
         target.write_all(&buffer[..count]).map_err(err)?;
     }
     if stat.size.is_some_and(|size| size != copied) {
-        return Err(crate::i18n::text("Файл изменился перед чтением").into());
+        return Err(crate::i18n::text!("Файл изменился перед чтением").into());
     }
     cancel.check().map_err(err)?;
     let current = input.get_mut().stat().map_err(err)?;
     if current.size != stat.size || current.mtime != stat.mtime || !current.is_file() {
-        return Err(crate::i18n::text("Файл изменился перед чтением").into());
+        return Err(crate::i18n::text!("Файл изменился перед чтением").into());
     }
     target.flush().map_err(err)
 }

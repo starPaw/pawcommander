@@ -15,7 +15,7 @@ pub enum Decision {
 
 pub struct EntryDetails {
     pub location: Location,
-    pub kind: &'static str,
+    pub kind: crate::i18n::MessageKey,
     pub size: Option<u64>,
     pub modified: Option<SystemTime>,
 }
@@ -71,7 +71,7 @@ impl ConflictDialog {
         let mut decision = None;
         egui::Modal::new(egui::Id::unique("transfer_conflict")).show(ctx, |ui| {
             ui.set_width((ctx.content_rect().width() - 32.0).clamp(1.0, 520.0));
-            ui.heading(crate::i18n::text("Совпадение имён"));
+            ui.heading(crate::i18n::text!("Совпадение имён"));
             ui.label(crate::tr_format!(
                 "Совпадение {} из {}",
                 "Conflict {} of {}",
@@ -79,27 +79,27 @@ impl ConflictDialog {
                 conflict.count
             ));
             ui.add_space(8.0);
-            entry(ui, crate::i18n::text("Исходный объект"), &conflict.source);
+            entry(ui, crate::i18n::text!("Исходный объект"), &conflict.source);
             ui.separator();
             entry(
                 ui,
-                crate::i18n::text("Существующий объект"),
+                crate::i18n::text!("Существующий объект"),
                 &conflict.target,
             );
             ui.add_space(12.0);
             if !conflict.can_replace {
-                ui.label(crate::i18n::text(
+                ui.label(crate::i18n::text!(
                     "Выберите свободное имя или пропустите этот объект.",
                 ));
             }
             if conflict.index < conflict.count {
                 ui.checkbox(
                     &mut self.apply_to_group,
-                    crate::i18n::text("Применить к остальным совпадениям"),
+                    crate::i18n::text!("Применить к остальным совпадениям"),
                 );
             }
             ui.horizontal_wrapped(|ui| {
-                let cancel = ui.button(crate::i18n::text("Отменить операцию"));
+                let cancel = ui.button(crate::i18n::text!("Отменить операцию"));
                 if self.focus_cancel && ui.is_visible() {
                     cancel.request_focus();
                     self.focus_cancel = false;
@@ -107,11 +107,11 @@ impl ConflictDialog {
                 if cancel.clicked() {
                     decision = Some(Decision::Cancel);
                 }
-                if ui.button(crate::i18n::text("Пропустить")).clicked() {
+                if ui.button(crate::i18n::text!("Пропустить")).clicked() {
                     decision = Some(Decision::Skip);
                 }
                 if ui
-                    .button(crate::i18n::text("Сохранить обе версии"))
+                    .button(crate::i18n::text!("Сохранить обе версии"))
                     .clicked()
                 {
                     decision = Some(Decision::KeepBoth);
@@ -119,7 +119,7 @@ impl ConflictDialog {
                 if ui
                     .add_enabled(
                         conflict.can_replace,
-                        egui::Button::new(crate::i18n::text("Заменить")),
+                        egui::Button::new(crate::i18n::text!("Заменить")),
                     )
                     .clicked()
                 {
@@ -194,7 +194,7 @@ mod tests {
     fn dialog(can_replace: bool, index: usize) -> (ConflictDialog, mpsc::Receiver<Answer>) {
         let entry = |path: &str, size| EntryDetails {
             location: PathBuf::from(path).into(),
-            kind: "Файл",
+            kind: crate::i18n::key!("Файл"),
             size: Some(size),
             modified: Some(UNIX_EPOCH),
         };

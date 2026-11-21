@@ -292,7 +292,7 @@ impl Tab {
                         self.select_revealed(path);
                     } else {
                         self.error = Some(
-                            crate::i18n::text(
+                            crate::i18n::text!(
                                 "Результат поиска уже отсутствует в папке. Выполните поиск снова.",
                             )
                             .into(),
@@ -417,7 +417,7 @@ impl Tab {
                     self.finish_load(result);
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    self.finish_load(Err(crate::i18n::text(
+                    self.finish_load(Err(crate::i18n::text!(
                         "Не удалось прочитать папку: фоновая задача завершилась",
                     )
                     .into()));

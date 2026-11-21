@@ -85,17 +85,17 @@ fn at_boundary(ctx: &egui::Context) -> bool {
 
 fn local_paths(sources: &[Location]) -> Result<Vec<PathBuf>, String> {
     if sources.is_empty() {
-        return Err(crate::i18n::text("Не выбраны файлы для перетаскивания").into());
+        return Err(crate::i18n::text!("Не выбраны файлы для перетаскивания").into());
     }
     sources.iter().map(|source| {
-        let path = source.local().ok_or(crate::i18n::text("Для переноса SFTP-файлов во внешнее приложение сначала скопируйте их в локальную папку"))?;
+        let path = source.local().ok_or(crate::i18n::text!("Для переноса SFTP-файлов во внешнее приложение сначала скопируйте их в локальную папку"))?;
         // No filesystem reads here: the receiver opens the exported paths.
         // In particular, do not resolve symlinks or touch network files on the UI thread.
         let path = if path.is_absolute() { path.to_owned() } else {
             std::env::current_dir().map_err(|e| e.to_string())?.join(path)
         };
         if path.as_os_str().as_encoded_bytes().contains(&0) {
-            return Err(crate::i18n::text("Недопустимый путь файла").into());
+            return Err(crate::i18n::text!("Недопустимый путь файла").into());
         }
         Ok(path)
     }).collect()

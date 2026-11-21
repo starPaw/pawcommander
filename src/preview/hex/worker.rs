@@ -178,7 +178,7 @@ fn find_end(window: &mut Window<'_>, mut at: u64) -> Result<u64, String> {
 }
 
 fn changed() -> String {
-    crate::i18n::text("Файл изменился. Откройте быстрый просмотр заново.").into()
+    crate::i18n::text!("Файл изменился. Откройте быстрый просмотр заново.").into()
 }
 
 fn read_error(error: io::Error) -> String {

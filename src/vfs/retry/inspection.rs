@@ -97,13 +97,13 @@ fn inspect_source(
             (
                 Disposition::Retry,
                 Outcome::RetryReady,
-                text("Источник проверен. Передача этого объекта не началась.").into(),
+                text!("Источник проверен. Передача этого объекта не началась.").into(),
             )
         } else {
             (
                 Disposition::Review,
                 Outcome::Failed,
-                text("Источник или папка назначения изменились. Повтор недоступен.").into(),
+                text!("Источник или папка назначения изменились. Повтор недоступен.").into(),
             )
         });
     };
@@ -126,7 +126,7 @@ fn inspect_source(
         return Ok((
             Disposition::Observed,
             Outcome::CopiedSourceRemaining,
-            checked(text("Копия была опубликована до обрыва. Проверьте остаток источника перед дальнейшими действиями.")),
+            checked(text!("Копия была опубликована до обрыва. Проверьте остаток источника перед дальнейшими действиями.")),
         ));
     }
 
@@ -151,7 +151,7 @@ fn inspect_source(
         return Ok((
             Disposition::Retry,
             Outcome::RetryReady,
-            checked(text(
+            checked(text!(
                 "Источник и назначение в ожидаемом состоянии. Можно повторить операцию.",
             )),
         ));
@@ -170,7 +170,7 @@ fn inspect_source(
         return Ok((
             Disposition::Observed,
             outcome,
-            checked(text("Содержимое назначения совпадает с источником. Состояние исходной команды сервера не подтверждено.")),
+            checked(text!("Содержимое назначения совпадает с источником. Состояние исходной команды сервера не подтверждено.")),
         ));
     }
 
@@ -182,13 +182,13 @@ fn inspect_source(
         return Ok((
             Disposition::Observed,
             Outcome::PublicationUnconfirmed,
-            checked(text("Источник отсутствует. Состав и метаданные назначения совпадают с записанными перед переносом.")),
+            checked(text!("Источник отсутствует. Состав и метаданные назначения совпадают с записанными перед переносом.")),
         ));
     }
     Ok((
         Disposition::Review,
         Outcome::PublicationUnconfirmed,
-        checked(text(
+        checked(text!(
             "Состояние файлов не позволяет подтвердить безопасный повтор.",
         )),
     ))

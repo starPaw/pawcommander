@@ -75,7 +75,7 @@ impl TrustFiles {
         {
             return Ok(Self::new(PathBuf::from(root).join("known_hosts"), None));
         }
-        let home = dirs::home_dir().ok_or_else(|| text("Не найдена домашняя папка"))?;
+        let home = dirs::home_dir().ok_or_else(|| text!("Не найдена домашняя папка"))?;
         Ok(Self::new(
             home.join(".ssh/known_hosts"),
             dirs::data_local_dir().map(|root| root.join("PawCommander").join("ssh-host-keys")),
@@ -94,7 +94,7 @@ impl TrustFiles {
     ) -> Result<(), String> {
         let (key, _) = session
             .host_key()
-            .ok_or_else(|| text("Сервер не предоставил ключ SSH"))?;
+            .ok_or_else(|| text!("Сервер не предоставил ключ SSH"))?;
         let names = HostNames::new(endpoint);
         let pin = Pin {
             address: names.scoped.clone(),
@@ -106,14 +106,14 @@ impl TrustFiles {
             return Ok(());
         }
         let Some(interactive) = interactive else {
-            return Err(text(
+            return Err(text!(
                 "Ключ сервера SSH не подтверждён. Откройте форму SFTP и проверьте отпечаток.",
             )
             .into());
         };
         let path = path
             .as_deref()
-            .ok_or_else(|| text("Не найдена папка для доверенных ключей PawCommander"))?;
+            .ok_or_else(|| text!("Не найдена папка для доверенных ключей PawCommander"))?;
         interactive.confirm_host_key(HostKey {
             address: pin.address.clone(),
             algorithm: session.methods(MethodType::HostKey).unwrap_or("SSH").into(),
@@ -142,7 +142,7 @@ impl TrustFiles {
             )
         })?;
         if known == Lookup::Mismatch {
-            let changed = text("Ключ сервера SSH изменился.");
+            let changed = text!("Ключ сервера SSH изменился.");
             let fingerprint = &pin.fingerprint;
             let path = self.known_hosts.display();
             return Err(crate::tr_format!(
@@ -185,7 +185,7 @@ fn check_known_hosts(
         CheckResult::Match => Ok(Lookup::Match),
         CheckResult::Mismatch => Ok(Lookup::Mismatch),
         CheckResult::NotFound => Ok(Lookup::Missing),
-        CheckResult::Failure => Err(text("Ошибка проверки записи known_hosts").to_owned()),
+        CheckResult::Failure => Err(text!("Ошибка проверки записи known_hosts").to_owned()),
     };
     let check =
         |hosts: &KnownHosts, canonical: &str, original: &str| match lookup(hosts, canonical)? {
@@ -209,7 +209,7 @@ fn check_known_hosts(
     if revoked_at(&names.scoped, &original_scoped)?
         || (names.port == 22 && revoked_at(&names.host, names.original)?)
     {
-        return Err(text("Ключ сервера SSH отозван").into());
+        return Err(text!("Ключ сервера SSH отозван").into());
     }
     let result = match scoped(&known)? {
         Lookup::Missing => bare(&known)?,
@@ -218,7 +218,7 @@ fn check_known_hosts(
     if result == Lookup::Missing
         && (scoped(&authorities)? != Lookup::Missing || bare(&authorities)? != Lookup::Missing)
     {
-        return Err(text("Для этого сервера в known_hosts указан центр сертификации SSH. Проверьте сертификат через OpenSSH.").into());
+        return Err(text!("Для этого сервера в known_hosts указан центр сертификации SSH. Проверьте сертификат через OpenSSH.").into());
     }
     Ok(result)
 }
@@ -230,7 +230,7 @@ fn read_line(
     revoked: &mut KnownHosts,
     authorities: &mut KnownHosts,
 ) -> Result<(), String> {
-    let invalid = || text("Некорректная запись known_hosts").to_owned();
+    let invalid = || text!("Некорректная запись known_hosts").to_owned();
     let mut fields = line
         .split(|byte| byte.is_ascii_whitespace())
         .filter(|field| !field.is_empty());
@@ -319,12 +319,12 @@ fn check_pin(path: &Path, expected: &Pin) -> Result<bool, String> {
     if bytes.len() > 4096 {
         return Err(pin_io_error(
             path,
-            text("Запись доверенного ключа слишком велика"),
+            text!("Запись доверенного ключа слишком велика"),
         ));
     }
     let saved: Pin = serde_json::from_slice(&bytes).map_err(|error| pin_io_error(path, error))?;
     if saved != *expected {
-        let changed = text("Ключ сервера SSH изменился.");
+        let changed = text!("Ключ сервера SSH изменился.");
         let path = path.display();
         let received = &expected.fingerprint;
         let saved = &saved.fingerprint;
@@ -402,7 +402,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             check(&endpoint, new).unwrap_err(),
-            text("Ключ сервера SSH отозван")
+            text!("Ключ сервера SSH отозван")
         );
         fs::write(
             &path,
@@ -411,7 +411,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             check(&endpoint, new).unwrap_err(),
-            text("Для этого сервера в known_hosts указан центр сертификации SSH. Проверьте сертификат через OpenSSH.")
+            text!("Для этого сервера в known_hosts указан центр сертификации SSH. Проверьте сертификат через OpenSSH.")
         );
     }
 
@@ -432,7 +432,7 @@ mod tests {
         };
         assert!(remember(&path, &changed)
             .unwrap_err()
-            .starts_with(text("Ключ сервера SSH изменился.")));
+            .starts_with(text!("Ключ сервера SSH изменился.")));
         assert_eq!(fs::read(&path).unwrap(), original);
         assert!(!check_pin(&pin_path(dir.path(), "[host.example]:2222"), &pinned).unwrap());
     }

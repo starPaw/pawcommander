@@ -44,7 +44,7 @@ impl FolderJump {
     ) -> JumpOutcome {
         let modal = egui::Modal::new(egui::Id::unique("folder_jump")).show(ctx, |ui| {
             ui.set_width((ctx.content_rect().width() - 40.0).clamp(160.0, 540.0));
-            ui.heading(text("Быстрый переход к папке"));
+            ui.heading(text!("Быстрый переход к папке"));
             let query_id = ui.make_persistent_id("query");
             let moving = keys
                 .iter()
@@ -53,7 +53,7 @@ impl FolderJump {
                 ui.memory_mut(|memory| memory.request_focus(query_id));
                 self.focus_query = false;
             }
-            let hint = text("Имя или путь папки…");
+            let hint = text!("Имя или путь папки…");
             let query = ui.add(
                 egui::TextEdit::singleline(&mut self.query)
                     .id(query_id)
@@ -91,19 +91,19 @@ impl FolderJump {
             self.highlighted = index.map(|index| folders[index].clone());
 
             if folders.is_empty() {
-                ui.label(text(if self.query.trim().is_empty() {
-                    "Недавних папок пока нет"
+                ui.label(if self.query.trim().is_empty() {
+                    text!("Недавних папок пока нет")
                 } else {
-                    "Папки не найдены"
-                }));
+                    text!("Папки не найдены")
+                });
                 return JumpOutcome::Open;
             }
 
-            ui.small(text(if self.query.trim().is_empty() {
-                "Порядок зависит от давности и частоты посещений"
+            ui.small(if self.query.trim().is_empty() {
+                text!("Порядок зависит от давности и частоты посещений")
             } else {
-                "Сначала лучшие совпадения, затем давность и частота посещений"
-            }));
+                text!("Сначала лучшие совпадения, затем давность и частота посещений")
+            });
             egui::ScrollArea::vertical()
                 .max_height((ctx.content_rect().height() - 160.0).clamp(60.0, 340.0))
                 .show(ui, |ui| {

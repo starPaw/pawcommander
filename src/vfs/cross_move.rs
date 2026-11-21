@@ -22,7 +22,7 @@ pub(super) fn required(item: &TransferItem) -> Result<bool, TransferError> {
     #[cfg(target_os = "macos")]
     if super::transfer::mounted_smb(&item.source) || super::transfer::mounted_smb(&item.target) {
         return Err(
-            crate::i18n::text("Для передачи файлов через SMB используйте копирование.").into(),
+            crate::i18n::text!("Для передачи файлов через SMB используйте копирование.").into(),
         );
     }
     if !item.source.same_backend(&item.target) {
@@ -307,7 +307,7 @@ impl MoveSource {
         let times = times.unwrap_or_else(|| vec![None; entries]);
         if times.len() != entries {
             return Err(
-                crate::i18n::text("Некорректная запись времени доступа для переноса").into(),
+                crate::i18n::text!("Некорректная запись времени доступа для переноса").into(),
             );
         }
         // The saved timestamps use the same sorted relative paths as the verified manifest.

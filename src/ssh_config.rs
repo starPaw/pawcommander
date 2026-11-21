@@ -36,7 +36,7 @@ pub(crate) struct Unsupported {
 }
 
 pub(crate) fn load_user_config(alias: &str) -> Result<ResolvedHost, String> {
-    let home = dirs::home_dir().ok_or_else(|| text("Не найдена домашняя папка"))?;
+    let home = dirs::home_dir().ok_or_else(|| text!("Не найдена домашняя папка"))?;
     let user = std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
         .unwrap_or_default();
@@ -56,7 +56,7 @@ pub(crate) fn load_config(home: &Path, alias: &str, user: &str) -> Result<Resolv
         .map_err(config_read_error)?;
     let metadata = file.metadata().map_err(config_read_error)?;
     if !metadata.is_file() {
-        return Err(text("~/.ssh/config должен быть обычным файлом").into());
+        return Err(text!("~/.ssh/config должен быть обычным файлом").into());
     }
     #[cfg(unix)]
     {
@@ -64,7 +64,7 @@ pub(crate) fn load_config(home: &Path, alias: &str, user: &str) -> Result<Resolv
         // SAFETY: geteuid has no arguments or preconditions.
         let owner = unsafe { libc::geteuid() };
         if (metadata.uid() != owner && metadata.uid() != 0) || metadata.mode() & 0o022 != 0 {
-            return Err(text("Проверьте владельца и права записи ~/.ssh/config").into());
+            return Err(text!("Проверьте владельца и права записи ~/.ssh/config").into());
         }
     }
     let mut config = String::new();
@@ -72,7 +72,7 @@ pub(crate) fn load_config(home: &Path, alias: &str, user: &str) -> Result<Resolv
         .read_to_string(&mut config)
         .map_err(config_read_error)?;
     if config.len() as u64 > MAX_CONFIG_BYTES {
-        return Err(text("~/.ssh/config больше 1 МиБ").into());
+        return Err(text!("~/.ssh/config больше 1 МиБ").into());
     }
     resolve(&config, alias, home, user)
 }
@@ -115,7 +115,7 @@ fn resolve(
 ) -> Result<ResolvedHost, String> {
     let alias = alias.trim();
     if !host_word(alias) {
-        return Err(text("Введите имя сервера или SSH-алиас").into());
+        return Err(text!("Введите имя сервера или SSH-алиас").into());
     }
     let (options, matched) = parse_options(config, alias)?;
     #[cfg(target_os = "macos")]

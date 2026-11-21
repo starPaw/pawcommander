@@ -16,10 +16,10 @@ pub(crate) fn open(folder: &Location) -> Result<String, String> {
         Location::Local(path) => {
             let path = std::path::absolute(path).map_err(launch_error)?;
             if !std::fs::metadata(&path).map_err(launch_error)?.is_dir() {
-                return Err(text("Выберите папку для открытия терминала.").into());
+                return Err(text!("Выберите папку для открытия терминала.").into());
             }
             open_document(&path)?;
-            Ok(text("Запрос открытия передан Terminal.").into())
+            Ok(text!("Запрос открытия передан Terminal.").into())
         }
         Location::Sftp { endpoint, path } => {
             let ssh = ssh_command(endpoint, path)?;
@@ -27,7 +27,7 @@ pub(crate) fn open(folder: &Location) -> Result<String, String> {
             open_document(script.path())?;
             // Terminal reads the document asynchronously and unlinks it on start.
             script.disable_cleanup(true);
-            Ok(text("Запрос SSH-сеанса передан Terminal.").into())
+            Ok(text!("Запрос SSH-сеанса передан Terminal.").into())
         }
         Location::Archive { .. } => Err(crate::archive::readonly().into()),
     }
@@ -67,7 +67,7 @@ fn launch_error(error: io::Error) -> String {
 
 pub(super) fn ssh_command(endpoint: &Endpoint, path: &Path) -> Result<Command, String> {
     if endpoint.jump.is_some() {
-        return Err(text(
+        return Err(text!(
             "Для этого подключения нужен маршрут ProxyJump. Откройте SSH-алиас в Terminal или Zed.",
         )
         .into());
@@ -79,7 +79,7 @@ pub(super) fn ssh_command(endpoint: &Endpoint, path: &Path) -> Result<Command, S
             .chars()
             .all(|ch| ch.is_alphanumeric() || matches!(ch, '.' | '-' | '_' | ':' | '%'))
     {
-        return Err(text("Некорректный сервер для SSH-сеанса.").into());
+        return Err(text!("Некорректный сервер для SSH-сеанса.").into());
     }
     if endpoint.port == 0
         || endpoint.user.is_empty()
@@ -89,7 +89,7 @@ pub(super) fn ssh_command(endpoint: &Endpoint, path: &Path) -> Result<Command, S
             .chars()
             .all(|ch| ch.is_alphanumeric() || matches!(ch, '-' | '_' | '.' | '@' | '+'))
     {
-        return Err(text("Проверьте пользователя и порт для SSH-сеанса.").into());
+        return Err(text!("Проверьте пользователя и порт для SSH-сеанса.").into());
     }
     let remote = remote_command(path)?;
     let mut command = Command::new("/usr/bin/ssh");
@@ -104,7 +104,7 @@ pub(super) fn ssh_command(endpoint: &Endpoint, path: &Path) -> Result<Command, S
         let key = std::path::absolute(key).map_err(launch_error)?;
         let bytes = key.as_os_str().as_bytes();
         if bytes.contains(&0) {
-            return Err(text("Путь к ключу SSH содержит NUL.").into());
+            return Err(text!("Путь к ключу SSH содержит NUL.").into());
         }
         if bytes.contains(&b'%') || bytes.windows(2).any(|pair| pair == b"${") {
             // OpenSSH expands IdentityFile tokens. A variable value is inserted as data.
@@ -123,7 +123,7 @@ fn remote_command(path: &Path) -> Result<String, String> {
     let path = path
         .to_str()
         .filter(|path| path.starts_with('/') && !path.contains('\0'))
-        .ok_or_else(|| text("Для SSH-сеанса нужен абсолютный путь UTF-8.").to_owned())?;
+        .ok_or_else(|| text!("Для SSH-сеанса нужен абсолютный путь UTF-8.").to_owned())?;
     // ssh sends a command string to the account's shell. Encode the folder
     // as a data argument and decode it inside the fixed POSIX program.
     let mut command = format!("/bin/sh -c '{REMOTE_SHELL}' pawcommander '");

@@ -121,18 +121,18 @@ impl FolderSyncDialog {
             ui.heading(Command::SyncFolders.label());
             let changed = ui.add_enabled_ui(!running, |ui| {
                 let pair_changed = self.profile.show(ui, profiles, &mut self.folders, &mut self.options);
-                show_pair(ui, &self.folders, ["Левая папка", "Правая папка"]);
+                show_pair(ui, &self.folders, [crate::i18n::key!("Левая папка"), crate::i18n::key!("Правая папка")]);
                 let direction = self.options.direction;
                 let delete_extra = self.options.delete_extra;
                 ui.horizontal_wrapped(|ui| {
-                    ui.selectable_value(&mut self.options.direction, Direction::LeftToRight, text("Слева направо"));
-                    ui.selectable_value(&mut self.options.direction, Direction::RightToLeft, text("Справа налево"));
-                    ui.selectable_value(&mut self.options.direction, Direction::Both, text("В обе стороны"));
+                    ui.selectable_value(&mut self.options.direction, Direction::LeftToRight, text!("Слева направо"));
+                    ui.selectable_value(&mut self.options.direction, Direction::RightToLeft, text!("Справа налево"));
+                    ui.selectable_value(&mut self.options.direction, Direction::Both, text!("В обе стороны"));
                 });
                 if self.options.direction != Direction::Both {
                     ui.checkbox(
                         &mut self.options.delete_extra,
-                        text("Удалять лишние объекты в назначении"),
+                        text!("Удалять лишние объекты в назначении"),
                     );
                 }
                 let exclusions_changed = show_exclusions(ui, &mut self.options.exclusions);
@@ -145,14 +145,14 @@ impl FolderSyncDialog {
             ui.separator();
             match &mut self.phase {
                 Phase::Ready => {}
-                Phase::Running(worker) => show_progress(ui, worker, "Проверяем папки для плана…"),
+                Phase::Running(worker) => show_progress(ui, worker, crate::i18n::key!("Проверяем папки для плана…")),
                 Phase::Finished(preview) => review = show_preview(ui, preview, self.run),
                 Phase::Failed(error) => {
                     let message = egui::RichText::new(error.as_str()).color(ui.visuals().error_fg_color);
                     ui.add(egui::Label::new(message).selectable(true).wrap());
                 }
                 Phase::Stopped => {
-                    ui.label(text("Проверка папок остановлена"));
+                    ui.label(text!("Проверка папок остановлена"));
                 }
             }
             ui.add_space(8.0);
@@ -161,15 +161,15 @@ impl FolderSyncDialog {
                     stop = ui
                         .add_enabled(
                             !worker.progress.cancel.is_requested(),
-                            egui::Button::new(text("Остановить")),
+                            egui::Button::new(text!("Остановить")),
                         )
                         .clicked();
                 } else {
-                    build = ui.button(text("Построить план")).clicked();
+                    build = ui.button(text!("Построить план")).clicked();
                     if ui
                         .add_enabled(
                             matches!(self.phase, Phase::Finished(_)),
-                            egui::Button::new(text("Проверить план")),
+                            egui::Button::new(text!("Проверить план")),
                         )
                         .clicked()
                     {
@@ -177,17 +177,17 @@ impl FolderSyncDialog {
                     }
                     if let Phase::Finished(Preview { plan: Plan::TwoWay(plan), .. }) = &self.phase
                         && plan.can_remember()
-                        && ui.button(text("Сохранить общее состояние")).clicked()
+                        && ui.button(text!("Сохранить общее состояние")).clicked()
                     {
                         review = Some(Review::Remember);
                     }
                     apply = ui
                         .add_enabled(
                             matches!(&self.phase, Phase::Finished(preview) if preview.plan.can_apply()),
-                            egui::Button::new(text("Применить план")),
+                            egui::Button::new(text!("Применить план")),
                         )
                         .clicked();
-                    close = ui.button(text("Закрыть")).clicked();
+                    close = ui.button(text!("Закрыть")).clicked();
                 }
             });
         });
@@ -213,14 +213,14 @@ impl FolderSyncDialog {
 fn show_exclusions(ui: &mut egui::Ui, input: &mut String) -> bool {
     let lines = input.lines().filter(|line| !line.trim().is_empty()).count();
     let title = if lines == 0 {
-        text("Исключения").to_owned()
+        text!("Исключения").to_owned()
     } else {
         crate::tr_format!("Исключения ({lines})", "Exclusions ({lines})")
     };
     egui::CollapsingHeader::new(title)
         .id_salt("sync-exclusions")
         .show(ui, |ui| {
-            ui.small(text("Одно имя или относительный путь на строку. Подстановки * и ? работают внутри имени."));
+            ui.small(text!("Одно имя или относительный путь на строку. Подстановки * и ? работают внутри имени."));
             ui.add(
                 egui::TextEdit::multiline(input)
                     .desired_rows(3)
@@ -233,7 +233,7 @@ fn show_exclusions(ui: &mut egui::Ui, input: &mut String) -> bool {
 
 fn show_preview(ui: &mut egui::Ui, preview: &Preview, run: u64) -> Option<Review> {
     if preview.checked {
-        ui.label(text("План проверен"));
+        ui.label(text!("План проверен"));
     }
     let excluded = match &preview.plan {
         Plan::OneWay(plan) => plan.excluded_count(),
@@ -256,7 +256,7 @@ fn show_preview(ui: &mut egui::Ui, preview: &Preview, run: u64) -> Option<Review
 
 fn show_one_way(ui: &mut egui::Ui, plan: &SyncPlan, run: u64) {
     if plan.rows.is_empty() {
-        ui.label(text("План пуст"));
+        ui.label(text!("План пуст"));
         return;
     }
     ui.label(crate::tr_format!(
@@ -267,13 +267,13 @@ fn show_one_way(ui: &mut egui::Ui, plan: &SyncPlan, run: u64) {
         plan.deletions
     ));
     if plan.deletions > 0 && plan.folders()[1].remote() {
-        ui.small(text("Удаление из папки SFTP необратимо."));
+        ui.small(text!("Удаление из папки SFTP необратимо."));
     }
     show_rows(ui, &plan.rows, run, |ui, row, height| {
         let action = match row.change {
-            SyncChange::Copy => "Копировать",
-            SyncChange::Replace => "Заменить",
-            SyncChange::Delete => "Удалить",
+            SyncChange::Copy => crate::i18n::text!("Копировать"),
+            SyncChange::Replace => crate::i18n::text!("Заменить"),
+            SyncChange::Delete => crate::i18n::text!("Удалить"),
         };
         show_action(ui, action, false, 112.0, height);
         show_relative_path(ui, &row.path);
@@ -281,15 +281,15 @@ fn show_one_way(ui: &mut egui::Ui, plan: &SyncPlan, run: u64) {
 }
 
 fn show_two_way(ui: &mut egui::Ui, plan: &TwoWayPlan, run: u64) -> Option<Review> {
-    ui.label(text(if plan.interrupted() {
-        "Проверка после прерывания синхронизации"
+    ui.label(if plan.interrupted() {
+        text!("Проверка после прерывания синхронизации")
     } else if plan.has_baseline() {
-        "Общее состояние сохранено"
+        text!("Общее состояние сохранено")
     } else {
-        "Первое сравнение"
-    }));
+        text!("Первое сравнение")
+    });
     if plan.rows.is_empty() {
-        ui.label(text("План пуст"));
+        ui.label(text!("План пуст"));
         return None;
     }
     ui.label(crate::tr_format!(
@@ -299,12 +299,12 @@ fn show_two_way(ui: &mut egui::Ui, plan: &TwoWayPlan, run: u64) -> Option<Review
         plan.conflicts
     ));
     if plan.conflicts > 0 {
-        ui.small(text(
+        ui.small(text!(
             "Для каждого конфликта выберите версию, которую нужно оставить.",
         ));
     }
     if plan.deletes_remote() {
-        ui.small(text("Удаление из папки SFTP необратимо."));
+        ui.small(text!("Удаление из папки SFTP необратимо."));
     }
     let mut choice = None;
     show_rows(ui, &plan.rows, run, |ui, row, height| {
@@ -314,21 +314,29 @@ fn show_two_way(ui: &mut egui::Ui, plan: &TwoWayPlan, run: u64) -> Option<Review
                 change,
             } => (
                 match (change, destination == 0) {
-                    (SyncChange::Copy, true) => "Копировать налево",
-                    (SyncChange::Copy, false) => "Копировать направо",
-                    (SyncChange::Replace, true) => "Заменить слева",
-                    (SyncChange::Replace, false) => "Заменить справа",
-                    (SyncChange::Delete, true) => "Удалить слева",
-                    (SyncChange::Delete, false) => "Удалить справа",
+                    (SyncChange::Copy, true) => crate::i18n::text!("Копировать налево"),
+                    (SyncChange::Copy, false) => crate::i18n::text!("Копировать направо"),
+                    (SyncChange::Replace, true) => crate::i18n::text!("Заменить слева"),
+                    (SyncChange::Replace, false) => crate::i18n::text!("Заменить справа"),
+                    (SyncChange::Delete, true) => crate::i18n::text!("Удалить слева"),
+                    (SyncChange::Delete, false) => crate::i18n::text!("Удалить справа"),
                 },
                 false,
             ),
             Reconcile::Conflict(reason) => (
                 match reason {
-                    ReconcileConflict::FirstComparison => "Разные версии при первом сравнении",
-                    ReconcileConflict::BothChanged => "Конфликт: обе стороны изменены",
-                    ReconcileConflict::EditAndDelete => "Конфликт: правка и удаление",
-                    ReconcileConflict::Interrupted => "Различие после прерывания",
+                    ReconcileConflict::FirstComparison => {
+                        crate::i18n::text!("Разные версии при первом сравнении")
+                    }
+                    ReconcileConflict::BothChanged => {
+                        crate::i18n::text!("Конфликт: обе стороны изменены")
+                    }
+                    ReconcileConflict::EditAndDelete => {
+                        crate::i18n::text!("Конфликт: правка и удаление")
+                    }
+                    ReconcileConflict::Interrupted => {
+                        crate::i18n::text!("Различие после прерывания")
+                    }
                 },
                 true,
             ),
@@ -337,12 +345,12 @@ fn show_two_way(ui: &mut egui::Ui, plan: &TwoWayPlan, run: u64) -> Option<Review
         if conflict {
             for side in 0..2 {
                 let label = match (side == 0, plan.missing(&row.path, side)) {
-                    (true, false) => "Оставить версию слева",
-                    (false, false) => "Оставить версию справа",
-                    (true, true) => "Принять удаление слева",
-                    (false, true) => "Принять удаление справа",
+                    (true, false) => crate::i18n::text!("Оставить версию слева"),
+                    (false, false) => crate::i18n::text!("Оставить версию справа"),
+                    (true, true) => crate::i18n::text!("Принять удаление слева"),
+                    (false, true) => crate::i18n::text!("Принять удаление справа"),
                 };
-                if ui.button(text(label)).clicked() {
+                if ui.button(label).clicked() {
                     choice = Some(Review::Keep(row.path.clone(), side));
                 }
             }
@@ -374,7 +382,7 @@ fn show_rows<T>(
 }
 
 fn show_action(ui: &mut egui::Ui, action: &'static str, conflict: bool, width: f32, height: f32) {
-    let mut action = egui::RichText::new(text(action));
+    let mut action = egui::RichText::new(action);
     if conflict {
         action = action.color(ui.visuals().error_fg_color);
     }
@@ -393,13 +401,21 @@ impl PawCommander {
 
     pub(super) fn enqueue_folder_sync(&mut self, plan: Plan, ctx: &egui::Context) {
         let (folders, label, direction) = match &plan {
-            Plan::OneWay(plan) => (plan.folders(), "Синхронизация папок", '→'),
-            Plan::TwoWay(plan) => (plan.folders(), "Двусторонняя синхронизация папок", '↔'),
+            Plan::OneWay(plan) => (
+                plan.folders(),
+                crate::i18n::text!("Синхронизация папок"),
+                '→',
+            ),
+            Plan::TwoWay(plan) => (
+                plan.folders(),
+                crate::i18n::text!("Двусторонняя синхронизация папок"),
+                '↔',
+            ),
         };
         let [left, right] = folders;
         self.start_stoppable_job(
             ctx,
-            text(label),
+            label,
             format!("{} {direction} {}", left.display(), right.display()),
             move |progress| match plan {
                 Plan::OneWay(plan) => plan.apply(progress),
@@ -429,7 +445,7 @@ impl PawCommander {
                 saved
             } else {
                 self.notice = Some((
-                    text("Папки профиля несовместимы с этой системой.").into(),
+                    text!("Папки профиля несовместимы с этой системой.").into(),
                     true,
                 ));
                 return;

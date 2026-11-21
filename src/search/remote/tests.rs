@@ -42,7 +42,7 @@ pub(crate) fn check_sftp_search(remote_root: &Location) {
         let results = run(scope, &query, deadline(), &|| false).unwrap();
         assert!(results
             .warning
-            .contains(text("Поиск достиг выбранной глубины вложенности.")));
+            .contains(text!("Поиск достиг выбранной глубины вложенности.")));
         results
             .matches
             .into_iter()
@@ -115,7 +115,7 @@ pub(crate) fn check_sftp_search(remote_root: &Location) {
         assert!(!stopped.replace(true));
         Visit::Continue
     });
-    assert_eq!(cancelled.err().as_deref(), Some(text("Поиск отменён")));
+    assert_eq!(cancelled.err().as_deref(), Some(text!("Поиск отменён")));
     assert!(stopped.get());
 
     let cutoff = Instant::now() + Duration::from_secs(1);
@@ -153,7 +153,7 @@ pub(crate) fn check_sftp_search(remote_root: &Location) {
     assert_eq!(results.matches.len(), MAX_RESULTS);
     let expired = run(&bounded, &query, Instant::now(), &|| false).unwrap();
     assert!(expired.matches.is_empty());
-    assert!(expired.warning.contains(text(
+    assert!(expired.warning.contains(text!(
         "Лимит времени поиска SFTP достигнут. Показаны собранные результаты."
     )));
 }

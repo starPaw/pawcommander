@@ -125,22 +125,22 @@ impl BookmarkEditor {
 
     pub(super) fn show(&mut self, ctx: &egui::Context, bookmarks: &mut [Bookmark]) -> bool {
         let response = egui::Modal::new(egui::Id::unique("bookmark_editor")).show(ctx, |ui| {
-            ui.heading(crate::i18n::text("Изменить избранное"));
-            ui.label(crate::i18n::text("Название"));
+            ui.heading(crate::i18n::text!("Изменить избранное"));
+            ui.label(crate::i18n::text!("Название"));
             let name = ui.text_edit_singleline(&mut self.name);
             if self.focus_name && !ui.is_sizing_pass() {
                 name.request_focus();
                 self.focus_name = false;
             }
-            ui.label(crate::i18n::text("Группа"));
+            ui.label(crate::i18n::text!("Группа"));
             ui.text_edit_singleline(&mut self.group);
             let mut done = false;
             ui.horizontal(|ui| {
-                if ui.button(crate::i18n::text("Сохранить")).clicked() {
+                if ui.button(crate::i18n::text!("Сохранить")).clicked() {
                     apply_bookmark_edit(bookmarks, self.id, &self.name, &self.group);
                     done = true;
                 }
-                if ui.button(crate::i18n::text("Отмена")).clicked() {
+                if ui.button(crate::i18n::text!("Отмена")).clicked() {
                     done = true;
                 }
             });
