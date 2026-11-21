@@ -16,6 +16,13 @@ macro_rules! formats {
 }
 
 formats! {
+    "{available} available of {capacity}" => ("Доступно {available} из {capacity}", "Dostupných {available} z {capacity}"),
+    "Eject the disk containing “{name}”?" => ("Извлечь диск с томом «{name}»?", "Vysunout disk se svazkem „{name}“?"),
+    "Could not start the volume task ({error})." => ("Не удалось запустить задачу для томов ({error}).", "Nepodařilo se spustit úlohu pro práci se svazky ({error})."),
+    "Could not read mounted volumes ({error})." => ("Не удалось прочитать список томов ({error}).", "Nepodařilo se načíst připojené svazky ({error})."),
+    "Could not verify ejection ({error})." => ("Не удалось проверить извлечение ({error}).", "Nepodařilo se ověřit vysunutí ({error})."),
+    "Could not start macOS ejection ({error})." => ("Не удалось запустить извлечение в macOS ({error}).", "Vysunutí v macOS se nepodařilo spustit ({error})."),
+    "macOS could not eject the disk ({reason}). Close any files in use and try again." => ("macOS не смогла извлечь диск ({reason}). Закройте открытые на нём файлы и повторите попытку.", "macOS se nepodařilo disk vysunout ({reason}). Zavřete otevřené soubory na disku a zkuste to znovu."),
     "{e}. Items fully deleted: {completed}. The current folder may have been partly deleted." => ("{e}. Удалено целых элементов: {completed}; текущая папка могла быть удалена частично.", "{e}. Úplně smazané položky: {completed}. Aktuální složka mohla být smazána jen částečně."),
     "Could not resolve the server: {e}" => ("Не удалось найти сервер: {e}", "Server se nepodařilo najít: {e}"),
     "Could not choose an unused name for {target}" => ("Не удалось подобрать свободное имя для {target}", "Pro {target} se nepodařilo vybrat volný název"),

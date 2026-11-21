@@ -37,6 +37,8 @@ PawCommander brings a familiar two-pane workflow to a calm, colorful desktop app
 
 Visible local and connected SFTP folders refresh automatically. On macOS, drag local and SFTP files and folders to Finder or another app that accepts them.
 
+On macOS, open **Devices → Mounted volumes…** or search for **Mounted volumes** in the command palette. The list shows available space, capacity, filesystem and connection type. Select **Open** to browse a mount, or **Eject…** to confirm removal of an external disk or disk image. Wait for running and queued PawCommander file operations to finish before ejecting. Use **Refresh** to update the list after connecting a disk.
+
 On macOS, **Settings → Crash recovery** lists interrupted copies and copy-based moves of local and SFTP files and folders. PawCommander checks the source, destination and partial copy before continuing. For folders it keeps verified children and writes the remainder of incomplete files. **Check and resume move** verifies the full copy before removing the original. If an interruption leaves the intact original in a temporary folder, PawCommander checks it and finishes the move using the published copy. If verification fails, the files remain available for inspection.
 
 On macOS, a local Git working tree shows its branch beside the folder path. The current folder marks modified (`M`), untracked (`?`) and ignored (`!`) entries. Git status refreshes in the background without writing to the repository.

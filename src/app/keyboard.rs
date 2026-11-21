@@ -177,6 +177,8 @@ impl PawCommander {
             Command::CopyToPane => Action::Transfer(TransferKind::Copy),
             #[cfg(target_os = "macos")]
             Command::CompatibleNames => Action::CompatibleNames(None),
+            #[cfg(target_os = "macos")]
+            Command::MountedVolumes => Action::MountedVolumes,
             Command::MoveToPane => Action::Transfer(TransferKind::Move),
         };
         self.action(action, ctx);

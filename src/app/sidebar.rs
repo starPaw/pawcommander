@@ -30,6 +30,7 @@ pub(super) fn place_button(ui: &mut egui::Ui, label: &str, selected: bool) -> bo
         (key!("Видео"), Icon::Video),
         (key!("Файловая система"), Icon::Drive),
         (key!("Тома и диски"), Icon::Drive),
+        (key!("Подключённые тома…"), Icon::Drive),
         (key!("Носители"), Icon::Drive),
     ]
     .into_iter()
@@ -456,6 +457,10 @@ impl PawCommander {
                                         self.active,
                                         PathBuf::from("/Volumes").into(),
                                     ));
+                                }
+                                #[cfg(target_os = "macos")]
+                                if place_button(ui, Command::MountedVolumes.label(), false) {
+                                    actions.push(Action::MountedVolumes);
                                 }
                                 #[cfg(target_os = "linux")]
                                 if place_button(

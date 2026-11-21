@@ -373,14 +373,28 @@ impl PawCommander {
     }
 
     pub(super) fn submit_job(&mut self, ctx: &egui::Context, job: PendingJob) {
-        if self.pending_jobs.len() >= MAX_PENDING_JOBS {
+        let rejection =
+            (self.pending_jobs.len() >= MAX_PENDING_JOBS).then_some(crate::i18n::text!(
+            "Очередь заполнена (100 заданий). Дождитесь завершения или удалите ожидающее задание."
+        ));
+        #[cfg(target_os = "macos")]
+        let rejection = if self.volumes.ejecting() {
+            Some(super::volumes::wait_for_eject())
+        } else {
+            rejection
+        };
+        if let Some(message) = rejection {
             if let Some(retry) = job.retry_origin {
                 self.remember_retry(retry);
             }
             if let Some(undo) = job.undo_origin {
                 self.remember_undo(undo);
             }
-            self.notice = Some((crate::i18n::text!("Очередь заполнена (100 заданий). Дождитесь завершения или удалите ожидающее задание.").into(), true));
+            #[cfg(target_os = "macos")]
+            if let Some(completion) = job.native_completion {
+                let _ = completion.send(Err(message.into()));
+            }
+            self.notice = Some((message.into(), true));
             return;
         }
         if self.job.is_none() && self.pending_jobs.is_empty() {

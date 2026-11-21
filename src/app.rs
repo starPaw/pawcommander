@@ -54,6 +54,8 @@ mod tab_strip;
 mod tabs;
 mod toolbar;
 mod transfer_limits;
+#[cfg(target_os = "macos")]
+mod volumes;
 
 use crate::command_palette::CommandPalette;
 use crate::directory_tree::DirectoryTree;
@@ -157,6 +159,8 @@ pub struct PawCommander {
     #[cfg(target_os = "macos")]
     smb: smb_connections::Connections,
     #[cfg(target_os = "macos")]
+    volumes: volumes::VolumeBrowser,
+    #[cfg(target_os = "macos")]
     embedded_terminal: Option<crate::terminal::embedded::Panel>,
     #[cfg(target_os = "macos")]
     remote_editor: external_editors::Session,
@@ -218,6 +222,8 @@ impl eframe::App for PawCommander {
         #[cfg(target_os = "macos")]
         self.poll_smb(ctx);
         #[cfg(target_os = "macos")]
+        self.poll_volumes(ctx);
+        #[cfg(target_os = "macos")]
         self.poll_external_editors(ctx);
         #[cfg(target_os = "macos")]
         if self
@@ -229,15 +235,22 @@ impl eframe::App for PawCommander {
             ctx.request_repaint();
         }
         // Hidden windows receive close requests through logic-only ticks too.
-        if (self.job.is_some() || !self.pending_jobs.is_empty())
-            && ctx.input(|i| i.viewport().close_requested())
-        {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.notice = Some((
-                crate::i18n::text!("Дождитесь завершения файловой операции, затем закройте окно.")
+        if ctx.input(|i| i.viewport().close_requested()) {
+            #[cfg(target_os = "macos")]
+            if self.volumes.ejecting() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                return;
+            }
+            if self.job.is_some() || !self.pending_jobs.is_empty() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.notice = Some((
+                    crate::i18n::text!(
+                        "Дождитесь завершения файловой операции, затем закройте окно."
+                    )
                     .into(),
-                false,
-            ));
+                    false,
+                ));
+            }
         }
     }
 

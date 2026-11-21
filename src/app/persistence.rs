@@ -259,6 +259,8 @@ impl PawCommander {
             #[cfg(target_os = "macos")]
             smb: super::smb_connections::Connections::load(&cc.egui_ctx),
             #[cfg(target_os = "macos")]
+            volumes: Default::default(),
+            #[cfg(target_os = "macos")]
             embedded_terminal: None,
             #[cfg(target_os = "macos")]
             remote_editor: Default::default(),
