@@ -81,17 +81,53 @@ pub(super) fn show_fields(ui: &mut egui::Ui, draft: &mut TransferLimits, endpoin
 }
 
 fn rate_field(ui: &mut egui::Ui, caption: &str, kib: &mut u32) -> egui::Response {
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        let response = ui.add(
-            egui::DragValue::new(kib)
-                .speed(1)
-                .range(0..=u32::MAX)
-                .suffix(format!(" {}", text("КиБ/с"))),
-        );
-        let caption = ui
-            .add(egui::Label::new(caption).truncate())
-            .on_hover_text(caption);
-        response.labelled_by(caption.id)
-    })
+    let row_size = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+    ui.allocate_ui_with_layout(
+        row_size,
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| {
+            let response = ui.add(
+                egui::DragValue::new(kib)
+                    .speed(1)
+                    .range(0..=u32::MAX)
+                    .suffix(format!(" {}", text("КиБ/с"))),
+            );
+            let caption = ui
+                .add(egui::Label::new(caption).truncate())
+                .on_hover_text(caption);
+            response.labelled_by(caption.id)
+        },
+    )
     .inner
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_ui::ContextExt as _;
+
+    #[test]
+    fn transfer_speed_field_reserves_only_one_row() {
+        let ctx = egui::Context::default();
+        ctx.run_test_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                let top = ui.next_widget_position().y;
+                let mut limit = 96;
+                let field = rate_field(ui, "Global limit", &mut limit);
+                let used = ui.next_widget_position().y - top;
+                let row_height = field.rect.height() + ui.spacing().item_spacing.y;
+                assert!(
+                    used <= row_height + 1.0,
+                    "Speed field used {used} pt for a {row_height} pt row"
+                );
+            },
+        );
+    }
 }
