@@ -1,12 +1,12 @@
 # Architecture and source map
 
-PawCommander is a single Rust binary using eframe/egui. Start at the module that owns the behavior; `app.rs` coordinates the frame lifecycle, while its submodules own individual features. Build and submission checks are in [CONTRIBUTING.md](../CONTRIBUTING.md).
+PawCommander ships as one executable using eframe/egui. The launcher forwards its arguments to `pawcommander::run` in the library, which owns the application modules and dispatches macOS CLI and helper commands. The frame lifecycle lives in `app.rs` and its submodules own individual features. Build and submission checks are in [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ## Find the owner
 
 | Change | Start here | Related code |
 | --- | --- | --- |
-| Startup, window, frame lifecycle | [`main.rs`](../src/main.rs), [`app.rs`](../src/app.rs) | [`app/persistence.rs`](../src/app/persistence.rs) initializes and saves state |
+| Startup, window, frame lifecycle | [`main.rs`](../src/main.rs), [`lib.rs`](../src/lib.rs), [`app.rs`](../src/app.rs) | [`app/persistence.rs`](../src/app/persistence.rs) initializes and saves state |
 | macOS command-line launch | [`cli.rs`](../src/cli.rs) | Commands validate their operands before opening a window. Explicit launches use a temporary copy of the saved profile. |
 | Actions, keyboard, focus | [`app/actions.rs`](../src/app/actions.rs), [`app/keyboard.rs`](../src/app/keyboard.rs) | [`shortcuts.rs`](../src/shortcuts.rs) supplies command names, search and bindings to the [`command palette`](../src/command_palette.rs) and [macOS help](../src/app/help.rs). |
 | Panes, tabs, navigation, directory loading | [`app/tabs.rs`](../src/app/tabs.rs), [`app/directory.rs`](../src/app/directory.rs) | `app/pane_view.rs`, `app/column_view.rs`, `app/address_bar.rs`, `address.rs`, `directory_tree.rs` |
