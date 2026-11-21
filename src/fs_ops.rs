@@ -3,13 +3,13 @@
 
 use crate::file_error::{
     AccessAction, AccessCause, AccessError, ListingError, ListingErrorKind, LocalPathAction,
-    MutationError, PathError, SpaceError, StagingCleanupError, StagingError,
+    MutationError, PathError, SpaceError, StagingCleanupError, StagingError, TransferPlanError,
 };
 use crate::operations::{
     access_io, AccessStream, Cancellation, CopyReader, Progress, TransferError,
 };
 use crate::vfs::{DeletionFailure, Location};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Seek};
@@ -227,10 +227,10 @@ pub(crate) fn plan_transfer(
 ) -> Result<Vec<LocalTransfer>, TransferError> {
     progress.checkpoint()?;
     progress.item(destination);
-    let destination = directory_path(destination)?;
+    let resolved_destination = directory_path(destination)?;
     let sources = normalize_selection(sources, progress)?;
-    let mut names = HashSet::new();
-    let mut plan = Vec::new();
+    let mut names = HashMap::new();
+    let mut plan = Vec::<LocalTransfer>::new();
     for LocalSelection {
         original,
         source,
@@ -240,31 +240,27 @@ pub(crate) fn plan_transfer(
     {
         progress.checkpoint()?;
         progress.item(&original);
-        let current = fs::symlink_metadata(&source).map_err(|e| {
-            at(
-                crate::i18n::text!("Не удалось получить сведения об элементе"),
-                &source,
-                e,
-            )
-        })?;
-        if current.is_dir() && destination.starts_with(&source) {
-            return Err(crate::tr_format!(
-                "Cannot copy or move “{}” into itself or a subfolder",
-                source.display()
-            )
+        let current = fs::symlink_metadata(&source)
+            .map_err(|error| MutationError::local(&source, LocalPathAction::ReadMetadata, error))?;
+        if current.is_dir() && resolved_destination.starts_with(&source) {
+            return Err(TransferPlanError::IntoSource {
+                source: original.into(),
+                destination: destination.to_owned().into(),
+            }
             .into());
         }
-        let name = source.file_name().ok_or(crate::i18n::text!(
-            "Нельзя скопировать или переместить корень файловой системы",
-        ))?;
-        if !names.insert(name.to_os_string()) {
-            return Err(crate::tr_format!(
-                "Multiple selected items are named “{}”; transfer them separately",
-                name.to_string_lossy()
-            )
+        let name = source
+            .file_name()
+            .ok_or_else(|| TransferPlanError::MissingName(original.clone().into()))?;
+        let target = resolved_destination.join(name);
+        if let Some(first) = names.insert(name.to_os_string(), plan.len()) {
+            return Err(TransferPlanError::DuplicateTarget {
+                first: plan[first].original.clone().into(),
+                second: original.into(),
+                target: target.into(),
+            }
             .into());
         }
-        let target = destination.join(name);
         plan.push(LocalTransfer {
             original,
             source,
@@ -345,7 +341,9 @@ pub(crate) fn validate_name(name: &str) -> Result<(), PathError> {
 fn directory_path(path: &Path) -> Result<PathBuf, TransferError> {
     let path = fs::canonicalize(path)
         .map_err(|error| MutationError::local(path, LocalPathAction::OpenDirectory, error))?;
-    if !path.is_dir() {
+    let metadata = fs::metadata(&path)
+        .map_err(|error| MutationError::local(&path, LocalPathAction::OpenDirectory, error))?;
+    if !metadata.is_dir() {
         return Err(MutationError::NotDirectory(path).into());
     }
     Ok(path)
@@ -2028,14 +2026,30 @@ mod tests {
     #[test]
     fn refuses_copy_and_move_into_descendants_without_changes() {
         let root = tempdir().unwrap();
-        let source = root.path().join("source");
-        fs::create_dir_all(source.join("nested")).unwrap();
+        let source: Location = root.path().join("source").into();
+        let nested = source.join("nested");
+        fs::create_dir_all(nested.path()).unwrap();
         for kind in [TransferKind::Copy, TransferKind::Move] {
-            assert!(transfer(std::slice::from_ref(&source), &source.join("nested"), kind).is_err());
-            assert!(transfer(std::slice::from_ref(&source), &source, kind).is_err());
+            for destination in [&source, &nested] {
+                let failure = crate::vfs::transfer_with_conflicts(
+                    std::slice::from_ref(&source),
+                    destination,
+                    kind,
+                    &mut Progress::default(),
+                    |_| panic!("transfer into the source must fail before conflicts"),
+                    |_, _| panic!("transfer into the source must fail before publication"),
+                )
+                .unwrap_err();
+                assert!(failure.summary.preparing);
+                assert!(
+                    matches!(failure.error, TransferError::Failed(crate::file_error::Failure::TransferPlan(reason))
+                    if matches!(reason.as_ref(), TransferPlanError::IntoSource { source: original, destination: chosen }
+                        if original == &source && chosen == destination))
+                );
+            }
         }
-        assert!(source.is_dir());
-        assert_eq!(fs::read_dir(source.join("nested")).unwrap().count(), 0);
+        assert!(source.path().is_dir());
+        assert_eq!(fs::read_dir(nested.path()).unwrap().count(), 0);
     }
 
     #[test]

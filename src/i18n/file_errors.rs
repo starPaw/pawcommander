@@ -6,6 +6,7 @@ use crate::file_error::{
     MetadataWarning, MutationError, PathError, PermissionError, PinError, PreviewError,
     ProbeAction, PublicationError, RecoveryNotice, RetryError, RetryProblem, ScanError,
     SearchError, SpaceError, SshStage, StagingCleanupError, StagingError, StagingRecordAction,
+    TransferPlanError,
 };
 use crate::file_error::{
     RecoveryRecordAction, RecoveryRecordError, RecoveryRecordProblem, RecoveryRecordSection,
@@ -57,12 +58,51 @@ pub(crate) fn file_error(error: &TransferError) -> String {
                 #[cfg(target_os = "macos")]
                 Failure::ResumeCheck(error) => resume_check_error(error),
                 Failure::Retry(error) => retry_error(error),
+                Failure::TransferPlan(error) => transfer_plan_error(error),
                 Failure::RecoveryRecord(error) => recovery_record_error(error),
                 Failure::StagingCleanup(error) => staging_cleanup_error(error),
                 _ => error.to_string(),
             }
         }
         TransferError::Cancelled => crate::tr_format!("Operation cancelled"),
+    }
+}
+
+fn transfer_plan_error(error: &TransferPlanError) -> String {
+    use TransferPlanError::*;
+
+    match error {
+        MissingName(path) => crate::tr_format!("Path {path} has no file name.", path = path),
+        MissingParent(path) => crate::tr_format!("Path {path} has no parent folder.", path = path),
+        NonUtf8Name(path) => crate::tr_format!(
+            "SFTP transfers require a UTF-8 name for {path}.",
+            path = path
+        ),
+        InvalidSourceName { location, cause } => crate::tr_format!(
+            "Cannot use {path} as a transfer source ({error}).",
+            path = location,
+            error = path_error(cause)
+        ),
+        DuplicateTarget { first, second, target } => crate::tr_format!(
+            "Selected items {first} and {second} have the same destination {target}. Transfer them separately.",
+            first = first,
+            second = second,
+            target = target
+        ),
+        SameFolder { source, destination } => crate::tr_format!(
+            "Item {source} is already in the destination folder {destination}.",
+            source = source,
+            destination = destination
+        ),
+        IntoSource { source, destination } => crate::tr_format!(
+            "Destination {destination} is the source {source} or inside it.",
+            destination = destination,
+            source = source
+        ),
+        NoUnusedName(target) => crate::tr_format!(
+            "Could not choose an unused name for {target}",
+            target = target
+        ),
     }
 }
 

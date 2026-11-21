@@ -1,4 +1,5 @@
 use super::*;
+use crate::file_error::{Failure, TransferPlanError};
 
 #[test]
 fn conflict_group_replaces_files_and_asks_again_for_a_directory() {
@@ -317,9 +318,11 @@ fn same_folder_move_stops_before_conflicts_but_copy_can_keep_both() {
             |_, _| panic!("same-folder moves must fail before transferring any item"),
         )
         .unwrap_err();
-        assert_eq!(
-            crate::i18n::transfer_failure(&error),
-            crate::i18n::text!("Элементы уже находятся в этой папке")
+        assert!(error.summary.preparing);
+        assert!(
+            matches!(error.error, TransferError::Failed(Failure::TransferPlan(reason))
+            if matches!(reason.as_ref(), TransferPlanError::SameFolder { source, destination: chosen }
+                if source == &existing && chosen == destination))
         );
         assert_eq!(fs::read(outside.path()).unwrap(), b"outside");
         assert_eq!(fs::read(existing.path()).unwrap(), b"existing");
@@ -353,6 +356,93 @@ fn same_folder_move_stops_before_conflicts_but_copy_can_keep_both() {
     assert_eq!(
         fs::read(destination.join("existing (2).txt").path()).unwrap(),
         b"existing"
+    );
+}
+
+#[test]
+fn planning_rejects_duplicate_targets_before_any_copy_or_move() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root: Location = fixture.path().to_path_buf().into();
+    let first = create_directory(&root, "one").unwrap().join("same.txt");
+    let second = create_directory(&root, "two").unwrap().join("same.txt");
+    let destination = create_directory(&root, "destination").unwrap();
+    let expected_target: Location = fs::canonicalize(destination.path())
+        .unwrap()
+        .join("same.txt")
+        .into();
+    fs::write(first.path(), b"first source").unwrap();
+    fs::write(second.path(), b"second source").unwrap();
+    let sentinel = destination.join("sentinel");
+    fs::write(sentinel.path(), b"existing file").unwrap();
+    let sources = [first.clone(), second.clone()];
+
+    for kind in [TransferKind::Copy, TransferKind::Move] {
+        let error = transfer_with_conflicts(
+            &sources,
+            &destination,
+            kind,
+            &mut Progress::default(),
+            |_| panic!("duplicate selection must fail before a conflict"),
+            |_, _| panic!("duplicate selection must fail before publication"),
+        )
+        .unwrap_err();
+        assert!(error.summary.preparing);
+        assert_eq!(error.summary.completed, 0);
+        assert_eq!(error.summary.remaining, sources);
+        assert!(
+            matches!(error.error, TransferError::Failed(Failure::TransferPlan(reason))
+            if matches!(reason.as_ref(), TransferPlanError::DuplicateTarget { first: a, second: b, target }
+                if a == &first && b == &second && target == &expected_target))
+        );
+        assert_eq!(fs::read(first.path()).unwrap(), b"first source");
+        assert_eq!(fs::read(second.path()).unwrap(), b"second source");
+        assert_eq!(fs::read(sentinel.path()).unwrap(), b"existing file");
+        assert_eq!(fs::read_dir(destination.path()).unwrap().count(), 1);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn planning_reports_root_and_malformed_source_names_before_sftp_io() {
+    use crate::file_error::PathError;
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let destination = Location::Sftp {
+        endpoint: Endpoint {
+            host: "127.0.0.1".into(),
+            user: "unused".into(),
+            port: 0,
+            key: None,
+            jump: None,
+        },
+        path: "/download".into(),
+    };
+    let root: Location = PathBuf::from("/").into();
+    let invalid: Location = PathBuf::from("/bad\\name").into();
+    let undecodable: Location = PathBuf::from(OsString::from_vec(vec![b'/', 0xff])).into();
+    let failure = |source: &Location| {
+        let error = transfer_with_conflicts(
+            std::slice::from_ref(source),
+            &destination,
+            TransferKind::Copy,
+            &mut Progress::default(),
+            |_| panic!("invalid source must fail before conflict resolution"),
+            |_, _| panic!("invalid source must fail before publication"),
+        )
+        .unwrap_err();
+        assert!(error.summary.preparing && error.summary.completed == 0);
+        let TransferError::Failed(Failure::TransferPlan(reason)) = error.error else {
+            panic!("expected a preparation error: {:?}", error.error);
+        };
+        *reason
+    };
+    assert!(matches!(failure(&root), TransferPlanError::MissingName(path) if path == root));
+    assert!(
+        matches!(failure(&invalid), TransferPlanError::InvalidSourceName { location, cause: PathError::InvalidName(name) }
+        if location == invalid && name == "bad\\name")
+    );
+    assert!(
+        matches!(failure(&undecodable), TransferPlanError::NonUtf8Name(path) if path == undecodable)
     );
 }
 

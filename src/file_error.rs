@@ -15,6 +15,7 @@ mod space;
 mod staging;
 #[cfg(target_os = "macos")]
 mod sync;
+mod transfer_plan;
 pub(crate) use archive::ArchiveError;
 pub(crate) use checksum::{ChecksumError, ManifestLineError};
 pub(crate) use host_key::{HostKeyError, KnownHostEntryError, KnownHostsError, PinError};
@@ -31,6 +32,7 @@ pub(crate) use space::{ProbeAction, SftpSpaceFailure, SpaceError};
 pub(crate) use staging::{StagingError, StagingRecordAction};
 #[cfg(target_os = "macos")]
 pub(crate) use sync::SyncError;
+pub(crate) use transfer_plan::TransferPlanError;
 
 #[derive(Debug)]
 pub(crate) enum Failure {
@@ -64,6 +66,7 @@ pub(crate) enum Failure {
     #[cfg(target_os = "macos")]
     ResumeCheck(Box<ResumeCheckError>),
     Retry(Box<RetryError>),
+    TransferPlan(Box<TransferPlanError>),
     RecoveryRecord(Box<RecoveryRecordError>),
     StagingCleanup(Box<StagingCleanupError>),
 }
@@ -106,6 +109,7 @@ impl Failure {
             #[cfg(target_os = "macos")]
             Self::ResumeCheck(error) => Some(error.as_ref()),
             Self::Retry(error) => Some(error.as_ref()),
+            Self::TransferPlan(error) => Some(error.as_ref()),
             Self::RecoveryRecord(error) => Some(error.as_ref()),
             Self::StagingCleanup(error) => Some(error.as_ref()),
         }
@@ -141,6 +145,7 @@ impl fmt::Display for Failure {
             #[cfg(target_os = "macos")]
             Self::ResumeCheck(error) => fmt::Display::fmt(error, f),
             Self::Retry(error) => fmt::Display::fmt(error, f),
+            Self::TransferPlan(error) => fmt::Display::fmt(error, f),
             Self::RecoveryRecord(error) => fmt::Display::fmt(error, f),
             Self::StagingCleanup(error) => fmt::Display::fmt(error, f),
         }

@@ -7,14 +7,15 @@ use crate::conflict::{Answer, Conflict, Decision, EntryDetails};
 use crate::file_error::{
     AccessAction, AccessCause, AccessError, Failure, MutationError, ProbeAction, PublicationError,
     RecoveryNotice, SftpSpaceFailure, SpaceError, StagingCleanupError, StagingError,
+    TransferPlanError,
 };
+use crate::fs_ops;
 use crate::fs_ops::TransferKind;
 use crate::operations::{
     access_io, AccessStream, Cancellation, CopyReader, Progress, TransferError,
 };
-use crate::{archive, fs_ops};
 use ssh2::{ErrorCode, FileStat, OpenFlags, OpenType, RenameFlags};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -235,8 +236,11 @@ pub(super) fn transfer_plan(
     kind: TransferKind,
     progress: &mut Progress,
 ) -> Result<Vec<TransferItem>, TransferError> {
-    if destination.is_archive() || sources.iter().any(Location::is_archive) {
-        return Err(archive::readonly().into());
+    if let Some(archive) = std::iter::once(destination)
+        .chain(sources)
+        .find(|location| location.is_archive())
+    {
+        return Err(MutationError::ReadOnlyArchive(archive.clone()).into());
     }
     if let Some(dest) = destination.local()
         && sources.iter().all(|p| !p.remote())
@@ -247,7 +251,11 @@ pub(super) fn transfer_plan(
         for item in &plan {
             progress.checkpoint()?;
             if kind == TransferKind::Move && item.source == item.target {
-                return Err(crate::i18n::text!("Элементы уже находятся в этой папке").into());
+                return Err(TransferPlanError::SameFolder {
+                    source: item.original.clone().into(),
+                    destination: destination.clone(),
+                }
+                .into());
             }
         }
         return Ok(plan
@@ -268,7 +276,7 @@ pub(super) fn transfer_plan(
             .collect());
     }
 
-    let mut names = HashSet::new();
+    let mut names: HashMap<&str, &Location> = HashMap::new();
     let mut plan = Vec::new();
     for source in sources {
         progress.checkpoint()?;
@@ -276,13 +284,22 @@ pub(super) fn transfer_plan(
         let name = source
             .path()
             .file_name()
-            .and_then(|s| s.to_str())
-            .ok_or(crate::i18n::text!(
-                "Нельзя переносить корень или имя не UTF-8"
-            ))?;
-        validate_name(name)?;
-        if !names.insert(name.to_owned()) {
-            return Err(crate::i18n::text!("Выбраны элементы с одинаковыми именами").into());
+            .ok_or_else(|| TransferPlanError::MissingName(source.clone()))?;
+        let name = name
+            .to_str()
+            .ok_or_else(|| TransferPlanError::NonUtf8Name(source.clone()))?;
+        validate_name(name).map_err(|cause| TransferPlanError::InvalidSourceName {
+            location: source.clone(),
+            cause,
+        })?;
+        let target = destination.join(name);
+        if let Some(first) = names.insert(name, source) {
+            return Err(TransferPlanError::DuplicateTarget {
+                first: first.clone(),
+                second: source.clone(),
+                target,
+            }
+            .into());
         }
         if source.might_share_filesystem(destination) {
             // Resolve aliases for the destination and the source subtree.
@@ -291,23 +308,24 @@ pub(super) fn transfer_plan(
             if kind == TransferKind::Move {
                 let parent = source
                     .parent()
-                    .ok_or(crate::i18n::text!("Недопустимый источник"))?;
+                    .ok_or_else(|| TransferPlanError::MissingParent(source.clone()))?;
                 if canonical(&parent)? == actual_dest {
-                    return Err(crate::i18n::text!("Элементы уже находятся в этой папке").into());
+                    return Err(TransferPlanError::SameFolder {
+                        source: source.clone(),
+                        destination: destination.clone(),
+                    }
+                    .into());
                 }
             }
             if actual_dest.starts_with(&actual_source) {
-                return Err(crate::i18n::text!(
-                    "Нельзя копировать или перемещать элемент в себя или вложенную папку"
-                )
+                return Err(TransferPlanError::IntoSource {
+                    source: source.clone(),
+                    destination: destination.clone(),
+                }
                 .into());
             }
         }
-        plan.push(TransferItem::new(
-            source.clone(),
-            source.clone(),
-            destination.join(name),
-        ));
+        plan.push(TransferItem::new(source.clone(), source.clone(), target));
     }
     Ok(plan)
 }
@@ -319,11 +337,11 @@ pub(super) fn keep_both_name(
 ) -> Result<Location, TransferError> {
     let parent = target
         .parent()
-        .ok_or(crate::i18n::text!("Недопустимое назначение"))?;
+        .ok_or_else(|| TransferPlanError::MissingParent(target.clone()))?;
     let stem = target
         .path()
         .file_stem()
-        .ok_or(crate::i18n::text!("Нет имени объекта"))?;
+        .ok_or_else(|| TransferPlanError::MissingName(target.clone()))?;
     for index in 2..=10_000 {
         cancel.check()?;
         let mut name = stem.to_os_string();
@@ -337,11 +355,7 @@ pub(super) fn keep_both_name(
             return Ok(candidate);
         }
     }
-    Err(crate::tr_format!(
-        "Could not choose an unused name for {target}",
-        target = target
-    )
-    .into())
+    Err(TransferPlanError::NoUnusedName(target.clone()).into())
 }
 
 pub fn transfer_with_conflicts(
@@ -420,7 +434,11 @@ pub(super) fn transfer_run(
             progress.checkpoint()?;
             progress.item(item.original.path());
             if kind == TransferKind::Move && item.source == item.target {
-                return Err(crate::i18n::text!("Элементы уже находятся в этой папке").into());
+                return Err(TransferPlanError::SameFolder {
+                    source: item.original.clone(),
+                    destination: destination.clone(),
+                }
+                .into());
             }
             entry_metadata(&item.target)
         })
