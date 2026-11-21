@@ -214,7 +214,15 @@ impl PawCommander {
             PendingJob {
                 label: label.into(),
                 description,
-                work: Box::new(move |progress| job.create(progress).map_err(TransferError::from)),
+                work: Box::new(move |progress| {
+                    let created = job.create(progress)?;
+                    Ok(if let Some(warning) = created.cleanup_warning {
+                        crate::i18n::file_error(&warning)
+                    } else {
+                        let path = created.target.display().escape_debug().to_string();
+                        crate::tr_format!("File created: {path}", path = path)
+                    })
+                }),
                 transfer: Some(TransferInteraction {
                     events: receive,
                     cut_generation: None,
@@ -563,7 +571,12 @@ impl PawCommander {
                 };
                 // The native file promise acknowledges the file operation. History
                 // persistence and recovery record cleanup remain worker follow-up.
-                let display_result = result.as_ref().cloned().map_err(crate::i18n::file_error);
+                let display_result = if matches!(&result, Err(TransferError::Cancelled)) {
+                    reporter.results.cancelled = true;
+                    Ok(crate::tr_format!("Operation cancelled"))
+                } else {
+                    result.as_ref().cloned().map_err(crate::i18n::file_error)
+                };
                 #[cfg(target_os = "macos")]
                 if let Some(completion) = worker_completion {
                     let _ = completion.send(result.map(|_| ()));

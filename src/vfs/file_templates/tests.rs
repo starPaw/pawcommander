@@ -1,5 +1,5 @@
 use super::*;
-use crate::operations::Cancellation;
+use crate::{file_error::Failure, operations::Cancellation};
 use std::{fs, os::unix::fs::symlink};
 
 fn draft(value: &str, encoding: TextEncoding) -> Source {
@@ -43,23 +43,28 @@ fn writes_explicit_text_encodings_and_rejects_lossy_output() {
     ];
     for (index, (encoding, text, expected)) in cases.into_iter().enumerate() {
         let name = format!("{index}.txt");
-        job(&directory, &name, draft(text, encoding))
+        let created = job(&directory, &name, draft(text, encoding))
             .create(&mut Progress::default())
             .unwrap();
+        assert_eq!(created.target, directory.join(&name));
+        assert!(created.cleanup_warning.is_none());
         assert_eq!(fs::read(root.path().join(name)).unwrap(), expected);
     }
-    assert!(job(
+    let error = job(
         &directory,
         "unsupported.txt",
-        draft("🙂", TextEncoding::Windows1251)
+        draft("🙂", TextEncoding::Windows1251),
     )
     .create(&mut Progress::default())
-    .is_err());
+    .unwrap_err();
     assert!(
-        job(&directory, "../outside", draft("x", TextEncoding::Utf8))
-            .create(&mut Progress::default())
-            .is_err()
+        matches!(error, TransferError::Failed(Failure::FileTemplate(reason))
+        if matches!(reason.as_ref(), FileTemplateError::UnrepresentableCharacters(TextEncoding::Windows1251)))
     );
+    assert!(matches!(
+        job(&directory, "../outside", draft("x", TextEncoding::Utf8)).create(&mut Progress::default()),
+        Err(TransferError::Failed(Failure::Path(PathError::InvalidName(name)))) if name == "../outside"
+    ));
     assert_eq!(fs::read_dir(root.path()).unwrap().count(), cases.len());
 }
 
@@ -98,15 +103,49 @@ fn saved_templates_survive_a_profile_round_trip_and_source_removal() {
 }
 
 #[test]
-fn collision_and_cancellation_preserve_existing_items_and_clean_staging() {
+fn unavailable_template_sources_keep_the_path_or_decoding_cause() {
+    use std::error::Error;
+
     let root = tempfile::tempdir().unwrap();
     let directory = Location::Local(root.path().into());
+    let source = directory.join("template.bin");
+    let target = "draft.bin";
+    let error = job(&directory, target, Source::File(source.clone()))
+        .create(&mut Progress::default())
+        .unwrap_err();
+    assert!(
+        matches!(error, TransferError::Failed(Failure::FileTemplate(reason))
+        if matches!(reason.as_ref(), FileTemplateError::SourceMissing(path) if path == &source))
+    );
+
+    let error = job(&directory, target, Source::Stored("!!!!".into()))
+        .create(&mut Progress::default())
+        .unwrap_err();
+    let TransferError::Failed(Failure::FileTemplate(reason)) = error else {
+        panic!("Expected a saved template decode failure: {error:?}");
+    };
+    assert!(matches!(
+        reason.as_ref(),
+        FileTemplateError::InvalidSavedPayload(_)
+    ));
+    assert!(reason.source().unwrap().is::<base64::DecodeError>());
+    assert!(fs::read_dir(root.path()).unwrap().next().is_none());
+}
+
+#[test]
+fn collision_and_cancellation_preserve_existing_items_and_clean_staging() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = Location::Local(root.path().canonicalize().unwrap());
     fs::write(root.path().join("original"), b"original bytes").unwrap();
     symlink("original", root.path().join("link")).unwrap();
     let source = || draft("draft", TextEncoding::Utf8);
-    assert!(job(&directory, "link", source())
+    let error = job(&directory, "link", source())
         .create(&mut Progress::default())
-        .is_err());
+        .unwrap_err();
+    assert!(
+        matches!(error, TransferError::Failed(Failure::Mutation(reason))
+        if matches!(reason.as_ref(), MutationError::DestinationExists(path) if path == &directory.join("link")))
+    );
     assert_eq!(
         fs::read_link(root.path().join("link")).unwrap(),
         Path::new("original")
@@ -131,16 +170,27 @@ fn collision_and_cancellation_preserve_existing_items_and_clean_staging() {
         }
         false
     });
-    assert!(job(&directory, "taken.txt", source())
+    let error = job(&directory, "taken.txt", source())
         .create(&mut Progress::with_cancellation(racing))
-        .is_err());
+        .unwrap_err();
+    assert!(
+        matches!(error, TransferError::Failed(Failure::Mutation(reason))
+        if matches!(reason.as_ref(), MutationError::DestinationExists(path) if path == &directory.join("taken.txt")))
+    );
     assert_eq!(fs::read(existing).unwrap(), b"competing create");
 
     let folder = root.path().to_owned();
     let stopping = Cancellation::at_checkpoint(move || payload_is_staged(&folder));
-    assert!(job(&directory, "stopped.txt", source())
-        .create(&mut Progress::with_cancellation(stopping))
-        .is_err());
+    let mut progress = Progress::with_cancellation(stopping);
+    assert!(matches!(
+        job(&directory, "stopped.txt", source()).create(&mut progress),
+        Err(TransferError::Cancelled)
+    ));
+    assert!(progress.results.cancelled);
+    assert_eq!(
+        progress.results.root_outcomes(),
+        [(directory.join("stopped.txt"), Outcome::Cancelled)]
+    );
     assert!(!root.path().join("stopped.txt").exists());
     assert_eq!(
         fs::read(root.path().join("original")).unwrap(),
@@ -151,6 +201,7 @@ fn collision_and_cancellation_preserve_existing_items_and_clean_staging() {
 
 pub(in crate::vfs) fn check_sftp(root: &Location) {
     let directory = crate::vfs::create_directory(root, "file-templates").unwrap();
+    let directory = directory.with_path(super::super::transfer::canonical(&directory).unwrap());
     let original = directory.join("legacy.txt");
     let existing = directory.join("created.txt");
     let bytes = b"\xcf\xf0\xe8\xe2\xe5\xf2\r\n";
@@ -167,13 +218,18 @@ pub(in crate::vfs) fn check_sftp(root: &Location) {
         .unwrap();
     assert_eq!(fs::read(existing.path()).unwrap(), bytes);
     assert_eq!(fs::read(original.path()).unwrap(), bytes);
-    assert!(job(
+    let error = job(
         &directory,
         "created.txt",
-        draft("different", TextEncoding::Utf8)
+        draft("different", TextEncoding::Utf8),
     )
     .create(&mut Progress::default())
-    .is_err());
+    .unwrap_err();
+    assert!(
+        matches!(&error, TransferError::Failed(Failure::Mutation(reason))
+        if matches!(reason.as_ref(), MutationError::DestinationExists(path) if path == &existing)),
+        "Unexpected result for {existing}: {error:?}"
+    );
     assert_eq!(fs::read(existing.path()).unwrap(), bytes);
     assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 2);
     println!("New file templates over SFTP preserved the legacy bytes and existing destination");
