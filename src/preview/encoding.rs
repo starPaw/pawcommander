@@ -2,7 +2,7 @@ use encoding_rs::{Decoder, DecoderResult, Encoding};
 use std::borrow::Cow;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) enum Codec {
+pub(crate) enum Codec {
     #[default]
     Utf8,
     Utf16Le,
@@ -125,7 +125,7 @@ impl Codec {
         (status == DecoderResult::InputEmpty && read == bytes.len()).then_some(text)
     }
 
-    pub(super) fn encode(self, text: &str) -> Option<Cow<'_, [u8]>> {
+    pub(crate) fn encode(self, text: &str) -> Option<Cow<'_, [u8]>> {
         match self {
             Self::Utf8 => Some(Cow::Borrowed(text.as_bytes())),
             Self::Utf16Le => Some(Cow::Owned(

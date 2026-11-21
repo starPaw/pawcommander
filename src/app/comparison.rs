@@ -24,6 +24,8 @@ pub(super) enum ComparisonBody {
     #[cfg(target_os = "macos")]
     Collections(Box<super::collections::CollectionsDialog>),
     #[cfg(target_os = "macos")]
+    NewFile(Box<super::file_templates::FileTemplatesDialog>),
+    #[cfg(target_os = "macos")]
     Sync(Box<super::folder_sync::FolderSyncDialog>),
 }
 
@@ -35,7 +37,12 @@ pub(super) enum ComparisonResponse {
     #[cfg(target_os = "macos")]
     TrashDuplicates(Box<crate::vfs::duplicates::TrashPlan>),
     #[cfg(target_os = "macos")]
-    RevealCollectionItem(Location),
+    RevealItem(Location),
+    #[cfg(target_os = "macos")]
+    CreateFile(
+        crate::vfs::file_templates::NewFile,
+        mpsc::Sender<Result<(), String>>,
+    ),
 }
 
 impl ComparisonDialog {
@@ -61,6 +68,8 @@ impl ComparisonDialog {
             #[cfg(target_os = "macos")]
             ComparisonBody::Collections(view) => view.poll(),
             #[cfg(target_os = "macos")]
+            ComparisonBody::NewFile(view) => view.poll(),
+            #[cfg(target_os = "macos")]
             ComparisonBody::Sync(view) => view.poll(),
         }
     }
@@ -70,6 +79,7 @@ impl ComparisonDialog {
         ctx: &egui::Context,
         #[cfg(target_os = "macos")] profiles: &mut Vec<super::sync_profiles::SyncProfile>,
         #[cfg(target_os = "macos")] catalog: &mut crate::vfs::collections::Catalog,
+        #[cfg(target_os = "macos")] templates: &mut crate::vfs::file_templates::Library,
     ) -> ComparisonResponse {
         let open = match &mut self.body {
             ComparisonBody::Folders(view) => view.show(ctx),
@@ -80,6 +90,8 @@ impl ComparisonDialog {
             ComparisonBody::Usage(view) => view.show(ctx),
             #[cfg(target_os = "macos")]
             ComparisonBody::Collections(view) => return view.show(ctx, catalog),
+            #[cfg(target_os = "macos")]
+            ComparisonBody::NewFile(view) => return view.show(ctx, templates),
             #[cfg(target_os = "macos")]
             ComparisonBody::Sync(view) => return view.show(ctx, profiles),
         };
@@ -97,9 +109,19 @@ impl PawCommander {
             return;
         };
         #[cfg(target_os = "macos")]
-        let response = comparison.show(ctx, &mut self.sync_profiles, &mut self.collections);
+        let response = comparison.show(
+            ctx,
+            &mut self.sync_profiles,
+            &mut self.collections,
+            &mut self.file_templates,
+        );
         #[cfg(not(target_os = "macos"))]
         let response = comparison.show(ctx);
+        #[cfg(target_os = "macos")]
+        if let ComparisonResponse::CreateFile(job, completion) = response {
+            self.enqueue_new_file(job, completion, ctx);
+            return;
+        }
         if matches!(response, ComparisonResponse::Open) {
             return;
         }
@@ -109,7 +131,7 @@ impl PawCommander {
         match response {
             ComparisonResponse::ApplySync(plan) => self.enqueue_folder_sync(plan, ctx),
             ComparisonResponse::TrashDuplicates(plan) => self.enqueue_duplicate_trash(*plan, ctx),
-            ComparisonResponse::RevealCollectionItem(path) => self.reveal_search_result(path, ctx),
+            ComparisonResponse::RevealItem(path) => self.reveal_search_result(path, ctx),
             _ => {}
         }
         ctx.request_repaint();

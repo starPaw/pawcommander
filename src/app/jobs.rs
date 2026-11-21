@@ -168,6 +168,36 @@ impl PawCommander {
         });
     }
 
+    #[cfg(target_os = "macos")]
+    pub(super) fn enqueue_new_file(
+        &mut self,
+        job: crate::vfs::file_templates::NewFile,
+        completion: mpsc::Sender<Result<(), String>>,
+        ctx: &egui::Context,
+    ) {
+        let label = crate::i18n::text("Создание файла");
+        let description = format!("{label} · {}", job.target().display().escape_debug());
+        let (_events, receive) = mpsc::channel();
+        self.submit_job(
+            ctx,
+            PendingJob {
+                label: label.into(),
+                description,
+                work: Box::new(move |progress| job.create(progress)),
+                transfer: Some(TransferInteraction {
+                    events: receive,
+                    cut_generation: None,
+                    conflict: None,
+                    can_pause: false,
+                }),
+                cut: None,
+                retry_origin: None,
+                undo_origin: None,
+                native_completion: Some(completion),
+            },
+        );
+    }
+
     pub(super) fn start_stoppable_job(
         &mut self,
         ctx: &egui::Context,
