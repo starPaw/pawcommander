@@ -49,7 +49,7 @@ impl PawCommander {
                         .on_hover_text(self.settings.shortcuts.hint(ctx, Command::Search, Command::Search.label())).clicked() {
                         self.open_search();
                     }
-                    if ui.add_enabled_ui(self.job.is_none(), |ui| icons::button(ui, Icon::Server, "SFTP", self.tab().path.remote())).inner
+                    if ui.add_enabled_ui(self.jobs.current.is_none(), |ui| icons::button(ui, Icon::Server, "SFTP", self.tab().path.remote())).inner
                         .on_hover_text(crate::i18n::text!("Подключиться по SFTP")).clicked() {
                         actions.push(Action::ConnectSftp);
                     }

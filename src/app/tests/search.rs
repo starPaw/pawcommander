@@ -81,13 +81,13 @@ fn search_results_copy_to_captured_location_and_do_not_reveal_in_a_changed_tab()
         },
         &ctx,
     );
-    assert!(app.job.is_some());
+    assert!(app.jobs.current.is_some());
     let deadline = Instant::now() + Duration::from_secs(5);
-    while app.job.is_some() && Instant::now() < deadline {
+    while app.jobs.current.is_some() && Instant::now() < deadline {
         app.poll(&ctx);
         std::thread::sleep(Duration::from_millis(5));
     }
-    assert!(app.job.is_none());
+    assert!(app.jobs.current.is_none());
     assert_eq!(
         std::fs::read(destination.join("found.txt")).unwrap(),
         b"search hit"

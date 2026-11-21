@@ -131,7 +131,9 @@ fn operation_footer_text(output: &egui::FullOutput) -> String {
 fn hold_queue(app: &mut PawCommander) -> mpsc::Sender<Result<String, String>> {
     let (send, receive) = mpsc::channel();
     let (_, progress) = Progress::tracked();
-    app.job = Some(Job {
+    app.jobs.current = Some(Job {
+        transfer: None,
+        cut: None,
         label: "held operation".into(),
         started: Instant::now(),
         result: receive,
@@ -167,7 +169,7 @@ fn answer_queue_conflict(app: &mut PawCommander, ctx: &egui::Context, label: &st
             },
             |ui| {
                 let ctx = &ui.ctx().clone();
-                let transfer = app.transfer.as_mut().unwrap();
+                let transfer = app.jobs.transfer_mut().unwrap();
                 if transfer.conflict.as_mut().unwrap().show(ctx) {
                     transfer.conflict = None;
                 }

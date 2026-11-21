@@ -433,106 +433,15 @@ impl PawCommander {
                 self.dialog_focus = true;
             }
             #[cfg(target_os = "macos")]
-            Action::CustomActions => {
-                let Some(folder) = self.tab().path.local().map(Path::to_owned) else {
-                    return;
-                };
-                let Some(files) = self
-                    .selected()
-                    .into_iter()
-                    .map(|location| match location {
-                        Location::Local(path) => Some(path),
-                        _ => None,
-                    })
-                    .collect::<Option<Vec<_>>>()
-                    .filter(|files| !files.is_empty())
-                else {
-                    return;
-                };
-                self.remember_dialog_file_focus(ctx);
-                self.dialog = Some(
-                    match super::custom_actions::Preview::new(
-                        folder,
-                        files,
-                        self.settings.custom_actions.clone(),
-                    ) {
-                        Some(preview) => Dialog::RunCustomAction(Box::new(preview)),
-                        None => Dialog::EditCustomActions(Box::new(
-                            super::custom_actions::Editor::new(Vec::new()),
-                        )),
-                    },
-                );
-                self.dialog_focus = true;
-            }
+            Action::CustomActions => self.open_custom_action_preview(ctx),
             Action::OpenEmbeddedTerminal(folder) => {
                 if !crate::terminal::available(&folder) {
                     return;
                 }
                 #[cfg(target_os = "macos")]
-                {
-                    if let Some(terminal) = self
-                        .embedded_terminal
-                        .as_mut()
-                        .filter(|terminal| !terminal.finished())
-                    {
-                        terminal.focus(ctx);
-                        return;
-                    }
-                    match crate::terminal::embedded::Panel::open(folder, ctx) {
-                        Ok(terminal) => self.embedded_terminal = Some(terminal),
-                        Err(error) => {
-                            self.notice = Some((
-                                crate::tr_format!(
-                                    "Could not open the embedded terminal. {error}",
-                                    error = error
-                                ),
-                                true,
-                            ))
-                        }
-                    }
-                }
+                self.open_embedded_terminal(folder, ctx);
             }
-            Action::Open(i, p) => {
-                self.active = i;
-                let entry = self.panes[i]
-                    .tab()
-                    .entries
-                    .iter()
-                    .find(|entry| entry.path == p);
-                #[cfg(target_os = "macos")]
-                if let Some(problem) = entry
-                    .and_then(|entry| entry.metadata.link_status)
-                    .and_then(crate::fs_ops::links::LinkStatus::problem)
-                {
-                    self.notice = Some((problem.into(), true));
-                    return;
-                }
-                let directory = entry.is_some_and(|entry| entry.is_dir);
-                let browse = if directory {
-                    Some(p.clone())
-                } else {
-                    p.browse_archive()
-                };
-                if let Some(browse) = browse {
-                    if browse.is_archive() {
-                        self.notice = None;
-                    }
-                    if self.folder_view(i).mode == FolderMode::Columns {
-                        self.navigate_columns(i, ColumnNavigation::Browse(browse), ctx);
-                    } else {
-                        self.panes[i].tab_mut().navigate(browse, ctx);
-                    }
-                } else if p.is_archive() {
-                    self.notice = Some((crate::archive::readonly().into(), true));
-                } else if p.remote() {
-                    self.open_in_zed(p, true, ctx);
-                } else if let Some(path) = p.local()
-                    && let Err(e) = open::that_detached(path)
-                {
-                    self.notice =
-                        Some((crate::tr_format!("Could not open file: {e}", e = e), true));
-                }
-            }
+            Action::Open(pane, location) => self.open_entry(pane, location, ctx),
             Action::History(index, delta) => {
                 self.active = index;
                 self.navigate_history(index, delta, ctx);
@@ -630,34 +539,7 @@ impl PawCommander {
                 )));
                 self.dialog_focus = true;
             }
-            Action::Rename if !self.conflict_open() => {
-                let selected = self.selected();
-                if self.tab().path.is_archive() {
-                    if let [source] = selected.as_slice() {
-                        self.open_archive_edit(
-                            ArchiveEdit::Rename {
-                                entry: source.path().to_owned(),
-                                name: file_name(source),
-                            },
-                            ctx,
-                        );
-                    }
-                    return;
-                }
-                if !selected.is_empty() {
-                    self.remember_dialog_file_focus(ctx);
-                    self.dialog = Some(if selected.len() == 1 {
-                        let source = selected.into_iter().next().unwrap();
-                        let name = file_name(&source);
-                        Dialog::Rename { source, name }
-                    } else {
-                        Dialog::BatchRename(Box::new(super::batch_rename::BatchRenameDialog::new(
-                            selected,
-                        )))
-                    });
-                    self.dialog_focus = true;
-                }
-            }
+            Action::Rename if !self.conflict_open() => self.open_rename_dialog(ctx),
             Action::ChangePermissions if !self.conflict_open() && self.tab().path.remote() => {
                 let sources = self.selected();
                 if !sources.is_empty() && sources.iter().all(Location::remote) {
@@ -683,31 +565,7 @@ impl PawCommander {
                 }
             }
             Action::ExtractArchive if !self.conflict_open() => {
-                let Some(parent) = self
-                    .tab()
-                    .path
-                    .archive_source()
-                    .and_then(std::path::Path::parent)
-                else {
-                    return;
-                };
-                let sources = self.selected();
-                if !sources.is_empty() {
-                    let archive_directory = Location::Local(parent.to_owned());
-                    let peer = self.panes[1 - self.active].tab().path.clone();
-                    let other =
-                        (self.settings.split && !peer.is_archive() && peer != archive_directory)
-                            .then_some(peer);
-                    self.remember_dialog_file_focus(ctx);
-                    self.dialog = Some(Dialog::ExtractArchive {
-                        sources,
-                        address: archive_directory.display(),
-                        archive_directory,
-                        other,
-                        password: zeroize::Zeroizing::new(String::new()),
-                    });
-                    self.dialog_focus = true;
-                }
+                self.open_extract_archive_dialog(ctx)
             }
             Action::VerifyArchive if !self.conflict_open() => {
                 if let Some(archive) = self.archive_to_verify(&self.selected()) {
@@ -805,37 +663,7 @@ impl PawCommander {
                     self.bookmarks.push(Bookmark::new(path));
                 }
             }
-            Action::Reveal => {
-                let location = self
-                    .selected()
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| self.tab().path.clone());
-                let Some(path) = location.local() else {
-                    self.notice = Some((
-                        crate::i18n::text!("SFTP нельзя показать в системном файловом менеджере")
-                            .into(),
-                        true,
-                    ));
-                    return;
-                };
-                #[cfg(target_os = "macos")]
-                let result = std::process::Command::new("open")
-                    .arg("-R")
-                    .arg(path)
-                    .spawn()
-                    .map(|mut child| {
-                        std::thread::spawn(move || {
-                            let _ = child.wait();
-                        });
-                    });
-                #[cfg(not(target_os = "macos"))]
-                let result = open::that_detached(path.parent().unwrap_or(path));
-                if let Err(e) = result {
-                    self.notice =
-                        Some((crate::tr_format!("Could not reveal file: {e}", e = e), true));
-                }
-            }
+            Action::Reveal => self.reveal_selection(),
             Action::CopyPath => {
                 let paths = self.selected();
                 ctx.copy_text(if paths.is_empty() {
@@ -849,6 +677,190 @@ impl PawCommander {
                 });
             }
             _ => {}
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn open_custom_action_preview(&mut self, ctx: &egui::Context) {
+        let Some(folder) = self.tab().path.local().map(Path::to_owned) else {
+            return;
+        };
+        let Some(files) = self
+            .selected()
+            .into_iter()
+            .map(|location| match location {
+                Location::Local(path) => Some(path),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .filter(|files| !files.is_empty())
+        else {
+            return;
+        };
+        self.remember_dialog_file_focus(ctx);
+        self.dialog = Some(
+            match super::custom_actions::Preview::new(
+                folder,
+                files,
+                self.settings.custom_actions.clone(),
+            ) {
+                Some(preview) => Dialog::RunCustomAction(Box::new(preview)),
+                None => Dialog::EditCustomActions(Box::new(super::custom_actions::Editor::new(
+                    Vec::new(),
+                ))),
+            },
+        );
+        self.dialog_focus = true;
+    }
+
+    #[cfg(target_os = "macos")]
+    fn open_embedded_terminal(&mut self, folder: Location, ctx: &egui::Context) {
+        if let Some(terminal) = self
+            .embedded_terminal
+            .as_mut()
+            .filter(|terminal| !terminal.finished())
+        {
+            terminal.focus(ctx);
+            return;
+        }
+        match crate::terminal::embedded::Panel::open(folder, ctx) {
+            Ok(terminal) => self.embedded_terminal = Some(terminal),
+            Err(error) => {
+                self.notice = Some((
+                    crate::tr_format!(
+                        "Could not open the embedded terminal. {error}",
+                        error = error
+                    ),
+                    true,
+                ))
+            }
+        }
+    }
+
+    fn open_entry(&mut self, pane: usize, location: Location, ctx: &egui::Context) {
+        self.active = pane;
+        let entry = self.panes[pane]
+            .tab()
+            .entries
+            .iter()
+            .find(|entry| entry.path == location);
+        #[cfg(target_os = "macos")]
+        if let Some(problem) = entry
+            .and_then(|entry| entry.metadata.link_status)
+            .and_then(crate::fs_ops::links::LinkStatus::problem)
+        {
+            self.notice = Some((problem.into(), true));
+            return;
+        }
+        let directory = entry.is_some_and(|entry| entry.is_dir);
+        let browse = if directory {
+            Some(location.clone())
+        } else {
+            location.browse_archive()
+        };
+        if let Some(browse) = browse {
+            if browse.is_archive() {
+                self.notice = None;
+            }
+            if self.folder_view(pane).mode == FolderMode::Columns {
+                self.navigate_columns(pane, ColumnNavigation::Browse(browse), ctx);
+            } else {
+                self.panes[pane].tab_mut().navigate(browse, ctx);
+            }
+        } else if location.is_archive() {
+            self.notice = Some((crate::archive::readonly().into(), true));
+        } else if location.remote() {
+            self.open_in_zed(location, true, ctx);
+        } else if let Some(path) = location.local()
+            && let Err(e) = open::that_detached(path)
+        {
+            self.notice = Some((crate::tr_format!("Could not open file: {e}", e = e), true));
+        }
+    }
+
+    fn open_rename_dialog(&mut self, ctx: &egui::Context) {
+        let selected = self.selected();
+        if self.tab().path.is_archive() {
+            if let [source] = selected.as_slice() {
+                self.open_archive_edit(
+                    ArchiveEdit::Rename {
+                        entry: source.path().to_owned(),
+                        name: file_name(source),
+                    },
+                    ctx,
+                );
+            }
+            return;
+        }
+        if !selected.is_empty() {
+            self.remember_dialog_file_focus(ctx);
+            self.dialog = Some(if selected.len() == 1 {
+                let source = selected.into_iter().next().unwrap();
+                let name = file_name(&source);
+                Dialog::Rename { source, name }
+            } else {
+                Dialog::BatchRename(Box::new(super::batch_rename::BatchRenameDialog::new(
+                    selected,
+                )))
+            });
+            self.dialog_focus = true;
+        }
+    }
+
+    fn open_extract_archive_dialog(&mut self, ctx: &egui::Context) {
+        let Some(parent) = self
+            .tab()
+            .path
+            .archive_source()
+            .and_then(std::path::Path::parent)
+        else {
+            return;
+        };
+        let sources = self.selected();
+        if !sources.is_empty() {
+            let archive_directory = Location::Local(parent.to_owned());
+            let peer = self.panes[1 - self.active].tab().path.clone();
+            let other = (self.settings.split && !peer.is_archive() && peer != archive_directory)
+                .then_some(peer);
+            self.remember_dialog_file_focus(ctx);
+            self.dialog = Some(Dialog::ExtractArchive {
+                sources,
+                address: archive_directory.display(),
+                archive_directory,
+                other,
+                password: zeroize::Zeroizing::new(String::new()),
+            });
+            self.dialog_focus = true;
+        }
+    }
+
+    fn reveal_selection(&mut self) {
+        let location = self
+            .selected()
+            .first()
+            .cloned()
+            .unwrap_or_else(|| self.tab().path.clone());
+        let Some(path) = location.local() else {
+            self.notice = Some((
+                crate::i18n::text!("SFTP нельзя показать в системном файловом менеджере").into(),
+                true,
+            ));
+            return;
+        };
+        #[cfg(target_os = "macos")]
+        let result = std::process::Command::new("open")
+            .arg("-R")
+            .arg(path)
+            .spawn()
+            .map(|mut child| {
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+            });
+        #[cfg(not(target_os = "macos"))]
+        let result = open::that_detached(path.parent().unwrap_or(path));
+        if let Err(e) = result {
+            self.notice = Some((crate::tr_format!("Could not reveal file: {e}", e = e), true));
         }
     }
 

@@ -230,7 +230,7 @@ impl PawCommander {
     }
 
     pub(super) fn volume_file_work_active(&self) -> bool {
-        self.job.is_some() || !self.pending_jobs.is_empty() || self.smb.busy()
+        self.jobs.is_busy() || self.smb.busy()
     }
 
     pub(super) fn eject_volume(&mut self, target: EjectTarget, ctx: &egui::Context) {
