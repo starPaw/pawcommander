@@ -2,9 +2,10 @@ use super::text;
 use crate::file_error::{
     AccessAction, AccessCause, AccessError, ArchiveError, ArchiveMemberError, ChecksumError,
     ConnectionError, Failure, HostKeyError, KnownHostEntryError, KnownHostsError, ListingError,
-    ListingErrorKind, LocalPathAction, ManifestLineError, MutationError, PathError,
-    PermissionError, PinError, PreviewError, ProbeAction, PublicationError, RecoveryNotice,
-    ScanError, SearchError, SpaceError, SshStage, StagingCleanupError,
+    ListingErrorKind, LocalPathAction, ManifestLineError, MetadataError, MetadataField,
+    MetadataWarning, MutationError, PathError, PermissionError, PinError, PreviewError,
+    ProbeAction, PublicationError, RecoveryNotice, ScanError, SearchError, SpaceError, SshStage,
+    StagingCleanupError,
 };
 use crate::operations::TransferError;
 use crate::vfs::{DeletionFailure, TransferFailure};
@@ -21,6 +22,7 @@ pub(crate) fn file_error(error: &TransferError) -> String {
                 Failure::Scan(error) => scan_error(error),
                 Failure::Checksum(error) => checksum_error(error),
                 Failure::Archive(error) => archive_error(error),
+                Failure::Metadata(error) => metadata_error(error),
                 Failure::Space(error) => space_error(error),
                 Failure::Permissions(reason) => permission_error(
                     reason,
@@ -47,6 +49,43 @@ pub(crate) fn file_error(error: &TransferError) -> String {
         }
         TransferError::Cancelled => crate::tr_format!("Operation cancelled"),
     }
+}
+
+fn metadata_error(error: &MetadataError) -> String {
+    match error {
+        MetadataError::TargetChanged(target) => crate::tr_format!(
+            "Item {target} changed while preserving metadata.",
+            target = target
+        ),
+        MetadataError::CleanupDirectoryChanged(target) => format!(
+            "{} · {target}",
+            text!("Временная папка изменилась перед очисткой")
+        ),
+    }
+}
+
+pub(crate) fn metadata_warning(warning: &MetadataWarning) -> String {
+    let fields = warning
+        .fields
+        .iter()
+        .map(|field| match field {
+            MetadataField::Permissions => text!("права доступа"),
+            MetadataField::AccessTime => text!("время доступа"),
+            MetadataField::ModificationTime => text!("время изменения"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut lines = vec![crate::tr_format!(
+        "Could not fully preserve {fields}.",
+        fields = fields
+    )];
+    for cause in &warning.causes {
+        let cause = cause.to_string();
+        if !lines.contains(&cause) {
+            lines.push(cause);
+        }
+    }
+    lines.join("\n")
 }
 
 pub(crate) fn connection_result_error(error: &TransferError) -> String {

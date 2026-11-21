@@ -361,7 +361,7 @@ fn finish_attributes(
             copy.verify_metadata(target, &handle.metadata(target)?)?;
             copy_metadata::finish_file(target, &wanted, &mut handle)?
         };
-        progress.results.note_metadata(source, warning.as_deref());
+        progress.results.note_metadata(source, warning);
     }
     Ok(())
 }

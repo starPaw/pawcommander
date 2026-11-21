@@ -1,6 +1,5 @@
-//! Preserve ordinary attributes on private SFTP transfer payloads.
+//! Preserve ordinary attributes on transfer payloads and mounted SMB files.
 use super::{
-    err,
     sftp::remote,
     transfer::{
         entry_metadata, EntryMetadata, LocalEntryMetadata, SourceReader, TransferSourceEntry,
@@ -9,7 +8,9 @@ use super::{
     Location,
 };
 use crate::{
-    i18n::text,
+    file_error::{
+        AccessAction, AccessCause, AccessError, MetadataError, MetadataField, MetadataWarning,
+    },
     operations::{Progress, TransferError},
 };
 use libssh2_sys::{
@@ -107,14 +108,15 @@ impl Attributes {
         if self.shape.is_some() && self.shape == current.shape {
             return Ok(());
         }
-        Err(crate::tr_format!(
-            "Item {target} changed while preserving metadata.",
-            target = target
-        )
-        .into())
+        Err(MetadataError::TargetChanged(target.clone()).into())
     }
 
-    fn warning(&self, current: &Self, remote_target: bool) -> Option<String> {
+    fn warning(
+        &self,
+        current: &Self,
+        remote_target: bool,
+        causes: Vec<AccessCause>,
+    ) -> Option<MetadataWarning> {
         let exact_time = |expected, actual| {
             let expected = if remote_target {
                 from_seconds(wire_time(expected))
@@ -127,22 +129,15 @@ impl Attributes {
         if self.mode.is_none()
             || self.mode.map(|mode| mode & 0o7777) != current.mode.map(|mode| mode & 0o7777)
         {
-            fields.push(text!("права доступа"));
+            fields.push(MetadataField::Permissions);
         }
         if !exact_time(self.accessed, current.accessed) {
-            fields.push(text!("время доступа"));
+            fields.push(MetadataField::AccessTime);
         }
         if !exact_time(self.modified, current.modified) {
-            fields.push(text!("время изменения"));
+            fields.push(MetadataField::ModificationTime);
         }
-        if fields.is_empty() {
-            return None;
-        }
-        let fields = fields.join(", ");
-        Some(crate::tr_format!(
-            "Could not fully preserve {fields}.",
-            fields = fields
-        ))
+        (!fields.is_empty()).then_some(MetadataWarning { fields, causes })
     }
 }
 
@@ -155,7 +150,11 @@ fn wire_time(value: Option<SystemTime>) -> Option<u64> {
     u32::try_from(seconds).ok().map(u64::from)
 }
 
-fn local_attribute(result: io::Result<()>) -> io::Result<()> {
+fn local_attribute(
+    result: io::Result<()>,
+    target: &Location,
+    causes: &mut Vec<AccessCause>,
+) -> Result<(), TransferError> {
     match result {
         Err(error)
             if matches!(
@@ -163,9 +162,11 @@ fn local_attribute(result: io::Result<()>) -> io::Result<()> {
                 ErrorKind::PermissionDenied | ErrorKind::Unsupported | ErrorKind::InvalidInput
             ) =>
         {
+            causes.push(error.into());
             Ok(())
         }
-        result => result,
+        result => result
+            .map_err(|error| AccessError::new(target, AccessAction::WriteMetadata, error).into()),
     }
 }
 
@@ -175,8 +176,9 @@ fn local_apply(
     mode: Mode,
     target: &Location,
     existing: Option<&TransferSourceEntry>,
-) -> Result<Option<String>, TransferError> {
-    let original = file.metadata()?;
+) -> Result<Option<MetadataWarning>, TransferError> {
+    let read_error = |error| AccessError::new(target, AccessAction::ReadOpenMetadata, error);
+    let original = file.metadata().map_err(read_error)?;
     if let Some(existing) = existing {
         existing.verify_metadata(
             target,
@@ -185,40 +187,53 @@ fn local_apply(
     }
     let initial = Attributes::from_local(&original);
     wanted.check_shape(&initial, target)?;
+    let mut causes = Vec::new();
     if let Some(accessed) = wanted
         .accessed
         .filter(|&time| Some(time) != initial.accessed)
     {
-        local_attribute(file.set_times(FileTimes::new().set_accessed(accessed)))?;
+        local_attribute(
+            file.set_times(FileTimes::new().set_accessed(accessed)),
+            target,
+            &mut causes,
+        )?;
     }
     if let Some(modified) = wanted
         .modified
         .filter(|&time| Some(time) != initial.modified)
     {
-        local_attribute(file.set_times(FileTimes::new().set_modified(modified)))?;
+        local_attribute(
+            file.set_times(FileTimes::new().set_modified(modified)),
+            target,
+            &mut causes,
+        )?;
     }
     #[cfg(unix)]
     if let Some(permissions) = wanted.requested_mode(mode)
         && initial.mode.map(|mode| mode & 0o7777) != Some(permissions)
     {
-        local_attribute(file.set_permissions(fs::Permissions::from_mode(permissions)))?;
+        local_attribute(
+            file.set_permissions(fs::Permissions::from_mode(permissions)),
+            target,
+            &mut causes,
+        )?;
     }
     #[cfg(not(unix))]
     let _ = mode;
-    let observed = file.metadata()?;
+    let observed = file.metadata().map_err(read_error)?;
     let after = Attributes::from_local(&observed);
     wanted.check_shape(&after, target)?;
     if existing.is_some() {
         let opened = EntryMetadata::Local(LocalEntryMetadata::from_file(file, observed));
         let actual =
-            entry_metadata(target)?.ok_or_else(|| super::transfer::changed_source(target))?;
+            entry_metadata(target)?.ok_or_else(|| MetadataError::TargetChanged(target.clone()))?;
         TransferSourceEntry {
             metadata: opened,
             children: None,
         }
         .verify_metadata(target, &actual)?;
     }
-    Ok(wanted.warning(&after, false))
+    Ok(wanted.warning(&after, false, causes))
 }
 
 enum RemoteObject<'a> {
@@ -227,15 +242,20 @@ enum RemoteObject<'a> {
 }
 
 impl RemoteObject<'_> {
-    fn stat(&mut self) -> Result<FileStat, TransferError> {
-        match self {
-            Self::Path(channel, path) => channel.lstat(path),
-            Self::Handle(handle) => handle.stat(),
-        }
-        .map_err(|error| TransferError::from(err(error)))
+    fn stat(&mut self, target: &Location) -> Result<FileStat, TransferError> {
+        let (result, action) = match self {
+            Self::Path(channel, path) => (channel.lstat(path), AccessAction::ReadMetadata),
+            Self::Handle(handle) => (handle.stat(), AccessAction::ReadOpenMetadata),
+        };
+        result.map_err(|error| AccessError::new(target, action, error).into())
     }
 
-    fn set(&mut self, stat: FileStat) -> Result<(), TransferError> {
+    fn set(
+        &mut self,
+        stat: FileStat,
+        target: &Location,
+        causes: &mut Vec<AccessCause>,
+    ) -> Result<(), TransferError> {
         let result = match self {
             Self::Path(channel, path) => channel.setstat(path, stat),
             Self::Handle(handle) => handle.setstat(stat),
@@ -251,9 +271,12 @@ impl RemoteObject<'_> {
                     )
                 ) =>
             {
+                causes.push(error.into());
                 Ok(())
             }
-            result => result.map_err(|error| TransferError::from(err(error))),
+            result => result.map_err(|error| {
+                AccessError::new(target, AccessAction::WriteMetadata, error).into()
+            }),
         }
     }
 
@@ -263,8 +286,8 @@ impl RemoteObject<'_> {
         mode: Mode,
         target: &Location,
         existing: Option<&TransferSourceEntry>,
-    ) -> Result<Option<String>, TransferError> {
-        let initial = self.stat()?;
+    ) -> Result<Option<MetadataWarning>, TransferError> {
+        let initial = self.stat(target)?;
         if let Some(existing) = existing {
             existing.verify_metadata(target, &EntryMetadata::Remote(initial.clone()))?;
         }
@@ -272,31 +295,44 @@ impl RemoteObject<'_> {
         let accessed = wire_time(wanted.accessed).or(initial.atime);
         let modified = wire_time(wanted.modified).or(initial.mtime);
         let mut attempted = false;
+        let mut causes = Vec::new();
         // SFTP v3 encodes both times together. Retain the target's other
         // value if one source date is absent or outside the wire range.
         if let (Some(atime), Some(mtime)) = (accessed, modified)
             && (accessed != initial.atime || modified != initial.mtime)
         {
-            self.set(FileStat {
-                atime: Some(atime),
-                mtime: Some(mtime),
-                ..empty_stat()
-            })?;
+            self.set(
+                FileStat {
+                    atime: Some(atime),
+                    mtime: Some(mtime),
+                    ..empty_stat()
+                },
+                target,
+                &mut causes,
+            )?;
             attempted = true;
         }
         if let Some(permissions) = wanted.requested_mode(mode)
             && initial.perm.map(|mode| mode & 0o7777) != Some(permissions)
         {
-            self.set(FileStat {
-                perm: Some(permissions),
-                ..empty_stat()
-            })?;
+            self.set(
+                FileStat {
+                    perm: Some(permissions),
+                    ..empty_stat()
+                },
+                target,
+                &mut causes,
+            )?;
             attempted = true;
         }
-        let stat = if attempted { self.stat()? } else { initial };
+        let stat = if attempted {
+            self.stat(target)?
+        } else {
+            initial
+        };
         let after = Attributes::from_remote(&stat);
         wanted.check_shape(&after, target)?;
-        Ok(wanted.warning(&after, true))
+        Ok(wanted.warning(&after, true, causes))
     }
 }
 
@@ -317,7 +353,7 @@ fn apply_path(
     channel: Option<&Sftp>,
     mode: Mode,
     existing: Option<&TransferSourceEntry>,
-) -> Result<Option<String>, TransferError> {
+) -> Result<Option<MetadataWarning>, TransferError> {
     if let Some(channel) = channel {
         return RemoteObject::Path(channel, target.path()).apply(wanted, mode, target, existing);
     }
@@ -339,14 +375,16 @@ fn apply_path(
         {
             if let Some(existing) = existing {
                 let actual = entry_metadata(target)?
-                    .ok_or_else(|| super::transfer::changed_source(target))?;
+                    .ok_or_else(|| MetadataError::TargetChanged(target.clone()))?;
                 existing.verify_metadata(target, &actual)?;
             }
-            let current = Attributes::from_local(&fs::symlink_metadata(target.path())?);
+            let metadata = fs::symlink_metadata(target.path())
+                .map_err(|error| AccessError::new(target, AccessAction::ReadMetadata, error))?;
+            let current = Attributes::from_local(&metadata);
             wanted.check_shape(&current, target)?;
-            return Ok(wanted.warning(&current, false));
+            return Ok(wanted.warning(&current, false, vec![error.into()]));
         }
-        Err(error) => return Err(error.into()),
+        Err(error) => return Err(AccessError::new(target, AccessAction::OpenFile, error).into()),
     };
     local_apply(&file, wanted, mode, target, existing)
 }
@@ -381,7 +419,7 @@ pub(super) fn stage(
             mode,
             None,
         )?;
-        progress.results.note_metadata(original, warning.as_deref());
+        progress.results.note_metadata(original, warning);
     }
     Ok(())
 }
@@ -404,7 +442,7 @@ pub(super) fn stage_resumed_entry(
     attributes.accessed = accessed;
     let channel = payload.remote().then(|| remote(payload)).transpose()?;
     let warning = apply_path(payload, &attributes, channel.as_ref(), mode, None)?;
-    progress.results.note_metadata(source, warning.as_deref());
+    progress.results.note_metadata(source, warning);
     Ok(())
 }
 
@@ -412,7 +450,7 @@ pub(super) fn finish_file(
     target: &Location,
     wanted: &Attributes,
     opened: &mut SourceReader,
-) -> Result<Option<String>, TransferError> {
+) -> Result<Option<MetadataWarning>, TransferError> {
     match opened {
         SourceReader::Local(file) => finish_local_file(target, wanted, file),
         SourceReader::Remote(handle) => {
@@ -425,7 +463,7 @@ pub(super) fn finish_local_file(
     target: &Location,
     wanted: &Attributes,
     file: &fs::File,
-) -> Result<Option<String>, TransferError> {
+) -> Result<Option<MetadataWarning>, TransferError> {
     local_apply(file, wanted, Mode::Final, target, None)
 }
 
@@ -433,7 +471,7 @@ pub(super) fn finish_directory(
     target: &Location,
     wanted: &Attributes,
     existing: &TransferSourceEntry,
-) -> Result<Option<String>, TransferError> {
+) -> Result<Option<MetadataWarning>, TransferError> {
     let channel = target.remote().then(|| remote(target)).transpose()?;
     apply_path(
         target,
@@ -469,12 +507,16 @@ pub(super) fn reopen_for_cleanup(
                                     ..empty_stat()
                                 },
                             )
-                            .map_err(err)?;
+                            .map_err(|error| {
+                                AccessError::new(&dir, AccessAction::WriteMetadata, error)
+                            })?;
                     }
                 }
                 Err(error) if error.code() == ErrorCode::SFTP(LIBSSH2_FX_NO_SUCH_FILE) => {}
-                Err(error) => return Err(err(error).into()),
-                Ok(_) => return Err(text!("Временная папка изменилась перед очисткой").into()),
+                Err(error) => {
+                    return Err(AccessError::new(&dir, AccessAction::ReadMetadata, error).into())
+                }
+                Ok(_) => return Err(MetadataError::CleanupDirectoryChanged(dir).into()),
             }
         } else {
             match fs::symlink_metadata(dir.path()) {
@@ -486,14 +528,67 @@ pub(super) fn reopen_for_cleanup(
                             fs::Permissions::from_mode(
                                 (metadata.permissions().mode() & 0o1777) | 0o700,
                             ),
-                        )?;
+                        )
+                        .map_err(|error| {
+                            AccessError::new(&dir, AccessAction::WriteMetadata, error)
+                        })?;
                     }
                 }
                 Err(error) if error.kind() == ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
-                Ok(_) => return Err(text!("Временная папка изменилась перед очисткой").into()),
+                Err(error) => {
+                    return Err(AccessError::new(&dir, AccessAction::ReadMetadata, error).into())
+                }
+                Ok(_) => return Err(MetadataError::CleanupDirectoryChanged(dir).into()),
             }
         }
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::file_error::Failure;
+
+    #[test]
+    fn local_metadata_write_retains_tolerated_and_fatal_errors() {
+        let target = Location::Local("/fixture/copy".into());
+        let mut causes = Vec::new();
+        local_attribute(
+            Err(io::Error::from_raw_os_error(libc::EACCES)),
+            &target,
+            &mut causes,
+        )
+        .unwrap();
+        let wanted = Attributes {
+            shape: Some(Shape::File(5)),
+            mode: Some(0o640),
+            accessed: from_seconds(Some(42)),
+            modified: from_seconds(Some(43)),
+        };
+        let observed = Attributes {
+            mode: Some(0o600),
+            ..wanted
+        };
+        let warning = wanted.warning(&observed, false, causes).unwrap();
+        assert_eq!(warning.fields, [MetadataField::Permissions]);
+        assert!(
+            matches!(warning.causes.as_slice(), [AccessCause::Local(source)]
+            if source.raw_os_error() == Some(libc::EACCES))
+        );
+
+        let error = local_attribute(
+            Err(io::Error::from_raw_os_error(libc::EIO)),
+            &target,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        let TransferError::Failed(Failure::Access(error)) = error else {
+            panic!("expected a typed metadata write failure");
+        };
+        assert_eq!(error.location, target);
+        assert_eq!(error.action, AccessAction::WriteMetadata);
+        assert!(matches!(error.cause, AccessCause::Local(source)
+            if source.raw_os_error() == Some(libc::EIO)));
+    }
 }

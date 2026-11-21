@@ -1,4 +1,5 @@
 //! Completed operation results. Disk access and serialization belong to workers.
+use crate::file_error::MetadataWarning;
 use crate::operations::TransferError;
 #[cfg(test)]
 use crate::test_ui::ContextExt as _;
@@ -153,7 +154,7 @@ impl Results {
         self.unrecorded_metadata_warning = false;
     }
 
-    pub(crate) fn note_metadata(&mut self, source: &Location, warning: Option<&str>) {
+    pub(crate) fn note_metadata(&mut self, source: &Location, warning: Option<MetadataWarning>) {
         let index = if self.active_source.as_ref() == Some(source) {
             self.active
         } else {
@@ -165,7 +166,7 @@ impl Results {
         };
         let old = self.items[index].metadata_warning.take();
         self.items[index].metadata_warning = if let Some(warning) = warning {
-            Some(self.field(warning, old))
+            Some(self.field(&crate::i18n::metadata_warning(&warning), old))
         } else {
             self.weight = self
                 .weight

@@ -217,6 +217,7 @@ pub(super) fn server_rejected(local: &Location, remote: &Location) {
         assert!(warning.contains(crate::i18n::text!("права доступа")));
         assert!(warning.contains(crate::i18n::text!("время доступа")));
         assert!(warning.contains(crate::i18n::text!("время изменения")));
+        assert!(warning.contains("[SFTP(3)]"), "{warning}");
     }
     let target = remote.join(source.name()).join("payload");
     assert_eq!(fs::read(target.path()).unwrap(), DATA);

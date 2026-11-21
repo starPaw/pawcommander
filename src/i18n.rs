@@ -8,8 +8,8 @@ mod file_errors;
 mod formats;
 pub(crate) use catalog::key;
 pub(crate) use file_errors::{
-    access_io_message, connection_result_error, deletion_failure, file_error, path_error,
-    transfer_failure,
+    access_io_message, connection_result_error, deletion_failure, file_error, metadata_warning,
+    path_error, transfer_failure,
 };
 #[cfg(target_os = "macos")]
 pub(crate) use formats::czech_format;
