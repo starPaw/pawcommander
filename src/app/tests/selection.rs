@@ -165,6 +165,51 @@ fn selection_commands_retarget_file_focus_and_keep_select_all_cursor() {
     assert!(matches!(app.dialog, Some(Dialog::Trash { ref paths }) if paths == &[first]));
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn selection_restore_rejects_same_metadata_replacements_and_keeps_edited_files() {
+    let root = tempfile::tempdir().unwrap();
+    let location = Location::from(root.path().to_path_buf());
+    let edited = location.join("edited.txt");
+    let replaced = location.join("replaced.txt");
+    for path in [&edited, &replaced] {
+        std::fs::write(path.path(), b"old data").unwrap();
+    }
+    let ctx = egui::Context::default();
+    let mut tab = Tab::new(location.clone(), &ctx);
+    wait_for_directory(&mut tab);
+    let original = tab
+        .entries
+        .iter()
+        .find(|entry| entry.path == replaced)
+        .unwrap();
+    let original_timestamps = (original.metadata.created, original.modified);
+    let original_identity = original.metadata.local_file.unwrap().device_and_inode();
+    let view = FolderView::default();
+    tab.change_selection(view, SelectionChange::All);
+    tab.change_selection(view, SelectionChange::Invert);
+
+    std::fs::write(edited.path(), b"edited in place").unwrap();
+    let staged = root.path().join("replacement");
+    std::fs::write(&staged, b"new data").unwrap();
+    std::fs::rename(staged, replaced.path()).unwrap();
+    let mut entries = crate::vfs::read_directory(&location, &|| false).unwrap();
+    let replacement = entries
+        .iter_mut()
+        .find(|entry| entry.path == replaced)
+        .unwrap();
+    assert_ne!(
+        original_identity,
+        replacement.metadata.local_file.unwrap().device_and_inode()
+    );
+    // Model a replacement that preserves the original creation and modification times.
+    (replacement.metadata.created, replacement.modified) = original_timestamps;
+    tab.entries.replace(entries);
+    tab.reconcile_previous_selection();
+    tab.change_selection(view, SelectionChange::Restore);
+    assert_eq!(tab.selected, BTreeSet::from([edited]));
+}
+
 #[test]
 fn filters_sort_and_range_selection() {
     let ctx = egui::Context::default();

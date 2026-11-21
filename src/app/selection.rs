@@ -60,6 +60,8 @@ impl Rule {
 pub(super) struct EntryIdentity {
     is_dir: bool,
     is_symlink: bool,
+    #[cfg(target_os = "macos")]
+    local_file_id: Option<(u64, u64)>,
     created: Option<SystemTime>,
     // The server may only provide timestamps and size, with no creation time or file ID.
     fallback: Option<(Option<SystemTime>, u64)>,
@@ -67,15 +69,20 @@ pub(super) struct EntryIdentity {
 
 impl From<&FileEntry> for EntryIdentity {
     fn from(entry: &FileEntry) -> Self {
+        let needs_fallback = entry.metadata.created.is_none();
+        #[cfg(target_os = "macos")]
+        let local_file_id = entry.metadata.local_file.map(|id| id.device_and_inode());
+        #[cfg(target_os = "macos")]
+        let needs_fallback = needs_fallback && local_file_id.is_none();
+
         Self {
             is_dir: entry.is_dir,
             is_symlink: entry.is_symlink,
+            // Selection follows the filesystem object through edits in place.
+            #[cfg(target_os = "macos")]
+            local_file_id,
             created: entry.metadata.created,
-            fallback: entry
-                .metadata
-                .created
-                .is_none()
-                .then_some((entry.modified, entry.size)),
+            fallback: needs_fallback.then_some((entry.modified, entry.size)),
         }
     }
 }

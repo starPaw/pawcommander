@@ -66,6 +66,11 @@ pub(crate) struct LocalFileIdentity {
 }
 
 impl LocalFileIdentity {
+    #[cfg(target_os = "macos")]
+    pub(crate) fn device_and_inode(self) -> (u64, u64) {
+        (self.device, self.inode)
+    }
+
     pub(crate) fn from_metadata(metadata: &fs::Metadata) -> Option<Self> {
         if !metadata.is_file() {
             return None;
