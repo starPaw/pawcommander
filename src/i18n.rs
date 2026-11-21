@@ -265,7 +265,6 @@ fn format_replacement_rollback_failed(
 }
 
 // Pass named values explicitly so Rust checks the arguments of every template.
-#[macro_export]
 macro_rules! tr_format {
     ($message:tt $($args:tt)*) => {
         match $crate::i18n::language() {
@@ -280,6 +279,8 @@ macro_rules! tr_format {
         }
     };
 }
+
+pub(crate) use tr_format;
 
 #[cfg(test)]
 mod tests {
