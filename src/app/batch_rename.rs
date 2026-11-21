@@ -121,7 +121,9 @@ impl BatchRenameDialog {
         match std::thread::Builder::new()
             .name("pawcommander-rename-preview".into())
             .spawn(move || {
-                let _ = sender.send(BatchRenamePreview::build(&sources, &rules, &worker_cancel));
+                let result = BatchRenamePreview::build(&sources, &rules, &worker_cancel)
+                    .map_err(|error| crate::i18n::file_error(&error));
+                let _ = sender.send(result);
                 ctx.request_repaint();
             }) {
             Ok(_) => self.work = Some(PreviewWork { cancel, result }),

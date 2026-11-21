@@ -252,7 +252,7 @@ impl CopyTree<'_, '_> {
             directory.current_metadata()
         } else {
             let mut input = SourceReader::open(source)?;
-            entry.verify_metadata(source, &input.metadata()?)?;
+            entry.verify_metadata(source, &input.metadata(source)?)?;
             let mut file = parent.exclusive_file(name)?;
             self.created = true;
             let size = entry.size();
@@ -270,7 +270,7 @@ impl CopyTree<'_, '_> {
                 self.progress
                     .verify_copy(source.path(), size, hash, &mut file)?;
             }
-            entry.verify_metadata(source, &input.metadata()?)?;
+            entry.verify_metadata(source, &input.metadata(source)?)?;
             entry.verify(source, &cancel, true)?;
             Ok(EntryMetadata::Local(LocalEntryMetadata::from_file(
                 &file,
@@ -358,7 +358,7 @@ fn finish_attributes(
             copy_metadata::finish_directory(target, &wanted, copy)?
         } else {
             let mut handle = SourceReader::open(target)?;
-            copy.verify_metadata(target, &handle.metadata()?)?;
+            copy.verify_metadata(target, &handle.metadata(target)?)?;
             copy_metadata::finish_file(target, &wanted, &mut handle)?
         };
         progress.results.note_metadata(source, warning.as_deref());
@@ -436,7 +436,7 @@ fn verify_apple_double(path: &Location, entry: &TransferSourceEntry) -> Result<(
         return Err(stale_target(path));
     }
     let mut file = SourceReader::open(path)?;
-    entry.verify_metadata(path, &file.metadata()?)?;
+    entry.verify_metadata(path, &file.metadata(path)?)?;
     let mut header = [0; HEADER.len()];
     file.read_exact(&mut header)?;
     if header != HEADER {

@@ -202,7 +202,7 @@ fn report_path(path: &Location, exists: bool) -> String {
     }
 }
 
-fn observe_path(path: Option<&Location>, details: &mut Vec<String>) -> Result<bool, String> {
+fn observe_path(path: Option<&Location>, details: &mut Vec<String>) -> Result<bool, TransferError> {
     if let Some(path) = path {
         let exists = entry_metadata(path)?.is_some();
         details.push(report_path(path, exists));

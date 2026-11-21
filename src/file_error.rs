@@ -5,8 +5,16 @@ use std::{error::Error, fmt, io, path::PathBuf, str::Utf8Error};
 #[derive(Debug)]
 pub(crate) enum Failure {
     Message(String),
-    Io { source: io::Error, message: String },
+    Io {
+        source: io::Error,
+        message: String,
+    },
     Path(PathError),
+    Access(Box<AccessError>),
+    ComparisonPane {
+        right: bool,
+        cause: Box<TransferError>,
+    },
     Listing(Box<ListingError>),
     ConflictClosed,
     Mutation(Box<MutationError>),
@@ -32,6 +40,8 @@ impl Failure {
             Self::Message(_) | Self::ConflictClosed => None,
             Self::Io { source, .. } => Some(source),
             Self::Path(error) => Some(error),
+            Self::Access(error) => Some(error.as_ref()),
+            Self::ComparisonPane { cause, .. } => Some(cause.as_ref()),
             Self::Listing(error) => Some(error.as_ref()),
             Self::Mutation(error) => Some(error.as_ref()),
             Self::Publication(error) => Some(error.as_ref()),
@@ -45,11 +55,109 @@ impl fmt::Display for Failure {
         match self {
             Self::Message(message) | Self::Io { message, .. } => f.write_str(message),
             Self::Path(error) => fmt::Display::fmt(error, f),
+            Self::Access(error) => fmt::Display::fmt(error, f),
+            Self::ComparisonPane { right, cause } => {
+                let pane = if *right { "Right pane" } else { "Left pane" };
+                write!(f, "{pane} · {cause}")
+            }
             Self::Listing(error) => fmt::Display::fmt(error, f),
             Self::ConflictClosed => f.write_str("Conflict dialog closed"),
             Self::Mutation(error) => fmt::Display::fmt(error, f),
             Self::Publication(error) => fmt::Display::fmt(error, f),
             Self::StagingCleanup(error) => fmt::Display::fmt(error, f),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AccessAction {
+    ResolvePath,
+    ReadMetadata,
+    OpenFile,
+    ReadOpenMetadata,
+    ReadChildren,
+}
+
+#[derive(Debug)]
+pub(crate) enum AccessCause {
+    Local(io::Error),
+    Sftp(ssh2::Error),
+    Connection(String),
+}
+
+impl From<io::Error> for AccessCause {
+    fn from(error: io::Error) -> Self {
+        Self::Local(error)
+    }
+}
+
+impl From<ssh2::Error> for AccessCause {
+    fn from(error: ssh2::Error) -> Self {
+        Self::Sftp(error)
+    }
+}
+
+impl From<String> for AccessCause {
+    fn from(message: String) -> Self {
+        Self::Connection(message)
+    }
+}
+
+impl fmt::Display for AccessCause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Local(error) => fmt::Display::fmt(error, f),
+            Self::Sftp(error) => fmt::Display::fmt(error, f),
+            Self::Connection(message) => f.write_str(message),
+        }
+    }
+}
+
+impl AccessCause {
+    pub(crate) fn is_absent(&self) -> bool {
+        match self {
+            Self::Local(error) => error.kind() == io::ErrorKind::NotFound,
+            Self::Sftp(error) => {
+                error.code() == ssh2::ErrorCode::SFTP(libssh2_sys::LIBSSH2_FX_NO_SUCH_FILE)
+            }
+            Self::Connection(_) => false,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct AccessError {
+    pub(crate) location: Location,
+    pub(crate) action: AccessAction,
+    pub(crate) cause: AccessCause,
+}
+
+impl AccessError {
+    pub(crate) fn new(
+        location: &Location,
+        action: AccessAction,
+        cause: impl Into<AccessCause>,
+    ) -> Self {
+        Self {
+            location: location.clone(),
+            action,
+            cause: cause.into(),
+        }
+    }
+}
+
+impl fmt::Display for AccessError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?} at {}: {}", self.action, self.location, self.cause)
+    }
+}
+
+impl Error for AccessError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match &self.cause {
+            AccessCause::Local(error) => Some(error),
+            AccessCause::Sftp(error) => Some(error),
+            AccessCause::Connection(_) => None,
         }
     }
 }

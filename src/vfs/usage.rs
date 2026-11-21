@@ -129,13 +129,13 @@ pub(crate) fn analyze(
             }
             Err(error) => {
                 scan.result.issues += 1;
-                scan.result.nodes[node].issue = Some(error.to_string());
+                scan.result.nodes[node].issue = Some(crate::i18n::file_error(&error));
             }
         }
     }
     if let Err(error) = scope.parent.verify() {
         scan.result.issues += 1;
-        scan.result.nodes[0].issue = Some(error);
+        scan.result.nodes[0].issue = Some(crate::i18n::file_error(&error));
     }
     Ok(scan.finish())
 }

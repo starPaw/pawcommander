@@ -1,5 +1,51 @@
 use super::*;
 
+#[cfg(target_os = "macos")]
+#[test]
+fn path_access_preserves_local_causes_and_distinguishes_an_absent_entry() {
+    use crate::file_error::{AccessAction, AccessCause, Failure};
+    use crate::vfs::transfer::SourceReader;
+    use std::io::ErrorKind;
+
+    let fixture = tempfile::tempdir().unwrap();
+    let root: Location = fixture.path().to_path_buf().into();
+    let existing = root.join("regular-file");
+    fs::write(existing.path(), b"preserved").unwrap();
+    let blocked = existing.join("child");
+    let missing = root.join("missing");
+    assert!(entry_metadata(&missing).unwrap().is_none());
+
+    for (failure, action, location, kind) in [
+        (
+            entry_metadata(&blocked).err().expect("metadata must fail"),
+            AccessAction::ReadMetadata,
+            &blocked,
+            ErrorKind::NotADirectory,
+        ),
+        (
+            canonical(&missing).unwrap_err(),
+            AccessAction::ResolvePath,
+            &missing,
+            ErrorKind::NotFound,
+        ),
+        (
+            SourceReader::open(&missing).err().expect("open must fail"),
+            AccessAction::OpenFile,
+            &missing,
+            ErrorKind::NotFound,
+        ),
+    ] {
+        let TransferError::Failed(Failure::Access(details)) = &failure else {
+            panic!("original filesystem failure was lost: {failure:?}");
+        };
+        assert_eq!(&details.location, location);
+        assert_eq!(details.action, action);
+        assert!(matches!(&details.cause, AccessCause::Local(error) if error.kind() == kind));
+        assert!(crate::i18n::file_error(&failure).contains(&location.display()));
+    }
+    assert_eq!(fs::read(existing.path()).unwrap(), b"preserved");
+}
+
 #[test]
 fn local_mutations_keep_typed_conflicts_and_preserve_existing_items() {
     use crate::file_error::{Failure, LocalPathAction, MutationError};

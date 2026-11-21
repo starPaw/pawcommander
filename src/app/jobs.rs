@@ -744,7 +744,7 @@ impl PawCommander {
                         }
                         Err(error) => {
                             send(job);
-                            Err(error.to_string())
+                            Err(crate::i18n::file_error(&error))
                         }
                     }
                 }),

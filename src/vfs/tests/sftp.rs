@@ -2,6 +2,79 @@ use super::*;
 #[cfg(target_os = "macos")]
 use crate::vfs::cache_media_preview;
 
+#[cfg(target_os = "macos")]
+fn check_sftp_access_errors(remote_root: &Location) {
+    use crate::file_error::{AccessAction, AccessCause, Failure};
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let missing = remote_root.join("missing-metadata-entry");
+    assert!(entry_metadata(&missing).unwrap().is_none());
+    let sftp = remote(remote_root).unwrap();
+    let denied = remote_root.join("denied-metadata-folder");
+    fs::create_dir(denied.path()).unwrap();
+    let child = denied.join("file");
+    fs::write(child.path(), b"preserved despite metadata denial").unwrap();
+    let mode = fs::metadata(denied.path()).unwrap().permissions();
+    fs::set_permissions(denied.path(), fs::Permissions::from_mode(0o600)).unwrap();
+    let inspection = entry_metadata(&child);
+    fs::set_permissions(denied.path(), mode).unwrap();
+    let inspection = inspection
+        .err()
+        .expect("metadata must fail with permission denied");
+
+    let source = remote_root.join("canonicalization-source");
+    fs::write(source.path(), b"preserve during path check").unwrap();
+    let link = remote_root.join("unresolvable-folder");
+    symlink("unresolvable-folder", link.path()).unwrap();
+    let blocked = link.join("subdirectory");
+    let expected_resolution = sftp.realpath(blocked.path()).unwrap_err().code();
+    let transfer = transfer_with_conflicts(
+        std::slice::from_ref(&source),
+        &blocked,
+        TransferKind::Copy,
+        &mut Progress::default(),
+        |_| panic!("an invalid destination cannot reach a conflict"),
+        |_, _| panic!("an invalid destination cannot publish"),
+    )
+    .unwrap_err();
+    assert!(transfer.summary.preparing);
+    assert_eq!(transfer.summary.completed, 0);
+    assert_eq!(transfer.summary.remaining, std::slice::from_ref(&source));
+    for (failure, location, action, code) in [
+        (
+            inspection,
+            &child,
+            AccessAction::ReadMetadata,
+            ssh2::ErrorCode::SFTP(libssh2_sys::LIBSSH2_FX_PERMISSION_DENIED),
+        ),
+        (
+            transfer.error,
+            &blocked,
+            AccessAction::ResolvePath,
+            expected_resolution,
+        ),
+    ] {
+        let TransferError::Failed(Failure::Access(details)) = &failure else {
+            panic!("original SFTP failure was lost: {failure:?}");
+        };
+        assert_eq!(&details.location, location);
+        assert_eq!(details.action, action);
+        assert!(matches!(&details.cause, AccessCause::Sftp(error) if error.code() == code));
+        assert!(crate::i18n::file_error(&failure).contains(&location.display()));
+    }
+    assert_eq!(
+        fs::read(child.path()).unwrap(),
+        b"preserved despite metadata denial"
+    );
+    assert_eq!(
+        fs::read(source.path()).unwrap(),
+        b"preserve during path check"
+    );
+    fs::remove_dir_all(denied.path()).unwrap();
+    fs::remove_file(link.path()).unwrap();
+    fs::remove_file(source.path()).unwrap();
+}
+
 fn check_sftp_deletion_results(remote_root: &Location) {
     use crate::file_error::{Failure, MutationError, SftpRemovalAction};
     use crate::result_history::Outcome;
@@ -1077,6 +1150,8 @@ fn openssh_round_trip_and_host_verification() {
             if source.code() == ssh2::ErrorCode::SFTP(libssh2_sys::LIBSSH2_FX_NO_SUCH_FILE)
     ));
     check_sftp_deletion_results(&remote_root);
+    #[cfg(target_os = "macos")]
+    check_sftp_access_errors(&remote_root);
     #[cfg(target_os = "macos")]
     check_sftp_editor(
         &local_root,

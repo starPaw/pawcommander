@@ -245,7 +245,7 @@ impl RetryTransfer {
         }
     }
 
-    fn target_matches(&self) -> Result<bool, String> {
+    fn target_matches(&self) -> Result<bool, TransferError> {
         let actual = entry_metadata(&self.destination)?;
         let (Some((path, expected)), Some(actual)) = (&self.target, actual) else {
             return Ok(false);
@@ -380,7 +380,7 @@ impl Attempt {
             .map(|stage| stage.join("payload"))
     }
 
-    fn ready_to_retry(&self) -> Result<bool, String> {
+    fn ready_to_retry(&self) -> Result<bool, TransferError> {
         if !self.target_matches(entry_metadata(&self.target)?.as_ref()) {
             return Ok(false);
         }
