@@ -1,13 +1,14 @@
 //! Completed operation results. Disk access and serialization belong to workers.
 use crate::file_error::MetadataWarning;
 use crate::operations::TransferError;
+use crate::recovery::same_owned_marker;
 #[cfg(test)]
 use crate::test_ui::ContextExt as _;
 use crate::vfs::Location;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -779,9 +780,33 @@ struct Update {
 pub(crate) enum HistoryError {
     Unavailable,
     Disconnected(PathBuf),
-    Spawn { path: PathBuf, source: io::Error },
-    Open { path: PathBuf, source: io::Error },
-    Save { path: PathBuf, source: io::Error },
+    Spawn {
+        path: PathBuf,
+        source: io::Error,
+    },
+    Open {
+        path: PathBuf,
+        problem: HistoryOpenProblem,
+    },
+    Save {
+        path: PathBuf,
+        source: io::Error,
+    },
+}
+
+#[derive(Debug)]
+pub(crate) enum HistoryOpenProblem {
+    MissingParent,
+    CreateDirectory(io::Error),
+    OpenLock(io::Error),
+    Locked,
+    Lock(io::Error),
+    Read(io::Error),
+    InvalidType,
+    IdentityChanged,
+    SizeLimit(u64),
+    Json(serde_json::Error),
+    UnsupportedVersion(u32),
 }
 
 struct Append {
@@ -880,16 +905,13 @@ impl History {
                 let opened = open_store(&worker_path);
                 let (mut saved, lock, mut error) = match opened {
                     Ok((saved, lock)) => (saved, Some(lock), None),
-                    Err(source) => (
+                    Err(error) => (
                         Saved {
                             version: VERSION,
                             ..Saved::default()
                         },
                         None,
-                        Some(Arc::new(HistoryError::Open {
-                            path: worker_path.clone(),
-                            source,
-                        })),
+                        Some(Arc::new(error)),
                     ),
                 };
                 let _ = updates.send(Update {
@@ -1183,41 +1205,25 @@ fn single_line(text: &str) -> String {
     text.replace('\r', "\\r").replace('\n', "\\n")
 }
 
-fn open_store(path: &Path) -> io::Result<(Saved, File)> {
+fn open_store(path: &Path) -> Result<(Saved, File), HistoryError> {
+    let open_error = |problem| HistoryError::Open {
+        path: path.to_owned(),
+        problem,
+    };
     let parent = path
         .parent()
-        .ok_or_else(|| io::Error::other("Missing history parent"))?;
-    fs::create_dir_all(parent)?;
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(path.with_extension("lock"))?;
-    lock.try_lock().map_err(io::Error::other)?;
-    let saved = match File::open(path) {
-        Ok(file) => {
-            let mut bytes = Vec::new();
-            file.take(MAX_BYTES + 1).read_to_end(&mut bytes)?;
-            if bytes.len() as u64 > MAX_BYTES {
-                return Err(io::Error::other(
-                    "History exceeds 32 MiB; existing file preserved",
-                ));
-            }
-            let saved: Saved = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-            if saved.version != VERSION {
-                return Err(io::Error::other(
-                    "Unsupported history version; existing file preserved",
-                ));
-            }
-            saved
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Saved {
-            version: VERSION,
-            ..Saved::default()
-        },
-        Err(error) => return Err(error),
+        .ok_or_else(|| open_error(HistoryOpenProblem::MissingParent))?;
+    fs::create_dir_all(parent).map_err(|source| HistoryError::Open {
+        path: parent.to_owned(),
+        problem: HistoryOpenProblem::CreateDirectory(source),
+    })?;
+    let lock_path = path.with_extension("lock");
+    let lock_error = |problem| HistoryError::Open {
+        path: lock_path.clone(),
+        problem,
     };
+    let lock = open_history_lock(&lock_path).map_err(lock_error)?;
+    let saved = read_history(path).map_err(open_error)?;
     let mut bounded = Saved {
         version: VERSION,
         records: Vec::new(),
@@ -1225,7 +1231,102 @@ fn open_store(path: &Path) -> io::Result<(Saved, File)> {
     for record in saved.records {
         bounded.push(record);
     }
+    if !same_owned_marker(&lock, &lock_path)
+        .map_err(|source| lock_error(HistoryOpenProblem::OpenLock(source)))?
+    {
+        return Err(lock_error(HistoryOpenProblem::IdentityChanged));
+    }
     Ok((bounded, lock))
+}
+
+fn history_file_options() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        // A replacement between inspection and open must not redirect or block the worker.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    options
+}
+
+fn regular_history_file_exists(
+    path: &Path,
+    on_io: fn(io::Error) -> HistoryOpenProblem,
+) -> Result<bool, HistoryOpenProblem> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() => Ok(true),
+        Ok(_) => Err(HistoryOpenProblem::InvalidType),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(on_io(error)),
+    }
+}
+
+fn open_history_lock(path: &Path) -> Result<File, HistoryOpenProblem> {
+    let open_lock = HistoryOpenProblem::OpenLock;
+    regular_history_file_exists(path, open_lock)?;
+    let lock = history_file_options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .map_err(open_lock)?;
+    if !lock.metadata().map_err(open_lock)?.is_file() {
+        return Err(HistoryOpenProblem::InvalidType);
+    }
+    match lock.try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => return Err(HistoryOpenProblem::Locked),
+        Err(TryLockError::Error(source)) => return Err(HistoryOpenProblem::Lock(source)),
+    }
+    Ok(lock)
+}
+
+fn read_history(path: &Path) -> Result<Saved, HistoryOpenProblem> {
+    let read = HistoryOpenProblem::Read;
+    if !regular_history_file_exists(path, read)? {
+        return Ok(Saved {
+            version: VERSION,
+            ..Saved::default()
+        });
+    }
+    let file = history_file_options().open(path).map_err(read)?;
+    let metadata = file.metadata().map_err(read)?;
+    if !metadata.is_file() {
+        return Err(HistoryOpenProblem::InvalidType);
+    }
+    if metadata.len() > MAX_BYTES {
+        return Err(HistoryOpenProblem::SizeLimit(MAX_BYTES));
+    }
+    let mut bytes = Vec::new();
+    (&file)
+        .take(MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(read)?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err(HistoryOpenProblem::SizeLimit(MAX_BYTES));
+    }
+    if !same_owned_marker(&file, path).map_err(read)? {
+        return Err(HistoryOpenProblem::IdentityChanged);
+    }
+
+    #[derive(Deserialize)]
+    struct StoredVersion {
+        version: u32,
+    }
+
+    match serde_json::from_slice::<Saved>(&bytes) {
+        Ok(saved) if saved.version == VERSION => Ok(saved),
+        Ok(saved) => Err(HistoryOpenProblem::UnsupportedVersion(saved.version)),
+        // Future versions may have fields that no longer deserialize as Saved.
+        Err(source) => match serde_json::from_slice::<StoredVersion>(&bytes) {
+            Ok(header) if header.version != VERSION => {
+                Err(HistoryOpenProblem::UnsupportedVersion(header.version))
+            }
+            _ => Err(HistoryOpenProblem::Json(source)),
+        },
+    }
 }
 
 fn save(path: &Path, saved: &Saved) -> io::Result<()> {
@@ -1569,7 +1670,12 @@ mod tests {
         let corrupt = dir.path().join("corrupt.json");
         fs::write(&corrupt, b"{incomplete history").unwrap();
         let mut history = History::open(corrupt.clone(), &ctx);
-        assert!(history.sender().append(record()).is_err());
+        let error = history.sender().append(record()).unwrap_err();
+        assert!(matches!(
+            &*error,
+            HistoryError::Open { path, problem: HistoryOpenProblem::Json(source) }
+                if path == &corrupt && source.line() == 1 && source.column() == 2
+        ));
         history.poll();
         assert!(history.error.is_some());
         assert_eq!(
@@ -1587,17 +1693,88 @@ mod tests {
         let (saved, lock) = open_store(&path).unwrap();
         save(&path, &saved).unwrap();
         let baseline = fs::read(&path).unwrap();
-        assert!(open_store(&path).is_err());
         let ctx = egui::Context::default();
         let mut history = History::open(path.clone(), &ctx);
-        assert!(history.sender().append(record()).is_err());
+        let error = history.sender().append(record()).unwrap_err();
+        assert!(matches!(
+            &*error,
+            HistoryError::Open { path: locked, problem: HistoryOpenProblem::Locked }
+                if *locked == path.with_extension("lock")
+        ));
         history.poll();
         assert!(history.error.is_some());
+        assert_eq!(history.records.len(), 1);
         assert_eq!(fs::read(&path).unwrap(), baseline);
         drop(lock);
-        fs::write(&path, br#"{"version":999,"records":[]}"#).unwrap();
-        assert!(open_store(&path).is_err());
-        assert_eq!(fs::read(path).unwrap(), br#"{"version":999,"records":[]}"#);
+        let future = br#"{"version":999,"records":[{"future":true}]}"#;
+        fs::write(&path, future).unwrap();
+        let history = History::open(path.clone(), &ctx);
+        let error = history.sender().append(record()).unwrap_err();
+        assert!(matches!(
+            &*error,
+            HistoryError::Open { path: rejected, problem: HistoryOpenProblem::UnsupportedVersion(999) }
+                if rejected == &path
+        ));
+        assert_eq!(fs::read(path).unwrap(), future);
+    }
+
+    #[test]
+    fn oversized_history_is_rejected_before_deserialization() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.json");
+        File::create(&path).unwrap().set_len(MAX_BYTES + 1).unwrap();
+        assert!(matches!(
+            open_store(&path),
+            Err(HistoryError::Open { path: rejected, problem: HistoryOpenProblem::SizeLimit(limit) })
+                if rejected == path && limit == MAX_BYTES
+        ));
+        assert_eq!(fs::metadata(path).unwrap().len(), MAX_BYTES + 1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn history_open_rejects_links_and_fifos_in_both_paths() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::os::unix::fs::{symlink, FileTypeExt as _};
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let history = dir.path().join("history.json");
+        let lock = history.with_extension("lock");
+        let target = dir.path().join("independent-file");
+        fs::write(&target, b"independent contents").unwrap();
+
+        for path in [&history, &lock] {
+            if path == &lock {
+                fs::remove_file(&lock).unwrap();
+            }
+            symlink(&target, path).unwrap();
+            assert!(matches!(
+                open_store(&history),
+                Err(HistoryError::Open { path: rejected, problem: HistoryOpenProblem::InvalidType })
+                    if rejected == *path
+            ));
+            assert_eq!(fs::read_link(path).unwrap(), target);
+            fs::remove_file(path).unwrap();
+
+            let c_path = CString::new(path.as_os_str().as_bytes()).unwrap();
+            // SAFETY: c_path is a live C string in the disposable test directory.
+            assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+            let (send, receive) = mpsc::channel();
+            let worker_path = history.clone();
+            std::thread::spawn(move || {
+                let _ = send.send(open_store(&worker_path));
+            });
+            assert!(matches!(
+                receive.recv_timeout(Duration::from_secs(3)).expect("history open blocked"),
+                Err(HistoryError::Open { path: rejected, problem: HistoryOpenProblem::InvalidType })
+                    if rejected == *path
+            ));
+            assert!(fs::symlink_metadata(path).unwrap().file_type().is_fifo());
+            fs::remove_file(path).unwrap();
+        }
+        assert_eq!(fs::read(target).unwrap(), b"independent contents");
     }
 
     #[test]
@@ -1978,7 +2155,10 @@ mod tests {
             row.remove("parent");
             row.remove("descendants_enumerated");
         }
-        let reopened: Saved = serde_json::from_value(value).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.json");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let (reopened, _lock) = open_store(&path).unwrap();
         assert_eq!(reopened.records[0].omitted, 0);
         assert!(!reopened.records[0].details_truncated);
         assert!(!reopened.records[0].items[0].descendants_enumerated);
