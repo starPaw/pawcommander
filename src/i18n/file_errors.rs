@@ -4,8 +4,8 @@ use crate::file_error::{
     ConnectionError, Failure, HostKeyError, KnownHostEntryError, KnownHostsError, ListingError,
     ListingErrorKind, LocalPathAction, ManifestLineError, MetadataError, MetadataField,
     MetadataWarning, MutationError, PathError, PermissionError, PinError, PreviewError,
-    ProbeAction, PublicationError, RecoveryNotice, ScanError, SearchError, SpaceError, SshStage,
-    StagingCleanupError, StagingError, StagingRecordAction,
+    ProbeAction, PublicationError, RecoveryNotice, RetryError, RetryProblem, ScanError,
+    SearchError, SpaceError, SshStage, StagingCleanupError, StagingError, StagingRecordAction,
 };
 use crate::file_error::{
     RecoveryRecordAction, RecoveryRecordError, RecoveryRecordProblem, RecoveryRecordSection,
@@ -56,12 +56,57 @@ pub(crate) fn file_error(error: &TransferError) -> String {
                 Failure::Staging(error) => staging_error(error),
                 #[cfg(target_os = "macos")]
                 Failure::ResumeCheck(error) => resume_check_error(error),
+                Failure::Retry(error) => retry_error(error),
                 Failure::RecoveryRecord(error) => recovery_record_error(error),
                 Failure::StagingCleanup(error) => staging_cleanup_error(error),
                 _ => error.to_string(),
             }
         }
         TransferError::Cancelled => crate::tr_format!("Operation cancelled"),
+    }
+}
+
+fn retry_error(error: &RetryError) -> String {
+    use RetryProblem::*;
+
+    let path = &error.location;
+    match error.problem {
+        InspectionRequired => crate::tr_format!(
+            "Inspect the interrupted SFTP transfer to {path} before retrying.",
+            path = path
+        ),
+        RequestChanged => crate::tr_format!(
+            "The selection or operation for the retry to {path} changed. Review the selection.",
+            path = path
+        ),
+        SourceChanged => crate::tr_format!(
+            "Source {path} changed or is unavailable. Inspect it before retrying.",
+            path = path
+        ),
+        DestinationChanged => crate::tr_format!(
+            "Destination folder {path} changed or is unavailable. Select it again.",
+            path = path
+        ),
+        TargetChanged => crate::tr_format!(
+            "Destination item {path} changed since the previous attempt. Inspect it before retrying.",
+            path = path
+        ),
+        BackupRetained => crate::tr_format!(
+            "A backup of the previous destination remains at {path}. Inspect it before retrying.",
+            path = path
+        ),
+        OriginalRetained => crate::tr_format!(
+            "The original item remains in temporary storage at {path}. Inspect it before retrying.",
+            path = path
+        ),
+        PayloadMissing => crate::tr_format!(
+            "The temporary copy needed for the retry is missing at {path}.",
+            path = path
+        ),
+        PayloadPathMissing => crate::tr_format!(
+            "The previous attempt to {path} did not record a path to the required temporary copy.",
+            path = path
+        ),
     }
 }
 
@@ -1027,9 +1072,10 @@ pub(crate) fn transfer_failure(failure: &TransferFailure) -> String {
     {
         return message;
     }
+    let reason = message.strip_suffix('.').unwrap_or(&message);
     if matches!(error, TransferError::PublicationUnconfirmed(_)) {
         return crate::tr_format!(
-            "{error}. Server publication is unconfirmed. Completed: {completed}. Skipped: {skipped}. Remaining: {remaining}. Inspect the source and destination before retrying.", completed = completed, error = message, remaining = remaining, skipped = skipped
+            "{error}. Server publication is unconfirmed. Completed: {completed}. Skipped: {skipped}. Remaining: {remaining}. Inspect the source and destination before retrying.", completed = completed, error = reason, remaining = remaining, skipped = skipped
         );
     }
     if summary.preparing {
@@ -1042,7 +1088,7 @@ pub(crate) fn transfer_failure(failure: &TransferFailure) -> String {
         .collect::<Vec<_>>()
         .join("; ");
     crate::tr_format!(
-        "{error}. Completed: {completed}. Skipped: {skipped}. Remaining: {remaining}: {paths}. Refresh both folders before retrying; check any recovery instructions.", completed = completed, error = message, paths = paths, remaining = remaining, skipped = skipped
+        "{error}. Completed: {completed}. Skipped: {skipped}. Remaining: {remaining}: {paths}. Refresh both folders before retrying; check any recovery instructions.", completed = completed, error = reason, paths = paths, remaining = remaining, skipped = skipped
     )
 }
 

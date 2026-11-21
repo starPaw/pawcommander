@@ -393,6 +393,9 @@ pub(super) fn transfer_run(
     summary: &mut TransferSummary,
 ) -> Result<(), TransferError> {
     progress.checkpoint()?;
+    if let Some(retry) = &progress.retry {
+        retry.verify_request(sources, destination, kind)?;
+    }
     let mut plan = transfer_plan(sources, destination, kind, progress)?;
     if let Some(retry) = &progress.retry {
         for item in &mut plan {

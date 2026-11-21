@@ -1372,7 +1372,6 @@ catalog! {
     "Готово к повтору" => ("Ready to retry", "Připraveno k opakování"),
     "Проверить прерванную операцию SFTP" => ("Check interrupted SFTP transfer", "Zkontrolovat přerušený přenos SFTP"),
     "Проверка прерванной операции SFTP" => ("Checking interrupted SFTP transfer", "Kontrola přerušeného přenosu SFTP"),
-    "Сначала проверьте прерванную операцию SFTP." => ("Check the interrupted SFTP transfer first.", "Nejdříve zkontrolujte přerušený přenos SFTP."),
     "Проверка прерванной операции SFTP отменена." => ("The interrupted SFTP transfer check was cancelled.", "Kontrola přerušeného přenosu SFTP byla zrušena."),
     "Источник проверен. Передача этого объекта не началась." => ("Source checked. Transfer of this item did not start.", "Zdroj zkontrolován. Přenos této položky nezačal."),
     "Источник или папка назначения изменились. Повтор недоступен." => ("The source or destination folder changed. Retry is unavailable.", "Zdrojová nebo cílová složka se změnila. Operaci nelze zopakovat."),

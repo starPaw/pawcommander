@@ -4,6 +4,7 @@ use super::transfer::{
     TransferSourceManifest,
 };
 use super::Location;
+use crate::file_error::{AccessAction, AccessError, RetryProblem};
 use crate::fs_ops::TransferKind;
 use crate::operations::{Cancellation, TransferError};
 use crate::result_history::{Outcome, Results};
@@ -89,23 +90,40 @@ impl RetryTransfer {
         self.checking
     }
 
+    pub(super) fn verify_request(
+        &self,
+        sources: &[Location],
+        destination: &Location,
+        kind: TransferKind,
+    ) -> Result<(), TransferError> {
+        if !self.checking {
+            return Ok(());
+        }
+        if self.needs_inspection() {
+            return Err(RetryProblem::InspectionRequired.at(&self.destination));
+        }
+        if destination != &self.destination {
+            return Err(RetryProblem::DestinationChanged.at(destination));
+        }
+        if kind != self.kind
+            || sources.len() != self.sources.len()
+            || sources
+                .iter()
+                .any(|source| !self.indices.contains_key(source))
+        {
+            return Err(RetryProblem::RequestChanged.at(destination));
+        }
+        self.verify_target()
+    }
+
     pub(super) fn prepare(
         &mut self,
         plan: &[TransferItem],
         cancel: &Cancellation,
     ) -> Result<(), TransferError> {
         if self.checking {
-            if self.needs_inspection() {
-                return Err(
-                    crate::i18n::text!("Сначала проверьте прерванную операцию SFTP.").into(),
-                );
-            }
-            self.verify_target()?;
             if plan.len() != self.sources.len() {
-                return Err(crate::tr_format!(
-                    "The source selection changed. Select the files again."
-                )
-                .into());
+                return Err(RetryProblem::RequestChanged.at(&self.destination));
             }
             for item in plan {
                 self.verify(item, cancel)?;
@@ -150,14 +168,7 @@ impl RetryTransfer {
             .source(&item.original)
             .and_then(|source| source.attempt.as_ref())
         {
-            if !attempt.ready_to_retry()? {
-                let target = &attempt.target;
-                return Err(crate::tr_format!(
-                    "Retry stopped. The state of {target} or its backup has changed.",
-                    target = target
-                )
-                .into());
-            }
+            attempt.verify()?;
             if let Some(manifest) = &attempt.source_entries {
                 manifest.verify(cancel, |_, _| {})?;
             }
@@ -173,15 +184,15 @@ impl RetryTransfer {
         if !self.checking {
             return Ok(());
         }
-        let unchanged = self
+        let changed = || RetryProblem::SourceChanged.at(&item.original);
+        let expected = self
             .source(&item.original)
-            .is_some_and(|expected| expected.resolved == item.source && expected.matches(actual));
-        if unchanged {
+            .filter(|expected| expected.resolved == item.source)
+            .ok_or_else(changed)?;
+        if expected.matches(actual)? {
             Ok(())
         } else {
-            Err(crate::tr_format!(
-                "Retry not started: source {} changed or is unavailable. Inspect it and select the files again.", item.original
-            ).into())
+            Err(changed())
         }
     }
 
@@ -266,10 +277,7 @@ impl RetryTransfer {
         if self.target_matches()? {
             Ok(())
         } else {
-            Err(crate::tr_format!(
-                "The destination folder changed or is unavailable. Select it again."
-            )
-            .into())
+            Err(RetryProblem::DestinationChanged.at(&self.destination))
         }
     }
 
@@ -343,16 +351,19 @@ impl RetryTransfer {
 }
 
 impl Source {
-    fn matches(&self, actual: Option<&EntryMetadata>) -> bool {
+    fn matches(&self, actual: Option<&EntryMetadata>) -> Result<bool, TransferError> {
         match (&self.metadata, actual) {
-            (EntryMetadata::Local(before), Some(actual @ EntryMetadata::Local(after))) => {
-                self.metadata.same_object(actual)
-                    && crate::fs_ops::source_metadata_matches(before, after).unwrap_or(false)
+            (EntryMetadata::Local(before), Some(actual @ EntryMetadata::Local(after)))
+                if self.metadata.same_object(actual) =>
+            {
+                crate::fs_ops::source_metadata_matches(before, after).map_err(|source| {
+                    AccessError::new(&self.resolved, AccessAction::ReadMetadata, source).into()
+                })
             }
             (EntryMetadata::Remote(before), Some(EntryMetadata::Remote(after))) => {
-                remote_source_matches(before, after)
+                Ok(remote_source_matches(before, after))
             }
-            _ => false,
+            _ => Ok(false),
         }
     }
 }
@@ -380,25 +391,93 @@ impl Attempt {
             .map(|stage| stage.join("payload"))
     }
 
-    fn ready_to_retry(&self) -> Result<bool, TransferError> {
+    fn verify(&self) -> Result<(), TransferError> {
         if !self.target_matches(entry_metadata(&self.target)?.as_ref()) {
-            return Ok(false);
+            return Err(RetryProblem::TargetChanged.at(&self.target));
         }
-        for retained in self
-            .backup()
-            .as_ref()
-            .into_iter()
-            .chain(self.held_source.as_ref())
+        if let Some(backup) = self.backup()
+            && entry_metadata(&backup)?.is_some()
         {
-            if entry_metadata(retained)?.is_some() {
-                return Ok(false);
+            return Err(RetryProblem::BackupRetained.at(&backup));
+        }
+        if let Some(original) = &self.held_source
+            && entry_metadata(original)?.is_some()
+        {
+            return Err(RetryProblem::OriginalRetained.at(original));
+        }
+        if self.require_payload {
+            let payload = self
+                .payload()
+                .ok_or_else(|| RetryProblem::PayloadPathMissing.at(&self.target))?;
+            if entry_metadata(&payload)?.is_none() {
+                return Err(RetryProblem::PayloadMissing.at(&payload));
             }
         }
-        if self.require_payload
-            && let Some(payload) = self.payload()
-        {
-            return Ok(entry_metadata(&payload)?.is_some());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::file_error::Failure;
+    use std::fs;
+
+    #[test]
+    fn retry_reports_the_exact_path_of_each_retained_or_missing_artifact() {
+        let dir = tempfile::tempdir().unwrap();
+        let target: Location = dir.path().join("destination").into();
+        let held: Location = dir.path().join("held-original").into();
+        let stage: Location = dir.path().join("staging").into();
+        let backup = stage.join("previous");
+        let payload = stage.join("payload");
+        fs::create_dir(stage.path()).unwrap();
+        fs::write(target.path(), b"original destination").unwrap();
+        fs::write(held.path(), b"held source").unwrap();
+        fs::write(backup.path(), b"saved backup").unwrap();
+        let mut attempt = Attempt {
+            previous: entry_metadata(&target).unwrap(),
+            target: target.clone(),
+            staging: Some(stage),
+            held_source: Some(held.clone()),
+            copied: true,
+            source_entries: None,
+            require_payload: true,
+        };
+        for (path, problem, original_bytes) in [
+            (
+                &backup,
+                RetryProblem::BackupRetained,
+                b"saved backup".as_slice(),
+            ),
+            (
+                &held,
+                RetryProblem::OriginalRetained,
+                b"held source".as_slice(),
+            ),
+        ] {
+            let error = attempt.verify().unwrap_err();
+            assert!(
+                matches!(error, TransferError::Failed(Failure::Retry(reason))
+                if reason.problem == problem && &reason.location == path)
+            );
+            assert_eq!(fs::read(path.path()).unwrap(), original_bytes);
+            fs::remove_file(path.path()).unwrap();
         }
-        Ok(!self.require_payload)
+        let error = attempt.verify().unwrap_err();
+        assert!(
+            matches!(error, TransferError::Failed(Failure::Retry(reason))
+            if reason.problem == RetryProblem::PayloadMissing && reason.location == payload)
+        );
+        fs::write(payload.path(), b"temporary copy").unwrap();
+        assert!(attempt.verify().is_ok());
+        attempt.staging = None;
+        let error = attempt.verify().unwrap_err();
+        assert!(
+            matches!(error, TransferError::Failed(Failure::Retry(reason))
+            if reason.problem == RetryProblem::PayloadPathMissing && reason.location == target)
+        );
+        assert_eq!(fs::read(target.path()).unwrap(), b"original destination");
+        assert_eq!(fs::read(payload.path()).unwrap(), b"temporary copy");
     }
 }

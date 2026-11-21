@@ -10,6 +10,7 @@ mod metadata;
 mod recovery_record;
 #[cfg(target_os = "macos")]
 mod resume_check;
+mod retry;
 mod space;
 mod staging;
 #[cfg(target_os = "macos")]
@@ -25,6 +26,7 @@ pub(crate) use recovery_record::{
 };
 #[cfg(target_os = "macos")]
 pub(crate) use resume_check::{ResumeCheckError, ResumeCheckProblem, ResumeRole};
+pub(crate) use retry::{RetryError, RetryProblem};
 pub(crate) use space::{ProbeAction, SftpSpaceFailure, SpaceError};
 pub(crate) use staging::{StagingError, StagingRecordAction};
 #[cfg(target_os = "macos")]
@@ -61,6 +63,7 @@ pub(crate) enum Failure {
     Staging(Box<StagingError>),
     #[cfg(target_os = "macos")]
     ResumeCheck(Box<ResumeCheckError>),
+    Retry(Box<RetryError>),
     RecoveryRecord(Box<RecoveryRecordError>),
     StagingCleanup(Box<StagingCleanupError>),
 }
@@ -102,6 +105,7 @@ impl Failure {
             Self::Staging(error) => Some(error.as_ref()),
             #[cfg(target_os = "macos")]
             Self::ResumeCheck(error) => Some(error.as_ref()),
+            Self::Retry(error) => Some(error.as_ref()),
             Self::RecoveryRecord(error) => Some(error.as_ref()),
             Self::StagingCleanup(error) => Some(error.as_ref()),
         }
@@ -136,6 +140,7 @@ impl fmt::Display for Failure {
             Self::Staging(error) => fmt::Display::fmt(error, f),
             #[cfg(target_os = "macos")]
             Self::ResumeCheck(error) => fmt::Display::fmt(error, f),
+            Self::Retry(error) => fmt::Display::fmt(error, f),
             Self::RecoveryRecord(error) => fmt::Display::fmt(error, f),
             Self::StagingCleanup(error) => fmt::Display::fmt(error, f),
         }
