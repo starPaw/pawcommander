@@ -5,9 +5,9 @@ use super::sftp::remote;
 use super::{err, TransferFailure, TransferSummary, MAX_TREE_DEPTH};
 use crate::conflict::{Answer, Conflict, Decision, EntryDetails};
 use crate::file_error::{
-    AccessAction, AccessCause, AccessError, Failure, MutationError, ProbeAction, PublicationError,
-    RecoveryNotice, SftpSpaceFailure, SpaceError, StagingCleanupError, StagingError,
-    TransferPlanError,
+    AccessAction, AccessCause, AccessError, ConflictError, Failure, MutationError, ProbeAction,
+    PublicationError, RecoveryNotice, ReplacementRefusal, SftpSpaceFailure, SpaceError,
+    StagingCleanupError, StagingError, TransferPlanError,
 };
 use crate::fs_ops;
 use crate::fs_ops::TransferKind;
@@ -228,6 +228,64 @@ impl TransferItem {
             replacement: None,
         }
     }
+
+    fn replacement_unavailable(&self, reason: ReplacementRefusal) -> TransferError {
+        ConflictError::ReplacementUnavailable {
+            source: self.original.clone(),
+            target: self.target.clone(),
+            reason,
+        }
+        .into()
+    }
+
+    pub(super) fn verify_approved_source(
+        &self,
+        current: Option<&EntryMetadata>,
+    ) -> Result<(), TransferError> {
+        if let Some((approved, _)) = &self.replacement
+            && !current.is_some_and(|metadata| approved.matches_file(metadata))
+        {
+            return Err(ConflictError::SourceChanged(self.original.clone()).into());
+        }
+        Ok(())
+    }
+
+    fn recheck_approved_source(&self) -> Result<(), TransferError> {
+        if self.replacement.is_some() {
+            self.verify_approved_source(entry_metadata(&self.source)?.as_ref())?;
+        }
+        Ok(())
+    }
+}
+
+fn replacement_refusal(
+    item: &TransferItem,
+    source: &EntryMetadata,
+    target: &EntryMetadata,
+) -> Result<Option<ReplacementRefusal>, TransferError> {
+    #[cfg(target_os = "macos")]
+    if mounted_smb(&item.target) {
+        return Ok(Some(ReplacementRefusal::Smb));
+    }
+    if !source.is_file() {
+        return Ok(Some(ReplacementRefusal::SourceNotRegular));
+    }
+    if !target.is_file() {
+        return Ok(Some(ReplacementRefusal::TargetNotRegular));
+    }
+    if source.same_object(target)
+        || (item.source.same_backend(&item.target)
+            && canonical(&item.source)? == canonical(&item.target)?)
+    {
+        return Ok(Some(ReplacementRefusal::SameFile));
+    }
+    #[cfg(windows)]
+    if let (Some(source), Some(target)) = (item.source.local(), item.target.local())
+        && fs_ops::same_windows_file(source, target)
+    {
+        return Ok(Some(ReplacementRefusal::SameFile));
+    }
+    Ok(None)
 }
 
 pub(super) fn transfer_plan(
@@ -456,19 +514,9 @@ pub(super) fn transfer_run(
             let source_meta = read_entry_metadata(&item.source).map_err(|cause| {
                 AccessError::new(&item.source, AccessAction::ReadMetadata, cause)
             })?;
-            let can_replace = source_meta.is_file()
-                && target_meta.is_file()
-                && !source_meta.same_object(&target_meta)
-                && (!item.source.same_backend(&item.target)
-                    || canonical(&item.source)? != canonical(&item.target)?);
-            #[cfg(target_os = "macos")]
-            let can_replace = can_replace && !mounted_smb(&item.target);
-            #[cfg(windows)]
-            let can_replace = can_replace
-                && !matches!((item.source.local(), item.target.local()),
-                    (Some(source), Some(target)) if fs_ops::same_windows_file(source, target));
+            let replacement_refusal = replacement_refusal(&item, &source_meta, &target_meta)?;
             let decision = match group {
-                Some(Decision::Replace) if !can_replace => None,
+                Some(Decision::Replace) if replacement_refusal.is_some() => None,
                 saved => saved,
             };
             let decision = if let Some(decision) = decision {
@@ -478,7 +526,7 @@ pub(super) fn transfer_run(
                 let answer = decide(Conflict {
                     source: source_meta.details(&item.original),
                     target: target_meta.details(&item.target),
-                    can_replace,
+                    replacement_refusal,
                     index,
                     count,
                 })?;
@@ -506,18 +554,11 @@ pub(super) fn transfer_run(
                     item.target = keep_both_name(&item.target, &reserved, &cancel)?;
                     reserved.insert(item.target.clone());
                 }
-                Decision::Replace if can_replace => {
-                    item.replacement = Some((source_meta, target_meta))
-                }
                 Decision::Replace => {
-                    #[cfg(target_os = "macos")]
-                    if mounted_smb(&item.target) {
-                        return Err(crate::i18n::text(crate::smb::REPLACE_UNAVAILABLE).into());
+                    if let Some(reason) = replacement_refusal {
+                        return Err(item.replacement_unavailable(reason));
                     }
-                    return Err(crate::i18n::text!(
-                        "Замена доступна только для двух разных обычных файлов"
-                    )
-                    .into());
+                    item.replacement = Some((source_meta, target_meta));
                 }
             }
         }
@@ -540,15 +581,9 @@ pub(super) fn transfer_run(
             retry.verify(&item, &cancel)?;
         }
         let expected = item.replacement.as_ref().map(|(_, target)| target);
-        if let Some((expected_source, _)) = &item.replacement
-            && !entry_metadata(&item.source)?
-                .is_some_and(|meta| expected_source.matches_file(&meta))
-        {
-            return Err(crate::tr_format!(
-                "Source file {} changed after the dialog was shown",
-                item.source
-            )
-            .into());
+        if let Some(expected) = expected {
+            item.recheck_approved_source()?;
+            check_replacement_destination(&item.target, &item.target, expected)?;
         }
         progress.checkpoint()?;
         let copy_move = kind == TransferKind::Move && super::cross_move::required(&item)?;
@@ -914,7 +949,7 @@ pub(super) fn copy_item_cancellable(
     #[cfg(target_os = "macos")]
     if mounted_smb(&item.target) {
         if expected.is_some() {
-            return Err(crate::i18n::text(crate::smb::REPLACE_UNAVAILABLE).into());
+            return Err(item.replacement_unavailable(ReplacementRefusal::Smb));
         }
         return copy_to_smb(item, progress, published);
     }
@@ -940,6 +975,7 @@ pub(super) fn copy_item_cancellable(
                     &item.target,
                     expected,
                     |_| {},
+                    || item.recheck_approved_source(),
                     published,
                 )
             },
@@ -1086,12 +1122,7 @@ pub(super) fn move_item(
         && !entry_metadata(&item.source)?
             .is_some_and(|current| planned.matches_local_move(&current))
     {
-        let source = &item.original;
-        return Err(crate::tr_format!(
-            "Source item {source} changed while waiting for a conflict decision",
-            source = source
-        )
-        .into());
+        return Err(ConflictError::SourceChanged(item.original.clone()).into());
     }
     progress.checkpoint()?;
     publish_item_typed(
@@ -1103,6 +1134,7 @@ pub(super) fn move_item(
                 retry.note_staging(&item.original, staging);
             }
         },
+        || item.recheck_approved_source(),
         moved,
     )
 }
@@ -1170,14 +1202,13 @@ fn copy_transfer(
             }
         })?;
     progress.results.captured();
+    let source = manifest
+        .entries
+        .get(&item.source)
+        .map(|entry| &entry.metadata);
+    item.verify_approved_source(source)?;
     if let Some(retry) = &progress.retry {
-        retry.verify_snapshot(
-            item,
-            manifest
-                .entries
-                .get(&item.source)
-                .map(|entry| &entry.metadata),
-        )?;
+        retry.verify_snapshot(item, source)?;
     }
     progress.checkpoint()?;
     let result = with_staging_typed(&item.target, Some(&cancel), |staging, preserve| {
@@ -1339,12 +1370,23 @@ pub(super) fn publish_item_typed(
     target: &Location,
     expected: Option<&EntryMetadata>,
     planned_backup: impl FnOnce(&Location),
+    mut recheck_source: impl FnMut() -> Result<(), TransferError>,
     published: impl FnOnce(),
 ) -> Result<(), TransferError> {
     if let Some(expected) = expected {
         with_staging_typed(target, None, |staging, preserve| {
             planned_backup(staging);
-            publish_replacement(payload, target, staging, expected, preserve)?;
+            publish_checked_replacement(
+                payload,
+                target,
+                staging,
+                preserve,
+                rename_for_publication,
+                |candidate| {
+                    check_replacement_destination(candidate, target, expected)?;
+                    recheck_source()
+                },
+            )?;
             published();
             Ok(())
         })
@@ -1386,14 +1428,20 @@ pub(super) fn publish_replacement_with_backup_rename(
         staging,
         preserve,
         backup_rename,
-        |candidate| {
-            if entry_metadata(candidate)?.is_some_and(|meta| expected.matches_file(&meta)) {
-                Ok(())
-            } else {
-                Err(PublicationError::DestinationChanged(target.clone()).into())
-            }
-        },
+        |candidate| check_replacement_destination(candidate, target, expected),
     )
+}
+
+fn check_replacement_destination(
+    candidate: &Location,
+    target: &Location,
+    expected: &EntryMetadata,
+) -> Result<(), TransferError> {
+    if entry_metadata(candidate)?.is_some_and(|meta| expected.matches_file(&meta)) {
+        Ok(())
+    } else {
+        Err(PublicationError::DestinationChanged(target.clone()).into())
+    }
 }
 
 pub(super) fn publish_checked_replacement(

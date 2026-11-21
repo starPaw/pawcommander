@@ -1,12 +1,12 @@
 use super::text;
 use crate::file_error::{
     AccessAction, AccessCause, AccessError, ArchiveError, ArchiveMemberError, ChecksumError,
-    ConnectionError, Failure, HostKeyError, KnownHostEntryError, KnownHostsError, ListingError,
-    ListingErrorKind, LocalPathAction, ManifestLineError, MetadataError, MetadataField,
-    MetadataWarning, MutationError, PathError, PermissionError, PinError, PreviewError,
-    ProbeAction, PublicationError, RecoveryNotice, RetryError, RetryProblem, ScanError,
-    SearchError, SpaceError, SshStage, StagingCleanupError, StagingError, StagingRecordAction,
-    TransferPlanError,
+    ConflictError, ConnectionError, Failure, HostKeyError, KnownHostEntryError, KnownHostsError,
+    ListingError, ListingErrorKind, LocalPathAction, ManifestLineError, MetadataError,
+    MetadataField, MetadataWarning, MutationError, PathError, PermissionError, PinError,
+    PreviewError, ProbeAction, PublicationError, RecoveryNotice, ReplacementRefusal, RetryError,
+    RetryProblem, ScanError, SearchError, SpaceError, SshStage, StagingCleanupError, StagingError,
+    StagingRecordAction, TransferPlanError,
 };
 use crate::file_error::{
     RecoveryRecordAction, RecoveryRecordError, RecoveryRecordProblem, RecoveryRecordSection,
@@ -49,6 +49,7 @@ pub(crate) fn file_error(error: &TransferError) -> String {
                 }
                 Failure::Listing(error) => listing_error(error),
                 Failure::ConflictClosed => text!("Диалог конфликта закрыт").into(),
+                Failure::Conflict(error) => conflict_error(error),
                 Failure::Mutation(reason) => mutation_error(
                     reason,
                     matches!(error, TransferError::PublicationUnconfirmed(_)),
@@ -65,6 +66,44 @@ pub(crate) fn file_error(error: &TransferError) -> String {
             }
         }
         TransferError::Cancelled => crate::tr_format!("Operation cancelled"),
+    }
+}
+
+pub(crate) fn replacement_refusal(reason: ReplacementRefusal) -> &'static str {
+    match reason {
+        ReplacementRefusal::SourceNotRegular => {
+            text!("Для замены исходный объект должен быть обычным файлом.")
+        }
+        ReplacementRefusal::TargetNotRegular => {
+            text!("Для замены объект назначения должен быть обычным файлом.")
+        }
+        ReplacementRefusal::SameFile => text!("Оба пути ведут к одному файлу."),
+        ReplacementRefusal::WouldOverwriteArchive => {
+            text!("Замена затронет архив, из которого извлекаются файлы.")
+        }
+        #[cfg(target_os = "macos")]
+        ReplacementRefusal::Smb => {
+            text!("Безопасная замена файла на SMB недоступна. Выберите свободное имя.")
+        }
+    }
+}
+
+fn conflict_error(error: &ConflictError) -> String {
+    match error {
+        ConflictError::ReplacementUnavailable {
+            source,
+            target,
+            reason,
+        } => crate::tr_format!(
+            "Could not replace {target} with {source}. {reason}",
+            source = source,
+            target = target,
+            reason = replacement_refusal(*reason)
+        ),
+        ConflictError::SourceChanged(source) => crate::tr_format!(
+            "Source item {source} changed after the conflict dialog was shown.",
+            source = source
+        ),
     }
 }
 

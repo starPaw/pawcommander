@@ -1,3 +1,4 @@
+use crate::file_error::ReplacementRefusal;
 #[cfg(test)]
 use crate::test_ui::ContextExt as _;
 use crate::vfs::Location;
@@ -23,9 +24,15 @@ pub struct EntryDetails {
 pub struct Conflict {
     pub source: EntryDetails,
     pub target: EntryDetails,
-    pub can_replace: bool,
+    pub(crate) replacement_refusal: Option<ReplacementRefusal>,
     pub index: usize,
     pub count: usize,
+}
+
+impl Conflict {
+    pub fn can_replace(&self) -> bool {
+        self.replacement_refusal.is_none()
+    }
 }
 
 pub struct Answer {
@@ -86,10 +93,8 @@ impl ConflictDialog {
                 &conflict.target,
             );
             ui.add_space(12.0);
-            if !conflict.can_replace {
-                ui.label(crate::i18n::text!(
-                    "Выберите свободное имя или пропустите этот объект.",
-                ));
+            if let Some(reason) = conflict.replacement_refusal {
+                ui.label(crate::i18n::replacement_refusal(reason));
             }
             if conflict.index < conflict.count {
                 ui.checkbox(
@@ -117,7 +122,7 @@ impl ConflictDialog {
                 }
                 if ui
                     .add_enabled(
-                        conflict.can_replace,
+                        conflict.can_replace(),
                         egui::Button::new(crate::i18n::text!("Заменить")),
                     )
                     .clicked()
@@ -205,7 +210,7 @@ mod tests {
                 Conflict {
                     source: entry("/source/file.txt", 17),
                     target: entry("/target/file.txt", 32),
-                    can_replace,
+                    replacement_refusal: (!can_replace).then_some(ReplacementRefusal::SameFile),
                     index,
                     count: 3,
                 },

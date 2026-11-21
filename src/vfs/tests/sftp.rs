@@ -1599,7 +1599,7 @@ fn openssh_round_trip_and_host_verification() {
     );
     let file_source = source.join("hello world.txt");
     let replace = |conflict: Conflict| {
-        assert!(conflict.can_replace);
+        assert!(conflict.can_replace());
         assert!(conflict.source.size.is_some());
         assert!(conflict.target.modified.is_some());
         Ok(Answer {
@@ -1760,7 +1760,7 @@ fn openssh_round_trip_and_host_verification() {
         TransferKind::Copy,
         &mut Progress::default(),
         |conflict| {
-            assert!(!conflict.can_replace);
+            assert!(!conflict.can_replace());
             Ok(Answer {
                 decision: Decision::Replace,
                 apply_to_group: false,
