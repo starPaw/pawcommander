@@ -646,18 +646,66 @@ fn remote_edit_error(error: &RemoteEditError) -> String {
 }
 
 #[cfg(target_os = "macos")]
+pub(crate) fn file_template_encoding(
+    encoding: crate::vfs::file_templates::TextEncoding,
+) -> &'static str {
+    use crate::vfs::file_templates::TextEncoding::*;
+    match encoding {
+        Utf8 => "UTF-8",
+        Utf8Bom => text!("UTF-8 с BOM"),
+        Utf16Le => text!("UTF-16 LE с BOM"),
+        Utf16Be => text!("UTF-16 BE с BOM"),
+        Windows1251 => "Windows-1251",
+        Windows1252 => "Windows-1252",
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn file_template_error(error: &FileTemplateError) -> String {
     use FileTemplateError::*;
 
     match error {
+        Save { title, cause } => crate::tr_format!(
+            "Saving template “{title}”\n{error}",
+            title = title.escape_debug(),
+            error = file_error(cause)
+        ),
+        EmptyTitle => text!("Введите название шаблона.").into(),
+        TitleTooLong(limit) => crate::tr_format!(
+            "Template names can contain up to {limit} characters.",
+            limit = limit
+        ),
+        TitleHasControl => text!("Уберите управляющие символы из названия шаблона.").into(),
+        DuplicateTitle(title) => crate::tr_format!(
+            "A template named “{title}” already exists.",
+            title = title.escape_debug()
+        ),
+        LibraryCountLimit(limit) => crate::tr_format!(
+            "The library can hold up to {limit} saved templates.",
+            limit = limit
+        ),
+        LibrarySizeLimit(limit) => crate::tr_format!(
+            "Saving this template would exceed the library limit of {limit} MiB.",
+            limit = limit / (1024 * 1024)
+        ),
         UnrepresentableCharacters(encoding) => crate::tr_format!(
             "Some characters cannot be represented in {encoding}. Choose a different encoding.",
-            encoding = encoding.label()
+            encoding = file_template_encoding(*encoding)
         ),
-        InvalidSavedPayload(_) => text!("Не удалось прочитать сохранённый шаблон").into(),
-        SourceMissing(path) => {
-            crate::tr_format!("The template source file {path} is missing.", path = path)
-        }
+        InvalidSavedPayload { title, cause } => crate::tr_format!(
+            "Could not read saved template “{title}” ({error}).",
+            title = title.escape_debug(),
+            error = cause
+        ),
+        SavedPayloadTooLarge(title) => crate::tr_format!(
+            "Saved template “{title}” exceeds 4 MiB.",
+            title = title.escape_debug()
+        ),
+        SourceMissing { source, cause } => crate::tr_format!(
+            "The template source file {path} is missing ({error}).",
+            path = source.display().escape_debug(),
+            error = cause.cause
+        ),
         TooLarge(Some(path)) => crate::tr_format!(
             "The template source file {path} exceeds 4 MiB.",
             path = path

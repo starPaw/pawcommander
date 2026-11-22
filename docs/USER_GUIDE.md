@@ -315,6 +315,8 @@ Open a local or SFTP folder and choose **New file** from Settings or the command
 
 To reuse a file, select it in the pane before opening **New file** and choose **Selected file** as the template. **Save as template** stores a copy in PawCommander's settings for later use. You can also save an edited built-in template. File-based templates preserve the original bytes and accept files up to 4 MiB. After a name conflict, the form keeps your draft so you can enter a different name. PawCommander creates the file without replacing any existing item and selects the new file in the pane.
 
+The library supports up to 64 templates and 16 MiB of saved template data. If saving fails, the dialog shows the source error or the limit reached. The draft remains available for correction.
+
 ## Transfer with compatible names on macOS
 
 Open two local folders, select regular files or folders in the source pane, and choose **Transfer with compatible names** from Settings or the command palette. Select **Copy** or **Move**, then choose **Preview names**. The preview lists each proposed path and the reason for the change, including changes within selected folders. Choose **Copy with these names** or **Move with these names** to apply the reviewed plan.

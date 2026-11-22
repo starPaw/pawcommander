@@ -1,5 +1,8 @@
 use super::*;
-use crate::{file_error::Failure, operations::Cancellation};
+use crate::{
+    file_error::{AccessCause, Failure},
+    operations::Cancellation,
+};
 use std::{fs, os::unix::fs::symlink};
 
 fn draft(value: &str, encoding: TextEncoding) -> Source {
@@ -15,6 +18,13 @@ fn job(directory: &Location, name: &str, source: Source) -> NewFile {
         name: name.into(),
         source,
     }
+}
+
+fn template_error(error: TransferError) -> Box<FileTemplateError> {
+    let TransferError::Failed(Failure::FileTemplate(error)) = error else {
+        panic!("expected a template error, got {error:?}");
+    };
+    error
 }
 
 #[test]
@@ -88,7 +98,10 @@ fn saved_templates_survive_a_profile_round_trip_and_source_removal() {
     let settings = ron::to_string(&library).unwrap();
     let library: Library = ron::from_str(&settings).unwrap();
     assert_eq!(library.templates[0].filename, "sample.bin");
-    assert!(library.check_title("fixture").is_err());
+    assert!(
+        matches!(template_error(library.check_new("fixture").unwrap_err()).as_ref(),
+        FileTemplateError::DuplicateTitle(title) if title == "Fixture")
+    );
     job(
         &directory,
         "from-template.bin",
@@ -115,21 +128,147 @@ fn unavailable_template_sources_keep_the_path_or_decoding_cause() {
         .unwrap_err();
     assert!(
         matches!(error, TransferError::Failed(Failure::FileTemplate(reason))
-        if matches!(reason.as_ref(), FileTemplateError::SourceMissing(path) if path == &source))
+        if matches!(reason.as_ref(), FileTemplateError::SourceMissing { source: path, cause }
+            if path == &source && matches!(&cause.cause, AccessCause::Local(error)
+                if error.raw_os_error() == Some(libc::ENOENT))))
     );
 
-    let error = job(&directory, target, Source::Stored("!!!!".into()))
+    let saved = SavedTemplate {
+        title: "Unreadable template".into(),
+        filename: "draft.bin".into(),
+        payload: "!!!!".into(),
+    };
+    let error = job(&directory, target, saved.source())
         .create(&mut Progress::default())
         .unwrap_err();
-    let TransferError::Failed(Failure::FileTemplate(reason)) = error else {
-        panic!("Expected a saved template decode failure: {error:?}");
-    };
-    assert!(matches!(
-        reason.as_ref(),
-        FileTemplateError::InvalidSavedPayload(_)
-    ));
+    let reason = template_error(error);
+    assert!(matches!(reason.as_ref(),
+        FileTemplateError::InvalidSavedPayload { title, .. } if title == &saved.title));
     assert!(reason.source().unwrap().is::<base64::DecodeError>());
     assert!(fs::read_dir(root.path()).unwrap().next().is_none());
+}
+
+#[test]
+fn library_validation_distinguishes_invalid_names_and_preserves_entries_at_both_limits() {
+    let template = |title: String, payload: Arc<str>| SavedTemplate {
+        title,
+        filename: "draft.txt".into(),
+        payload,
+    };
+    let mut library = Library::default();
+    assert!(matches!(
+        *template_error(library.check_new("  ").unwrap_err()),
+        FileTemplateError::EmptyTitle
+    ));
+    assert!(matches!(
+        *template_error(library.check_new("a\nb").unwrap_err()),
+        FileTemplateError::TitleHasControl
+    ));
+    assert!(matches!(
+        *template_error(
+            library
+                .check_new(&"ř".repeat(MAX_TITLE_CHARS + 1))
+                .unwrap_err()
+        ),
+        FileTemplateError::TitleTooLong(MAX_TITLE_CHARS)
+    ));
+    for index in 0..MAX_TEMPLATES {
+        library
+            .insert(template(format!("Template {index}"), "".into()))
+            .unwrap();
+    }
+    let persisted = ron::to_string(&library).unwrap();
+    assert!(matches!(
+        *template_error(library.check_new("Another").unwrap_err()),
+        FileTemplateError::LibraryCountLimit(MAX_TEMPLATES)
+    ));
+    assert!(matches!(
+        *template_error(
+            library
+                .insert(template("Another".into(), "".into()))
+                .unwrap_err()
+        ),
+        FileTemplateError::LibraryCountLimit(MAX_TEMPLATES)
+    ));
+    assert_eq!(ron::to_string(&library).unwrap(), persisted);
+
+    let payload: Arc<str> = "A".repeat(MAX_LIBRARY_BYTES / 4).into();
+    let mut library = Library::default();
+    for index in 0..4 {
+        library
+            .insert(template(format!("Large {index}"), payload.clone()))
+            .unwrap();
+    }
+    assert!(library.check_new("Another").is_ok());
+    assert!(matches!(
+        *template_error(
+            library
+                .insert(template("Another".into(), "eA==".into()))
+                .unwrap_err()
+        ),
+        FileTemplateError::LibrarySizeLimit(MAX_LIBRARY_BYTES)
+    ));
+    assert_eq!(library.templates.len(), 4);
+    assert!(library
+        .templates
+        .iter()
+        .all(|saved| Arc::ptr_eq(&saved.payload, &payload)));
+}
+
+#[test]
+fn saving_a_template_keeps_the_title_source_cause_and_cancellation() {
+    let root = tempfile::tempdir().unwrap();
+    let source = Location::Local(root.path().join("missing.txt"));
+    let title = "Copy to keep";
+    let capture = |progress: &mut Progress| {
+        save_template(
+            title.into(),
+            "draft.txt".into(),
+            Source::File(source.clone()),
+            progress,
+        )
+    };
+    let reason = template_error(capture(&mut Progress::default()).err().unwrap());
+    let FileTemplateError::Save {
+        title: captured,
+        cause,
+    } = *reason
+    else {
+        panic!("expected save context");
+    };
+    assert_eq!(captured, title);
+    assert!(matches!(template_error(*cause).as_ref(),
+        FileTemplateError::SourceMissing { source: selected, cause }
+            if selected == &source && matches!(&cause.cause, AccessCause::Local(error)
+                if error.raw_os_error() == Some(libc::ENOENT))));
+
+    let stop = Cancellation::at_checkpoint({
+        let mut calls = 0;
+        move || {
+            calls += 1;
+            calls == 3
+        }
+    });
+    assert!(matches!(
+        capture(&mut Progress::with_cancellation(stop)),
+        Err(TransferError::Cancelled)
+    ));
+
+    let too_long = draft(&"x".repeat(MAX_BYTES + 1), TextEncoding::Utf8);
+    let error = save_template(
+        title.into(),
+        "draft.txt".into(),
+        too_long,
+        &mut Progress::default(),
+    )
+    .err()
+    .unwrap();
+    let reason = template_error(error);
+    assert!(
+        matches!(reason.as_ref(), FileTemplateError::Save { title: attempted, cause }
+        if attempted == title && matches!(cause.as_ref(), TransferError::Failed(Failure::FileTemplate(reason))
+            if matches!(reason.as_ref(), FileTemplateError::TooLarge(None))))
+    );
 }
 
 #[test]
@@ -232,5 +371,21 @@ pub(in crate::vfs) fn check_sftp(root: &Location) {
     );
     assert_eq!(fs::read(existing.path()).unwrap(), bytes);
     assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 2);
+    let absent = directory.join("vanished.txt");
+    let error = save_template(
+        "Missing remote template".into(),
+        "draft.txt".into(),
+        Source::File(absent.clone()),
+        &mut Progress::default(),
+    )
+    .err()
+    .unwrap();
+    let FileTemplateError::Save { cause, .. } = *template_error(error) else {
+        panic!("expected the failed save of a remote template");
+    };
+    assert!(matches!(template_error(*cause).as_ref(),
+        FileTemplateError::SourceMissing { source, cause }
+            if source == &absent && matches!(&cause.cause, AccessCause::Sftp(error)
+                if error.code() == ssh2::ErrorCode::SFTP(2))));
     println!("New file templates over SFTP preserved the legacy bytes and existing destination");
 }
