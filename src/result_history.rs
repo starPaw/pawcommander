@@ -1084,6 +1084,7 @@ impl History {
                     Outcome::Failed
                         | Outcome::PublicationUnconfirmed
                         | Outcome::CopiedSourceRemaining
+                        | Outcome::PartialCopyRetained
                 )
             });
             ((record.failed && !record.cancelled) || failed_item.is_some()).then(|| {

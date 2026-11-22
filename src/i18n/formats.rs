@@ -188,6 +188,7 @@ formats! {
     "Temporary folder creation at {staging} is unconfirmed: {e}. Inspect this location before retrying." => ("Создание временной папки {staging} не подтверждено: {e}. Проверьте этот адрес перед повтором.", "Vytvoření dočasné složky v {staging} se nepodařilo potvrdit: {e}. Před opakováním zkontrolujte tuto cestu."),
     "Could not check whether the temporary folder exists: {error}" => ("Не удалось проверить наличие временной папки: {error}", "Nepodařilo se ověřit, zda dočasná složka existuje: {error}"),
     "{outcome}. Temporary folder remains at {staging}: {e}" => ("{outcome}. Осталась временная папка {staging}: {e}", "{outcome}. Dočasná složka zůstala v {staging}: {e}"),
+    "{outcome}. Could not clean up the temporary folder at {staging}. {e}" => ("{outcome}. Не удалось очистить временную папку {staging}. {e}", "{outcome}. Dočasnou složku v {staging} se nepodařilo uklidit. {e}"),
     "Expected a regular temporary file at {staging} for {target}." => ("Для {target} ожидался обычный временный файл по пути {staging}.", "Pro {target} se očekával běžný dočasný soubor v {staging}."),
     "Invalid SFTP address: {e}" => ("Некорректный адрес SFTP: {e}", "Neplatná adresa SFTP: {e}"),
     "Inspect the interrupted SFTP transfer to {path} before retrying." => ("Проверьте прерванную передачу SFTP в {path} перед повтором.", "Před opakováním zkontrolujte přerušený přenos SFTP do {path}."),

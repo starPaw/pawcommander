@@ -339,6 +339,8 @@ pub(crate) enum AccessAction {
     CreateDirectory,
     CreateStagingDirectory,
     RemoveStagingDirectory,
+    #[cfg(target_os = "macos")]
+    RemoveStagingItem,
     ReadOpenMetadata,
     ReadChildren,
     ReadFile,
@@ -931,21 +933,31 @@ impl StagingCleanupError {
         staging: &Location,
         target: &Location,
     ) -> Result<(), TransferError> {
-        let Err(cleanup) = cleanup else {
-            return result;
-        };
-        let unconfirmed = matches!(result, Err(TransferError::PublicationUnconfirmed(_)));
+        match cleanup {
+            Ok(()) => result,
+            Err(cleanup) => Err(Self::failed_cleanup(result.err(), cleanup, staging, target)),
+        }
+    }
+
+    pub(crate) fn failed_cleanup(
+        operation: Option<TransferError>,
+        cleanup: TransferError,
+        staging: &Location,
+        target: &Location,
+    ) -> TransferError {
+        // A private cleanup with a lost reply does not affect publication of the target.
+        let unconfirmed = matches!(operation, Some(TransferError::PublicationUnconfirmed(_)));
         let reason = Failure::StagingCleanup(Box::new(Self {
-            operation: result.err(),
+            operation,
             cleanup,
             staging: staging.clone(),
             target: target.clone(),
         }));
-        Err(if unconfirmed {
+        if unconfirmed {
             TransferError::PublicationUnconfirmed(reason)
         } else {
             TransferError::Failed(reason)
-        })
+        }
     }
 }
 
@@ -957,18 +969,25 @@ impl fmt::Display for StagingCleanupError {
             write!(f, "Item {} was published. ", self.target)?;
         }
         if matches!(self.cleanup, TransferError::PublicationUnconfirmed(_)) {
-            write!(
+            return write!(
                 f,
                 "Cleanup at {} is unconfirmed: {}",
                 self.staging, self.cleanup
-            )
-        } else {
-            write!(
-                f,
-                "Temporary folder remains at {}: {}",
-                self.staging, self.cleanup
-            )
+            );
         }
+        #[cfg(target_os = "macos")]
+        if matches!(self.operation, Some(TransferError::Cancelled)) {
+            return write!(
+                f,
+                "Could not clean up the temporary folder at {}. {}",
+                self.staging, self.cleanup
+            );
+        }
+        write!(
+            f,
+            "Temporary folder remains at {}: {}",
+            self.staging, self.cleanup
+        )
     }
 }
 
