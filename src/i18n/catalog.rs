@@ -1062,6 +1062,8 @@ catalog! {
     "Имя рабочего пространства" => ("Workspace name", "Název pracovní plochy"),
     "Левая папка" => ("Left folder", "Levá složka"),
     "Правая папка" => ("Right folder", "Pravá složka"),
+    "Исходная папка" => ("Source folder", "Zdrojová složka"),
+    "Папка назначения" => ("Destination folder", "Cílová složka"),
     "Это имя уже используется." => ("This name is already in use.", "Tento název už se používá."),
     "Пути этого рабочего пространства несовместимы с системой." => ("This workspace contains paths that are incompatible with this system.", "Pracovní plocha obsahuje cesty nekompatibilní s tímto systémem."),
     "Избранное" => ("Favorites", "Oblíbené"),

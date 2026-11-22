@@ -1,5 +1,5 @@
 use super::*;
-use crate::file_error::{Failure, MutationError, PublicationError, RecoveryNotice};
+use crate::file_error::{AccessCause, Failure, MutationError, PublicationError, RecoveryNotice};
 use std::{
     fs,
     os::unix::fs::symlink,
@@ -26,6 +26,23 @@ fn set_modified(path: &Path, time: SystemTime) {
         .unwrap()
         .set_times(fs::FileTimes::new().set_modified(time))
         .unwrap();
+}
+
+fn folder_cause(error: TransferError, role: SyncFolderRole, folder: &Location) -> TransferError {
+    let TransferError::Failed(Failure::Sync(error)) = error else {
+        panic!("expected synchronization folder context, got {error:?}");
+    };
+    let SyncError::Folder {
+        role: actual,
+        folder: selected,
+        cause,
+    } = *error
+    else {
+        panic!("expected synchronization folder context, got {error:?}");
+    };
+    assert_eq!(actual, role);
+    assert_eq!(&selected, folder);
+    *cause
 }
 
 #[test]
@@ -202,7 +219,12 @@ fn apply_revalidates_before_its_first_mutation() {
     set_modified(item.path(), time);
     let report = plan.apply(&mut progress);
     assert_eq!(report.completed, 0);
-    let Err(TransferError::Failed(Failure::Mutation(error))) = report.result else {
+    let cause = folder_cause(
+        report.result.unwrap_err(),
+        SyncFolderRole::Destination,
+        target,
+    );
+    let TransferError::Failed(Failure::Mutation(error)) = cause else {
         panic!("expected a typed stale plan error");
     };
     assert!(matches!(*error, MutationError::PlanChanged(path)
@@ -214,6 +236,120 @@ fn apply_revalidates_before_its_first_mutation() {
         .all(|(_, status)| *status == Outcome::NotStarted));
     assert_eq!(fs::read(item.path()).unwrap(), b"edit");
     assert!(!target.join("a-copy").path().exists());
+}
+
+#[test]
+fn checking_a_plan_identifies_the_changed_child_when_membership_differs() {
+    for (remove, add) in [(true, false), (false, true), (true, true)] {
+        let (_temporary, pair) = folders();
+        let target = &pair[1];
+        let branch = target.join("branch");
+        fs::create_dir(branch.path()).unwrap();
+        let old = branch.join("a-prior");
+        let new = branch.join("z-added");
+        fs::write(old.path(), b"prior bytes").unwrap();
+        let plan = SyncPlan::build(
+            pair.clone(),
+            true,
+            Exclusions::default(),
+            &mut Progress::default(),
+        )
+        .unwrap();
+        if remove {
+            fs::remove_file(old.path()).unwrap();
+        }
+        if add {
+            fs::write(new.path(), b"new bytes").unwrap();
+        }
+        let expected =
+            branch
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join(if remove { "a-prior" } else { "z-added" });
+        let cause = folder_cause(
+            plan.verify(&mut Progress::default()).unwrap_err(),
+            SyncFolderRole::Destination,
+            target,
+        );
+        let TransferError::Failed(Failure::Sync(error)) = cause else {
+            panic!("expected a change to plan membership");
+        };
+        match *error {
+            SyncError::PlanEntryMissing(location) => assert!(remove && location.path() == expected),
+            SyncError::PlanEntryAdded(location) => assert!(!remove && location.path() == expected),
+            error => panic!("unexpected membership change {error:?}"),
+        }
+        if add {
+            assert_eq!(fs::read(new.path()).unwrap(), b"new bytes");
+        }
+    }
+}
+
+#[test]
+fn snapshot_reports_disappearance_type_changes_and_retargeted_links() {
+    for scenario in ["missing", "type", "link"] {
+        let (temporary, pair) = folders();
+        let location = pair[0].join("observed");
+        if scenario == "link" {
+            symlink("first-target", location.path()).unwrap();
+        } else {
+            fs::write(location.path(), b"original bytes").unwrap();
+        }
+        let scope = ReadScope::open(&pair[0]).unwrap();
+        let cancel = Cancellation::default();
+        let mut observed = None;
+        scan::visit(&scope, Path::new(""), &cancel, &mut |name, entry| {
+            assert_eq!(name, "observed");
+            observed = Some(entry);
+            Ok(())
+        })
+        .unwrap();
+        let held = temporary[1].path().join("preserved");
+        fs::rename(location.path(), &held).unwrap();
+        match scenario {
+            "type" => fs::create_dir(location.path()).unwrap(),
+            "link" => symlink("other-target", location.path()).unwrap(),
+            _ => {}
+        }
+        let mut snapshot = Snapshot::empty(&scope);
+        let cause = snapshot
+            .observe(
+                &scope,
+                "observed".into(),
+                observed.unwrap(),
+                &Exclusions::default(),
+                &mut Budget::default(),
+                &mut Progress::default(),
+            )
+            .unwrap_err();
+        let expected = scope.parent.location.join("observed");
+        match scenario {
+            "missing" => assert!(
+                matches!(cause, TransferError::Failed(Failure::Access(error))
+                    if error.location == expected && error.action == AccessAction::ReadMetadata
+                        && matches!(&error.cause, AccessCause::Local(source)
+                            if source.raw_os_error() == Some(libc::ENOENT))
+                )
+            ),
+            "type" => assert!(matches!(cause, TransferError::Failed(Failure::Sync(error))
+                if matches!(error.as_ref(), SyncError::EntryTypeChanged(path) if path == &expected)
+            )),
+            _ => assert!(matches!(cause, TransferError::Failed(Failure::Sync(error))
+                if matches!(error.as_ref(), SyncError::LinkTargetChanged(path) if path == &expected)
+            )),
+        }
+        assert!(snapshot.entries.is_empty());
+        if scenario == "link" {
+            assert_eq!(fs::read_link(&held).unwrap(), Path::new("first-target"));
+            assert_eq!(
+                fs::read_link(location.path()).unwrap(),
+                Path::new("other-target")
+            );
+        } else {
+            assert_eq!(fs::read(&held).unwrap(), b"original bytes");
+        }
+    }
 }
 
 #[test]

@@ -1,6 +1,6 @@
 use super::{
-    is_link, stale, Budget, Exclusions, Kind, Observed, Snapshot, SyncChange, SyncPlan, SyncReport,
-    SyncRow,
+    is_link, read_link, stale, Budget, Exclusions, Kind, Observed, Snapshot, SyncChange, SyncPlan,
+    SyncReport, SyncRow,
 };
 use crate::{
     file_error::{
@@ -497,15 +497,7 @@ fn required_tree(
                     .ok_or_else(changed_during_read)?,
             )
         } else if is_link(&metadata) {
-            let target = if let Some(path) = location.local() {
-                fs::read_link(path)
-                    .map_err(|error| AccessError::new(&location, AccessAction::ReadLink, error))?
-            } else {
-                remote(&location)?
-                    .readlink(location.path())
-                    .map_err(|error| AccessError::new(&location, AccessAction::ReadLink, error))?
-            };
-            Kind::Link(target.into_os_string())
+            Kind::Link(read_link(&location)?.into_os_string())
         } else {
             return Err(stale(&location));
         };
