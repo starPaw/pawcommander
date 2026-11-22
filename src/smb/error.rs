@@ -1,4 +1,4 @@
-use crate::file_error::CredentialFailure;
+use crate::file_error::{CredentialFailure, SecretFormatError};
 use std::{
     error::Error,
     fmt, io,
@@ -10,12 +10,14 @@ use std::{
 pub(crate) enum PathAction {
     CreateStorage,
     ResolveStorage,
+    ReadStorage,
     AllocateMount,
     PrepareMount,
     OpenMount,
     InspectMount,
     ProtectMount,
     ReadShare,
+    ReadRecord,
     WriteRecord,
     Unmount,
     Cleanup,
@@ -41,6 +43,29 @@ pub(crate) enum PasswordAction {
 pub(crate) enum MountFailure {
     Posix(io::Error),
     Status(i32),
+}
+
+#[derive(Debug)]
+pub(crate) enum RecordProblem {
+    NotRegular,
+    TooLarge { limit: usize },
+    Json(SecretFormatError),
+    Endpoint(Box<SmbError>),
+    EndpointMismatch,
+}
+
+impl fmt::Display for RecordProblem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotRegular => f.write_str("Expected a regular file"),
+            Self::TooLarge { limit } => write!(f, "Record exceeds {limit} bytes"),
+            Self::Json(source) => write!(f, "{source}"),
+            Self::Endpoint(source) => write!(f, "{source}"),
+            Self::EndpointMismatch => {
+                f.write_str("Saved share details differ from the normalized address")
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -71,6 +96,15 @@ pub(crate) enum SmbError {
         path: PathBuf,
         source: serde_json::Error,
     },
+    InvalidRecord {
+        path: PathBuf,
+        problem: RecordProblem,
+    },
+    UnrecordedMount {
+        mount: PathBuf,
+        record: PathBuf,
+    },
+    DiscoveryWorkerStart(io::Error),
     Password {
         action: PasswordAction,
         address: String,
@@ -128,6 +162,22 @@ impl fmt::Display for SmbError {
                 "Could not encode SMB record at {}: {source}",
                 path.display()
             ),
+            Self::InvalidRecord { path, problem } => {
+                write!(
+                    f,
+                    "Invalid SMB connection record at {}: {problem}",
+                    path.display()
+                )
+            }
+            Self::UnrecordedMount { mount, record } => write!(
+                f,
+                "SMB mount at {} is missing the connection record {}",
+                mount.display(),
+                record.display()
+            ),
+            Self::DiscoveryWorkerStart(source) => {
+                write!(f, "Could not start SMB discovery: {source}")
+            }
             Self::Password {
                 action,
                 address,
@@ -156,6 +206,15 @@ impl Error for SmbError {
                 ..
             } => Some(source),
             Self::EncodeRecord { source, .. } => Some(source),
+            Self::InvalidRecord {
+                problem: RecordProblem::Json(source),
+                ..
+            } => Some(source),
+            Self::InvalidRecord {
+                problem: RecordProblem::Endpoint(source),
+                ..
+            } => Some(source.as_ref()),
+            Self::DiscoveryWorkerStart(source) => Some(source),
             Self::Password { cause, .. } => Some(cause),
             Self::SetupCleanup { primary, .. } => Some(primary.as_ref()),
             Self::DisconnectCleanup { cleanup, .. } => Some(cleanup.as_ref()),
