@@ -1271,6 +1271,8 @@ pub(crate) enum SmbMutationAction {
     CreateArchive,
     ExtractArchive,
     EditArchive,
+    CreateChecksumManifest,
+    VerifyChecksumManifest,
 }
 
 #[derive(Debug)]

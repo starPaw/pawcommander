@@ -1,5 +1,3 @@
-#[cfg(target_os = "macos")]
-use super::archive_smb;
 use super::location::{validate_name, Location};
 use super::staged_file::StagedFile;
 use super::transfer::{
@@ -7,6 +5,8 @@ use super::transfer::{
     EntryMetadata, SourceReader, TransferSourceEntry,
 };
 use super::undo::Parent;
+#[cfg(target_os = "macos")]
+use super::{archive_smb, smb_output};
 use crate::archive::{ArchiveWriter, Attributes, CreationLimits, Format};
 use crate::file_error::{
     AccessAction, AccessError, ArchiveError, MutationError, PathError, PermissionError,
@@ -99,14 +99,14 @@ fn write_archive(
     let cancel = progress.cancellation();
     cancel.check()?;
     #[cfg(target_os = "macos")]
-    let mut mount = archive_smb::guard(&directory.join(name), SmbMutationAction::CreateArchive)?;
+    let mut mount = smb_output::guard(&directory.join(name), SmbMutationAction::CreateArchive)?;
     let mut plan = ArchivePlan::new(format, password.is_some());
     #[cfg(target_os = "macos")]
     plan.check_source(directory)?;
     let parent = Parent::capture(directory)?;
     let target = parent.location.join(name);
     #[cfg(target_os = "macos")]
-    let smb_output = archive_smb::is_destination(&mut mount, &target)?;
+    let smb_destination = smb_output::is_destination(&mut mount, &target)?;
     ensure_absent(&target)?;
 
     plan.capture_sources(sources, &parent.location, Path::new(""), progress, &cancel)?;
@@ -132,7 +132,7 @@ fn write_archive(
         Ok(())
     };
     #[cfg(target_os = "macos")]
-    if smb_output {
+    if smb_destination {
         let staged = archive_smb::spool(&target, &cancel, |output| write(output, progress))?;
         mount.recheck()?;
         verify()?;
@@ -180,7 +180,7 @@ impl ArchivePlan {
 
     #[cfg(target_os = "macos")]
     pub(super) fn check_source(&mut self, directory: &Location) -> Result<(), TransferError> {
-        archive_smb::check(&mut self.mount, directory)
+        smb_output::check(&mut self.mount, directory)
     }
 
     pub(super) fn capture_sources(

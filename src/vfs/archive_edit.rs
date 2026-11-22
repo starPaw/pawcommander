@@ -16,7 +16,7 @@ use std::{
     path::{Path, PathBuf},
 };
 #[cfg(target_os = "macos")]
-use {super::archive_smb, crate::file_error::SmbMutationAction};
+use {super::smb_output, crate::file_error::SmbMutationAction};
 
 pub(crate) enum ArchiveEdit {
     Add {
@@ -78,13 +78,13 @@ fn rebuild(
     let changed = || ArchiveError::SourceChanged(source.clone());
     let directory = source.parent().ok_or_else(changed)?;
     #[cfg(target_os = "macos")]
-    let mut mount = archive_smb::guard(source, SmbMutationAction::EditArchive)?;
+    let mut mount = smb_output::guard(source, SmbMutationAction::EditArchive)?;
     let parent = Parent::capture(&directory)?;
     let target = parent
         .location
         .join(source.path().file_name().ok_or_else(changed)?);
     #[cfg(target_os = "macos")]
-    if archive_smb::is_destination(&mut mount, &target)? {
+    if smb_output::is_destination(&mut mount, &target)? {
         return Err(ArchiveError::SmbEditingUnavailable(target).into());
     }
     let expected = entry_metadata(&target)?

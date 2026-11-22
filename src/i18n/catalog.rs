@@ -754,6 +754,8 @@ catalog! {
     "Не удалось создать архив" => ("Could not create the archive", "Archiv se nepodařilo vytvořit"),
     "Не удалось распаковать архив" => ("Could not extract the archive", "Archiv se nepodařilo rozbalit"),
     "Не удалось изменить архив" => ("Could not edit the archive", "Archiv se nepodařilo upravit"),
+    "Не удалось создать манифест SHA-256" => ("Could not create the SHA-256 manifest", "Manifest SHA-256 se nepodařilo vytvořit"),
+    "Не удалось сверить манифест SHA-256" => ("Could not verify the SHA-256 manifest", "Manifest SHA-256 se nepodařilo ověřit"),
     "Не удалось записать буфер файла" => ("Could not flush the file", "Vyrovnávací paměť souboru se nepodařilo zapsat"),
     "Не удалось сохранить данные файла" => ("Could not sync the file", "Data souboru se nepodařilo synchronizovat"),
     "Не удалось закрыть файл" => ("Could not close the file", "Soubor se nepodařilo zavřít"),

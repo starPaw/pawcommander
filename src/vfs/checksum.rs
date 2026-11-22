@@ -13,10 +13,12 @@ use super::{
 };
 use crate::{
     file_error::{AccessError, ChecksumError, MutationError, ScanError},
-    operations::{Progress, TransferError},
+    operations::{Cancellation, Progress, TransferError},
     result_history::{ChecksumOutcome, Outcome},
 };
 use std::{io::Write, path::Path};
+#[cfg(target_os = "macos")]
+use {super::smb_output, crate::file_error::SmbMutationAction};
 
 pub(crate) fn checksum_manifest_name(name: &str) -> Result<&str, TransferError> {
     let name = name.trim();
@@ -89,8 +91,18 @@ fn write_manifest(
     }
     let cancel = progress.cancellation();
     cancel.check()?;
+    #[cfg(target_os = "macos")]
+    let mut mount = smb_output::guard(
+        &directory.join(name),
+        SmbMutationAction::CreateChecksumManifest,
+    )?;
+    #[cfg(target_os = "macos")]
+    let scope = ReadScope::open_with_smb(directory, &mut mount)?;
+    #[cfg(not(target_os = "macos"))]
     let scope = ReadScope::open(directory)?;
     let target = scope.parent.location.join(name);
+    #[cfg(target_os = "macos")]
+    let smb_destination = smb_output::is_destination(&mut mount, &target)?;
     ensure_absent(&target)?;
     let mut body = Vec::new();
     for source in sources {
@@ -108,6 +120,30 @@ fn write_manifest(
     }
 
     progress.item(target.path());
+    let verify_destination = || -> Result<(), TransferError> {
+        scope.verify_root()?;
+        if canonical(directory)? != scope.parent.location.path() {
+            return Err(ChecksumError::DirectoryChanged(directory.clone()).into());
+        }
+        ensure_absent(&target)?;
+        cancel.check()?;
+        Ok(())
+    };
+    #[cfg(target_os = "macos")]
+    if smb_destination {
+        verify_destination()?;
+        smb_output::publish(
+            &mut body.as_slice(),
+            body.len() as u64,
+            &target,
+            &target,
+            &scope.parent,
+            &mount,
+            progress,
+        )?;
+        *published = true;
+        return Ok(());
+    }
     with_staging_typed(&target, Some(&cancel), |staging, _| {
         let payload = staging.join("payload");
         let mut output = StagedFile::open(&payload, cancel.clone())?;
@@ -117,12 +153,7 @@ fn write_manifest(
                 .map_err(|error| AccessError::write(&payload, error))?;
         }
         output.close()?;
-        scope.verify_root()?;
-        if canonical(directory)? != scope.parent.location.path() {
-            return Err(ChecksumError::DirectoryChanged(directory.clone()).into());
-        }
-        ensure_absent(&target)?;
-        cancel.check()?;
+        verify_destination()?;
         rename_for_publication(&payload, &target)?;
         *published = true;
         Ok(())
@@ -141,12 +172,7 @@ pub(crate) fn verify_checksum_manifest(
             progress.results.cancelled = true;
             report.cancelled = true;
         }
-        Err(error) => {
-            progress
-                .results
-                .record_with_error(manifest, Outcome::Failed, Some(&error));
-            return Err(error);
-        }
+        Err(error) => return Err(error),
         Ok(()) => {}
     }
     Ok(report)
@@ -157,37 +183,15 @@ fn verify_manifest(
     progress: &mut Progress,
     report: &mut ChecksumVerification,
 ) -> Result<(), TransferError> {
-    let directory = path
-        .parent()
-        .ok_or_else(|| ChecksumError::RequiresManifest(path.clone()))?;
-    let name = path
-        .path()
-        .file_name()
-        .ok_or_else(|| ChecksumError::RequiresManifest(path.clone()))?;
     let cancel = progress.cancellation();
-    cancel.check()?;
-    if path.is_archive() {
-        return Err(MutationError::ReadOnlyArchive(path.clone()).into());
-    }
-    let scope = ReadScope::open(&directory)?;
-    let entries = scope
-        .read_checked(Path::new(name), &cancel, |source, size, input| {
-            if size > manifest::MAX_BYTES as u64 {
-                return Err(ChecksumError::TooLarge(source.clone()).into());
+    let (directory, scope, entries) =
+        prepare_verification(path, progress, &cancel).inspect_err(|error| {
+            if !matches!(error, TransferError::Cancelled) {
+                progress
+                    .results
+                    .record_with_error(path, Outcome::Failed, Some(error));
             }
-            let mut bytes = Vec::with_capacity(size as usize);
-            let count = progress
-                .read_stream(source.path(), size, input, |input| {
-                    input.read_to_end(&mut bytes)?;
-                    Ok(())
-                })
-                .map_err(|error| AccessError::read(source, error))?;
-            if count != size {
-                return Err(ScanError::FileChanged(source.clone()).into());
-            }
-            manifest::parse(&bytes, source, &cancel)
-        })?
-        .ok_or_else(|| ChecksumError::ManifestMissing(path.clone()))?;
+        })?;
 
     progress
         .results
@@ -197,7 +201,19 @@ fn verify_manifest(
         let source = directory.join(&entry.path);
         progress.results.begin(&source);
         progress.item(source.path());
-        let outcome = match scope.digest(&entry.path, progress, &cancel) {
+        let hashed = match scope.digest(&entry.path, progress, &cancel) {
+            Err(TransferError::Cancelled) => return Err(TransferError::Cancelled),
+            hashed => hashed,
+        };
+        // A lost mount interrupts the batch and leaves pending rows unstarted.
+        #[cfg(target_os = "macos")]
+        if let Err(error) = scope.verify_mount() {
+            progress
+                .results
+                .record_with_error(&source, Outcome::Failed, Some(&error));
+            return Err(error);
+        }
+        let outcome = match hashed {
             Ok(Some(actual)) if actual == entry.digest => {
                 report.matched += 1;
                 ChecksumOutcome::Matched
@@ -210,7 +226,6 @@ fn verify_manifest(
                 report.missing += 1;
                 ChecksumOutcome::Missing
             }
-            Err(TransferError::Cancelled) => return Err(TransferError::Cancelled),
             Err(error) => {
                 report.errors += 1;
                 ChecksumOutcome::Unreadable(error)
@@ -218,7 +233,56 @@ fn verify_manifest(
         };
         progress.results.record_checksum(&source, outcome);
     }
+    #[cfg(target_os = "macos")]
+    scope.verify_mount()?;
     Ok(())
+}
+
+fn prepare_verification(
+    path: &Location,
+    progress: &mut Progress,
+    cancel: &Cancellation,
+) -> Result<(Location, ReadScope, Vec<manifest::Entry>), TransferError> {
+    let directory = path
+        .parent()
+        .ok_or_else(|| ChecksumError::RequiresManifest(path.clone()))?;
+    let name = path
+        .path()
+        .file_name()
+        .ok_or_else(|| ChecksumError::RequiresManifest(path.clone()))?;
+    cancel.check()?;
+    if path.is_archive() {
+        return Err(MutationError::ReadOnlyArchive(path.clone()).into());
+    }
+    #[cfg(target_os = "macos")]
+    let scope = {
+        let mut mount = smb_output::guard(path, SmbMutationAction::VerifyChecksumManifest)?;
+        ReadScope::open_with_smb(&directory, &mut mount)?
+    };
+    #[cfg(not(target_os = "macos"))]
+    let scope = ReadScope::open(&directory)?;
+    let entries = scope.read_checked(Path::new(name), cancel, |source, size, input| {
+        if size > manifest::MAX_BYTES as u64 {
+            return Err(ChecksumError::TooLarge(source.clone()).into());
+        }
+        let mut bytes = Vec::with_capacity(size as usize);
+        let count = progress
+            .read_stream(source.path(), size, input, |input| {
+                input.read_to_end(&mut bytes)?;
+                Ok(())
+            })
+            .map_err(|error| AccessError::read(source, error))?;
+        if count != size {
+            return Err(ScanError::FileChanged(source.clone()).into());
+        }
+        manifest::parse(&bytes, source, cancel)
+    });
+    #[cfg(target_os = "macos")]
+    if !matches!(&entries, Err(TransferError::Cancelled)) {
+        scope.verify_mount()?;
+    }
+    let entries = entries?.ok_or_else(|| ChecksumError::ManifestMissing(path.clone()))?;
+    Ok((directory, scope, entries))
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]

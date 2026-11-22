@@ -373,6 +373,8 @@ Select regular files in a local or SFTP folder and choose **Create SHA-256 manif
 
 Select a manifest and choose **Verify SHA-256 manifest** from the command palette. The context menu also offers this action for `SHA256SUMS` and `.sha256` files. Verification reads paths relative to the manifest's folder and accepts standard untagged and tagged SHA-256 records. Paths through symlinks receive a read error. Invalid paths and duplicate entries cause a manifest error. Up to 16 MiB and 50,000 entries are supported. Use **Stop** to cancel and **Result history** to see matches, changed files, missing files and read errors.
 
+On macOS, manifests can also be created and verified on SMB shares. Creation uses an unused name. If the saved SMB volume changes during verification, the history keeps the completed checks and shows where verification stopped.
+
 ## Search and Zed
 
 `Cmd/Ctrl+F` filters names in the current folder. `Cmd/Ctrl+Shift+F` opens search. **Folder and subfolders** starts in the local or SFTP folder that was open when you opened Search. Enter a name fragment or a wildcard such as `*.rs`. Comma-separated exclusion masks skip matching names and prune matching directories. Folder search skips symlink branches and returns up to 1,000 results. It reports incomplete coverage if it cannot read a branch or reaches the traversal limit. You can cancel the search and reveal a result in its parent folder.
