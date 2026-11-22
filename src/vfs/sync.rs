@@ -13,6 +13,7 @@ use super::{
     guarded_directory::{stale, Directory},
     read_scope::ReadScope,
     sftp::remote,
+    smb_output,
     transfer::{
         entry_metadata, read_entry_metadata, validate_sftp_source_path, EntryMetadata,
         TransferSourceEntry, SYNC_STAGING_PREFIX,
@@ -20,8 +21,11 @@ use super::{
     Location, MAX_TREE_DEPTH,
 };
 use crate::{
-    file_error::{AccessAction, AccessError, ScanError, SyncError, SyncFolderRole},
+    file_error::{
+        AccessAction, AccessError, ScanError, SmbMutationAction, SyncError, SyncFolderRole,
+    },
     operations::{Cancellation, Progress, TransferError},
+    smb::MutationMount,
 };
 use std::{
     cmp::Ordering,
@@ -75,7 +79,7 @@ impl SyncPlan {
         exclusions: Exclusions,
         progress: &mut Progress,
     ) -> Result<Self, TransferError> {
-        let (_, observed) = observe_folders(&folders, ONE_WAY_ROLES, &exclusions, progress)?;
+        let (_, observed) = observe_folders(&folders, ONE_WAY_ROLES, &exclusions, None, progress)?;
         let mut plan = Self {
             folders,
             observed,
@@ -127,6 +131,7 @@ impl SyncPlan {
                 destination: 1,
             });
         }
+        verify_snapshot_mounts(&plan.observed, &plan.folders, ONE_WAY_ROLES, &cancel)?;
         Ok(plan)
     }
 
@@ -229,6 +234,7 @@ struct Observed {
 
 struct Snapshot {
     root: Location,
+    mount: Option<MutationMount>,
     entries: BTreeMap<PathBuf, Observed>,
     excluded: BTreeSet<PathBuf>,
 }
@@ -240,13 +246,14 @@ fn revalidate_folders(
     exclusions: &Exclusions,
     progress: &mut Progress,
 ) -> Result<[ReadScope; 2], TransferError> {
-    let (scopes, current) = observe_folders(folders, roles, exclusions, progress)?;
+    let (scopes, current) = observe_folders(folders, roles, exclusions, Some(observed), progress)?;
     let cancel = progress.cancellation();
     for (side, (before, after)) in observed.iter().zip(current).enumerate() {
         before
             .verify_unchanged(&after, &cancel)
             .map_err(|error| folder_error(roles[side], &folders[side], error))?;
     }
+    verify_snapshot_mounts(observed, folders, roles, &cancel)?;
     Ok(scopes)
 }
 
@@ -254,13 +261,16 @@ fn observe_folders(
     folders: &[Location; 2],
     roles: [SyncFolderRole; 2],
     exclusions: &Exclusions,
+    previous: Option<&[Snapshot; 2]>,
     progress: &mut Progress,
 ) -> Result<([ReadScope; 2], [Snapshot; 2]), TransferError> {
     let cancel = progress.cancellation();
     let context = |side: usize, error| folder_error(roles[side], &folders[side], error);
     let open = |side: usize| -> Result<_, TransferError> {
         cancel.check()?;
-        let scope = ReadScope::open(&folders[side]).map_err(|error| context(side, error))?;
+        let folder = &folders[side];
+        let expected = previous.and_then(|snapshots| snapshots[side].mount.as_ref());
+        let scope = open_sync_folder(folder, expected).map_err(|error| context(side, error))?;
         if scope.descriptor.is_some() {
             Directory::from_scope(&scope).map_err(|error| context(side, error))?;
         }
@@ -287,6 +297,37 @@ fn observe_folders(
             .map_err(|error| context(side, error))?;
     }
     Ok((scopes, observed))
+}
+
+fn open_sync_folder(
+    folder: &Location,
+    expected: Option<&MutationMount>,
+) -> Result<ReadScope, TransferError> {
+    let mut mount = match expected {
+        Some(mount) => {
+            mount.recheck()?;
+            mount.clone()
+        }
+        None => smb_output::guard(folder, SmbMutationAction::CheckSyncFolder)?,
+    };
+    ReadScope::open_with_smb(folder, &mut mount)
+}
+
+fn verify_snapshot_mounts(
+    observed: &[Snapshot; 2],
+    folders: &[Location; 2],
+    roles: [SyncFolderRole; 2],
+    cancel: &Cancellation,
+) -> Result<(), TransferError> {
+    for (side, snapshot) in observed.iter().enumerate() {
+        cancel.check()?;
+        if let Some(mount) = &snapshot.mount {
+            mount
+                .recheck()
+                .map_err(|cause| folder_error(roles[side], &folders[side], cause))?;
+        }
+    }
+    Ok(())
 }
 
 fn folder_error(role: SyncFolderRole, folder: &Location, cause: TransferError) -> TransferError {
@@ -369,6 +410,7 @@ impl Snapshot {
     fn empty(scope: &ReadScope) -> Self {
         Self {
             root: scope.parent.location.clone(),
+            mount: scope.owned_smb_mount().cloned(),
             entries: BTreeMap::new(),
             excluded: BTreeSet::new(),
         }
@@ -462,15 +504,23 @@ impl Snapshot {
         budget: &mut Budget,
         progress: &mut Progress,
     ) -> Result<Self, TransferError> {
+        let cancel = progress.cancellation();
+        cancel.check()?;
+        scope.verify_mount()?;
         let mut snapshot = Self::empty(scope);
-        snapshot.observe(
+        let read = snapshot.observe(
             scope,
             PathBuf::new(),
             scan::Entry::Directory,
             exclusions,
             budget,
             progress,
-        )?;
+        );
+        if !matches!(&read, Err(TransferError::Cancelled)) {
+            cancel.check()?;
+            scope.verify_mount()?;
+        }
+        read?;
         Ok(snapshot)
     }
 
@@ -490,6 +540,11 @@ impl Snapshot {
         }
         let location = self.root.join(&relative);
         let metadata = read_metadata(&location)?;
+        if let Some(mount) = scope.owned_smb_mount()
+            && scope.parent.same_local_volume(&metadata) != Some(true)
+        {
+            return Err(mount.changed(location.path()));
+        }
         let kind = match entry {
             scan::Entry::Directory if metadata.is_directory() => {
                 if relative.components().count() > MAX_TREE_DEPTH {
@@ -517,6 +572,7 @@ impl Snapshot {
                     }
                     Ok(())
                 })?;
+                scope.verify_mount()?;
                 for (path, child) in children {
                     self.observe(scope, path, child, exclusions, budget, progress)?;
                 }

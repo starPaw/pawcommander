@@ -7,8 +7,8 @@ pub(in crate::vfs) use tests::two_way_round_trip;
 
 use super::{
     apply::{self, Execution},
-    check_new_name, observe_folders, revalidate_folders, Budget, Exclusions, Kind, ReadScope,
-    Snapshot, SyncChange, SyncReport, SyncRow, TWO_WAY_ROLES,
+    check_new_name, observe_folders, revalidate_folders, verify_snapshot_mounts, Budget,
+    Exclusions, Kind, ReadScope, Snapshot, SyncChange, SyncReport, SyncRow, TWO_WAY_ROLES,
 };
 use crate::{
     file_error::{SyncError, SyncStateKind, SyncStateProblem},
@@ -81,7 +81,7 @@ impl TwoWayPlan {
         progress: &mut Progress,
     ) -> Result<Self, TransferError> {
         let cancel = progress.cancellation();
-        let (_, observed) = observe_folders(&folders, TWO_WAY_ROLES, &exclusions, progress)?;
+        let (_, observed) = observe_folders(&folders, TWO_WAY_ROLES, &exclusions, None, progress)?;
         let store = BaselineStore::new(directory, &observed, exclusions.patterns())?;
         let baseline = store.read(&cancel)?;
         let interrupted = store.read_run()?;
@@ -100,6 +100,7 @@ impl TwoWayPlan {
             && baseline
                 .as_ref()
                 .is_some_and(|tree| matches_tree(&observed[0], tree));
+        verify_snapshot_mounts(&observed, &folders, TWO_WAY_ROLES, &cancel)?;
         Ok(Self {
             folders,
             observed,
@@ -169,13 +170,16 @@ impl TwoWayPlan {
         }
         let mut choices = self.choices.clone();
         choices.insert(path, side);
+        let cancel = progress.cancellation();
+        verify_snapshot_mounts(&self.observed, &self.folders, TWO_WAY_ROLES, &cancel)?;
         let (rows, conflicts) = reconcile(
             &self.observed,
             self.baseline.as_ref(),
             self.interrupted(),
             &choices,
-            &progress.cancellation(),
+            &cancel,
         )?;
+        verify_snapshot_mounts(&self.observed, &self.folders, TWO_WAY_ROLES, &cancel)?;
         self.choices = choices;
         self.rows = rows;
         self.conflicts = conflicts;
@@ -204,6 +208,7 @@ impl TwoWayPlan {
         if let Some(run) = &self.interrupted {
             self.store.check_stage(run, &self.observed)?;
         }
+        verify_snapshot_mounts(&self.observed, &self.folders, TWO_WAY_ROLES, &cancel)?;
         Ok(scopes)
     }
 
@@ -279,8 +284,13 @@ impl TwoWayPlan {
                 Some(&mut |stage| lock.track_stage(&mut run, stage, &self.observed, &cancel)),
             )?;
             self.store.check_stage(&run, &self.observed)?;
-            let (_, final_state) =
-                observe_folders(&self.folders, TWO_WAY_ROLES, &self.exclusions, progress)?;
+            let (_, final_state) = observe_folders(
+                &self.folders,
+                TWO_WAY_ROLES,
+                &self.exclusions,
+                Some(&self.observed),
+                progress,
+            )?;
             self.store.check_roots(&final_state)?;
             if let Some(folder) = final_state.iter().find(|side| !matches_tree(side, &target)) {
                 return Err(SyncError::ResultMismatch(folder.root.clone()).into());

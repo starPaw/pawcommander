@@ -27,6 +27,11 @@ pub(super) struct Parent {
 }
 
 impl Parent {
+    #[cfg(target_os = "macos")]
+    pub(super) fn same_local_volume(&self, metadata: &EntryMetadata) -> Option<bool> {
+        self.metadata.same_local_volume(metadata)
+    }
+
     pub(super) fn capture(location: &Location) -> Result<Self, TransferError> {
         let location = location.with_path(canonical(location)?);
         let metadata = entry_metadata(&location)?.ok_or_else(|| unavailable(&location))?;
