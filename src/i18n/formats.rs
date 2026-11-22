@@ -97,6 +97,7 @@ formats! {
     "Move stopped: item {path} changed or is inaccessible" => ("Перенос остановлен: объект {path} изменился или недоступен", "Přesun byl zastaven: položka {path} se změnila nebo není dostupná"),
     "Safe cross-volume move is unavailable for this object type: {path}" => ("Безопасный перенос этого типа объекта между дисками недоступен: {path}", "Bezpečný přesun mezi svazky není pro tento typ položky dostupný: {path}"),
     "Saved access times for {source} have {actual} entries. Expected {expected}." => ("Для «{source}» сохранено записей о времени доступа: {actual}. Ожидалось: {expected}.", "Uložené časy přístupu pro {source} obsahují {actual} položek. Očekáváno: {expected}."),
+    "Preparing to move the original from {original} was interrupted. {error}" => ("Подготовка переноса исходных данных из «{original}» прервана. {error}", "Příprava přesunu zdrojových dat z {original} byla přerušena. {error}"),
     "Check the original source {source} and temporary path {held}.\n{error}" => ("Проверьте исходный путь «{source}» и временный путь «{held}».\n{error}", "Zkontrolujte původní zdroj {source} a dočasnou cestu {held}.\n{error}"),
     "The remaining source was restored to {original}" => ("Оставшиеся исходные данные возвращены в «{original}»", "Zbývající zdrojová data byla obnovena do {original}"),
     "Could not restore the source from {held} to {source}.\n{error}" => ("Не удалось вернуть источник из «{held}» в «{source}».\n{error}", "Zdroj se nepodařilo obnovit z {held} do {source}.\n{error}"),

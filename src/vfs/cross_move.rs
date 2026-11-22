@@ -55,6 +55,8 @@ pub(super) enum Phase {
     Copied,
     #[cfg(target_os = "macos")]
     QuarantinePlanned,
+    #[cfg(target_os = "macos")]
+    QuarantineAborted,
     Quarantined,
     BeforeRemove,
     Removed,
@@ -455,6 +457,18 @@ pub(super) fn remove_verified(
             if let Err(error) = observe(&held, Phase::QuarantinePlanned)
                 .and_then(|()| cancel.check().map_err(Into::into))
             {
+                if keep_stage {
+                    let preparation = CrossMoveError::Prepare {
+                        original: item.source.clone(),
+                        cause: error,
+                    };
+                    return StagingCleanupError::combine(
+                        Err(preparation.into()),
+                        observe(&held, Phase::QuarantineAborted),
+                        staging,
+                        &item.target,
+                    );
+                }
                 *preserve = false;
                 return Err(error);
             }

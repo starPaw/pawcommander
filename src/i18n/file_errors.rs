@@ -193,6 +193,12 @@ fn cross_move_error(error: &CrossMoveError) -> String {
             expected = expected,
             actual = actual
         ),
+        #[cfg(target_os = "macos")]
+        Prepare { original, cause } => crate::tr_format!(
+            "Preparing to move the original from {original} was interrupted. {error}",
+            original = original,
+            error = file_error(cause)
+        ),
         Hold {
             original,
             held,
@@ -1935,7 +1941,7 @@ fn staging_error(error: &StagingError) -> String {
             "Staging directory identity changed at {staging}. Its contents were preserved.",
             staging = staging
         ),
-        #[cfg(windows)]
+        #[cfg(any(target_os = "macos", windows))]
         StagingError::IdentityUnavailable(staging) => crate::tr_format!(
             "Could not verify the identity of temporary folder {staging}",
             staging = staging

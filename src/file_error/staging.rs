@@ -16,7 +16,7 @@ pub(crate) enum StagingError {
     MissingParent(Location),
     NamesExhausted(Location),
     IdentityChanged(Location),
-    #[cfg(windows)]
+    #[cfg(any(target_os = "macos", windows))]
     IdentityUnavailable(Location),
     Journal {
         staging: Location,
@@ -45,7 +45,7 @@ impl fmt::Display for StagingError {
             Self::IdentityChanged(staging) => {
                 write!(f, "Staging directory identity changed at {staging}")
             }
-            #[cfg(windows)]
+            #[cfg(any(target_os = "macos", windows))]
             Self::IdentityUnavailable(staging) => {
                 write!(f, "Staging directory identity unavailable at {staging}")
             }
