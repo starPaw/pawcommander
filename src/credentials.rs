@@ -2,6 +2,7 @@
 use crate::vfs::Endpoint;
 use keyring::api::CredentialStoreApi;
 use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, Zeroizing};
 
 const SERVICE: &str = "dev.pawcommander.sftp.v1";
 #[derive(Serialize, Deserialize)]
@@ -9,6 +10,14 @@ pub struct SavedKey {
     pub private_key: String,
     pub passphrase: String,
 }
+
+impl Zeroize for SavedKey {
+    fn zeroize(&mut self) {
+        self.private_key.zeroize();
+        self.passphrase.zeroize();
+    }
+}
+
 fn entry(endpoint: &Endpoint) -> Result<keyring::Entry, String> {
     let account = account(endpoint)?;
     system_entry(SERVICE, &account).map_err(vault_error)
@@ -76,8 +85,10 @@ pub fn save(endpoint: &Endpoint, secret: &SavedKey) -> Result<(), String> {
 fn save_entry(entry: &keyring::Entry, secret: &SavedKey) -> Result<(), String> {
     // Keep JSON as UTF-8 bytes: Windows doubles ASCII password strings to
     // UTF-16, unnecessarily exceeding its credential-blob limit for RSA keys.
-    let encoded = serde_json::to_vec(secret)
-        .map_err(|_| crate::i18n::text!("Не удалось подготовить ключ к сохранению"))?;
+    let encoded = Zeroizing::new(
+        serde_json::to_vec(secret)
+            .map_err(|_| crate::i18n::text!("Не удалось подготовить ключ к сохранению"))?,
+    );
     entry.set_secret(&encoded).map_err(vault_error)
 }
 pub fn forget(endpoint: &Endpoint) -> Result<(), String> {

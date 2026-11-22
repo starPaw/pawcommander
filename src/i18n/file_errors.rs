@@ -1173,6 +1173,26 @@ fn connection_error(error: &ConnectionError) -> String {
             "Could not open the SFTP connection ({error}). Use the SFTP dialog to sign in with a password or MFA.",
             error = file_error(cause)
         ),
+        ConnectionError::KeyPasswordConflict => text!("Для сохранения ключа очистите пароль аккаунта").into(),
+        ConnectionError::KeyFileRequired => text!("Укажите файл приватного ключа").into(),
+        ConnectionError::ImportedKeyNotFile(path) => crate::tr_format!(
+            "The private key path {path} must refer to a regular file.",
+            path = path.display()
+        ),
+        ConnectionError::ImportedKeyTooLarge { path, limit } => crate::tr_format!(
+            "The private key file {path} exceeds the {limit}-byte import limit.",
+            path = path.display(),
+            limit = limit
+        ),
+        ConnectionError::ImportedKeyEncoding { path, source } => crate::tr_format!(
+            "The private key file {path} must be OpenSSH or PEM text. {error}",
+            path = path.display(),
+            error = source
+        ),
+        ConnectionError::InitialPathNotDirectory(location) => crate::tr_format!(
+            "The initial SFTP path {path} is not a folder.",
+            path = location
+        ),
         ConnectionError::AuthenticationUnconfirmed { interactive: true } =>
             text!("Сервер не подтвердил интерактивную аутентификацию").into(),
         ConnectionError::AuthenticationUnconfirmed { interactive: false } =>

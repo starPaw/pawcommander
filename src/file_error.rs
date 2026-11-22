@@ -267,6 +267,18 @@ pub(crate) enum ConnectionError {
         cause: TransferError,
     },
     Automatic(TransferError),
+    KeyPasswordConflict,
+    KeyFileRequired,
+    ImportedKeyNotFile(PathBuf),
+    ImportedKeyTooLarge {
+        path: PathBuf,
+        limit: usize,
+    },
+    ImportedKeyEncoding {
+        path: PathBuf,
+        source: Utf8Error,
+    },
+    InitialPathNotDirectory(Location),
     AuthenticationUnconfirmed {
         interactive: bool,
     },
@@ -304,6 +316,32 @@ impl fmt::Display for ConnectionError {
                 write!(f, "{role} {address} · {cause}")
             }
             Self::Automatic(cause) => write!(f, "Automatic SFTP connection: {cause}"),
+            Self::KeyPasswordConflict => f.write_str("Clear the account password to save the key"),
+            Self::KeyFileRequired => f.write_str("Choose a private key file"),
+            Self::ImportedKeyNotFile(path) => {
+                write!(
+                    f,
+                    "The private key path {} must refer to a regular file",
+                    path.display()
+                )
+            }
+            Self::ImportedKeyTooLarge { path, limit } => {
+                write!(
+                    f,
+                    "The private key file {} exceeds the {limit}-byte import limit",
+                    path.display()
+                )
+            }
+            Self::ImportedKeyEncoding { path, source } => {
+                write!(
+                    f,
+                    "Invalid text encoding in the private key file {}: {source}",
+                    path.display()
+                )
+            }
+            Self::InitialPathNotDirectory(location) => {
+                write!(f, "The initial SFTP path {location} is not a folder")
+            }
             Self::AuthenticationUnconfirmed { .. } => f.write_str("Authentication unconfirmed"),
             Self::UnsupportedAuthentication => {
                 f.write_str("No supported SSH authentication method")
@@ -325,6 +363,7 @@ impl Error for ConnectionError {
             #[cfg(target_os = "macos")]
             Self::Forward { source, .. } => Some(source),
             Self::Route { cause, .. } | Self::Automatic(cause) => Some(cause),
+            Self::ImportedKeyEncoding { source, .. } => Some(source),
             _ => None,
         }
     }

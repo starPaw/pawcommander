@@ -3,6 +3,122 @@ use super::*;
 use crate::vfs::cache_media_preview;
 
 #[cfg(target_os = "macos")]
+#[test]
+fn key_import_failures_are_typed_before_opening_a_connection() {
+    use crate::file_error::{AccessAction, AccessCause, ConnectionError, Failure};
+    use crate::vfs::{
+        sftp::{connect_location_at, TrustFiles},
+        ConnectRequest, InteractiveAuth,
+    };
+    use std::error::Error;
+    use zeroize::Zeroizing;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let endpoint = Endpoint {
+        host: "127.0.0.1".into(),
+        port: 49152,
+        user: "fixture".into(),
+        key: None,
+        jump: None,
+    };
+    let absent = root.join("missing");
+    let large = root.join("large");
+    let invalid = root.join("invalid");
+    let password = "fixture-account-password";
+    let phrase = "fixture-key-phrase";
+    let prefix = b"fixture-private-key-data";
+    fs::write(&large, vec![0_u8; 64 * 1024 + 1]).unwrap();
+    fs::write(&invalid, [prefix.as_slice(), &[0xff]].concat()).unwrap();
+    let trust = TrustFiles::new(root.join("known_hosts"), None);
+    let request = |key: Option<PathBuf>, password: &str| ConnectRequest {
+        endpoint: Endpoint {
+            key,
+            ..endpoint.clone()
+        },
+        path: ".".into(),
+        password: Zeroizing::new(password.into()),
+        passphrase: Zeroizing::new(phrase.into()),
+        jump_passphrase: Default::default(),
+        use_saved: false,
+        save_key: true,
+    };
+    let attempt = |key: Option<PathBuf>, secret: &str| {
+        let (auth, prompts) = InteractiveAuth::new(|| {});
+        let error = connect_location_at(request(key.clone(), secret), auth, &trust)
+            .err()
+            .expect("expected a local key import failure");
+        assert!(prompts.try_recv().is_err());
+        let message = crate::i18n::connection_result_error(&error);
+        assert!(message.contains(&endpoint.label()), "{message}");
+        if let Some(path) = key {
+            assert!(message.contains(&*path.to_string_lossy()), "{message}");
+        }
+        for value in [message, error.to_string(), format!("{error:?}")] {
+            assert!(!value.contains(password));
+            assert!(!value.contains(phrase));
+            assert!(!value.contains(std::str::from_utf8(prefix).unwrap()));
+        }
+        let TransferError::Failed(Failure::Connection(error)) = error else {
+            panic!("expected a connection setup error");
+        };
+        let ConnectionError::Route {
+            jump: false,
+            address,
+            cause,
+        } = *error
+        else {
+            panic!("expected the target for the key import");
+        };
+        assert_eq!(address, endpoint.label());
+        cause
+    };
+    assert!(
+        matches!(attempt(None, password), TransferError::Failed(Failure::Connection(error))
+        if matches!(*error, ConnectionError::KeyPasswordConflict))
+    );
+    assert!(
+        matches!(attempt(None, ""), TransferError::Failed(Failure::Connection(error))
+        if matches!(*error, ConnectionError::KeyFileRequired))
+    );
+    assert!(matches!(
+        attempt(Some(absent.clone()), ""),
+        TransferError::Failed(Failure::Access(error))
+            if error.location.path() == absent
+                && matches!(error.action, AccessAction::OpenFile)
+                && matches!(&error.cause, AccessCause::Local(source)
+                    if source.kind() == std::io::ErrorKind::NotFound)
+    ));
+    assert!(matches!(
+        attempt(Some(root.to_owned()), ""),
+        TransferError::Failed(Failure::Connection(error))
+            if matches!(error.as_ref(), ConnectionError::ImportedKeyNotFile(path) if path.as_path() == root)
+    ));
+    assert!(matches!(
+        attempt(Some(large.clone()), ""),
+        TransferError::Failed(Failure::Connection(error))
+            if matches!(error.as_ref(), ConnectionError::ImportedKeyTooLarge { path, limit: 65536 } if path == &large)
+    ));
+    let TransferError::Failed(Failure::Connection(encoding)) = attempt(Some(invalid.clone()), "")
+    else {
+        panic!("expected an encoding error with a safe source");
+    };
+    assert!(matches!(
+        encoding.as_ref(),
+        ConnectionError::ImportedKeyEncoding { path, source }
+            if path == &invalid && source.valid_up_to() == prefix.len()
+    ));
+    assert!(encoding.source().unwrap().is::<std::str::Utf8Error>());
+
+    let (auth, _) = InteractiveAuth::new(|| {});
+    assert!(auth.control().cancel());
+    assert!(matches!(
+        connect_location_at(request(Some(invalid), ""), auth, &trust),
+        Err(TransferError::Cancelled)
+    ));
+}
+
+#[cfg(target_os = "macos")]
 fn check_sftp_connection_errors(root: &Path) {
     use crate::file_error::{ConnectionError, Failure, SshStage};
     use crate::vfs::{
@@ -62,6 +178,65 @@ fn check_sftp_connection_errors(root: &Path) {
         }
     ));
     assert!(handshake.source().unwrap().is::<ssh2::Error>());
+}
+
+#[cfg(target_os = "macos")]
+fn check_sftp_initial_folder(endpoint: &Endpoint, root: &Path) {
+    use crate::file_error::{ConnectionError, Failure};
+    use crate::vfs::{
+        sftp::{connect_location_at, TrustFiles},
+        ConnectRequest, InteractiveAuth,
+    };
+    use zeroize::Zeroizing;
+
+    let fixture = tempfile::tempdir_in(root).unwrap();
+    let folder = fixture.path().join("folder");
+    let file = fixture.path().join("file");
+    let alias = fixture.path().join("start-alias");
+    fs::create_dir(&folder).unwrap();
+    fs::write(&file, b"existing server file").unwrap();
+    std::os::unix::fs::symlink(&file, &alias).unwrap();
+    let connect = |path: &Path, save_key| {
+        let (auth, prompts) = InteractiveAuth::new(|| {});
+        let request = ConnectRequest {
+            endpoint: endpoint.clone(),
+            path: path.to_string_lossy().into_owned(),
+            password: Default::default(),
+            passphrase: Zeroizing::new("test-passphrase".into()),
+            jump_passphrase: Default::default(),
+            use_saved: false,
+            save_key,
+        };
+        let result = connect_location_at(
+            request,
+            auth,
+            &TrustFiles::new(root.join("known_hosts"), None),
+        );
+        assert!(prompts.try_recv().is_err());
+        result
+    };
+    let prior = sessions().lock().unwrap()[endpoint].clone();
+    // A valid key can authenticate in memory. Failure to validate the starting
+    // folder must precede any attempt to save it or activate a new session.
+    let error = connect(&alias, true)
+        .err()
+        .expect("expected a non-directory start");
+    let TransferError::Failed(Failure::Connection(error)) = error else {
+        panic!("expected the typed starting directory problem");
+    };
+    assert!(matches!(
+        *error,
+        ConnectionError::InitialPathNotDirectory(Location::Sftp { endpoint: actual, path })
+            if &actual == endpoint && path == file.canonicalize().unwrap()
+    ));
+    assert!(std::sync::Arc::ptr_eq(
+        &prior,
+        &sessions().lock().unwrap()[endpoint]
+    ));
+    assert_eq!(fs::read(&file).unwrap(), b"existing server file");
+    let connected = connect(&folder, false).unwrap();
+    assert_eq!(connected.location.path(), folder.canonicalize().unwrap());
+    assert!(!connected.saved_profile);
 }
 
 #[cfg(target_os = "macos")]
@@ -1424,6 +1599,8 @@ fn openssh_round_trip_and_host_verification() {
     let local_root = Location::Local(root.join("local"));
     fs::create_dir(local_root.path()).unwrap();
     fs::create_dir(remote_root.path()).unwrap();
+    #[cfg(target_os = "macos")]
+    check_sftp_initial_folder(&endpoint, &root);
     let duplicate = create_directory(&remote_root.parent().unwrap(), "remote").unwrap_err();
     let TransferError::Failed(crate::file_error::Failure::Mutation(duplicate)) = duplicate else {
         panic!("expected a typed SFTP directory conflict: {duplicate:?}");
