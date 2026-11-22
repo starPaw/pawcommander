@@ -16,6 +16,7 @@ mod file_promise;
 mod file_template;
 mod host_key;
 mod metadata;
+mod move_history;
 mod recovery_record;
 #[cfg(target_os = "macos")]
 mod resume_check;
@@ -39,6 +40,7 @@ pub(crate) use file_promise::FilePromiseError;
 pub(crate) use file_template::FileTemplateError;
 pub(crate) use host_key::{HostKeyError, KnownHostEntryError, KnownHostsError, PinError};
 pub(crate) use metadata::{MetadataError, MetadataField, MetadataWarning};
+pub(crate) use move_history::{DescendantProblem, MoveHistoryError};
 #[cfg(target_os = "macos")]
 pub(crate) use recovery_record::ResumeRecordEvent;
 pub(crate) use recovery_record::{
@@ -83,6 +85,7 @@ pub(crate) enum Failure {
     Conflict(Box<ConflictError>),
     BatchRename(Box<BatchRenameError>),
     CrossMove(Box<CrossMoveError>),
+    MoveHistory(Box<MoveHistoryError>),
     Undo(Box<UndoError>),
     #[cfg(target_os = "macos")]
     FilePromise(Box<FilePromiseError>),
@@ -136,6 +139,7 @@ impl Failure {
             Self::Conflict(error) => Some(error.as_ref()),
             Self::BatchRename(error) => Some(error.as_ref()),
             Self::CrossMove(error) => Some(error.as_ref()),
+            Self::MoveHistory(error) => Some(error.as_ref()),
             Self::Undo(error) => Some(error.as_ref()),
             #[cfg(target_os = "macos")]
             Self::FilePromise(error) => Some(error.as_ref()),
@@ -182,6 +186,7 @@ impl fmt::Display for Failure {
             Self::Conflict(error) => fmt::Display::fmt(error, f),
             Self::BatchRename(error) => fmt::Display::fmt(error, f),
             Self::CrossMove(error) => fmt::Display::fmt(error, f),
+            Self::MoveHistory(error) => fmt::Display::fmt(error, f),
             Self::Undo(error) => fmt::Display::fmt(error, f),
             #[cfg(target_os = "macos")]
             Self::FilePromise(error) => fmt::Display::fmt(error, f),

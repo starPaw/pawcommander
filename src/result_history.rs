@@ -402,6 +402,14 @@ impl Results {
         }
     }
 
+    pub(crate) fn staged_with_error(&mut self, source: &Location, error: &TransferError) {
+        self.staged(
+            source,
+            Some(crate::i18n::file_error(error)),
+            matches!(error, TransferError::Cancelled),
+        );
+    }
+
     /// A root rename does not itself establish each descendant's identity.
     /// Confirm an observed path only after checking the published target.
     pub fn moved_entry(&mut self, source: &Location, verified: bool, reason: Option<String>) {
@@ -567,6 +575,31 @@ impl Results {
         error: Option<&TransferError>,
     ) {
         self.record(source, None, outcome, error.map(crate::i18n::file_error));
+    }
+
+    pub(crate) fn record_transfer_item(
+        &mut self,
+        source: &Location,
+        outcome: Outcome,
+        error: Option<&TransferError>,
+        history_warning: Option<&TransferError>,
+        metadata_warning: bool,
+    ) {
+        let mut reasons: Vec<_> = error
+            .into_iter()
+            .chain(history_warning)
+            .map(crate::i18n::file_error)
+            .collect();
+        if metadata_warning {
+            reasons.push(
+                crate::i18n::text!(
+                "Даты или права доступа сохранены частично. Подробности указаны в строках журнала.",
+            )
+                .into(),
+            );
+        }
+        let reason = (!reasons.is_empty()).then(|| reasons.join("\n"));
+        self.record(source, None, outcome, reason);
     }
 
     pub(crate) fn record_checksum(&mut self, source: &Location, outcome: ChecksumOutcome) {

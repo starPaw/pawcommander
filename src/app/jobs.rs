@@ -986,6 +986,10 @@ impl PawCommander {
                 summary.cancelled,
                 &destination.display(),
             );
+            if let Some(warning) = &summary.move_history_warning {
+                message.push('\n');
+                message.push_str(&crate::i18n::file_error(warning));
+            }
             if summary.metadata_warnings != 0 {
                 message.push('\n');
                 message.push_str(crate::i18n::text!("Даты или права доступа сохранены частично. Подробности указаны в строках журнала."));
