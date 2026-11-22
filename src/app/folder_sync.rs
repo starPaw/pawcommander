@@ -152,8 +152,14 @@ impl FolderSyncDialog {
                 Phase::Running(worker) => show_progress(ui, worker, crate::i18n::key!("Проверяем папки для плана…")),
                 Phase::Finished(preview) => review = show_preview(ui, preview, self.run),
                 Phase::Failed(error) => {
-                    let message = egui::RichText::new(error.as_str()).color(ui.visuals().error_fg_color);
-                    ui.add(egui::Label::new(message).selectable(true).wrap());
+                    let height = (ctx.content_rect().height() * 0.30).clamp(90.0, 240.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt(("sync-plan-error", self.run))
+                        .max_height(height)
+                        .show(ui, |ui| {
+                            let message = egui::RichText::new(error.as_str()).color(ui.visuals().error_fg_color);
+                            ui.add(egui::Label::new(message).selectable(true).wrap());
+                        });
                 }
                 Phase::Stopped => {
                     ui.label(text!("Проверка папок остановлена"));

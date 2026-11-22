@@ -14,7 +14,7 @@ use crate::file_error::{
 use crate::file_error::{
     CompatiblePlanError, DuplicateError, DuplicateRole, FilePromiseError, FileTemplateError,
     RemoteEditError, ResumeCheckError, ResumeCheckProblem, ResumeRecordEvent, ResumeRole,
-    ScanLimit, ScanLimitKind, SyncError,
+    ScanLimit, ScanLimitKind, SyncError, SyncFolderRole,
 };
 use crate::file_error::{
     RecoveryRecordAction, RecoveryRecordError, RecoveryRecordProblem, RecoveryRecordSection,
@@ -1049,6 +1049,32 @@ fn metadata_error(error: &MetadataError) -> String {
 #[cfg(target_os = "macos")]
 fn sync_error(error: &SyncError) -> String {
     match error {
+        SyncError::Folder { role, folder, cause } => {
+            let role = match role {
+                SyncFolderRole::Source => text!("Исходная папка"),
+                SyncFolderRole::Destination => text!("Папка назначения"),
+                SyncFolderRole::Left => text!("Левая папка"),
+                SyncFolderRole::Right => text!("Правая папка"),
+            };
+            let folder = folder.display();
+            format!("{role} · {}\n{}", folder.escape_debug(), file_error(cause))
+        }
+        SyncError::EntryTypeChanged(location) => crate::tr_format!(
+            "Item type changed while scanning {location}.",
+            location = location.display().escape_debug()
+        ),
+        SyncError::LinkTargetChanged(location) => crate::tr_format!(
+            "Symbolic link target changed while scanning {location}.",
+            location = location.display().escape_debug()
+        ),
+        SyncError::PlanEntryAdded(location) => crate::tr_format!(
+            "An item was added after planning. Build the plan again.\n{location}",
+            location = location.display().escape_debug()
+        ),
+        SyncError::PlanEntryMissing(location) => crate::tr_format!(
+            "An item disappeared after planning. Build the plan again.\n{location}",
+            location = location.display().escape_debug()
+        ),
         SyncError::NameCollision(location) => crate::tr_format!(
             "Names collide at the destination: {location}", location = location
         ),

@@ -1,7 +1,8 @@
 //! Bounded reads rooted at a folder, with identity and version checks.
 use super::{
     transfer::{
-        entry_metadata, read_entry_metadata, EntryMetadata, SourceReader, TransferSourceEntry,
+        canonical, entry_metadata, read_entry_metadata, EntryMetadata, SourceReader,
+        TransferSourceEntry,
     },
     undo::Parent,
     Location,
@@ -47,6 +48,20 @@ impl CheckedFile<'_> {
 
     pub(super) fn stream(&mut self) -> (&Location, u64, &mut SourceReader) {
         (&self.source, self.stamp.size(), &mut self.input)
+    }
+
+    pub(super) fn digest(
+        &mut self,
+        progress: &mut Progress,
+        cancel: &Cancellation,
+    ) -> Result<[u8; 32], TransferError> {
+        let (source, size, input) = self.stream();
+        let digest = progress
+            .hash_file(source.path(), size, input)
+            .map_err(|error| AccessError::read(source, error))?
+            .ok_or_else(|| ScanError::FileChanged(source.clone()))?;
+        self.verify(cancel)?;
+        Ok(digest)
     }
 
     pub(super) fn verify(&mut self, cancel: &Cancellation) -> Result<(), TransferError> {
@@ -95,18 +110,24 @@ impl ReadScope {
         self.parent.verify().map_err(folder_error)
     }
 
+    pub(super) fn verify_selected_root(&self, selected: &Location) -> Result<(), TransferError> {
+        self.verify_root()?;
+        let captured = self.parent.location.path();
+        if selected.path() != captured && canonical(selected)? != captured {
+            return Err(ScanError::FolderUnavailable(selected.clone()).into());
+        }
+        Ok(())
+    }
+
     pub(super) fn digest(
         &self,
         path: &Path,
         progress: &mut Progress,
         cancel: &Cancellation,
     ) -> Result<Option<[u8; 32]>, TransferError> {
-        self.read_checked(path, cancel, |source, size, input| {
-            progress
-                .hash_file(source.path(), size, input)
-                .map_err(|error| AccessError::read(source, error))?
-                .ok_or_else(|| ScanError::FileChanged(source.clone()).into())
-        })
+        self.open_file(path, cancel)?
+            .map(|mut file| file.digest(progress, cancel))
+            .transpose()
     }
 
     pub(super) fn read_checked<T>(

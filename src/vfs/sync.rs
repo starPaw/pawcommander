@@ -10,21 +10,24 @@ pub(crate) use two_way::{Reconcile, ReconcileConflict, TwoWayPlan};
 
 use super::{
     compare::{scan, MAX_ENTRIES, MAX_PATH_BYTES},
-    guarded_directory::stale,
-    read_scope::{changed_during_read, ReadScope},
+    guarded_directory::{stale, Directory},
+    read_scope::ReadScope,
+    sftp::remote,
     transfer::{
-        entry_metadata, validate_sftp_source_path, EntryMetadata, TransferSourceEntry,
-        SYNC_STAGING_PREFIX,
+        entry_metadata, read_entry_metadata, validate_sftp_source_path, EntryMetadata,
+        TransferSourceEntry, SYNC_STAGING_PREFIX,
     },
     Location, MAX_TREE_DEPTH,
 };
 use crate::{
-    file_error::{ScanError, SyncError},
+    file_error::{AccessAction, AccessError, ScanError, SyncError, SyncFolderRole},
     operations::{Cancellation, Progress, TransferError},
 };
 use std::{
+    cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     ffi::{OsStr, OsString},
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -32,6 +35,9 @@ use std::{
 mod tests;
 #[cfg(test)]
 pub(super) use tests::sync_round_trip;
+
+const ONE_WAY_ROLES: [SyncFolderRole; 2] = [SyncFolderRole::Source, SyncFolderRole::Destination];
+const TWO_WAY_ROLES: [SyncFolderRole; 2] = [SyncFolderRole::Left, SyncFolderRole::Right];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SyncChange {
@@ -69,7 +75,7 @@ impl SyncPlan {
         exclusions: Exclusions,
         progress: &mut Progress,
     ) -> Result<Self, TransferError> {
-        let (_, observed) = observe_folders(&folders, &exclusions, progress)?;
+        let (_, observed) = observe_folders(&folders, ONE_WAY_ROLES, &exclusions, progress)?;
         let mut plan = Self {
             folders,
             observed,
@@ -129,7 +135,13 @@ impl SyncPlan {
     }
 
     fn revalidate(&self, progress: &mut Progress) -> Result<[ReadScope; 2], TransferError> {
-        revalidate_folders(&self.folders, &self.observed, &self.exclusions, progress)
+        revalidate_folders(
+            &self.folders,
+            ONE_WAY_ROLES,
+            &self.observed,
+            &self.exclusions,
+            progress,
+        )
     }
 
     pub(crate) fn excluded_count(&self) -> usize {
@@ -156,9 +168,9 @@ fn check_new_name(
     path: &Path,
     names: &mut BTreeSet<(PathBuf, String)>,
 ) -> Result<(), TransferError> {
-    let name = path.file_name().ok_or_else(changed_during_read)?;
-    let parent = path.parent().ok_or_else(changed_during_read)?;
     let location = destination.root.join(path);
+    let name = path.file_name().ok_or_else(|| stale(&location))?;
+    let parent = path.parent().ok_or_else(|| stale(&location))?;
     if let Some(name) = name.to_str()
         && !names.insert((
             parent.to_owned(),
@@ -223,64 +235,83 @@ struct Snapshot {
 
 fn revalidate_folders(
     folders: &[Location; 2],
+    roles: [SyncFolderRole; 2],
     observed: &[Snapshot; 2],
     exclusions: &Exclusions,
     progress: &mut Progress,
 ) -> Result<[ReadScope; 2], TransferError> {
-    let (scopes, current) = observe_folders(folders, exclusions, progress)?;
+    let (scopes, current) = observe_folders(folders, roles, exclusions, progress)?;
     let cancel = progress.cancellation();
-    for (before, after) in observed.iter().zip(current) {
-        if before.root != after.root
-            || before.entries.len() != after.entries.len()
-            || before.excluded != after.excluded
-        {
-            return Err(stale(&before.root));
-        }
-        for (path, entry) in &before.entries {
-            cancel.check()?;
-            let location = before.root.join(path);
-            let actual = after.entries.get(path).ok_or_else(|| stale(&location))?;
-            if entry.kind != actual.kind
-                || entry
-                    .version
-                    .verify_metadata(&location, &actual.version.metadata)
-                    .is_err()
-            {
-                return Err(stale(&location));
-            }
-        }
+    for (side, (before, after)) in observed.iter().zip(current).enumerate() {
+        before
+            .verify_unchanged(&after, &cancel)
+            .map_err(|error| folder_error(roles[side], &folders[side], error))?;
     }
     Ok(scopes)
 }
 
 fn observe_folders(
     folders: &[Location; 2],
+    roles: [SyncFolderRole; 2],
     exclusions: &Exclusions,
     progress: &mut Progress,
 ) -> Result<([ReadScope; 2], [Snapshot; 2]), TransferError> {
     let cancel = progress.cancellation();
-    cancel.check()?;
-    let source = ReadScope::open(&folders[0])?;
-    cancel.check()?;
-    let destination = ReadScope::open(&folders[1])?;
+    let context = |side: usize, error| folder_error(roles[side], &folders[side], error);
+    let open = |side: usize| -> Result<_, TransferError> {
+        cancel.check()?;
+        let scope = ReadScope::open(&folders[side]).map_err(|error| context(side, error))?;
+        if scope.descriptor.is_some() {
+            Directory::from_scope(&scope).map_err(|error| context(side, error))?;
+        }
+        Ok(scope)
+    };
+    let scopes = [open(0)?, open(1)?];
     check_roots(
-        &source.parent.location,
-        &destination.parent.location,
+        scopes.each_ref().map(|scope| &scope.parent.location),
+        roles,
         &cancel,
     )?;
     let mut budget = Budget::default();
     let observed = [
-        Snapshot::read(&source, exclusions, &mut budget, progress)?,
-        Snapshot::read(&destination, exclusions, &mut budget, progress)?,
+        Snapshot::read(&scopes[0], exclusions, &mut budget, progress)
+            .map_err(|error| context(0, error))?,
+        Snapshot::read(&scopes[1], exclusions, &mut budget, progress)
+            .map_err(|error| context(1, error))?,
     ];
-    Ok(([source, destination], observed))
+    // The first folder may have moved while the second was being read.
+    for (side, scope) in scopes.iter().enumerate() {
+        cancel.check()?;
+        scope
+            .verify_selected_root(&folders[side])
+            .map_err(|error| context(side, error))?;
+    }
+    Ok((scopes, observed))
+}
+
+fn folder_error(role: SyncFolderRole, folder: &Location, cause: TransferError) -> TransferError {
+    match cause {
+        cause @ TransferError::Failed(_) => SyncError::Folder {
+            role,
+            folder: folder.clone(),
+            cause: Box::new(cause),
+        }
+        .into(),
+        cause => cause,
+    }
+}
+
+fn read_metadata(location: &Location) -> Result<EntryMetadata, TransferError> {
+    read_entry_metadata(location)
+        .map_err(|cause| AccessError::new(location, AccessAction::ReadMetadata, cause).into())
 }
 
 fn check_roots(
-    source: &Location,
-    destination: &Location,
+    folders: [&Location; 2],
+    roles: [SyncFolderRole; 2],
     cancel: &Cancellation,
 ) -> Result<(), TransferError> {
+    let [source, destination] = folders;
     let overlap = || SyncError::Overlap {
         source: source.clone(),
         destination: destination.clone(),
@@ -298,12 +329,17 @@ fn check_roots(
     if source.local().is_some() && destination.local().is_some() {
         // Check directory identity too. A local alias or volume spelling
         // mismatch can hide an overlap from a lexical path comparison.
-        for (parent, child) in [(source, destination), (destination, source)] {
+        for side in 0..2 {
             cancel.check()?;
-            let expected = entry_metadata(parent)?.ok_or_else(changed_during_read)?;
-            for ancestor in child.ancestors() {
+            let folder = folders[side];
+            let other = folders[1 - side];
+            let expected =
+                read_metadata(folder).map_err(|error| folder_error(roles[side], folder, error))?;
+            for ancestor in other.ancestors() {
                 cancel.check()?;
-                if entry_metadata(&ancestor)?.is_some_and(|actual| expected.same_object(&actual)) {
+                let actual = entry_metadata(&ancestor)
+                    .map_err(|error| folder_error(roles[1 - side], other, error))?;
+                if actual.is_some_and(|actual| expected.same_object(&actual)) {
                     return Err(overlap().into());
                 }
             }
@@ -360,6 +396,66 @@ impl Snapshot {
             .take_while(move |(candidate, _)| candidate.starts_with(path))
     }
 
+    fn verify_unchanged(&self, after: &Self, cancel: &Cancellation) -> Result<(), TransferError> {
+        cancel.check()?;
+        let root = Path::new("");
+        if self.root != after.root
+            || (self.root.local().is_some()
+                && !self.entries[root]
+                    .version
+                    .metadata
+                    .same_object(&after.entries[root].version.metadata))
+        {
+            return Err(stale(&self.root));
+        }
+        let mut current = after.entries.iter();
+        let mut changed_folder = None;
+        for (path, before) in &self.entries {
+            cancel.check()?;
+            let location = self.root.join(path);
+            let Some((actual_path, actual)) = current.next() else {
+                return Err(SyncError::PlanEntryMissing(location).into());
+            };
+            match path.cmp(actual_path) {
+                Ordering::Less => return Err(SyncError::PlanEntryMissing(location).into()),
+                Ordering::Greater => {
+                    return Err(SyncError::PlanEntryAdded(self.root.join(actual_path)).into())
+                }
+                Ordering::Equal => {}
+            }
+            if before.kind != actual.kind {
+                return Err(stale(&location));
+            }
+            if !before
+                .version
+                .matches_metadata(&actual.version.metadata)
+                .map_err(|cause| AccessError::new(&location, AccessAction::ReadMetadata, cause))?
+            {
+                if before.kind != Kind::Directory {
+                    return Err(stale(&location));
+                }
+                // A changed child also updates its parent. Prefer the exact child path.
+                changed_folder.get_or_insert(location);
+            }
+        }
+        if let Some((path, _)) = current.next() {
+            return Err(SyncError::PlanEntryAdded(self.root.join(path)).into());
+        }
+        if let Some(path) = self.excluded.symmetric_difference(&after.excluded).next() {
+            let location = self.root.join(path);
+            let error = if self.excluded.contains(path) {
+                SyncError::PlanEntryMissing(location)
+            } else {
+                SyncError::PlanEntryAdded(location)
+            };
+            return Err(error.into());
+        }
+        if let Some(folder) = changed_folder {
+            return Err(stale(&folder));
+        }
+        Ok(())
+    }
+
     fn read(
         scope: &ReadScope,
         exclusions: &Exclusions,
@@ -375,7 +471,6 @@ impl Snapshot {
             budget,
             progress,
         )?;
-        scope.parent.verify()?;
         Ok(snapshot)
     }
 
@@ -394,7 +489,7 @@ impl Snapshot {
             return Err(error);
         }
         let location = self.root.join(&relative);
-        let metadata = entry_metadata(&location)?.ok_or_else(changed_during_read)?;
+        let metadata = read_metadata(&location)?;
         let kind = match entry {
             scan::Entry::Directory if metadata.is_directory() => {
                 if relative.components().count() > MAX_TREE_DEPTH {
@@ -429,19 +524,36 @@ impl Snapshot {
             }
             scan::Entry::File(_) if metadata.is_file() => Kind::File(
                 scope
-                    .digest(&relative, progress, &cancel)?
-                    .ok_or_else(changed_during_read)?,
+                    .require_file(&relative, &cancel)?
+                    .digest(progress, &cancel)?,
             ),
-            scan::Entry::Link(target) if is_link(&metadata) => Kind::Link(target.into_os_string()),
-            _ => return Err(changed_during_read()),
+            scan::Entry::Link(target) if is_link(&metadata) => {
+                if read_link(&location)? != target {
+                    return Err(SyncError::LinkTargetChanged(location).into());
+                }
+                Kind::Link(target.into_os_string())
+            }
+            _ => return Err(SyncError::EntryTypeChanged(location).into()),
         };
         let version = TransferSourceEntry {
             metadata,
             children: None,
         };
-        version.verify(&location, &cancel, false)?;
+        cancel.check()?;
+        version.verify_metadata(&location, &read_metadata(&location)?)?;
         self.entries.insert(relative, Observed { kind, version });
         Ok(())
+    }
+}
+
+fn read_link(location: &Location) -> Result<PathBuf, TransferError> {
+    if let Some(path) = location.local() {
+        fs::read_link(path)
+            .map_err(|cause| AccessError::new(location, AccessAction::ReadLink, cause).into())
+    } else {
+        remote(location)?
+            .readlink(location.path())
+            .map_err(|cause| AccessError::new(location, AccessAction::ReadLink, cause).into())
     }
 }
 

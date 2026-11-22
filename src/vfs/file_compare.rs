@@ -8,7 +8,6 @@ pub(super) use tests::file_comparison_round_trip;
 use super::{
     compare::side_error,
     read_scope::{CheckedFile, ReadScope},
-    transfer::canonical,
     Location,
 };
 use crate::{
@@ -113,18 +112,10 @@ impl<'a> FileInput<'a> {
         cancel: &Cancellation,
     ) -> Result<(), TransferError> {
         input.verify(cancel)?;
-        let containing_folder = |cause| folder_error(self.file, cause);
         // The descriptor can still read a folder that has moved away from the selected path.
-        self.scope.verify_root().map_err(containing_folder)?;
-        let captured = self.scope.parent.location.path();
-        if self.parent.path() != captured
-            && canonical(&self.parent).map_err(containing_folder)? != captured
-        {
-            return Err(containing_folder(
-                ScanError::FolderUnavailable(self.parent.clone()).into(),
-            ));
-        }
-        Ok(())
+        self.scope
+            .verify_selected_root(&self.parent)
+            .map_err(|cause| folder_error(self.file, cause))
     }
 }
 

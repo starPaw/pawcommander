@@ -8,7 +8,7 @@ pub(in crate::vfs) use tests::two_way_round_trip;
 use super::{
     apply::{self, Execution},
     check_new_name, observe_folders, revalidate_folders, Budget, Exclusions, Kind, ReadScope,
-    Snapshot, SyncChange, SyncReport, SyncRow,
+    Snapshot, SyncChange, SyncReport, SyncRow, TWO_WAY_ROLES,
 };
 use crate::{
     file_error::SyncError,
@@ -83,7 +83,7 @@ impl TwoWayPlan {
         progress: &mut Progress,
     ) -> Result<Self, TransferError> {
         let cancel = progress.cancellation();
-        let (_, observed) = observe_folders(&folders, &exclusions, progress)?;
+        let (_, observed) = observe_folders(&folders, TWO_WAY_ROLES, &exclusions, progress)?;
         let store = BaselineStore::new(directory, &observed, exclusions.patterns())?;
         let baseline = store.read(&cancel)?;
         let interrupted = store.read_run()?;
@@ -186,7 +186,13 @@ impl TwoWayPlan {
 
     fn revalidate(&self, progress: &mut Progress) -> Result<[ReadScope; 2], TransferError> {
         let cancel = progress.cancellation();
-        let scopes = revalidate_folders(&self.folders, &self.observed, &self.exclusions, progress)?;
+        let scopes = revalidate_folders(
+            &self.folders,
+            TWO_WAY_ROLES,
+            &self.observed,
+            &self.exclusions,
+            progress,
+        )?;
         self.store.check_roots(&self.observed)?;
         if self.store.read(&cancel)? != self.baseline || self.store.read_run()? != self.interrupted
         {
@@ -272,7 +278,8 @@ impl TwoWayPlan {
                 Some(&mut |stage| lock.track_stage(&mut run, stage, &self.observed, &cancel)),
             )?;
             self.store.check_stage(&run, &self.observed)?;
-            let (_, final_state) = observe_folders(&self.folders, &self.exclusions, progress)?;
+            let (_, final_state) =
+                observe_folders(&self.folders, TWO_WAY_ROLES, &self.exclusions, progress)?;
             self.store.check_roots(&final_state)?;
             if let Some(folder) = final_state.iter().find(|side| !matches_tree(side, &target)) {
                 return Err(SyncError::ResultMismatch(folder.root.clone()).into());
