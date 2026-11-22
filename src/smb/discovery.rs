@@ -1,5 +1,6 @@
 use super::{
-    Endpoint, MountedShare, PathAction, Record, RecordProblem, SmbError, MOUNT_DIR, RECORD,
+    Endpoint, MountedShare, PathAction, Record, RecordProblem, SmbError, CONNECTION_PREFIX,
+    MOUNT_DIR, RECORD,
 };
 use std::{
     fs::{self, OpenOptions},
@@ -57,7 +58,11 @@ pub(super) fn scan(
         let result = entry
             .map_err(PathAction::ReadStorage.at(root))
             .and_then(|entry| {
-                if !entry.file_name().as_bytes().starts_with(b"connection-") {
+                if !entry
+                    .file_name()
+                    .as_bytes()
+                    .starts_with(CONNECTION_PREFIX.as_bytes())
+                {
                     return Ok(None);
                 }
                 let path = entry.path();
@@ -83,9 +88,16 @@ fn read_share(
     base: &Path,
     inspect: &impl Fn(&Path) -> io::Result<Option<[i32; 2]>>,
 ) -> Result<Option<MountedShare>, SmbError> {
+    let Some(share) = read_saved_share(base)? else {
+        check_unrecorded_mount(base, &base.join(RECORD), inspect)?;
+        return Ok(None);
+    };
+    Ok(share.has_expected_mount(inspect)?.then_some(share))
+}
+
+pub(super) fn read_saved_share(base: &Path) -> Result<Option<MountedShare>, SmbError> {
     let record_path = base.join(RECORD);
     let Some(record) = read_record(&record_path)? else {
-        check_unrecorded_mount(base, &record_path, inspect)?;
         return Ok(None);
     };
     let invalid = |problem| SmbError::InvalidRecord {
@@ -101,16 +113,11 @@ fn read_share(
     if endpoint != record.endpoint {
         return Err(invalid(RecordProblem::EndpointMismatch));
     }
-    let path = endpoint.mountpoint(base);
-    match inspect(&path).map_err(PathAction::InspectMount.at(&path))? {
-        Some(id) if id == record.id => Ok(Some(MountedShare {
-            path,
-            base: base.to_owned(),
-            record,
-        })),
-        Some(_) => Err(SmbError::MountChanged(path)),
-        None => Ok(None),
-    }
+    Ok(Some(MountedShare {
+        path: endpoint.mountpoint(base),
+        base: base.to_owned(),
+        record,
+    }))
 }
 
 fn read_record(path: &Path) -> Result<Option<Record>, SmbError> {

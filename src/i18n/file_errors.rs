@@ -2671,6 +2671,18 @@ fn listing_error(error: &ListingError) -> String {
     };
     let (action, cause): (_, &dyn std::fmt::Display) = match &error.kind {
         OpenLocal(source) => (text!("Не удалось прочитать папку"), source),
+        #[cfg(target_os = "macos")]
+        SmbMount(source) => {
+            let path = error
+                .location
+                .archive_source()
+                .unwrap_or_else(|| error.location.path());
+            return crate::tr_format!(
+                "Could not read “{path}”. {error}",
+                path = path.display(),
+                error = crate::i18n::smb_error(source)
+            );
+        }
         OpenSftp(source) => (text!("Не удалось прочитать папку"), source),
         ReadLocalEntry(source) => (text!("Не удалось прочитать элемент папки"), source),
         ReadSftp(source) => (text!("Не удалось прочитать элемент папки"), source),

@@ -397,6 +397,42 @@ fn automatic_refresh_is_single_flight_and_ignores_stale_reads() {
     assert_eq!(tab.entries[0].name, "current");
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn automatic_smb_mount_refusal_clears_stale_entries_and_selection() {
+    use crate::file_error::{ListingError, ListingErrorKind};
+
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("old.txt");
+    std::fs::write(&file, b"old").unwrap();
+    let ctx = egui::Context::default();
+    let mut tab = Tab::new(root.path().to_path_buf().into(), &ctx);
+    wait_for_directory(&mut tab);
+    assert!(tab.has_complete_listing);
+    tab.select_revealed(file.clone().into());
+    let (worker, load) = DirectoryLoad::channel(DirectoryLoadMode::Automatic);
+    tab.loading = Some(load);
+    let mount = root.path().to_path_buf();
+    let error = ListingError::new(
+        tab.path.clone(),
+        ListingErrorKind::SmbMount(Box::new(crate::smb::SmbError::MountChanged(mount.clone()))),
+    );
+    worker
+        .send(DirectoryRead::Finished(Err(error.into())))
+        .unwrap();
+    wait_for_directory(&mut tab);
+    assert!(!tab.has_complete_listing);
+    assert!(tab.entries.is_empty() && tab.selected.is_empty());
+    assert!(tab.cursor.is_none() && tab.anchor.is_none());
+    assert_eq!(tab.path.local(), Some(mount.as_path()));
+    assert!(tab
+        .error
+        .as_ref()
+        .unwrap()
+        .contains(mount.to_str().unwrap()));
+    assert_eq!(std::fs::read(&file).unwrap(), b"old");
+}
+
 #[test]
 fn automatic_refresh_schedules_remote_tab_without_reconnecting_or_clearing_it() {
     let root = tempfile::tempdir().unwrap();

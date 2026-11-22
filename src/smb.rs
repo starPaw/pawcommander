@@ -17,12 +17,15 @@ use zeroize::Zeroizing;
 
 mod discovery;
 mod error;
+mod paths;
 pub(crate) use discovery::{Discovery, DiscoveryWarnings};
 pub(crate) use error::{MountFailure, PasswordAction, PathAction, RecordProblem, SmbError};
+pub(crate) use paths::check_location;
 
 const SERVICE: &str = "dev.pawcommander.smb.v1";
 const RECORD: &str = "connection.json";
 const MOUNT_DIR: &str = "mount";
+const CONNECTION_PREFIX: &str = "connection-";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Endpoint {
@@ -122,31 +125,47 @@ impl MountedShare {
         &self.record.endpoint
     }
 
-    fn has_expected_mount(&self) -> Result<bool, SmbError> {
-        match mount_id(&self.path, true).map_err(PathAction::InspectMount.at(&self.path))? {
+    fn has_expected_mount(
+        &self,
+        inspect: impl FnOnce(&Path) -> io::Result<Option<[i32; 2]>>,
+    ) -> Result<bool, SmbError> {
+        match inspect(&self.path).map_err(PathAction::InspectMount.at(&self.path))? {
             Some(id) if id == self.record.id => Ok(true),
             Some(_) => Err(SmbError::MountChanged(self.path.clone())),
             None => Ok(false),
         }
     }
 
+    fn require_expected_mount(
+        &self,
+        inspect: impl FnOnce(&Path) -> io::Result<Option<[i32; 2]>>,
+    ) -> Result<(), SmbError> {
+        if self.has_expected_mount(inspect)? {
+            Ok(())
+        } else {
+            Err(SmbError::MissingMount(self.path.clone()))
+        }
+    }
+
     pub(crate) fn check_open(&self) -> Result<(), SmbError> {
-        let result = self.has_expected_mount().and_then(|mounted| {
-            if !mounted {
-                return Err(SmbError::MissingMount(self.path.clone()));
-            }
-            fs::read_dir(&self.path)
-                .map(|_| ())
-                .map_err(PathAction::ReadShare.at(&self.path))
-        });
-        result.map_err(|cause| SmbError::OpenShare {
+        self.require_expected_mount(|path| mount_id(path, true))
+            .and_then(|()| {
+                fs::read_dir(&self.path)
+                    .map(|_| ())
+                    .map_err(PathAction::ReadShare.at(&self.path))
+            })
+            .map_err(|cause| self.open_error(cause))
+    }
+
+    fn open_error(&self, cause: SmbError) -> SmbError {
+        SmbError::OpenShare {
             address: self.endpoint().address.clone(),
             cause: Box::new(cause),
-        })
+        }
     }
 
     pub(crate) fn disconnect(&self) -> Result<Option<SmbError>, SmbError> {
-        if self.has_expected_mount()? {
+        if self.has_expected_mount(|path| mount_id(path, true))? {
             unmount(&self.path).map_err(PathAction::Unmount.at(&self.path))?;
         }
         let record = self.base.join(RECORD);
@@ -225,7 +244,7 @@ fn connect_in(
         .map_err(PathAction::ResolveStorage.at(root))?;
     // Use only non-recursive cleanup for a directory that can cover remote data.
     let base = tempfile::Builder::new()
-        .prefix("connection-")
+        .prefix(CONNECTION_PREFIX)
         .tempdir_in(&root)
         .map_err(PathAction::AllocateMount.at(&root))?
         .keep();

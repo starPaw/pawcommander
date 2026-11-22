@@ -1441,6 +1441,8 @@ impl Error for MutationError {
 #[derive(Debug)]
 pub(crate) enum ListingErrorKind {
     OpenLocal(io::Error),
+    #[cfg(target_os = "macos")]
+    SmbMount(Box<crate::smb::SmbError>),
     ReadLocalEntry(io::Error),
     LocalMetadata(io::Error),
     ArchiveFormat,
@@ -1474,6 +1476,8 @@ impl fmt::Display for ListingError {
         write!(f, "{:?}: ", self.location.path())?;
         match &self.kind {
             OpenLocal(source) => write!(f, "Could not open folder: {source}"),
+            #[cfg(target_os = "macos")]
+            SmbMount(source) => write!(f, "Could not open folder: {source}"),
             ReadLocalEntry(source) => write!(f, "Could not read folder entry: {source}"),
             LocalMetadata(source) => write!(f, "Could not read entry metadata: {source}"),
             ArchiveFormat => f.write_str("Unsupported archive format"),
@@ -1496,6 +1500,8 @@ impl Error for ListingError {
             | ReadLocalEntry(source)
             | LocalMetadata(source)
             | ReadArchive(source) => Some(source),
+            #[cfg(target_os = "macos")]
+            SmbMount(source) => Some(source.as_ref()),
             OpenSftp(source) | ReadSftp(source) => Some(source),
             InvalidSftpName(source) => Some(source),
             _ => None,
