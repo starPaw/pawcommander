@@ -709,10 +709,9 @@ fn older_folder_moves_warn_and_a_damaged_access_time_section_preserves_the_sourc
             assert!(result.unwrap().metadata_warning);
             assert!(progress.results.items.iter().all(|row| {
                 row.outcome == Outcome::CompletedWithWarning
-                    && row
-                        .metadata_warning
-                        .as_deref()
-                        .is_some_and(|warning| warning.contains(text!("время доступа")))
+                    && row.metadata_warning.as_deref().is_some_and(|warning| {
+                        warning.contains(crate::i18n::text!("время доступа"))
+                    })
             }));
             assert!(!source.path().exists());
             assert!(!path.exists());
@@ -1735,6 +1734,31 @@ fn interrupted_folder_reuses_verified_children_and_refuses_changed_trees() {
             progress.results.items[0].outcome,
             Outcome::PartialCopyRetained
         );
+        let failed_children: Vec<_> = progress.results.items[1..]
+            .iter()
+            .filter(|row| row.outcome == Outcome::Failed)
+            .collect();
+        if matches!(change, "finished" | "prefix") {
+            let [child] = failed_children.as_slice() else {
+                panic!("expected one failed child for {change}, got {failed_children:?}");
+            };
+            let relative = changed.strip_prefix(&stage).unwrap();
+            assert_eq!(child.source, source.join(relative).display().to_string());
+            assert_eq!(
+                child.target.as_deref(),
+                Some(target.join(relative).display().to_string().as_str())
+            );
+            assert!(child
+                .reason
+                .as_ref()
+                .unwrap()
+                .contains(changed.to_str().unwrap()));
+            assert!(progress.results.items[1..]
+                .iter()
+                .all(|row| { matches!(row.outcome, Outcome::Failed | Outcome::NotStarted) }));
+        } else {
+            assert!(failed_children.is_empty(), "{change}: {failed_children:?}");
+        }
         assert_eq!(view.snapshot().total_written, 0, "{change}");
         assert_eq!(fs::read(&changed).unwrap(), changed_bytes);
         assert_eq!(fs::read(stage.join("z-child/large")).unwrap(), saved);

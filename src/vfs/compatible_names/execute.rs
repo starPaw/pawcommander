@@ -332,7 +332,7 @@ impl CopyTree<'_, '_> {
             )))
         };
         let identity = result?;
-        self.progress.results.staged(source, None, false);
+        self.progress.results.staged(source, None);
         self.identities.insert(source.clone(), identity);
         Ok(())
     }

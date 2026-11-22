@@ -465,7 +465,7 @@ fn record_staged_metadata(
             Ok(())
         }
         Err(error) => {
-            progress.results.staged_with_error(source, &error);
+            progress.results.staged(source, Some(&error));
             Err(error)
         }
     }

@@ -615,11 +615,7 @@ pub(crate) fn copy_atomically_cancellable(
     let manifest = SourceManifest::capture_observed(source, &scan, &mut |path, error| {
         let location = crate::vfs::Location::Local(path.to_path_buf());
         if let Some(error) = error {
-            progress.results.staged(
-                &location,
-                Some(crate::i18n::access_io_message(error)),
-                TransferError::is_cancelled_io(error),
-            );
+            progress.results.staged_io(&location, Some(error));
         } else {
             progress
                 .results
@@ -665,10 +661,9 @@ pub(crate) fn copy_atomically_cancellable(
     // Revisit every entry, including early files after later files copied.
     .and_then(|()| {
         manifest.verify(&cancel, |source, error| {
-            progress.results.staged(
+            progress.results.staged_io(
                 &crate::vfs::Location::Local(source.to_path_buf()),
-                Some(crate::i18n::access_io_message(error)),
-                TransferError::is_cancelled_io(error),
+                Some(error),
             );
         })
     })
@@ -1047,10 +1042,9 @@ fn copy_tree(
     after_entry: &mut impl FnMut(&Path) -> io::Result<()>,
 ) -> io::Result<()> {
     let result = copy_tree_entry(source, staged, target, progress, manifest, after_entry);
-    progress.results.staged(
+    progress.results.staged_io(
         &crate::vfs::Location::Local(source.to_path_buf()),
-        result.as_ref().err().map(crate::i18n::access_io_message),
-        result.as_ref().is_err_and(TransferError::is_cancelled_io),
+        result.as_ref().err(),
     );
     result
 }

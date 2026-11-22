@@ -793,7 +793,7 @@ fn capture_move_history(
         &scan,
         &mut |source, error| {
             if let Some(error) = error {
-                progress.results.staged_with_error(source, error);
+                progress.results.staged(source, Some(error));
             } else {
                 progress
                     .results
@@ -803,7 +803,7 @@ fn capture_move_history(
     )?;
     progress.results.captured();
     manifest.verify(cancel, |source, error| {
-        progress.results.staged_with_error(source, error);
+        progress.results.staged(source, Some(error));
     })?;
     Ok(manifest)
 }
@@ -1260,8 +1260,14 @@ pub(super) fn copy_transfer_checked(
     progress: &mut Progress,
     observe: &mut impl FnMut(&Location, CopyPhase) -> Result<(), String>,
 ) -> Result<(), String> {
-    copy_transfer_cancellable(item, expected, progress, observe, || {})
-        .map_err(|error| crate::i18n::file_error(&error))
+    copy_transfer_cancellable(
+        item,
+        expected,
+        progress,
+        &mut |source, phase| observe(source, phase).map_err(TransferError::from),
+        || {},
+    )
+    .map_err(|error| crate::i18n::file_error(&error))
 }
 
 #[cfg(test)]
@@ -1269,7 +1275,7 @@ pub(super) fn copy_transfer_cancellable(
     item: &TransferItem,
     expected: Option<&EntryMetadata>,
     progress: &mut Progress,
-    observe: &mut impl FnMut(&Location, CopyPhase) -> Result<(), String>,
+    observe: &mut impl FnMut(&Location, CopyPhase) -> Result<(), TransferError>,
     published: impl FnOnce(),
 ) -> Result<(), TransferError> {
     copy_transfer(
@@ -1286,7 +1292,7 @@ fn copy_transfer(
     item: &TransferItem,
     expected: Option<&EntryMetadata>,
     progress: &mut Progress,
-    observe: &mut impl FnMut(&Location, CopyPhase) -> Result<(), String>,
+    observe: &mut impl FnMut(&Location, CopyPhase) -> Result<(), TransferError>,
     metadata: MetadataMode,
     published: impl FnOnce(),
 ) -> Result<(), TransferError> {
@@ -1299,11 +1305,7 @@ fn copy_transfer(
         item.copy_manifest_mode(),
         &mut |source, error| {
             if let Some(error) = error {
-                progress.results.staged(
-                    source,
-                    Some(crate::i18n::file_error(error)),
-                    matches!(error, TransferError::Cancelled),
-                );
+                progress.results.staged(source, Some(error));
             } else {
                 progress
                     .results
@@ -1352,11 +1354,7 @@ fn copy_transfer(
                 )?;
             }
             manifest.verify(&cancel, |source, error| {
-                progress.results.staged(
-                    source,
-                    Some(crate::i18n::file_error(error)),
-                    matches!(error, TransferError::Cancelled),
-                )
+                progress.results.staged(source, Some(error));
             })?;
             if let Some(retry) = &progress.retry {
                 retry.verify(item, &cancel)?;
@@ -2427,7 +2425,7 @@ pub(super) fn copy_tree(
     local_parent: Option<&Path>,
     progress: &mut Progress,
     manifest: &TransferSourceManifest,
-    observe: &mut impl FnMut(&Location, CopyPhase) -> Result<(), String>,
+    observe: &mut impl FnMut(&Location, CopyPhase) -> Result<(), TransferError>,
 ) -> Result<(), TransferError> {
     let result = copy_tree_entry(
         source,
@@ -2438,11 +2436,7 @@ pub(super) fn copy_tree(
         manifest,
         observe,
     );
-    progress.results.staged(
-        source,
-        result.as_ref().err().map(crate::i18n::file_error),
-        matches!(result, Err(TransferError::Cancelled)),
-    );
+    progress.results.staged(source, result.as_ref().err());
     result
 }
 
@@ -2453,7 +2447,7 @@ pub(super) fn copy_tree_entry(
     local_parent: Option<&Path>,
     progress: &mut Progress,
     manifest: &TransferSourceManifest,
-    observe: &mut impl FnMut(&Location, CopyPhase) -> Result<(), String>,
+    observe: &mut impl FnMut(&Location, CopyPhase) -> Result<(), TransferError>,
 ) -> Result<(), TransferError> {
     progress.checkpoint()?;
     progress.item(source.path());
@@ -2463,8 +2457,6 @@ pub(super) fn copy_tree_entry(
         .get(source)
         .ok_or_else(|| MutationError::SourceChanged(source.clone()))?;
     entry.verify(source, &cancel, false)?;
-    let local_write_error =
-        |error| fs_ops::local_copy_error(local_parent, error, ToString::to_string);
     if let Some(children) = &entry.children {
         if let Some(path) = staged.local() {
             let mut directory = fs::DirBuilder::new();
@@ -2474,7 +2466,11 @@ pub(super) fn copy_tree_entry(
                 directory.mode(0o700);
             }
             directory.create(path).map_err(|error| {
-                local_write_error(access_io(target, AccessAction::CreateDirectory, error))
+                fs_ops::local_copy_error(
+                    local_parent,
+                    access_io(target, AccessAction::CreateDirectory, error),
+                    ToString::to_string,
+                )
             })?;
         } else {
             remote(staged)?
@@ -2496,8 +2492,32 @@ pub(super) fn copy_tree_entry(
             )?;
         }
         cancel.check()?;
-        return observe(source, CopyPhase::EntryCopied).map_err(Into::into);
+        return observe(source, CopyPhase::EntryCopied);
     }
+    copy_file_entry(
+        source,
+        staged,
+        target,
+        local_parent,
+        progress,
+        entry,
+        observe,
+    )
+}
+
+// Keep file handles and stream verification off the recursive directory frames.
+fn copy_file_entry(
+    source: &Location,
+    staged: &Location,
+    target: &Location,
+    local_parent: Option<&Path>,
+    progress: &mut Progress,
+    entry: &TransferSourceEntry,
+    observe: &mut impl FnMut(&Location, CopyPhase) -> Result<(), TransferError>,
+) -> Result<(), TransferError> {
+    let cancel = progress.cancellation();
+    let local_write_error =
+        |error| fs_ops::local_copy_error(local_parent, error, ToString::to_string);
     cancel.check()?;
     let mut input = SourceReader::open(source)?;
     observe(source, CopyPhase::Opened)?;
@@ -2608,7 +2628,7 @@ pub(super) fn copy_tree_entry(
             )
             .map_err(TransferError::from)?;
     }
-    observe(source, CopyPhase::EntryCopied).map_err(Into::into)
+    observe(source, CopyPhase::EntryCopied)
 }
 
 #[cfg(test)]

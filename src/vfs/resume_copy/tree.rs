@@ -9,7 +9,7 @@ use super::{
     Ticket, TransferError,
 };
 use crate::file_error::{
-    AccessAction, AccessError, PublicationError, RecoveryNotice, RecoveryRecordProblem,
+    AccessAction, AccessError, Failure, PublicationError, RecoveryNotice, RecoveryRecordProblem,
     ResumeCheckProblem, ResumeRole, ScanError,
 };
 use crate::fs_ops::local_copy_write_error;
@@ -332,11 +332,7 @@ impl Snapshot {
                 }
                 _ => Ok(()),
             };
-            progress.results.staged(
-                &source,
-                result.as_ref().err().map(crate::i18n::file_error),
-                matches!(&result, Err(TransferError::Cancelled)),
-            );
+            progress.results.staged(&source, result.as_ref().err());
             result?;
             cancel.check()?;
         }
@@ -561,6 +557,9 @@ fn finish(
         published();
         Ok(Completion::FolderCopied(reused))
     })();
+    if let Err(error) = &result {
+        record_child_failure(paths, &payload, error, progress);
+    }
     if committed {
         if receipt.intent == Intent::Move {
             return result;
@@ -594,6 +593,29 @@ fn finish(
         result.map_err(|error| retained_error(&paths.stage, error))
     } else {
         result
+    }
+}
+
+fn record_child_failure(
+    paths: &Paths,
+    payload: &Location,
+    error: &TransferError,
+    progress: &mut Progress,
+) {
+    let location = match error {
+        TransferError::Failed(Failure::ResumeCheck(check)) => &check.location,
+        TransferError::Failed(Failure::Access(access)) => &access.location,
+        _ => return,
+    };
+    let relative = [&paths.source, payload, &paths.target]
+        .into_iter()
+        .filter(|root| root.same_backend(location))
+        .find_map(|root| location.path().strip_prefix(root.path()).ok());
+    if let Some(relative) = relative {
+        // The result journal already indexes the entries from the source snapshot.
+        progress
+            .results
+            .staged(&paths.source.join(relative), Some(error));
     }
 }
 
