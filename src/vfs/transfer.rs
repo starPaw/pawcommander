@@ -227,7 +227,7 @@ pub(super) fn checked_source_metadata(
     Ok(metadata)
 }
 
-fn read_entry_metadata(location: &Location) -> Result<EntryMetadata, AccessCause> {
+pub(super) fn read_entry_metadata(location: &Location) -> Result<EntryMetadata, AccessCause> {
     if let Some(path) = location.local() {
         fs::symlink_metadata(path)
             .map(|metadata| EntryMetadata::Local(LocalEntryMetadata::at(path, metadata)))

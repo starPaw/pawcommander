@@ -326,7 +326,7 @@ impl Compare<'_> {
     }
 }
 
-fn side_error(side: usize, error: TransferError) -> TransferError {
+pub(super) fn side_error(side: usize, error: TransferError) -> TransferError {
     if matches!(error, TransferError::Cancelled) {
         return error;
     }
