@@ -1,6 +1,8 @@
 //! Bounded reads rooted at a folder, with identity and version checks.
 use super::{
-    transfer::{entry_metadata, EntryMetadata, SourceReader, TransferSourceEntry},
+    transfer::{
+        checked_source_metadata, entry_metadata, EntryMetadata, SourceReader, TransferSourceEntry,
+    },
     undo::Parent,
     Location,
 };
@@ -124,12 +126,9 @@ impl ReadScope {
             return Ok(None);
         };
         let metadata = input.metadata(&source)?;
+        metadata.check_sftp_source(&source)?;
         if !metadata.is_file() {
             return Err(ScanError::ExpectedRegularFile(source).into());
-        }
-        if matches!(&metadata, EntryMetadata::Remote(stat) if stat.size.is_none() || stat.mtime.is_none())
-        {
-            return Err(ScanError::MissingFileVersion(source).into());
         }
         Ok(Some(CheckedFile {
             scope: self,
@@ -167,7 +166,7 @@ impl ReadScope {
             return Ok(None);
         };
         let source = directory.join(path.file_name().ok_or_else(unsupported)?);
-        let Some(metadata) = entry_metadata(&source)? else {
+        let Some(metadata) = checked_source_metadata(&source)? else {
             return Ok(None);
         };
         if !metadata.is_file() {
@@ -217,6 +216,7 @@ fn verify_version(
     source: &Location,
     actual: &EntryMetadata,
 ) -> Result<(), TransferError> {
+    actual.check_sftp_source(source)?;
     let matches = stamp
         .matches_metadata(actual)
         .map_err(|error| AccessError::new(source, AccessAction::ReadOpenMetadata, error))?;

@@ -59,6 +59,9 @@ impl FileStamp {
         metadata: &EntryMetadata,
         role: ResumeRole,
     ) -> Result<Self, TransferError> {
+        if role == ResumeRole::Source {
+            metadata.check_sftp_source(file)?;
+        }
         let incomplete = || role.error(file, ResumeCheckProblem::IncompleteMetadata);
         match metadata {
             EntryMetadata::Local(file) if file.is_file() => Ok(Self::Local {

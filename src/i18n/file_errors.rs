@@ -1303,19 +1303,30 @@ fn scan_error(error: &ScanError) -> String {
             text!("Для проверки подходят только обычные файлы без ссылок"),
             location,
         ),
-        ScanError::MissingFileVersion(location) => (
-            text!("Сервер не передал размер или время изменения файла"),
-            location,
-        ),
         #[cfg(target_os = "macos")]
         ScanError::MissingLocalFileSize => return text!("Размер файла недоступен").into(),
-        #[cfg(target_os = "macos")]
         ScanError::MissingSftpFileSize(location) => {
             (text!("Сервер SFTP не сообщил размер файла"), location)
         }
+        ScanError::MissingSftpModificationTime(location) => (
+            text!("Сервер SFTP не сообщил время изменения файла"),
+            location,
+        ),
+        ScanError::MissingSftpFileVersion(location) => (
+            text!("Сервер SFTP не сообщил размер и время изменения файла"),
+            location,
+        ),
         ScanError::MissingSftpFileType(location) => {
             (text!("Сервер SFTP не сообщил тип объекта"), location)
         }
+        ScanError::SftpCopySymlink(location) => (
+            text!("Символическую ссылку нельзя скопировать по SFTP"),
+            location,
+        ),
+        ScanError::SftpCopySpecialFile(location) => (
+            text!("Специальный файл нельзя скопировать по SFTP"),
+            location,
+        ),
         #[cfg(target_os = "macos")]
         ScanError::DiskUsageRequiresLocalFolder => {
             return text!("Анализ места доступен в локальных папках").into();
