@@ -374,7 +374,7 @@ catalog! {
     "Ошибка чтения" => ("Read error", "Chyba čtení"),
     "Корень сравнения" => ("Compared folder", "Porovnávaná složka"),
     "Папка изменилась или недоступна" => ("The folder changed or is unavailable", "Složka se změnila nebo není dostupná"),
-    "Папка содержит недопустимое имя" => ("The folder contains an invalid name", "Složka obsahuje neplatný název"),
+    "Сервер SFTP вернул недопустимое имя" => ("The SFTP server returned an invalid name", "Server SFTP vrátil neplatný název"),
     "Папка содержит повторяющиеся имена" => ("The folder contains duplicate names", "Složka obsahuje duplicitní názvy"),
     "Не удалось прочитать символическую ссылку" => ("Could not read symbolic link", "Symbolický odkaz se nepodařilo přečíst"),
     "Не удалось создать символическую ссылку" => ("Could not create symbolic link", "Symbolický odkaz se nepodařilo vytvořit"),

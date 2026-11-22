@@ -166,20 +166,76 @@ fn transfer_source_final_check_catches_early_edits_and_preserves_target() {
 #[cfg(unix)]
 #[test]
 fn sftp_name_validation_rejects_non_utf8_without_lossy_conversion() {
+    use super::super::transfer::sftp_transfer_name;
+    use crate::file_error::{Failure, TransferPlanError};
     use std::os::unix::ffi::OsStringExt;
-    let source = Location::Local(PathBuf::from("source"));
+
+    let directory = Location::Local(PathBuf::from("source"));
     let raw = OsString::from_vec(b"bad-\xff-name".to_vec());
-    assert!(validate_source_child_name(&source, &raw)
-        .unwrap_err()
-        .contains("UTF-8"));
+    let error = sftp_transfer_name(&raw, || directory.join(&raw)).unwrap_err();
+    assert!(crate::i18n::file_error(&error).contains(&format!("{raw:?}")));
+    let TransferError::Failed(Failure::TransferPlan(reason)) = error else {
+        panic!("unexpected source name error: {error:?}");
+    };
+    assert!(
+        matches!(*reason, TransferPlanError::NonUtf8Name(location) if location == directory.join(&raw))
+    );
     // A literal replacement character is valid Unicode, but must never
     // substitute for the invalid byte and select a different source file.
-    assert!(validate_source_child_name(&source, OsStr::new("bad-�-name")).is_ok());
+    assert_eq!(
+        sftp_transfer_name(OsStr::new("bad-�-name"), || panic!("valid name")).unwrap(),
+        "bad-�-name"
+    );
+}
+
+#[test]
+fn sftp_listing_does_not_normalize_an_invalid_raw_child_name() {
+    use super::super::listing::checked_sftp_child_name;
+    use crate::file_error::{Failure, ScanError};
+
+    let directory = resolve(
+        "sftp://user@localhost/source",
+        &Location::Local(PathBuf::from("/")),
+    )
+    .unwrap();
+    for name in [
+        "",
+        "nested/file",
+        "./file",
+        "file/",
+        "file/.",
+        "./",
+        "../",
+        "/file",
+        "file\0",
+    ] {
+        let raw = PathBuf::from(name);
+        let error = checked_sftp_child_name(&directory, raw.clone()).unwrap_err();
+        let TransferError::Failed(Failure::Scan(reason)) = error else {
+            panic!("unexpected failure for {raw:?}: {error:?}");
+        };
+        assert!(
+            matches!(*reason, ScanError::InvalidSftpEntry { directory: path, name }
+            if path == directory && name.as_os_str() == raw.as_os_str())
+        );
+    }
+    for name in [".", ".."] {
+        assert!(checked_sftp_child_name(&directory, PathBuf::from(name))
+            .unwrap()
+            .is_none());
+    }
+    let valid = PathBuf::from("file.txt");
+    assert_eq!(
+        checked_sftp_child_name(&directory, valid.clone()).unwrap(),
+        Some(valid)
+    );
 }
 
 #[cfg(unix)]
 #[test]
 fn sftp_manifest_rejects_unsupported_nested_names_before_staging() {
+    use crate::file_error::{Failure, PathError, TransferPlanError};
+
     for name in unsupported_sftp_names() {
         let root = tempfile::tempdir().unwrap();
         let source = Location::Local(root.path().join("source"));
@@ -189,15 +245,21 @@ fn sftp_manifest_rejects_unsupported_nested_names_before_staging() {
         fs::write(unsupported.path(), b"source bytes").unwrap();
         fs::write(target.path(), b"previous target").unwrap();
         let expected = entry_metadata(&target).unwrap().unwrap();
-        let error = copy_transfer_checked(
+        let error = copy_transfer_cancellable(
             &TransferItem::new(source.clone(), source.clone(), target.clone()),
             Some(&expected),
             &mut Progress::default(),
             &mut |_, _| panic!("unsupported names must fail before copying"),
+            || panic!("unsupported names must not publish"),
         )
         .unwrap_err();
-        assert!(error.contains("SFTP"), "{error}");
-        assert!(!error.contains("Осталась"), "{error}");
+        let TransferError::Failed(Failure::TransferPlan(reason)) = error else {
+            panic!("unexpected nested source name error: {error:?}");
+        };
+        assert!(
+            matches!(*reason, TransferPlanError::InvalidSourceName { location, cause: PathError::InvalidName(raw) }
+            if location == unsupported && name == OsStr::new(&raw))
+        );
         assert_eq!(fs::read(target.path()).unwrap(), b"previous target");
         assert_eq!(fs::read(unsupported.path()).unwrap(), b"source bytes");
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);

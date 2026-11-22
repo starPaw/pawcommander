@@ -1,11 +1,11 @@
 use super::err;
 use super::location::{validate_name, Location};
 use super::sftp::{cached_channel, remote, sessions};
-use crate::file_error::{ListingError, ListingErrorKind};
+use crate::file_error::{ListingError, ListingErrorKind, ScanError};
 use crate::operations::TransferError;
 use crate::{archive, fs_ops};
 use ssh2::{ErrorCode, File, FileStat, Sftp};
-use std::path::{Path, PathBuf};
+use std::path::{Component, PathBuf};
 use std::sync::{Mutex, TryLockError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -204,9 +204,9 @@ pub(super) fn visit_sftp_directory(
         if cancelled() {
             break;
         }
-        if filename == Path::new(".") || filename == Path::new("..") {
+        let Some(filename) = checked_sftp_child_name(location, filename)? else {
             continue;
-        }
+        };
         let name = filename.to_str().ok_or_else(|| {
             ListingError::new(
                 location.clone(),
@@ -254,4 +254,26 @@ pub(super) fn next_sftp_entry(file: &mut File) -> Result<Option<(PathBuf, FileSt
         }
         Err(error) => Err(error),
     }
+}
+
+pub(super) fn checked_sftp_child_name(
+    directory: &Location,
+    name: PathBuf,
+) -> Result<Option<PathBuf>, TransferError> {
+    let raw = name.as_os_str();
+    if raw == "." || raw == ".." {
+        return Ok(None);
+    }
+    // Require the raw name itself to be one component. Path iteration can
+    // normalize a trailing slash or a dot component away.
+    if !matches!(name.components().next(), Some(Component::Normal(part)) if part == raw)
+        || raw.as_encoded_bytes().contains(&0)
+    {
+        return Err(ScanError::InvalidSftpEntry {
+            directory: directory.clone(),
+            name,
+        }
+        .into());
+    }
+    Ok(Some(name))
 }

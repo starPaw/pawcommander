@@ -19,7 +19,7 @@ use crate::file_error::{
 };
 use crate::operations::TransferError;
 use crate::result_history::{HistoryError, HistoryOpenProblem, HistorySaveProblem};
-use crate::vfs::{DeletionFailure, TransferFailure};
+use crate::vfs::{DeletionFailure, Location, TransferFailure};
 
 pub(crate) fn file_error(error: &TransferError) -> String {
     match error {
@@ -444,16 +444,20 @@ fn conflict_error(error: &ConflictError) -> String {
 fn transfer_plan_error(error: &TransferPlanError) -> String {
     use TransferPlanError::*;
 
+    let name_at = |location: &Location| match (location.parent(), location.path().file_name()) {
+        (Some(parent), Some(name)) => format!("{parent} · {name:?}"),
+        _ => format!("{:?}", location.path()),
+    };
     match error {
         MissingName(path) => crate::tr_format!("Path {path} has no file name.", path = path),
         MissingParent(path) => crate::tr_format!("Path {path} has no parent folder.", path = path),
         NonUtf8Name(path) => crate::tr_format!(
-            "SFTP transfers require a UTF-8 name for {path}.",
-            path = path
+            "SFTP transfer requires a UTF-8 name. {path}",
+            path = name_at(path)
         ),
         InvalidSourceName { location, cause } => crate::tr_format!(
-            "Cannot use {path} as a transfer source ({error}).",
-            path = location,
+            "SFTP transfer cannot use this name. {path}. {error}",
+            path = name_at(location),
             error = path_error(cause)
         ),
         DuplicateTarget { first, second, target } => crate::tr_format!(
@@ -1259,8 +1263,8 @@ fn scan_error(error: &ScanError) -> String {
         }
         ScanError::InvalidSftpEntry { directory, name } => {
             return format!(
-                "{} · {directory}/{name:?}",
-                text!("Папка содержит недопустимое имя")
+                "{} · {directory} · {name:?}",
+                text!("Сервер SFTP вернул недопустимое имя")
             );
         }
         ScanError::DepthLimit(location) => (text!("Достигнут предел вложенности папок"), location),
@@ -1548,7 +1552,7 @@ pub(crate) fn transfer_failure(failure: &TransferFailure) -> String {
     )
 }
 
-pub(crate) fn path_error(error: &PathError) -> String {
+fn path_error(error: &PathError) -> String {
     let message = match error {
         PathError::ArchiveAddress | PathError::ArchiveFile(_) => text!("Недопустимый адрес архива"),
         PathError::ArchiveMember {
@@ -1935,9 +1939,16 @@ fn listing_error(error: &ListingError) -> String {
         MissingArchiveFolder => return text!("Папка отсутствует в архиве").into(),
         SftpNameEncoding(name) => {
             return format!(
-                "{} · {path}/{name:?}",
+                "{} · {path} · {name:?}",
                 text!("Имя файла SFTP не является UTF-8")
             )
+        }
+        InvalidSftpName(source @ PathError::InvalidName(name)) => {
+            return format!(
+                "{} · {path} · {name:?}. {}",
+                text!("Сервер SFTP вернул недопустимое имя"),
+                path_error(source)
+            );
         }
         InvalidSftpName(source) => return format!("{} · {path}", path_error(source)),
         RequiresSftpConnection => {

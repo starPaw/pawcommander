@@ -1,8 +1,9 @@
 use super::copy_metadata::{self, Mode as MetadataMode};
+use super::listing::{checked_sftp_child_name, next_sftp_entry};
 use super::location::{validate_name, Location};
 use super::mutations::remove_remote_tree;
 use super::sftp::remote;
-use super::{err, TransferFailure, TransferSummary, MAX_TREE_DEPTH};
+use super::{TransferFailure, TransferSummary, MAX_TREE_DEPTH};
 use crate::conflict::{Answer, Conflict, Decision, EntryDetails};
 use crate::file_error::{
     AccessAction, AccessCause, AccessError, ConflictError, DescendantProblem, Failure,
@@ -19,7 +20,7 @@ use ssh2::{ErrorCode, FileStat, FileType, OpenFlags, OpenType, RenameFlags};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{fs, io};
@@ -396,13 +397,7 @@ pub(super) fn transfer_plan(
             .path()
             .file_name()
             .ok_or_else(|| TransferPlanError::MissingName(source.clone()))?;
-        let name = name
-            .to_str()
-            .ok_or_else(|| TransferPlanError::NonUtf8Name(source.clone()))?;
-        validate_name(name).map_err(|cause| TransferPlanError::InvalidSourceName {
-            location: source.clone(),
-            cause,
-        })?;
+        let name = sftp_transfer_name(name, || source.clone())?;
         let target = destination.join(name);
         if let Some(first) = names.insert(name, source) {
             return Err(TransferPlanError::DuplicateTarget {
@@ -1977,20 +1972,31 @@ impl TransferSourceEntry {
     }
 }
 
-pub(super) fn validate_source_child_name(source: &Location, name: &OsStr) -> Result<(), String> {
-    let name = name.to_str().ok_or_else(|| {
-        crate::tr_format!(
-            "SFTP transfer does not support a name outside UTF-8 in {source}",
-            source = source
-        )
+pub(super) fn sftp_transfer_name(
+    name: &OsStr,
+    location: impl FnOnce() -> Location,
+) -> Result<&str, TransferError> {
+    let Some(name) = name.to_str() else {
+        return Err(TransferPlanError::NonUtf8Name(location()).into());
+    };
+    validate_name(name).map_err(|cause| TransferPlanError::InvalidSourceName {
+        location: location(),
+        cause,
     })?;
-    validate_name(name).map_err(|error| {
-        crate::tr_format!(
-            "Unsupported SFTP transfer name in {source}: {error}",
-            error = crate::i18n::path_error(&error),
-            source = source
-        )
-    })
+    Ok(name)
+}
+
+pub(super) fn validate_sftp_source_path(
+    root: &Location,
+    relative: &Path,
+) -> Result<(), TransferError> {
+    for (index, name) in relative.iter().enumerate() {
+        sftp_transfer_name(name, || {
+            let affected = relative.iter().take(index + 1).collect::<PathBuf>();
+            root.join(affected)
+        })?;
+    }
+    Ok(())
 }
 
 pub(super) fn source_children(
@@ -2011,28 +2017,27 @@ pub(super) fn source_children(
             );
         }
     } else {
-        let children = remote(source)
+        let mut directory = remote(source)
             .map_err(|error| AccessError::new(source, action, error))?
-            .readdir(source.path())
+            .opendir(source.path())
             .map_err(|error| AccessError::new(source, action, error))?;
-        for (path, _) in children {
+        loop {
             cancel.check()?;
-            let name = path.strip_prefix(source.path()).map_err(err)?;
-            let mut parts = name.components();
-            match (parts.next(), parts.next()) {
-                (Some(Component::Normal(name)), None) => names.push(name.to_os_string()),
-                _ => {
-                    return Err(
-                        crate::tr_format!("Invalid name for SFTP: {}", path.display()).into(),
-                    )
-                }
+            let Some((name, _)) = next_sftp_entry(&mut directory)
+                .map_err(|error| AccessError::new(source, action, error))?
+            else {
+                break;
+            };
+            cancel.check()?;
+            if let Some(name) = checked_sftp_child_name(source, name)? {
+                names.push(name.into_os_string());
             }
         }
     }
     for name in &names {
         cancel.check()?;
         if !moving || source.remote() {
-            validate_source_child_name(source, name)?;
+            sftp_transfer_name(name, || source.join(name))?;
         }
     }
     cancel.check()?;

@@ -9,8 +9,6 @@ use super::mutations::{
 };
 use super::preview::preview_data;
 use super::sftp::{connect_with_key, remote, sessions};
-#[cfg(unix)]
-use super::transfer::validate_source_child_name;
 use super::transfer::{
     canonical, check_copy_space, copy_transfer_cancellable, copy_transfer_checked, entry_metadata,
     publish_item_typed, publish_replacement_with_backup_rename, record_item_result,
