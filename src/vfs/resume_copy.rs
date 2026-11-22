@@ -20,8 +20,8 @@ use super::{
 };
 use crate::app::SavedLocation;
 use crate::file_error::{
-    AccessAction, AccessError, Failure, MutationError, PublicationError, RecoveryNotice,
-    RecoveryRecordError, RecoveryRecordProblem, ResumeCheckProblem, ResumeRole,
+    AccessAction, AccessError, CrossMoveError, Failure, MutationError, PublicationError,
+    RecoveryNotice, RecoveryRecordError, RecoveryRecordProblem, ResumeCheckProblem, ResumeRole,
     StagingCleanupError, StagingError,
 };
 use crate::i18n::text;
@@ -570,7 +570,7 @@ fn restore_held_source(
     ticket: &Ticket,
     paths: &Paths,
     progress: &mut Progress,
-) -> Result<Option<RenamedIdentity>, TransferError> {
+) -> Result<(Option<RenamedIdentity>, bool), TransferError> {
     let record = match &ticket.holding {
         Some(HeldSource::Verified(record)) => record,
         Some(HeldSource::Legacy(location)) => {
@@ -584,9 +584,9 @@ fn restore_held_source(
                     ResumeRole::HeldOriginal.error(&held, ResumeCheckProblem::MissingProof),
                 ));
             }
-            return Ok(None);
+            return Ok((None, false));
         }
-        None => return Ok(None),
+        None => return Ok((None, false)),
     };
     let stage = staging_at(&paths.source, &record.stage_name)
         .ok_or_else(|| ticket.error(RecoveryRecordProblem::InvalidPaths))?;
@@ -595,7 +595,7 @@ fn restore_held_source(
         let source_present = entry_metadata(&paths.source)?.is_some();
         if entry_metadata(&held)?.is_none() {
             return if source_present {
-                Ok(())
+                Ok(false)
             } else {
                 Err(ResumeRole::HeldOriginal.error(&held, ResumeCheckProblem::Missing))
             };
@@ -614,10 +614,11 @@ fn restore_held_source(
         )?;
         progress.checkpoint()?;
         stage_contents(&stage, record.stage_identity, ticket.name(), &["source"])?;
-        rename_for_publication(&held, &paths.source)
+        rename_for_publication(&held, &paths.source)?;
+        Ok(true)
     })();
-    result.map_err(|error| retained_source(&held, error))?;
-    Ok(Some(record.source_identity))
+    let restored = result.map_err(|error| retained_source(&held, error))?;
+    Ok((Some(record.source_identity), restored))
 }
 
 fn retained_source(held: &Location, error: TransferError) -> TransferError {
@@ -628,14 +629,26 @@ fn retained_source(held: &Location, error: TransferError) -> TransferError {
     .into()
 }
 
-fn discard_source_stage(ticket: &Ticket, paths: &Paths) -> Result<(), TransferError> {
+fn discard_source_stage(
+    ticket: &Ticket,
+    paths: &Paths,
+    restored: bool,
+) -> Result<(), TransferError> {
     if let Some(HeldSource::Verified(record)) = &ticket.holding {
         let stage = staging_at(&paths.source, &record.stage_name)
             .ok_or_else(|| ticket.error(RecoveryRecordProblem::InvalidPaths))?;
-        if entry_metadata(&stage)?.is_some() {
-            discard_empty_stage(&stage, record.stage_identity, ticket.name())
-                .map_err(|error| retained_source(&stage.join("source"), error))?;
-        }
+        discard_completed_stage(&stage, record.stage_identity, ticket.name(), None, true).map_err(
+            |error| {
+                let restoration = restored.then(|| {
+                    CrossMoveError::Restored {
+                        original: paths.source.clone(),
+                        cause: None,
+                    }
+                    .into()
+                });
+                StagingCleanupError::failed_cleanup(restoration, error, &stage, &paths.target)
+            },
+        )?;
     }
     Ok(())
 }
@@ -696,7 +709,7 @@ fn finish_move(
                     .and_then(SavedTime::get)]),
                 Original::Folder(_) => ticket.folder_access_times()?,
             };
-            let renamed = restore_held_source(ticket, paths, progress)?;
+            let (renamed, restored) = restore_held_source(ticket, paths, progress)?;
             let source = MoveSource::capture(item, progress)?;
             let source_identity = verify_move_source(
                 &paths.source,
@@ -707,7 +720,7 @@ fn finish_move(
                 progress,
             )?;
             let source = source.with_original_access_times(&paths.source, original_access_times)?;
-            discard_source_stage(ticket, paths)?;
+            discard_source_stage(ticket, paths, restored)?;
             Ok((source, source_identity))
         })();
         let (source, source_identity) = verified.map_err(|error| {
@@ -715,7 +728,7 @@ fn finish_move(
             cross_move::incomplete(&paths.target, error, progress)
         })?;
         source.report(item, progress);
-        let mut held_stage = None;
+        let mut held_stage: Option<(Location, SourceStage)> = None;
         let cancel = progress.cancellation();
         cross_move::remove_verified(
             item,
@@ -724,6 +737,17 @@ fn finish_move(
             progress,
             removed,
             &mut |location, phase| {
+                if phase == Phase::Restored {
+                    observe(location, phase)?;
+                    let (_, record) = held_stage
+                        .as_ref()
+                        .filter(|(root, _)| root == location)
+                        .ok_or_else(|| ticket.error(RecoveryRecordProblem::InvalidProof))?;
+                    let stage = location
+                        .parent()
+                        .ok_or_else(|| ticket.error(RecoveryRecordProblem::InvalidPaths))?;
+                    return discard_empty_stage(&stage, record.stage_identity, ticket.name());
+                }
                 // Sync the location before rename and the completion after the last unlink.
                 if phase == Phase::QuarantinePlanned {
                     let record = record_source_stage(ticket, location, source_identity, &cancel)?;

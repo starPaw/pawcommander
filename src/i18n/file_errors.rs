@@ -203,6 +203,17 @@ fn cross_move_error(error: &CrossMoveError) -> String {
             held = held,
             error = file_error(cause)
         ),
+        #[cfg(target_os = "macos")]
+        Restored { original, cause } => {
+            let status = crate::tr_format!(
+                "The remaining source was restored to {original}",
+                original = original
+            );
+            match cause {
+                Some(cause) => format!("{}\n{status}", file_error(cause)),
+                None => status,
+            }
+        }
         Restore {
             original,
             held,
@@ -1981,7 +1992,7 @@ fn staging_cleanup_error(error: &StagingCleanupError) -> String {
         );
     }
     #[cfg(target_os = "macos")]
-    if matches!(error.operation, None | Some(TransferError::Cancelled)) {
+    if error.stage_may_be_absent() {
         return crate::tr_format!(
             "{outcome}. Could not clean up the temporary folder at {staging}. {e}",
             outcome = outcome,

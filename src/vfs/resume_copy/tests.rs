@@ -1,6 +1,8 @@
 use super::*;
 use crate::conflict::{Answer, Decision};
-use crate::file_error::{Failure, MutationError, PublicationError, RecoveryRecordSection};
+use crate::file_error::{
+    Failure, LocalPathAction, MutationError, PublicationError, RecoveryRecordSection,
+};
 use crate::fs_ops::TransferKind;
 use crate::vfs::transfer_with_conflicts;
 use std::io::{Seek, SeekFrom, Write};
@@ -776,6 +778,159 @@ fn move_recovery_preserves_held_source_and_recognizes_acknowledged_removal() {
             assert!(!held.parent().unwrap().path().exists());
             assert!(scan(&recovery).0.is_empty());
         }
+    }
+}
+
+#[test]
+fn restored_move_preserves_the_primary_error_and_an_unrelated_staging_entry() {
+    for stop in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let recovery = root.join("recovery");
+        let source: Location = root.join("left/data").into();
+        let target: Location = root.join("right/data").into();
+        let remaining = source.join("a");
+        let removed = source.join("z");
+        fs::create_dir_all(source.path()).unwrap();
+        fs::create_dir_all(target.parent().unwrap().path()).unwrap();
+        fs::write(remaining.path(), b"remaining").unwrap();
+        fs::write(removed.path(), b"last entry").unwrap();
+
+        let item = TransferItem::new(source.clone(), source.clone(), target.clone());
+        let mut progress = Progress::default();
+        progress.resume_directory = Some(recovery.clone());
+        progress
+            .results
+            .plan([(source.clone(), Some(target.display()))]);
+        progress.results.begin(&source);
+        let cancellation = progress.cancellation();
+        let mut published = false;
+        let mut unrelated = None;
+        let error = cross_move::run(
+            &item,
+            None,
+            &mut progress,
+            || published = true,
+            || panic!("move must remain incomplete"),
+            &mut |location, phase| {
+                if phase == Phase::BeforeRemove && (stop || location.name() == "a") {
+                    if stop {
+                        cancellation.request();
+                    } else {
+                        return Err(MutationError::local(
+                            location.path(),
+                            LocalPathAction::RemoveFile,
+                            std::io::Error::from_raw_os_error(libc::EIO),
+                        )
+                        .into());
+                    }
+                }
+                if phase == Phase::Restored {
+                    let entry = location.parent().unwrap().join("independent");
+                    fs::write(entry.path(), b"preserve this staging entry").unwrap();
+                    unrelated = Some(entry);
+                }
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(published);
+        assert_eq!(progress.results.cancelled, stop);
+        let last_entry = progress
+            .results
+            .items
+            .iter()
+            .find(|row| row.source == removed.display())
+            .unwrap();
+        assert_eq!(
+            last_entry.outcome,
+            if stop {
+                Outcome::CopiedSourceRemaining
+            } else {
+                Outcome::Completed
+            }
+        );
+        assert_eq!(fs::read(remaining.path()).unwrap(), b"remaining");
+        assert_eq!(removed.path().exists(), stop);
+        assert_eq!(fs::read(target.join("a").path()).unwrap(), b"remaining");
+        assert_eq!(fs::read(target.join("z").path()).unwrap(), b"last entry");
+
+        let unrelated = unrelated.unwrap();
+        let stage = unrelated.parent().unwrap();
+        assert_eq!(
+            fs::read(unrelated.path()).unwrap(),
+            b"preserve this staging entry"
+        );
+        let TransferError::Failed(Failure::Mutation(error)) = error else {
+            panic!("expected the incomplete move");
+        };
+        let MutationError::MoveIncomplete {
+            target: published,
+            cause,
+        } = *error
+        else {
+            panic!("expected the incomplete move");
+        };
+        assert_eq!(published, target);
+        let TransferError::Failed(Failure::StagingCleanup(error)) = cause else {
+            panic!("expected the cleanup error after restoration");
+        };
+        assert!(!error.completed_move);
+        assert_eq!(error.staging, stage);
+        assert_resume_check(
+            &error.cleanup,
+            ResumeRole::Staged,
+            unrelated.path(),
+            ResumeCheckProblem::Unexpected,
+        );
+        let Some(TransferError::Failed(Failure::CrossMove(restored))) = error.operation else {
+            panic!("expected the confirmed restoration");
+        };
+        let CrossMoveError::Restored {
+            original,
+            cause: Some(primary),
+        } = *restored
+        else {
+            panic!("expected the restored path and the primary error");
+        };
+        assert_eq!(original, source);
+        if stop {
+            assert!(matches!(primary, TransferError::Cancelled));
+        } else {
+            assert!(matches!(
+                primary, TransferError::Failed(Failure::Mutation(error))
+                    if matches!(error.as_ref(), MutationError::LocalIo { path, source, .. }
+                        if path == stage.join("source").join("a").path()
+                            && source.raw_os_error() == Some(libc::EIO))
+            ));
+        }
+
+        let (offers, errors) = scan(&recovery);
+        assert!(errors.is_empty() && offers.len() == 1);
+        let id = &offers[0].id;
+        let ticket = Ticket::open(receipts(&recovery).join(id)).unwrap().unwrap();
+        assert!(!ticket.removed);
+        let owner = stage.join(ticket.name());
+        drop(ticket);
+        let original_target = fs::metadata(target.path()).unwrap().ino();
+        if stop {
+            fs::remove_file(unrelated.path()).unwrap();
+            fs::remove_file(owner.path()).unwrap();
+            let (mut progress, mut view) = Progress::tracked_transfer();
+            let result = resume(&recovery, id, &mut progress).unwrap();
+            assert!(result.moving && result.kind == Completion::AlreadyPresent);
+            assert_eq!(view.snapshot().total_written, 0);
+            assert!(!source.path().exists() && !stage.path().exists());
+            assert!(scan(&recovery).0.is_empty());
+        } else {
+            assert!(resume(&recovery, id, &mut Progress::default()).is_err());
+            assert_eq!(fs::read(remaining.path()).unwrap(), b"remaining");
+            assert_eq!(
+                fs::read(unrelated.path()).unwrap(),
+                b"preserve this staging entry"
+            );
+        }
+        assert_eq!(fs::metadata(target.path()).unwrap().ino(), original_target);
     }
 }
 

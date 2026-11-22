@@ -10,6 +10,8 @@ use super::transfer::{
     TransferSourceManifest,
 };
 use super::Location;
+#[cfg(target_os = "macos")]
+use crate::file_error::StagingCleanupError;
 use crate::file_error::{
     AccessAction, AccessError, CopyVerificationError, CrossMoveError, LocalPathAction,
     MutationError, TransferPlanError,
@@ -56,6 +58,8 @@ pub(super) enum Phase {
     Quarantined,
     BeforeRemove,
     Removed,
+    #[cfg(target_os = "macos")]
+    Restored,
 }
 
 fn changed(path: &Location) -> CrossMoveError {
@@ -566,6 +570,22 @@ pub(super) fn remove_verified(
             // Restore the untouched or partially removed source tree without
             // replacing a new object that appeared at its original name.
             match rename_for_publication(&held, &item.source) {
+                #[cfg(target_os = "macos")]
+                Ok(()) if keep_stage => {
+                    let cause = deletion.err().unwrap_or_else(|| changed(&held).into());
+                    let restored = CrossMoveError::Restored {
+                        original: item.source.clone(),
+                        cause: Some(cause),
+                    };
+                    // The resumable path owns cleanup of the recorded stage.
+                    let cleanup = observe(&held, Phase::Restored);
+                    StagingCleanupError::combine(
+                        Err(restored.into()),
+                        cleanup,
+                        staging,
+                        &item.target,
+                    )
+                }
                 Ok(()) => {
                     *preserve = false;
                     deletion

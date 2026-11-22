@@ -976,6 +976,17 @@ impl StagingCleanupError {
             cleanup,
         })))
     }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn stage_may_be_absent(&self) -> bool {
+        match &self.operation {
+            None | Some(TransferError::Cancelled) => true,
+            Some(TransferError::Failed(Failure::CrossMove(error))) => {
+                matches!(error.as_ref(), CrossMoveError::Restored { .. })
+            }
+            _ => false,
+        }
+    }
 }
 
 impl fmt::Display for StagingCleanupError {
@@ -995,7 +1006,7 @@ impl fmt::Display for StagingCleanupError {
             );
         }
         #[cfg(target_os = "macos")]
-        if matches!(self.operation, None | Some(TransferError::Cancelled)) {
+        if self.stage_may_be_absent() {
             return write!(
                 f,
                 "Could not clean up the temporary folder at {}. {}",

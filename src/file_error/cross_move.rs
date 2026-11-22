@@ -19,6 +19,11 @@ pub(crate) enum CrossMoveError {
         held: Location,
         cause: TransferError,
     },
+    #[cfg(target_os = "macos")]
+    Restored {
+        original: Location,
+        cause: Option<TransferError>,
+    },
     Restore {
         original: Location,
         held: Location,
@@ -49,6 +54,13 @@ impl fmt::Display for CrossMoveError {
             Self::Hold { original, held, cause } => {
                 write!(f, "Check the original source {original} and temporary path {held}: {cause}")
             }
+            #[cfg(target_os = "macos")]
+            Self::Restored { original, cause } => {
+                if let Some(cause) = cause {
+                    writeln!(f, "{cause}")?;
+                }
+                write!(f, "The remaining source was restored to {original}")
+            }
             Self::Restore { original, held, cause, restore } => {
                 write!(f, "{cause}. Check restoration from {held} to {original}: {restore}")
             }
@@ -65,6 +77,10 @@ impl Error for CrossMoveError {
                 ..
             } => Some(restore),
             Self::Hold { cause, .. } | Self::Restore { cause, .. } => Some(cause),
+            #[cfg(target_os = "macos")]
+            Self::Restored {
+                cause: Some(cause), ..
+            } => Some(cause),
             _ => None,
         }
     }
