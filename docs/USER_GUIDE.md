@@ -339,6 +339,8 @@ Open the two folders and choose **Folder sync preview** from Settings or the com
 
 Enable **Remove destination-only items** to include extra files and folders from the destination. When a file replaces a folder, the preview lists the affected descendants as deletions. **Check plan** reads both folders again and identifies the changed path. Build the plan again after editing either folder. If a read fails or an entry changes during planning, the preview shows which folder was being read, the path and the cause. Overlapping folders, name collisions and unreadable entries prevent a complete plan.
 
+On macOS, both sync directions verify saved SMB volumes when building or checking a plan. If a volume disconnects or is replaced, PawCommander reports the affected folder and stops the check. After reconnecting, build a fresh plan to review the current folders.
+
 Choose **Apply plan** to queue the displayed changes. When the job starts, PawCommander checks both folders again. If the plan has become stale, the job ends before changing files. Copies and replacements are checked in private staging before publication. The job processes destination-only deletions after the copies and replacements. Local deletions go to the Trash, and deletions from an SFTP folder are permanent.
 
 Use **Stop** to stop before the next change publishes. **Result history** shows completed paths and the active operation's outcome, path and cause. A failed check of a staged copy or held original identifies the item and the temporary path where it was checked. If publication or restoration cannot be confirmed, the result gives the temporary folder to inspect.
