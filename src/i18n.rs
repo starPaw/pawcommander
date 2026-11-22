@@ -20,6 +20,95 @@ pub(crate) use file_errors::{
 pub(crate) use formats::czech_format;
 pub(crate) use formats::russian_format;
 
+pub(crate) fn inspection_report(report: &crate::vfs::InspectionReport) -> String {
+    use crate::vfs::{InspectionBlocker, InspectionFinding, InspectionRole};
+
+    let (summary, blocker) = match &report.finding {
+        InspectionFinding::BeforeAttempt(None) => (
+            text!("Источник проверен. Передача этого объекта не началась."),
+            None,
+        ),
+        InspectionFinding::BeforeAttempt(Some(blocker)) => {
+            (text!("Повтор недоступен."), Some(blocker))
+        }
+        InspectionFinding::Ready => (
+            text!("Источник и назначение в ожидаемом состоянии. Можно повторить операцию."),
+            None,
+        ),
+        InspectionFinding::CopyPublished => (
+            text!("Копия была опубликована до обрыва. Проверьте остаток источника перед дальнейшими действиями."),
+            None,
+        ),
+        InspectionFinding::MatchingContents(_) => (
+            text!("Содержимое назначения совпадает с источником. Состояние исходной команды сервера не подтверждено."),
+            None,
+        ),
+        InspectionFinding::MatchingMove => (
+            text!("Источник отсутствует. Состав и метаданные назначения совпадают с записанными перед переносом."),
+            None,
+        ),
+        InspectionFinding::Unconfirmed(blocker) => (
+            text!("Состояние файлов не позволяет подтвердить безопасный повтор."),
+            Some(blocker),
+        ),
+    };
+    let mut message = summary.to_owned();
+    if let Some(blocker) = blocker {
+        message.push('\n');
+        let detail = match blocker {
+            InspectionBlocker::RelatedItem => {
+                text!("Связанный объект требует проверки перед повтором.").into()
+            }
+            InspectionBlocker::DestinationFolder(path) => crate::tr_format!(
+                "Could not verify destination folder {path} for retry.",
+                path = path
+            ),
+            InspectionBlocker::SourceChanged => {
+                text!("Исходный объект изменился или отсутствует.").into()
+            }
+            InspectionBlocker::TargetChanged => {
+                text!("Объект назначения отличается от состояния перед попыткой.").into()
+            }
+            InspectionBlocker::BackupRetained => {
+                text!("Сохранённая копия прежнего назначения всё ещё на месте.").into()
+            }
+            InspectionBlocker::OriginalRetained => {
+                text!("Исходник остался во временной папке.").into()
+            }
+            InspectionBlocker::PayloadUnconfirmed => {
+                text!("Наличие временной копии для повтора не подтверждено.").into()
+            }
+            InspectionBlocker::DirectorySnapshotMissing => {
+                text!("Нет записи о составе исходной папки, необходимой для повтора.").into()
+            }
+        };
+        message.push_str(&detail);
+    }
+    for path in &report.paths {
+        let role = match path.role {
+            InspectionRole::Source => text!("Исходный объект"),
+            InspectionRole::Destination => text!("Объект назначения"),
+            InspectionRole::StagingFolder => text!("Временная папка"),
+            InspectionRole::Backup => text!("Сохранённое прежнее назначение"),
+            InspectionRole::HeldSource => text!("Исходник во временной папке"),
+            InspectionRole::Payload => text!("Временная копия"),
+        };
+        let state = if path.present {
+            text!("Присутствует")
+        } else {
+            text!("Отсутствует")
+        };
+        message.push('\n');
+        message.push_str(&crate::tr_format!(
+            "{role} at {path} · {state}",
+            role = role,
+            path = path.location,
+            state = state
+        ));
+    }
+    message
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) fn resume_completion(report: crate::vfs::resume_copy::ResumeCompletion) -> String {
     use crate::vfs::resume_copy::Completion;

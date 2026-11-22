@@ -1,16 +1,73 @@
 use super::{entry_metadata, Attempt, EntryMetadata, Location, RetryTransfer, Source};
 use crate::{
+    file_error::{DescendantProblem, MoveHistoryError, TransferPlanError},
     fs_ops::TransferKind,
-    i18n::text,
     operations::{Cancellation, Progress, TransferError},
     result_history::Outcome,
     vfs::{compare_folders, ComparisonMode},
 };
 
+pub(crate) struct InspectionReport {
+    pub(crate) finding: InspectionFinding,
+    pub(crate) paths: Vec<InspectedPath>,
+}
+
+pub(crate) enum InspectionFinding {
+    BeforeAttempt(Option<InspectionBlocker>),
+    Ready,
+    CopyPublished,
+    MatchingContents(TransferKind),
+    MatchingMove,
+    Unconfirmed(InspectionBlocker),
+}
+
+pub(crate) enum InspectionBlocker {
+    RelatedItem,
+    DestinationFolder(Location),
+    SourceChanged,
+    TargetChanged,
+    BackupRetained,
+    OriginalRetained,
+    PayloadUnconfirmed,
+    DirectorySnapshotMissing,
+}
+
+pub(crate) enum InspectionRole {
+    Source,
+    Destination,
+    StagingFolder,
+    Backup,
+    HeldSource,
+    Payload,
+}
+
+pub(crate) struct InspectedPath {
+    pub(crate) role: InspectionRole,
+    pub(crate) location: Location,
+    pub(crate) present: bool,
+}
+
 enum Disposition {
     Retry,
     Observed,
     Review,
+}
+
+impl InspectionFinding {
+    fn decision(&self) -> (Disposition, Outcome) {
+        match self {
+            Self::BeforeAttempt(None) | Self::Ready => (Disposition::Retry, Outcome::RetryReady),
+            Self::BeforeAttempt(Some(_)) => (Disposition::Review, Outcome::Failed),
+            Self::CopyPublished | Self::MatchingContents(TransferKind::Move) => {
+                (Disposition::Observed, Outcome::CopiedSourceRemaining)
+            }
+            Self::MatchingContents(TransferKind::Copy) => {
+                (Disposition::Observed, Outcome::CompletedWithWarning)
+            }
+            Self::MatchingMove => (Disposition::Observed, Outcome::PublicationUnconfirmed),
+            Self::Unconfirmed(_) => (Disposition::Review, Outcome::PublicationUnconfirmed),
+        }
+    }
 }
 
 impl RetryTransfer {
@@ -19,15 +76,17 @@ impl RetryTransfer {
         progress: &mut Progress,
     ) -> Result<(Option<Self>, Option<Self>), TransferError> {
         let cancel = progress.cancellation();
-        progress.results.plan(self.sources.iter().map(|source| {
-            (
-                source.original.clone(),
-                source
-                    .attempt
-                    .as_ref()
-                    .map(|attempt| attempt.target.display()),
-            )
-        }));
+        progress
+            .results
+            .plan_selected_items_with_targets(self.sources.iter().map(|source| {
+                (
+                    source.original.clone(),
+                    source
+                        .attempt
+                        .as_ref()
+                        .map(|attempt| attempt.target.display()),
+                )
+            }));
         cancel.check()?;
         // An inaccessible or replaced destination folder cannot authorize a
         // write. A read-only report can still describe paths that are visible.
@@ -38,11 +97,18 @@ impl RetryTransfer {
             cancel.check()?;
             progress.item(source.original.path());
             progress.results.begin(&source.original);
-            let (disposition, outcome, reason) =
-                inspect_source(source, self.kind, destination_matches, progress, &cancel)?;
+            let report = inspect_source(
+                source,
+                self.kind,
+                &self.destination,
+                destination_matches,
+                progress,
+                &cancel,
+            )?;
+            let (disposition, outcome) = report.finding.decision();
             progress
                 .results
-                .record(&source.original, None, outcome, Some(reason));
+                .record_inspection(&source.original, outcome, &report);
             match disposition {
                 Disposition::Retry => {
                     let mut ready_source = source.clone();
@@ -85,49 +151,56 @@ impl RetryTransfer {
 fn inspect_source(
     source: &Source,
     kind: TransferKind,
+    destination: &Location,
     destination_matches: bool,
     progress: &mut Progress,
     cancel: &Cancellation,
-) -> Result<(Disposition, Outcome, String), TransferError> {
+) -> Result<InspectionReport, TransferError> {
     let current_source = entry_metadata(&source.resolved)?;
-    let may_retry =
-        source.replay_allowed && destination_matches && source.matches(current_source.as_ref())?;
+    let blocker = if !source.replay_allowed {
+        Some(InspectionBlocker::RelatedItem)
+    } else if !destination_matches {
+        Some(InspectionBlocker::DestinationFolder(destination.clone()))
+    } else if !source.matches(current_source.as_ref())? {
+        Some(InspectionBlocker::SourceChanged)
+    } else {
+        None
+    };
+    let mut paths = vec![InspectedPath {
+        role: InspectionRole::Source,
+        location: source.resolved.clone(),
+        present: current_source.is_some(),
+    }];
     let Some(attempt) = &source.attempt else {
-        return Ok(if may_retry {
-            (
-                Disposition::Retry,
-                Outcome::RetryReady,
-                text!("Источник проверен. Передача этого объекта не началась.").into(),
-            )
-        } else {
-            (
-                Disposition::Review,
-                Outcome::Failed,
-                text!("Источник или папка назначения изменились. Повтор недоступен.").into(),
-            )
+        return Ok(InspectionReport {
+            finding: InspectionFinding::BeforeAttempt(blocker),
+            paths,
         });
     };
 
     let current_target = entry_metadata(&attempt.target)?;
-    let mut details = vec![
-        report_path(&source.resolved, current_source.is_some()),
-        report_path(&attempt.target, current_target.is_some()),
-    ];
-    let staging = observe_path(attempt.staging.as_ref(), &mut details)?;
-    let backup = observe_path(attempt.backup().as_ref(), &mut details)?;
-    let held = observe_path(attempt.held_source.as_ref(), &mut details)?;
-    let payload = if staging && let Some(payload) = attempt.payload() {
-        observe_path(Some(&payload), &mut details)?
-    } else {
-        false
-    };
-    let checked = |summary: &'static str| format!("{summary}\n{}", details.join("\n"));
+    paths.push(InspectedPath {
+        role: InspectionRole::Destination,
+        location: attempt.target.clone(),
+        present: current_target.is_some(),
+    });
+    let staging = observe_path(
+        InspectionRole::StagingFolder,
+        attempt.staging.clone(),
+        &mut paths,
+    )?;
+    let backup = observe_path(InspectionRole::Backup, attempt.backup(), &mut paths)?;
+    let held = observe_path(
+        InspectionRole::HeldSource,
+        attempt.held_source.clone(),
+        &mut paths,
+    )?;
+    let payload = staging && observe_path(InspectionRole::Payload, attempt.payload(), &mut paths)?;
     if source.review == Some(Outcome::CopiedSourceRemaining) {
-        return Ok((
-            Disposition::Observed,
-            Outcome::CopiedSourceRemaining,
-            checked(text!("Копия была опубликована до обрыва. Проверьте остаток источника перед дальнейшими действиями.")),
-        ));
+        return Ok(InspectionReport {
+            finding: InspectionFinding::CopyPublished,
+            paths,
+        });
     }
 
     // A remote replacement can have the same size and timestamp as the old
@@ -138,40 +211,40 @@ fn inspect_source(
         && attempt.previous.is_some();
     let needs_manifest =
         source.review == Some(Outcome::PublicationUnconfirmed) && is_directory(&source.metadata);
-    if may_retry
-        && attempt.target_matches(current_target.as_ref())
-        && !backup
-        && !held
-        && (!needs_payload || payload)
-        && (!needs_manifest || attempt.source_entries.is_some())
-    {
+    let blocker = blocker.or_else(|| {
+        if !attempt.target_matches(current_target.as_ref()) {
+            Some(InspectionBlocker::TargetChanged)
+        } else if backup {
+            Some(InspectionBlocker::BackupRetained)
+        } else if held {
+            Some(InspectionBlocker::OriginalRetained)
+        } else if needs_payload && !payload {
+            Some(InspectionBlocker::PayloadUnconfirmed)
+        } else if needs_manifest && attempt.source_entries.is_none() {
+            Some(InspectionBlocker::DirectorySnapshotMissing)
+        } else {
+            None
+        }
+    });
+    let Some(blocker) = blocker else {
         if let Some(manifest) = &attempt.source_entries {
             manifest.verify(cancel, |_, _| {})?;
         }
-        return Ok((
-            Disposition::Retry,
-            Outcome::RetryReady,
-            checked(text!(
-                "Источник и назначение в ожидаемом состоянии. Можно повторить операцию.",
-            )),
-        ));
-    }
+        return Ok(InspectionReport {
+            finding: InspectionFinding::Ready,
+            paths,
+        });
+    };
 
     if attempt.copied
         && source.matches(current_source.as_ref())?
         && let (Some(left), Some(right)) = (&current_source, &current_target)
         && copied_contents_match(source, attempt, left, right, progress, cancel)?
     {
-        let outcome = if kind == TransferKind::Copy {
-            Outcome::CompletedWithWarning
-        } else {
-            Outcome::CopiedSourceRemaining
-        };
-        return Ok((
-            Disposition::Observed,
-            outcome,
-            checked(text!("Содержимое назначения совпадает с источником. Состояние исходной команды сервера не подтверждено.")),
-        ));
+        return Ok(InspectionReport {
+            finding: InspectionFinding::MatchingContents(kind),
+            paths,
+        });
     }
 
     if !attempt.copied
@@ -179,36 +252,32 @@ fn inspect_source(
         && current_target.is_some()
         && moved_tree_matches(source, attempt, cancel)?
     {
-        return Ok((
-            Disposition::Observed,
-            Outcome::PublicationUnconfirmed,
-            checked(text!("Источник отсутствует. Состав и метаданные назначения совпадают с записанными перед переносом.")),
-        ));
+        return Ok(InspectionReport {
+            finding: InspectionFinding::MatchingMove,
+            paths,
+        });
     }
-    Ok((
-        Disposition::Review,
-        Outcome::PublicationUnconfirmed,
-        checked(text!(
-            "Состояние файлов не позволяет подтвердить безопасный повтор.",
-        )),
-    ))
+    Ok(InspectionReport {
+        finding: InspectionFinding::Unconfirmed(blocker),
+        paths,
+    })
 }
 
-fn report_path(path: &Location, exists: bool) -> String {
-    if exists {
-        crate::tr_format!("Found {path}", path = path)
-    } else {
-        crate::tr_format!("Missing {path}", path = path)
-    }
-}
-
-fn observe_path(path: Option<&Location>, details: &mut Vec<String>) -> Result<bool, TransferError> {
-    if let Some(path) = path {
-        let exists = entry_metadata(path)?.is_some();
-        details.push(report_path(path, exists));
-        return Ok(exists);
-    }
-    Ok(false)
+fn observe_path(
+    role: InspectionRole,
+    location: Option<Location>,
+    paths: &mut Vec<InspectedPath>,
+) -> Result<bool, TransferError> {
+    let Some(location) = location else {
+        return Ok(false);
+    };
+    let present = entry_metadata(&location)?.is_some();
+    paths.push(InspectedPath {
+        role,
+        location,
+        present,
+    });
+    Ok(present)
 }
 
 fn is_directory(metadata: &EntryMetadata) -> bool {
@@ -229,8 +298,13 @@ fn copied_contents_match(
     use crate::vfs::read_scope::ReadScope;
     let result = if left.is_file() && right.is_file() {
         let mut digest = |file: &Location| {
-            let parent = file.parent().ok_or("Missing file parent")?;
-            let name = file.path().file_name().ok_or("Missing file name")?;
+            let parent = file
+                .parent()
+                .ok_or_else(|| TransferPlanError::MissingParent(file.clone()))?;
+            let name = file
+                .path()
+                .file_name()
+                .ok_or_else(|| TransferPlanError::MissingName(file.clone()))?;
             ReadScope::open(&parent)?.digest(name.as_ref(), progress, cancel)
         };
         digest(&source.resolved)?
@@ -263,7 +337,11 @@ fn moved_tree_matches(
         let relative = original
             .path()
             .strip_prefix(source.resolved.path())
-            .map_err(|_| "Invalid move manifest")?;
+            .map_err(|_| MoveHistoryError::Descendant {
+                source: original.clone(),
+                target: attempt.target.clone(),
+                problem: DescendantProblem::Unmapped,
+            })?;
         let current = if relative.as_os_str().is_empty() {
             attempt.target.clone()
         } else {

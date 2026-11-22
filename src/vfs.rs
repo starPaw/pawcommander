@@ -74,7 +74,9 @@ pub(crate) use permissions::{ModeRule, PermissionsPreview};
 pub(crate) use preview::cache_media_preview;
 pub(crate) use preview::open_preview_stream;
 pub(crate) use preview::preview_data;
-pub(crate) use retry::RetryTransfer;
+pub(crate) use retry::{
+    InspectionBlocker, InspectionFinding, InspectionReport, InspectionRole, RetryTransfer,
+};
 #[cfg(test)]
 pub use sftp::connect;
 #[cfg(test)]

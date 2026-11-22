@@ -517,6 +517,19 @@ fn sftp_reconnect_checks_lost_publication_replies() {
         assert_eq!(fs::read(source.path()).unwrap(), CONTENTS);
         let row = &review.results.items[0];
         assert_eq!(row.target.as_deref(), Some(target.display().as_str()));
+        let reason = row.reason.as_ref().unwrap();
+        let state = if expected_marker == "before" {
+            crate::i18n::text!("Отсутствует")
+        } else {
+            crate::i18n::text!("Присутствует")
+        };
+        let destination_line = crate::tr_format!(
+            "{role} at {path} · {state}",
+            role = crate::i18n::text!("Объект назначения"),
+            path = target,
+            state = state
+        );
+        assert!(reason.lines().any(|line| line == destination_line));
         match name {
             "lost-before.bin" => {
                 assert_eq!(row.outcome, Outcome::RetryReady);
@@ -563,6 +576,9 @@ fn sftp_reconnect_checks_lost_publication_replies() {
             "lost-conflict.bin" => {
                 assert_eq!(row.outcome, Outcome::PublicationUnconfirmed);
                 assert!(ready.is_none() && pending.unwrap().needs_inspection());
+                assert!(reason.contains(crate::i18n::text!(
+                    "Объект назначения отличается от состояния перед попыткой."
+                )));
                 assert_eq!(fs::read(target.path()).unwrap(), b"independent edit");
             }
             _ => {
@@ -572,9 +588,22 @@ fn sftp_reconnect_checks_lost_publication_replies() {
                 if replace {
                     let retained: Vec<_> = fs::read_dir(remote_root.path())
                         .unwrap()
-                        .filter_map(|entry| fs::read(entry.unwrap().path().join("previous")).ok())
+                        .filter_map(|entry| {
+                            let path = entry.unwrap().path().join("previous");
+                            fs::read(&path).ok().map(|contents| (path, contents))
+                        })
                         .collect();
-                    assert_eq!(retained, [b"older destination"]);
+                    let [(backup, contents)] = retained.as_slice() else {
+                        panic!("one backup should be retained, found {retained:?}");
+                    };
+                    assert_eq!(contents, b"older destination");
+                    let backup_line = crate::tr_format!(
+                        "{role} at {path} · {state}",
+                        role = crate::i18n::text!("Сохранённое прежнее назначение"),
+                        path = target.with_path(backup.clone()),
+                        state = crate::i18n::text!("Присутствует")
+                    );
+                    assert!(reason.lines().any(|line| line == backup_line));
                 }
             }
         }

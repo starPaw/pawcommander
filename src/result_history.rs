@@ -4,7 +4,7 @@ use crate::operations::TransferError;
 use crate::recovery::{same_owned_marker, sync_directory};
 #[cfg(test)]
 use crate::test_ui::ContextExt as _;
-use crate::vfs::Location;
+use crate::vfs::{InspectionReport, Location};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -141,7 +141,14 @@ impl Results {
 
     /// Record an operation defined by an explicit list of paths.
     pub(crate) fn plan_selected_items(&mut self, items: impl IntoIterator<Item = Location>) {
-        self.plan(items.into_iter().map(|source| (source, None)));
+        self.plan_selected_items_with_targets(items.into_iter().map(|source| (source, None)));
+    }
+
+    pub(crate) fn plan_selected_items_with_targets(
+        &mut self,
+        items: impl IntoIterator<Item = (Location, Option<String>)>,
+    ) {
+        self.plan(items);
         self.selected_items_only = true;
     }
 
@@ -619,6 +626,20 @@ impl Results {
         self.record(source, None, status, Some(reason.into()));
     }
 
+    pub(crate) fn record_inspection(
+        &mut self,
+        source: &Location,
+        outcome: Outcome,
+        report: &InspectionReport,
+    ) {
+        self.record(
+            source,
+            None,
+            outcome,
+            Some(crate::i18n::inspection_report(report)),
+        );
+    }
+
     pub fn finish(
         mut self,
         label: String,
@@ -730,10 +751,11 @@ impl ItemResult {
 
 impl Record {
     fn selected_items_only(&self) -> bool {
-        // Older checksum and permission records stored only the translated command label.
+        // Older records stored the translated command label without this flag.
         self.selected_items_only
             || crate::i18n::key!("Создать манифест SHA-256").matches(&self.label)
             || crate::i18n::key!("Проверить манифест SHA-256").matches(&self.label)
+            || crate::i18n::key!("Проверка прерванной операции SFTP").matches(&self.label)
             || (crate::i18n::key!("Изменить права доступа").matches(&self.label)
                 && self.items.iter().all(|row| {
                     row.parent.is_none()
@@ -1498,7 +1520,7 @@ mod tests {
     }
 
     #[test]
-    fn checksum_history_recognizes_legacy_manifest_commands_in_all_languages() {
+    fn history_recognizes_legacy_commands_for_selected_items_in_all_languages() {
         let mut results = Results::default();
         results.plan([(local("SHA256SUMS"), None)]);
         let mut record = results
@@ -1509,10 +1531,14 @@ mod tests {
             "Создать манифест SHA-256",
             "Verify SHA-256 manifest",
             "Проверить манифест SHA-256",
+            "Checking interrupted SFTP transfer",
+            "Проверка прерванной операции SFTP",
             #[cfg(target_os = "macos")]
             "Vytvořit manifest SHA-256",
             #[cfg(target_os = "macos")]
             "Ověřit manifest SHA-256",
+            #[cfg(target_os = "macos")]
+            "Kontrola přerušeného přenosu SFTP",
         ] {
             record.label = label.into();
             let saved = serde_json::to_value(&record).unwrap();
