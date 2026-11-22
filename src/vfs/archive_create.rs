@@ -1,3 +1,5 @@
+#[cfg(target_os = "macos")]
+use super::archive_smb;
 use super::location::{validate_name, Location};
 use super::staged_file::StagedFile;
 use super::transfer::{
@@ -11,6 +13,8 @@ use crate::file_error::{
 };
 use crate::operations::{Cancellation, Progress, TransferError};
 use crate::result_history::Outcome;
+#[cfg(target_os = "macos")]
+use crate::{file_error::SmbMutationAction, smb::MutationMount};
 use std::{collections::BTreeSet, io, path::Path, time::UNIX_EPOCH};
 
 pub(crate) fn archive_file_name(name: &str, format: Format) -> Result<String, PathError> {
@@ -94,16 +98,20 @@ fn write_archive(
     }
     let cancel = progress.cancellation();
     cancel.check()?;
+    #[cfg(target_os = "macos")]
+    let mut mount = archive_smb::guard(&directory.join(name), SmbMutationAction::CreateArchive)?;
+    let mut plan = ArchivePlan::new(format, password.is_some());
+    #[cfg(target_os = "macos")]
+    plan.check_source(directory)?;
     let parent = Parent::capture(directory)?;
     let target = parent.location.join(name);
+    #[cfg(target_os = "macos")]
+    let smb_output = archive_smb::is_destination(&mut mount, &target)?;
     ensure_absent(&target)?;
 
-    let mut plan = ArchivePlan::new(format, password.is_some());
     plan.capture_sources(sources, &parent.location, Path::new(""), progress, &cancel)?;
 
-    with_staging_typed(&target, Some(&cancel), |staging, _| {
-        let payload = staging.join("payload");
-        let output = StagedFile::open(&payload, cancel.clone())?;
+    let write = |output, progress: &mut Progress| -> Result<(), TransferError> {
         let mut archive = ArchiveWriter::new(format, password, output)
             .map_err(|error| AccessError::write(&target, error))?;
         plan.append(&target, &mut archive, progress, &cancel)?;
@@ -111,7 +119,9 @@ fn write_archive(
         archive
             .finish()
             .map_err(|error| AccessError::write(&target, error))?
-            .close()?;
+            .close()
+    };
+    let verify = || -> Result<(), TransferError> {
         plan.verify(&cancel)?;
         parent.verify()?;
         if canonical(directory)? != parent.location.path() {
@@ -119,6 +129,21 @@ fn write_archive(
         }
         ensure_absent(&target)?;
         cancel.check()?;
+        Ok(())
+    };
+    #[cfg(target_os = "macos")]
+    if smb_output {
+        let staged = archive_smb::spool(&target, &cancel, |output| write(output, progress))?;
+        mount.recheck()?;
+        verify()?;
+        archive_smb::publish(staged, &target, &target, &parent, &mount, progress)?;
+        *published = true;
+        return Ok(());
+    }
+    with_staging_typed(&target, Some(&cancel), |staging, _| {
+        let payload = staging.join("payload");
+        write(StagedFile::open(&payload, cancel.clone())?, progress)?;
+        verify()?;
         rename_for_publication(&payload, &target)?;
         *published = true;
         Ok(())
@@ -137,6 +162,8 @@ pub(super) struct ArchivePlan {
     protected: bool,
     limits: CreationLimits,
     members: Vec<ArchiveSource>,
+    #[cfg(target_os = "macos")]
+    mount: MutationMount,
 }
 
 impl ArchivePlan {
@@ -146,7 +173,14 @@ impl ArchivePlan {
             protected,
             limits: CreationLimits::default(),
             members: Vec::new(),
+            #[cfg(target_os = "macos")]
+            mount: MutationMount::new(SmbMutationAction::ReadArchive),
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn check_source(&mut self, directory: &Location) -> Result<(), TransferError> {
+        archive_smb::check(&mut self.mount, directory)
     }
 
     pub(super) fn capture_sources(
@@ -157,6 +191,8 @@ impl ArchivePlan {
         progress: &mut Progress,
         cancel: &Cancellation,
     ) -> Result<(), TransferError> {
+        #[cfg(target_os = "macos")]
+        self.check_source(directory)?;
         let mut selected = BTreeSet::new();
         for source in sources {
             let name = source
@@ -198,13 +234,24 @@ impl ArchivePlan {
         progress: &mut Progress,
         cancel: &Cancellation,
     ) -> Result<(), TransferError> {
+        #[cfg(target_os = "macos")]
+        self.mount.recheck()?;
         for member in &self.members {
-            member.append(target, archive, progress, cancel)?;
+            member.append(
+                target,
+                archive,
+                progress,
+                cancel,
+                #[cfg(target_os = "macos")]
+                &self.mount,
+            )?;
         }
         Ok(())
     }
 
     pub(super) fn verify(&self, cancel: &Cancellation) -> Result<(), TransferError> {
+        #[cfg(target_os = "macos")]
+        self.mount.recheck()?;
         for member in &self.members {
             member.entry.verify(&member.source, cancel, true)?;
         }
@@ -270,6 +317,7 @@ impl ArchiveSource {
         archive: &mut ArchiveWriter<'_, StagedFile>,
         progress: &mut Progress,
         cancel: &Cancellation,
+        #[cfg(target_os = "macos")] mount: &MutationMount,
     ) -> Result<(), TransferError> {
         self.entry.verify(&self.source, cancel, true)?;
         let add_entry_error = |source| {
@@ -286,6 +334,10 @@ impl ArchiveSource {
                 .map_err(add_entry_error);
         }
         let mut input = SourceReader::open(&self.source)?;
+        #[cfg(target_os = "macos")]
+        if let SourceReader::Local(file) = &input {
+            mount.verify_file(file, self.source.path())?;
+        }
         self.entry
             .verify_metadata(&self.source, &input.metadata(&self.source)?)?;
         let expected = self.attributes.size;

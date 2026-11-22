@@ -1267,6 +1267,10 @@ pub(crate) enum SmbMutationAction {
     CreateLink,
     InspectLinkTarget,
     Undo,
+    ReadArchive,
+    CreateArchive,
+    ExtractArchive,
+    EditArchive,
 }
 
 #[derive(Debug)]

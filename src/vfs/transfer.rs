@@ -1203,8 +1203,6 @@ fn copy_to_smb(
     published: impl FnOnce(),
 ) -> Result<(), TransferError> {
     use crate::file_error::{Failure, ScanError};
-    use std::io::{Seek, SeekFrom};
-
     let target = &item.target;
     let cancel = progress.cancellation();
     progress.checkpoint()?;
@@ -1228,8 +1226,7 @@ fn copy_to_smb(
     source.verify_metadata(&item.source, &input.metadata(&item.source)?)?;
     source.verify(&item.source, &cancel, true)?;
     progress.checkpoint()?;
-    let mut file = crate::smb::open_upload(target, expected_mount)?;
-    let target_error = |action, error| AccessError::new(target, action, error);
+    let file = crate::smb::open_upload(target, expected_mount)?;
     let describe_source_error = |error| match &error {
         TransferError::Failed(Failure::Mutation(reason))
             if matches!(reason.as_ref(), MutationError::SourceChanged(_)) =>
@@ -1238,79 +1235,106 @@ fn copy_to_smb(
         }
         _ => error,
     };
-    let result = (|| -> Result<(), TransferError> {
-        let opened = file
-            .metadata()
-            .map_err(|error| target_error(AccessAction::ReadOpenMetadata, error))?;
-        let identity = EntryMetadata::Local(LocalEntryMetadata::from_file(&file, opened));
-        let mut data = CopyReader::new(
-            AccessStream::new(&mut input, &item.source).take(size),
-            progress.copy_verification(),
-        );
-        let written = progress.copy(
-            item.source.path(),
-            Some(size),
-            &mut data,
-            &mut AccessStream::new(&mut file, target),
-        )?;
-        cancel.check()?;
-        crate::smb::sync_upload(&file)
-            .map_err(|error| target_error(AccessAction::SyncFile, error))?;
-        if written != size {
-            return Err(CopyVerificationError::SourceSize {
-                source: item.source.clone(),
-                expected: size,
-                actual: written,
-            }
-            .into());
-        }
-        let actual = file
-            .metadata()
-            .map_err(|error| target_error(AccessAction::ReadOpenMetadata, error))?
-            .len();
-        if actual != size {
-            return Err(PublicationError::SmbTargetSize {
-                target: target.clone(),
-                expected: size,
-                actual,
-            }
-            .into());
-        }
-        if let Some(hash) = data.finish() {
-            file.seek(SeekFrom::Start(0))
-                .map_err(|error| target_error(AccessAction::SeekFile, error))?;
-            progress.verify_copy(
-                item.source.path(),
-                target,
-                size,
-                hash,
-                &mut AccessStream::new(&mut file, target),
-            )?;
-        }
+    let warning = finish_smb_upload(target, file, |file| {
+        write_smb_payload(&item.source, target, size, &mut input, file, progress)?;
         source
             .verify_metadata(&item.source, &input.metadata(&item.source)?)
             .map_err(&describe_source_error)?;
         source
             .verify(&item.source, &cancel, true)
             .map_err(describe_source_error)?;
-        let warning = copy_metadata::finish_local_file(
+        copy_metadata::finish_local_file(
             target,
             &copy_metadata::Attributes::from_entry(&source.metadata),
-            &file,
+            file,
+        )
+    })?;
+    progress.results.note_metadata(&item.source, warning);
+    published();
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn write_smb_payload(
+    source: &Location,
+    target: &Location,
+    size: u64,
+    input: &mut impl Read,
+    file: &mut fs::File,
+    progress: &mut Progress,
+) -> Result<(), TransferError> {
+    use std::io::{Seek, SeekFrom};
+
+    let target_error = |action, error| AccessError::new(target, action, error);
+    let mut data = CopyReader::new(
+        AccessStream::new(input, source).take(size),
+        progress.copy_verification(),
+    );
+    let written = progress.copy(
+        source.path(),
+        Some(size),
+        &mut data,
+        &mut AccessStream::new(&mut *file, target),
+    )?;
+    progress.check_cancelled()?;
+    crate::smb::sync_upload(file).map_err(|error| target_error(AccessAction::SyncFile, error))?;
+    if written != size {
+        return Err(CopyVerificationError::SourceSize {
+            source: source.clone(),
+            expected: size,
+            actual: written,
+        }
+        .into());
+    }
+    let actual = file
+        .metadata()
+        .map_err(|error| target_error(AccessAction::ReadOpenMetadata, error))?
+        .len();
+    if actual != size {
+        return Err(PublicationError::SmbTargetSize {
+            target: target.clone(),
+            expected: size,
+            actual,
+        }
+        .into());
+    }
+    if let Some(hash) = data.finish() {
+        file.seek(SeekFrom::Start(0))
+            .map_err(|error| target_error(AccessAction::SeekFile, error))?;
+        progress.verify_copy(
+            source.path(),
+            target,
+            size,
+            hash,
+            &mut AccessStream::new(file, target),
         )?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn finish_smb_upload<T>(
+    target: &Location,
+    mut file: fs::File,
+    write: impl FnOnce(&mut fs::File) -> Result<T, TransferError>,
+) -> Result<T, TransferError> {
+    let result = (|| {
+        let target_error = |action, error| AccessError::new(target, action, error);
+        let opened = file
+            .metadata()
+            .map_err(|error| target_error(AccessAction::ReadOpenMetadata, error))?;
+        let identity = EntryMetadata::Local(LocalEntryMetadata::from_file(&file, opened));
+        let value = write(&mut file)?;
         crate::smb::close_upload(file)
             .map_err(|error| target_error(AccessAction::CloseFile, error))?;
-        progress.results.note_metadata(&item.source, warning);
         if !entry_metadata(target)?.is_some_and(|current| identity.same_object(&current)) {
             return Err(PublicationError::SmbTargetChanged(target.clone()).into());
         }
-        Ok(())
+        Ok(value)
     })();
     // The destination was created exclusively. A failed upload can leave a
     // new partial file, and deleting its name could race another SMB client.
-    result.map_err(|error| crate::smb::unconfirmed_upload(target, error))?;
-    published();
-    Ok(())
+    result.map_err(|error| crate::smb::unconfirmed_upload(target, error))
 }
 
 pub(super) fn move_item(

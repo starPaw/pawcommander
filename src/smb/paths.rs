@@ -94,6 +94,10 @@ impl MutationMount {
         Ok(())
     }
 
+    pub(crate) fn verify_file(&self, file: &fs::File, path: &Path) -> Result<(), TransferError> {
+        self.verify_directory(file, path, path)
+    }
+
     fn inspect(&self, path: &Path) -> Result<Option<[i32; 2]>, TransferError> {
         checked_mount(path)
             .map_err(|cause| MutationError::smb_mount(path, self.action, cause).into())

@@ -63,20 +63,16 @@ impl Parent {
     }
 
     #[cfg(target_os = "macos")]
-    fn verify_handle(&self, handle: &File) -> Result<(), TransferError> {
+    pub(super) fn matches_handle(&self, handle: &File) -> Result<bool, TransferError> {
         let actual = handle.metadata().map_err(|error| {
             AccessError::new(&self.location, AccessAction::ReadOpenMetadata, error)
         })?;
-        if !actual.is_dir()
-            || !self
+        Ok(actual.is_dir()
+            && self
                 .metadata
                 .same_object(&EntryMetadata::Local(LocalEntryMetadata::from_file(
                     handle, actual,
-                )))
-        {
-            return Err(UndoError::FolderChanged(self.location.clone()).into());
-        }
-        Ok(())
+                ))))
     }
 }
 
@@ -216,12 +212,19 @@ impl Capture {
         let target = &self.original;
         #[cfg(target_os = "macos")]
         if let Some(source_parent) = self.mount.open_parent(source.path())? {
-            self.parents[1].verify_handle(&source_parent)?;
+            let check = |parent: &Parent, handle: &File| -> Result<(), TransferError> {
+                if parent.matches_handle(handle)? {
+                    Ok(())
+                } else {
+                    Err(UndoError::FolderChanged(parent.location.clone()).into())
+                }
+            };
+            check(&self.parents[1], &source_parent)?;
             let target_parent = self
                 .mount
                 .open_parent(target.path())?
                 .ok_or_else(|| unavailable(target))?;
-            self.parents[0].verify_handle(&target_parent)?;
+            check(&self.parents[0], &target_parent)?;
             return crate::fs_ops::rename_between_open_directories(
                 &source_parent,
                 &target_parent,
@@ -546,7 +549,6 @@ pub(crate) fn rename_with_undo(
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
-    use crate::file_error::Failure;
     use std::fs;
 
     #[test]
@@ -559,11 +561,7 @@ mod tests {
         fs::rename(&folder, folder.with_file_name("retained")).unwrap();
         fs::create_dir(&folder).unwrap();
 
-        assert!(saved.verify_handle(&original).is_ok());
-        let error = saved
-            .verify_handle(&File::open(&folder).unwrap())
-            .unwrap_err();
-        assert!(matches!(error, TransferError::Failed(Failure::Undo(reason))
-            if matches!(reason.as_ref(), UndoError::FolderChanged(path) if path.path() == folder)));
+        assert!(saved.matches_handle(&original).unwrap());
+        assert!(!saved.matches_handle(&File::open(&folder).unwrap()).unwrap());
     }
 }
