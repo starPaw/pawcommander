@@ -151,6 +151,7 @@ catalog! {
     "Ищем дубликаты…" => ("Finding duplicates…", "Hledání duplicitních souborů…"),
     "Поиск дубликатов остановлен" => ("Duplicate search stopped", "Hledání duplicitních souborů bylo zastaveno"),
     "Дубликаты не найдены" => ("No duplicates found", "Nebyly nalezeny žádné duplicitní soubory"),
+    "Объект изменился после поиска или недоступен. Выполните поиск заново." => ("The item changed after the search or is unavailable. Run a fresh search.", "Položka se po hledání změnila nebo není dostupná. Spusťte nové hledání."),
     "Поиск дубликатов доступен в локальных папках" => ("Duplicate search is available in local folders", "Duplicitní soubory lze hledat v místních složkách"),
     "Выберите папку вне временных папок PawCommander" => ("Choose a folder outside PawCommander's staging folders", "Vyberte složku mimo dočasné složky PawCommanderu"),
     "Перемещение дубликатов в корзину" => ("Moving duplicates to Trash", "Přesouvání duplicitních souborů do koše"),

@@ -1790,7 +1790,14 @@ pub(super) fn with_staging_typed(
     cancel: Option<&Cancellation>,
     work: impl FnOnce(&Location, &mut bool) -> Result<(), TransferError>,
 ) -> Result<(), TransferError> {
-    staging_typed(target, cancel, false, None, work)
+    staging_typed(
+        target,
+        cancel,
+        false,
+        None,
+        LocalStagingCleanup::Recursive,
+        work,
+    )
 }
 
 /// Source data may be moved here: never recursively remove it on unwinding.
@@ -1799,7 +1806,31 @@ pub(super) fn with_preserved_staging(
     cancel: &Cancellation,
     work: impl FnOnce(&Location, &mut bool) -> Result<(), TransferError>,
 ) -> Result<(), TransferError> {
-    staging_typed(target, Some(cancel), true, None, work)
+    staging_typed(
+        target,
+        Some(cancel),
+        true,
+        None,
+        LocalStagingCleanup::Recursive,
+        work,
+    )
+}
+
+/// Preserve held data and remove the local staging directory only while empty.
+#[cfg(target_os = "macos")]
+pub(super) fn with_preserved_empty_staging(
+    target: &Location,
+    cancel: &Cancellation,
+    work: impl FnOnce(&Location, &mut bool) -> Result<(), TransferError>,
+) -> Result<(), TransferError> {
+    staging_typed(
+        target,
+        Some(cancel),
+        true,
+        None,
+        LocalStagingCleanup::Empty,
+        work,
+    )
 }
 
 pub(super) type StagingNotice<'a> = dyn FnMut(&Location) -> Result<(), TransferError> + 'a;
@@ -1813,7 +1844,20 @@ pub(super) fn with_tracked_staging(
     notice: &mut StagingNotice<'_>,
     work: impl FnOnce(&Location, &mut bool) -> Result<(), TransferError>,
 ) -> Result<(), TransferError> {
-    staging_typed(target, Some(cancel), true, Some(notice), work)
+    staging_typed(
+        target,
+        Some(cancel),
+        true,
+        Some(notice),
+        LocalStagingCleanup::Recursive,
+        work,
+    )
+}
+
+enum LocalStagingCleanup {
+    Recursive,
+    #[cfg(target_os = "macos")]
+    Empty,
 }
 
 fn staging_typed(
@@ -1821,6 +1865,7 @@ fn staging_typed(
     cancel: Option<&Cancellation>,
     mut preserve: bool,
     mut notice: Option<&mut StagingNotice<'_>>,
+    cleanup: LocalStagingCleanup,
     work: impl FnOnce(&Location, &mut bool) -> Result<(), TransferError>,
 ) -> Result<(), TransferError> {
     if let Some(cancel) = cancel {
@@ -1869,7 +1914,8 @@ fn staging_typed(
             staging.keep();
             return result;
         }
-        return StagingCleanupError::combine(result, staging.close(true), &location, target);
+        let recursive = matches!(cleanup, LocalStagingCleanup::Recursive);
+        return StagingCleanupError::combine(result, staging.close(recursive), &location, target);
     }
 
     let sftp = remote(target)?;

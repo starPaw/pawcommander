@@ -11,7 +11,7 @@ use super::{
     Location, MAX_TREE_DEPTH,
 };
 use crate::{
-    file_error::ScanError,
+    file_error::{DuplicateError, ScanError},
     i18n::text,
     operations::{Cancellation, Progress, TransferError},
 };
@@ -296,7 +296,10 @@ fn checked<'a>(
     member
         .version
         .verify_metadata(&location, &file.stamp().metadata)
-        .map_err(|_| changed_since_search(&location))?;
+        .map_err(|cause| DuplicateError::Changed {
+            location,
+            cause: Some(cause),
+        })?;
     Ok(file)
 }
 
@@ -317,10 +320,10 @@ fn same_contents(
 }
 
 fn changed_since_search(location: &Location) -> TransferError {
-    crate::tr_format!(
-        "An item changed after the search or is unavailable: {location}. Run a fresh search.",
-        location = location
-    )
+    DuplicateError::Changed {
+        location: location.clone(),
+        cause: None,
+    }
     .into()
 }
 
