@@ -67,14 +67,20 @@ impl fmt::Display for CopyVerificationError {
 
 impl Error for CopyVerificationError {}
 
+impl From<CopyVerificationError> for Failure {
+    fn from(error: CopyVerificationError) -> Self {
+        Self::CopyVerification(Box::new(error))
+    }
+}
+
 impl From<CopyVerificationError> for TransferError {
     fn from(error: CopyVerificationError) -> Self {
-        Self::Failed(Failure::CopyVerification(Box::new(error)))
+        Self::Failed(error.into())
     }
 }
 
 impl From<CopyVerificationError> for io::Error {
     fn from(error: CopyVerificationError) -> Self {
-        io::Error::new(io::ErrorKind::InvalidData, error)
+        io::Error::new(io::ErrorKind::InvalidData, Failure::from(error))
     }
 }

@@ -49,9 +49,8 @@ fn spawn(tool: &Path, files: &[PathBuf; 2]) -> Result<Child, String> {
                 crate::i18n::text!("Внешнему инструменту нужны два локальных файла").into(),
             );
         }
-        crate::fs_ops::open_regular_source(path).map_err(|error| {
-            crate::tr_format!("Could not open {}: {error}", path.display(), error = error)
-        })?;
+        crate::fs_ops::open_regular_source(path)
+            .map_err(|error| crate::i18n::access_io_message(&error))?;
     }
     Command::new(tool)
         .args(files)

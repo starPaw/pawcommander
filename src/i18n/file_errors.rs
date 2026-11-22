@@ -23,64 +23,61 @@ use crate::vfs::{DeletionFailure, Location, TransferFailure};
 
 pub(crate) fn file_error(error: &TransferError) -> String {
     match error {
-        TransferError::Failed(reason) | TransferError::PublicationUnconfirmed(reason) => {
-            match reason {
-                Failure::Path(error) => path_error(error),
-                Failure::Connection(error) => connection_error(error),
-                Failure::Access(error) => access_error(error),
-                Failure::Preview(error) => preview_error(error),
-                Failure::Search(error) => search_error(error),
-                Failure::Scan(error) => scan_error(error),
-                Failure::Checksum(error) => checksum_error(error),
-                Failure::CopyVerification(error) => copy_verification_error(error),
-                Failure::Archive(error) => archive_error(error),
-                Failure::Metadata(error) => metadata_error(error),
-                Failure::Space(error) => space_error(error),
-                #[cfg(target_os = "macos")]
-                Failure::Sync(error) => sync_error(error),
-                Failure::Permissions(reason) => permission_error(
-                    reason,
-                    matches!(error, TransferError::PublicationUnconfirmed(_)),
-                ),
-                Failure::ComparisonPane { right, cause } => {
-                    let pane = if *right {
-                        text!("Правая панель")
-                    } else {
-                        text!("Левая панель")
-                    };
-                    format!("{pane} · {}", file_error(cause))
-                }
-                Failure::Listing(error) => listing_error(error),
-                Failure::ConflictClosed => text!("Диалог конфликта закрыт").into(),
-                Failure::Conflict(error) => conflict_error(error),
-                Failure::BatchRename(error) => batch_rename_error(error),
-                Failure::CrossMove(error) => cross_move_error(error),
-                Failure::MoveHistory(error) => move_history_error(error),
-                #[cfg(target_os = "macos")]
-                Failure::RemoteEdit(error) => remote_edit_error(error),
-                Failure::Undo(error) => undo_error(error),
-                #[cfg(target_os = "macos")]
-                Failure::FilePromise(error) => file_promise_error(error),
-                #[cfg(target_os = "macos")]
-                Failure::FileTemplate(error) => file_template_error(error),
-                #[cfg(target_os = "macos")]
-                Failure::CompatiblePlan(error) => compatible_plan_error(error),
-                Failure::Mutation(reason) => mutation_error(
-                    reason,
-                    matches!(error, TransferError::PublicationUnconfirmed(_)),
-                ),
-                Failure::Publication(reason) => publication_error(reason),
-                Failure::Staging(error) => staging_error(error),
-                #[cfg(target_os = "macos")]
-                Failure::ResumeCheck(error) => resume_check_error(error),
-                Failure::Retry(error) => retry_error(error),
-                Failure::TransferPlan(error) => transfer_plan_error(error),
-                Failure::RecoveryRecord(error) => recovery_record_error(error),
-                Failure::StagingCleanup(error) => staging_cleanup_error(error),
-                _ => error.to_string(),
-            }
-        }
+        TransferError::Failed(reason) => file_failure(reason, false),
+        TransferError::PublicationUnconfirmed(reason) => file_failure(reason, true),
         TransferError::Cancelled => crate::tr_format!("Operation cancelled"),
+    }
+}
+
+fn file_failure(reason: &Failure, unconfirmed: bool) -> String {
+    match reason {
+        Failure::Path(error) => path_error(error),
+        Failure::Connection(error) => connection_error(error),
+        Failure::Access(error) => access_error(error),
+        Failure::Preview(error) => preview_error(error),
+        Failure::Search(error) => search_error(error),
+        Failure::Scan(error) => scan_error(error),
+        Failure::Checksum(error) => checksum_error(error),
+        Failure::CopyVerification(error) => copy_verification_error(error),
+        Failure::Archive(error) => archive_error(error),
+        Failure::Metadata(error) => metadata_error(error),
+        Failure::Space(error) => space_error(error),
+        #[cfg(target_os = "macos")]
+        Failure::Sync(error) => sync_error(error),
+        Failure::Permissions(reason) => permission_error(reason, unconfirmed),
+        Failure::ComparisonPane { right, cause } => {
+            let pane = if *right {
+                text!("Правая панель")
+            } else {
+                text!("Левая панель")
+            };
+            format!("{pane} · {}", file_error(cause))
+        }
+        Failure::Listing(error) => listing_error(error),
+        Failure::ConflictClosed => text!("Диалог конфликта закрыт").into(),
+        Failure::Conflict(error) => conflict_error(error),
+        Failure::BatchRename(error) => batch_rename_error(error),
+        Failure::CrossMove(error) => cross_move_error(error),
+        Failure::MoveHistory(error) => move_history_error(error),
+        #[cfg(target_os = "macos")]
+        Failure::RemoteEdit(error) => remote_edit_error(error),
+        Failure::Undo(error) => undo_error(error),
+        #[cfg(target_os = "macos")]
+        Failure::FilePromise(error) => file_promise_error(error),
+        #[cfg(target_os = "macos")]
+        Failure::FileTemplate(error) => file_template_error(error),
+        #[cfg(target_os = "macos")]
+        Failure::CompatiblePlan(error) => compatible_plan_error(error),
+        Failure::Mutation(reason) => mutation_error(reason, unconfirmed),
+        Failure::Publication(reason) => publication_error(reason),
+        Failure::Staging(error) => staging_error(error),
+        #[cfg(target_os = "macos")]
+        Failure::ResumeCheck(error) => resume_check_error(error),
+        Failure::Retry(error) => retry_error(error),
+        Failure::TransferPlan(error) => transfer_plan_error(error),
+        Failure::RecoveryRecord(error) => recovery_record_error(error),
+        Failure::StagingCleanup(error) => staging_cleanup_error(error),
+        _ => reason.to_string(),
     }
 }
 
@@ -1231,8 +1228,11 @@ fn access_error(error: &AccessError) -> String {
     };
     let action = match error.action {
         AccessAction::ResolvePath => text!("Не удалось определить путь к элементу"),
-        AccessAction::ReadMetadata | AccessAction::ReadOpenMetadata => {
+        AccessAction::ReadMetadata => {
             text!("Не удалось получить сведения об элементе")
+        }
+        AccessAction::ReadOpenMetadata => {
+            text!("Не удалось прочитать метаданные открытого объекта")
         }
         AccessAction::OpenFile => {
             return crate::tr_format!("Could not open {}: {error}", error.location, error = cause);
@@ -1273,10 +1273,16 @@ fn access_error(error: &AccessError) -> String {
 }
 
 pub(crate) fn access_io_message(error: &std::io::Error) -> String {
-    error
-        .get_ref()
-        .and_then(|cause| cause.downcast_ref::<AccessError>())
-        .map_or_else(|| error.to_string(), access_error)
+    let Some(cause) = error.get_ref() else {
+        return error.to_string();
+    };
+    if let Some(reason) = cause.downcast_ref::<Failure>() {
+        return file_failure(reason, false);
+    }
+    if let Some(error) = cause.downcast_ref::<AccessError>() {
+        return access_error(error);
+    }
+    error.to_string()
 }
 
 fn search_error(error: &SearchError) -> String {
@@ -1379,6 +1385,12 @@ fn scan_error(error: &ScanError) -> String {
             text!("Специальный файл нельзя скопировать по SFTP"),
             location,
         ),
+        ScanError::LocalCopySpecialFile(location) => {
+            return crate::tr_format!(
+                "“{}” is a special file (socket, device, or pipe). You can copy regular files, folders and symbolic links",
+                location
+            );
+        }
         #[cfg(target_os = "macos")]
         ScanError::DiskUsageRequiresLocalFolder => {
             return text!("Анализ места доступен в локальных папках").into();

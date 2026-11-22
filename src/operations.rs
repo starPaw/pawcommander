@@ -263,8 +263,8 @@ impl TransferError {
             Ok(error) => return error.into(),
             Err(error) => error,
         };
-        match error.downcast::<CopyVerificationError>() {
-            Ok(error) => error.into(),
+        match error.downcast::<Failure>() {
+            Ok(reason) => Self::Failed(reason),
             Err(error) => Self::Failed(Failure::Io {
                 message: context(&error),
                 source: error,
@@ -325,7 +325,7 @@ impl From<SearchError> for TransferError {
 
 impl From<ScanError> for TransferError {
     fn from(error: ScanError) -> Self {
-        Self::Failed(Failure::Scan(Box::new(error)))
+        Self::Failed(error.into())
     }
 }
 
@@ -426,7 +426,9 @@ impl std::fmt::Display for TransferError {
 impl std::error::Error for TransferError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Failed(error) | Self::PublicationUnconfirmed(error) => error.source(),
+            Self::Failed(error) | Self::PublicationUnconfirmed(error) => {
+                std::error::Error::source(error)
+            }
             Self::Cancelled => None,
         }
     }

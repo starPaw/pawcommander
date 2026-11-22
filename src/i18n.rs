@@ -226,9 +226,9 @@ pub(crate) fn source_changed_during_copy(source: impl std::fmt::Display) -> Stri
 fn format_source_changed(language: Language, source: impl std::fmt::Display) -> String {
     match language {
         #[cfg(target_os = "macos")]
-        Language::Czech => format!("Zdroj „{source}“ se během kopírování změnil. Kopie nebyla umístěna do cíle. Zkuste to znovu po dokončení zápisu do zdroje"),
-        Language::English => format!("Source “{source}” changed during copying; the copy was not published. Try again after writing to the source has finished"),
-        Language::Russian => format!("Источник «{source}» изменился во время копирования; копия не опубликована. Повторите попытку после завершения записи в источник"),
+        Language::Czech => format!("Zdroj „{source}“ se během kopírování změnil"),
+        Language::English => format!("Source “{source}” changed during copying"),
+        Language::Russian => format!("Источник «{source}» изменился во время копирования"),
     }
 }
 
@@ -454,15 +454,15 @@ mod tests {
     }
 
     #[test]
-    fn source_change_error_explains_safe_retry_in_both_languages() {
+    fn source_change_error_preserves_the_path_in_both_languages() {
         let source = "/tmp/Документы {name}.txt";
         assert_eq!(
             format_source_changed(Language::English, source),
-            format!("Source “{source}” changed during copying; the copy was not published. Try again after writing to the source has finished")
+            format!("Source “{source}” changed during copying")
         );
         assert_eq!(
             format_source_changed(Language::Russian, source),
-            format!("Источник «{source}» изменился во время копирования; копия не опубликована. Повторите попытку после завершения записи в источник")
+            format!("Источник «{source}» изменился во время копирования")
         );
     }
 

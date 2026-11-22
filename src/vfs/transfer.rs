@@ -2245,18 +2245,14 @@ pub(super) enum SourceReader {
 impl SourceReader {
     pub(super) fn open(source: &Location) -> Result<Self, TransferError> {
         let action = AccessAction::OpenFile;
-        let result = if let Some(path) = source.local() {
-            fs_ops::open_regular_source(path)
-                .map(Self::Local)
-                .map_err(|error| AccessError::new(source, action, error))
-        } else {
-            remote(source)
-                .map_err(|error| AccessError::new(source, action, error))?
-                .open(source.path())
-                .map(Self::Remote)
-                .map_err(|error| AccessError::new(source, action, error))
-        };
-        result.map_err(Into::into)
+        if let Some(path) = source.local() {
+            return Ok(Self::Local(fs_ops::open_regular_source(path)?));
+        }
+        remote(source)
+            .map_err(|error| AccessError::new(source, action, error))?
+            .open(source.path())
+            .map(Self::Remote)
+            .map_err(|error| AccessError::new(source, action, error).into())
     }
 
     pub(super) fn metadata(&mut self, source: &Location) -> Result<EntryMetadata, TransferError> {
@@ -2453,7 +2449,7 @@ pub(super) fn copy_tree_entry(
             staging: staged.clone(),
             target: target.clone(),
         };
-        // Inspect before opening so a staged link is never followed for readback.
+        // Reject a link reported by the staging path lookup before opening it.
         if entry_metadata(staged)?.is_some_and(|entry| !entry.is_file()) {
             return Err(wrong_type().into());
         }

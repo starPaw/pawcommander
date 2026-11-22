@@ -145,18 +145,22 @@ impl FileProof {
         let (scope, name) = file_scope(file, role)?;
         let metadata = required_metadata(file, role)?;
         let stamp = FileStamp::from(file, &metadata, role)?;
-        progress.set_copy_endpoints(file, file);
-        let digest = scope
-            .read_checked(name, &cancel, |source, size, input| {
-                checked_digest(
-                    progress,
-                    source,
-                    size,
-                    role,
-                    &mut AccessStream::new(input, source),
-                )
-            })?
+        let mut opened = scope
+            .open_file(name, &cancel)?
             .ok_or_else(|| role.error(file, ResumeCheckProblem::Missing))?;
+        if FileStamp::from(file, &opened.stamp().metadata, role)? != stamp {
+            return Err(role.error(file, ResumeCheckProblem::Changed));
+        }
+        progress.set_copy_endpoints(file, file);
+        let (source, size, input) = opened.stream();
+        let digest = checked_digest(
+            progress,
+            source,
+            size,
+            role,
+            &mut AccessStream::new(input, source),
+        )?;
+        opened.verify(&cancel)?;
         verify_stamp(file, stamp, role)?;
         Ok((Self { stamp, digest }, metadata))
     }
