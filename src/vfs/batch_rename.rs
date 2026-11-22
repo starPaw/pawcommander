@@ -8,6 +8,8 @@ use super::Location;
 use crate::file_error::BatchRenameError;
 use crate::operations::{Cancellation, Progress, TransferError};
 use crate::result_history::Outcome;
+#[cfg(target_os = "macos")]
+use crate::{file_error::SmbMutationAction, smb::MutationMount};
 use icu_normalizer::ComposingNormalizerBorrowed;
 use regex::RegexBuilder;
 use std::collections::{HashMap, HashSet};
@@ -115,6 +117,8 @@ pub(crate) struct BatchRenamePreview {
     pub conflicts: usize,
     directory: Location,
     parent: Parent,
+    #[cfg(target_os = "macos")]
+    mount: MutationMount,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -159,7 +163,21 @@ impl BatchRenamePreview {
             })
             .transpose()
             .map_err(BatchRenameError::InvalidRegex)?;
+        #[cfg(target_os = "macos")]
+        let mut mount = {
+            let mut mount = MutationMount::new(SmbMutationAction::BatchRename);
+            if let Some(path) = directory.local() {
+                mount.check(path)?;
+            }
+            mount
+        };
         let parent = Parent::capture(&directory)?;
+        #[cfg(target_os = "macos")]
+        if parent.location != directory
+            && let Some(path) = parent.location.local()
+        {
+            mount.check(path)?;
+        }
         let mut rows = Vec::with_capacity(sources.len());
         for (index, source) in sources.iter().enumerate() {
             cancel.check()?;
@@ -176,6 +194,12 @@ impl BatchRenamePreview {
                     .and_then(|name| name.to_str())
                     .ok_or(BatchRenameError::NameEncoding)?;
                 let actual_source = parent.location.join(old);
+                #[cfg(target_os = "macos")]
+                if !mount.is_owned()
+                    && let Some(path) = actual_source.local()
+                {
+                    mount.check(path)?;
+                }
                 let metadata = entry_metadata(&actual_source)?
                     .ok_or_else(|| BatchRenameError::Changed(row.source.clone()))?;
                 let (stem, extension) = name_parts(old, &metadata);
@@ -203,6 +227,12 @@ impl BatchRenamePreview {
                 validate_name(name).map_err(BatchRenameError::InvalidName)?;
                 if name != old {
                     let target = parent.location.join(name);
+                    #[cfg(target_os = "macos")]
+                    if !mount.is_owned()
+                        && let Some(path) = target.local()
+                    {
+                        mount.check(path)?;
+                    }
                     ensure_vacant(&target)?;
                     row.expected = Some(metadata);
                 }
@@ -212,6 +242,8 @@ impl BatchRenamePreview {
             rows.push(row);
         }
         mark_duplicate_targets(&mut rows, case_sensitive(&parent.location));
+        #[cfg(target_os = "macos")]
+        mount.recheck()?;
         if !parent.matches()? {
             return Err(BatchRenameError::Changed(directory).into());
         }
@@ -224,6 +256,8 @@ impl BatchRenamePreview {
             conflicts,
             directory,
             parent,
+            #[cfg(target_os = "macos")]
+            mount,
         })
     }
 
@@ -236,11 +270,21 @@ impl BatchRenamePreview {
     }
 
     pub fn apply(self, progress: &mut Progress) -> Result<BatchRenameOutcome, TransferError> {
-        self.apply_using(progress, rename_for_publication)
+        self.apply_using(progress, |source, target| {
+            #[cfg(target_os = "macos")]
+            if let Some(parent) = self.mount.open_parent(source.path())? {
+                return crate::fs_ops::rename_in_open_directory(
+                    &parent,
+                    source.path(),
+                    target.path(),
+                );
+            }
+            rename_for_publication(source, target)
+        })
     }
 
     fn apply_using(
-        self,
+        &self,
         progress: &mut Progress,
         mut rename: impl FnMut(&Location, &Location) -> Result<(), TransferError>,
     ) -> Result<BatchRenameOutcome, TransferError> {
@@ -317,6 +361,8 @@ impl BatchRenamePreview {
         cancel: &Cancellation,
     ) -> Result<(Location, Location), TransferError> {
         cancel.check()?;
+        #[cfg(target_os = "macos")]
+        self.mount.recheck()?;
         if !self.parent.matches()?
             || (self.directory.path() != self.parent.location.path()
                 && canonical(&self.directory)? != self.parent.location.path())

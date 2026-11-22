@@ -25,6 +25,8 @@ mod file_promise;
 #[cfg(target_os = "macos")]
 mod file_template;
 mod host_key;
+#[cfg(target_os = "macos")]
+mod link_create;
 mod metadata;
 mod move_history;
 mod recovery_record;
@@ -59,6 +61,8 @@ pub(crate) use file_promise::FilePromiseError;
 #[cfg(target_os = "macos")]
 pub(crate) use file_template::FileTemplateError;
 pub(crate) use host_key::{HostKeyError, KnownHostEntryError, KnownHostsError, PinError};
+#[cfg(target_os = "macos")]
+pub(crate) use link_create::{LinkCreateError, LinkIoAction};
 pub(crate) use metadata::{MetadataError, MetadataField, MetadataWarning};
 pub(crate) use move_history::{DescendantProblem, MoveHistoryError};
 #[cfg(target_os = "macos")]
@@ -121,6 +125,8 @@ pub(crate) enum Failure {
     FilePromise(Box<FilePromiseError>),
     #[cfg(target_os = "macos")]
     FileTemplate(Box<FileTemplateError>),
+    #[cfg(target_os = "macos")]
+    LinkCreate(Box<LinkCreateError>),
     #[cfg(target_os = "macos")]
     Collection(Box<CollectionError>),
     #[cfg(target_os = "macos")]
@@ -189,6 +195,8 @@ impl Error for Failure {
             #[cfg(target_os = "macos")]
             Self::FileTemplate(error) => Some(error.as_ref()),
             #[cfg(target_os = "macos")]
+            Self::LinkCreate(error) => Some(error.as_ref()),
+            #[cfg(target_os = "macos")]
             Self::Collection(error) => Some(error.as_ref()),
             #[cfg(target_os = "macos")]
             Self::CompatiblePlan(error) => Some(error.as_ref()),
@@ -242,6 +250,8 @@ impl fmt::Display for Failure {
             Self::FilePromise(error) => fmt::Display::fmt(error, f),
             #[cfg(target_os = "macos")]
             Self::FileTemplate(error) => fmt::Display::fmt(error, f),
+            #[cfg(target_os = "macos")]
+            Self::LinkCreate(error) => fmt::Display::fmt(error, f),
             #[cfg(target_os = "macos")]
             Self::Collection(error) => fmt::Display::fmt(error, f),
             #[cfg(target_os = "macos")]
@@ -1253,6 +1263,9 @@ pub(crate) enum SmbMutationAction {
     CreateFolder,
     Rename,
     Trash,
+    BatchRename,
+    CreateLink,
+    InspectLinkTarget,
 }
 
 #[derive(Debug)]

@@ -760,6 +760,7 @@ catalog! {
     "Не удалось получить сведения об элементе" => ("Could not get item details", "Podrobnosti položky se nepodařilo získat"),
     "Не удалось создать папку" => ("Could not create folder", "Složku se nepodařilo vytvořit"),
     "Не удалось переименовать элемент" => ("Could not rename the item", "Položku se nepodařilo přejmenovat"),
+    "Не удалось выполнить пакетное переименование" => ("Could not apply batch rename", "Hromadné přejmenování se nepodařilo provést"),
     "Не удалось переместить элемент в Корзину" => ("Could not move the item to Trash", "Položku se nepodařilo přesunout do koše"),
     "Нельзя переименовать корень файловой системы" => ("Cannot rename the filesystem root", "Kořen souborového systému nelze přejmenovat"),
     "Задача поиска завершилась неожиданно" => ("Search task ended unexpectedly", "Úloha hledání byla neočekávaně ukončena"),

@@ -13,10 +13,10 @@ use crate::file_error::{
 #[cfg(target_os = "macos")]
 use crate::file_error::{
     CollectionAction, CollectionError, CollectionUnavailable, CompatiblePlanError, DuplicateError,
-    DuplicateRole, FilePromiseError, FileTemplateError, RemoteEditError, ResumeCheckError,
-    ResumeCheckProblem, ResumeRecordEvent, ResumeRole, ScanLimit, ScanLimitKind, SyncDifference,
-    SyncError, SyncExclusionProblem, SyncFolderRole, SyncStateAction, SyncStateKind,
-    SyncStateProblem, SyncVerification,
+    DuplicateRole, FilePromiseError, FileTemplateError, LinkCreateError, LinkIoAction,
+    RemoteEditError, ResumeCheckError, ResumeCheckProblem, ResumeRecordEvent, ResumeRole,
+    ScanLimit, ScanLimitKind, SyncDifference, SyncError, SyncExclusionProblem, SyncFolderRole,
+    SyncStateAction, SyncStateKind, SyncStateProblem, SyncVerification,
 };
 use crate::file_error::{
     RecoveryRecordAction, RecoveryRecordError, RecoveryRecordProblem, RecoveryRecordSection,
@@ -72,6 +72,8 @@ fn file_failure(reason: &Failure, unconfirmed: bool) -> String {
         Failure::FilePromise(error) => file_promise_error(error),
         #[cfg(target_os = "macos")]
         Failure::FileTemplate(error) => file_template_error(error),
+        #[cfg(target_os = "macos")]
+        Failure::LinkCreate(error) => link_create_error(error),
         #[cfg(target_os = "macos")]
         Failure::Collection(error) => collection_error(error),
         #[cfg(target_os = "macos")]
@@ -2325,6 +2327,55 @@ fn path_error(error: &PathError) -> String {
     message.into()
 }
 
+#[cfg(target_os = "macos")]
+fn link_create_error(error: &LinkCreateError) -> String {
+    use LinkCreateError::*;
+
+    let (message, path) = match error {
+        InvalidName(_) => return text!("Введите один компонент имени ссылки без / и \\").into(),
+        MissingTarget => return text!("Введите путь к цели ссылки").into(),
+        ExpectedFile(path) => (text!("Для жёсткой ссылки выберите обычный файл"), path),
+        DifferentVolume(path) => (
+            text!("Жёсткие ссылки требуют целевой файл на том же томе"),
+            path,
+        ),
+        TargetChanged(path) => (text!("Цель изменилась до создания жёсткой ссылки"), path),
+        DirectoryChanged(path) => (
+            text!("Папка назначения изменилась до создания ссылки"),
+            path,
+        ),
+        Io {
+            path,
+            action,
+            source,
+        } => {
+            if matches!(action, LinkIoAction::Create)
+                && source.kind() == std::io::ErrorKind::AlreadyExists
+            {
+                return crate::tr_format!(
+                    "“{}” already exists. Choose another name.",
+                    path.display()
+                );
+            }
+            let action = match action {
+                LinkIoAction::InspectDirectory => text!("Не удалось проверить папку назначения"),
+                LinkIoAction::InspectTarget => text!("Не удалось проверить цель ссылки"),
+                LinkIoAction::Create if source.kind() == std::io::ErrorKind::CrossesDevices => {
+                    text!("Жёсткие ссылки требуют целевой файл на том же томе")
+                }
+                LinkIoAction::Create => text!("Не удалось создать ссылку"),
+            };
+            return crate::tr_format!(
+                "{action} at {path} ({error})",
+                action = action,
+                path = path.display(),
+                error = source
+            );
+        }
+    };
+    format!("{message} · {}", path.display())
+}
+
 fn mutation_error(error: &MutationError, unconfirmed: bool) -> String {
     use MutationError::*;
     match error {
@@ -2354,6 +2405,9 @@ fn mutation_error(error: &MutationError, unconfirmed: bool) -> String {
                 SmbMutationAction::CreateFolder => text!("Не удалось создать папку"),
                 SmbMutationAction::Rename => text!("Не удалось переименовать элемент"),
                 SmbMutationAction::Trash => text!("Не удалось переместить элемент в Корзину"),
+                SmbMutationAction::BatchRename => text!("Не удалось выполнить пакетное переименование"),
+                SmbMutationAction::CreateLink => text!("Не удалось создать ссылку"),
+                SmbMutationAction::InspectLinkTarget => text!("Не удалось проверить цель ссылки"),
             };
             crate::tr_format!(
                 "{action} at {path} ({error})",

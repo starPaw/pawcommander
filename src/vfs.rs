@@ -96,6 +96,8 @@ pub use transfer::transfer;
 pub use transfer::transfer_with_conflicts;
 #[cfg(target_os = "macos")]
 pub(crate) use transfer::{copy_sftp_for_drop, DropDelivery, PromiseKind};
+#[cfg(target_os = "macos")]
+pub(crate) use transfer::{with_open_file_staging, FILE_STAGING_PAYLOAD};
 pub(crate) use undo::{rename_with_undo, UndoBatch, UndoOutcome};
 
 #[derive(Debug, Default)]
