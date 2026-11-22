@@ -1,6 +1,16 @@
 use super::*;
+use crate::file_error::{Failure, UndoError};
 use crate::result_history::Outcome;
-use crate::vfs::{rename_with_undo, UndoBatch};
+use crate::vfs::transfer::entry_metadata;
+use crate::vfs::{rename_with_undo, UndoBatch, UndoOutcome};
+
+fn undo_error(error: &TransferError) -> &UndoError {
+    match error {
+        TransferError::Failed(Failure::Undo(error))
+        | TransferError::PublicationUnconfirmed(Failure::Undo(error)) => error,
+        other => panic!("Expected a typed undo error, got {other:?}"),
+    }
+}
 
 fn run_move(sources: &[Location], target: &Location, decision: Decision, progress: &mut Progress) {
     transfer_with_conflicts(
@@ -31,7 +41,19 @@ fn undo_renames_in_reverse_order_and_never_replaces_an_occupied_name() {
     assert_eq!(first.undo.len(), 1);
     assert_eq!(second.undo.len(), 1);
     fs::write(b.path(), b"external occupant").unwrap();
-    assert!(second.undo.restore(&mut Progress::default()).is_err());
+    let error = second.undo.restore(&mut Progress::default()).unwrap_err();
+    let UndoError::Incomplete {
+        restored: 0,
+        remaining: 1,
+        cause,
+    } = undo_error(&error)
+    else {
+        panic!("Expected a failed undo with one entry left, got {error:?}");
+    };
+    assert!(
+        matches!(undo_error(cause), UndoError::OriginalOccupied { target, source: None }
+            if target.path() == b.path().canonicalize().unwrap())
+    );
     assert_eq!(fs::read(b.path()).unwrap(), b"external occupant");
     assert_eq!(fs::read(c.path()).unwrap(), b"original bytes");
     assert_eq!(second.undo.len(), 1);
@@ -59,7 +81,12 @@ fn undo_refuses_replaced_objects_even_when_size_and_mtime_match() {
         .unwrap()
         .set_times(fs::FileTimes::new().set_modified(modified))
         .unwrap();
-    assert!(progress.undo.restore(&mut Progress::default()).is_err());
+    let error = progress.undo.restore(&mut Progress::default()).unwrap_err();
+    let UndoError::Incomplete { cause, .. } = undo_error(&error) else {
+        panic!("Expected a changed item error, got {error:?}");
+    };
+    assert!(matches!(undo_error(cause), UndoError::ItemChanged(path)
+        if path.path() == current.path().canonicalize().unwrap()));
     assert!(!original.path().exists());
     assert_eq!(fs::read(current.path()).unwrap(), b"same bytes");
     assert_eq!(fs::read(moved_elsewhere).unwrap(), b"same bytes");
@@ -144,10 +171,14 @@ fn undo_partial_stop_keeps_only_unrestored_roots_and_records_descendants() {
     let restored_b = root.path().join("b");
     let cancel = Cancellation::at_checkpoint(move || restored_b.exists());
     let mut partial = Progress::with_cancellation(cancel);
-    assert!(matches!(
-        moved.undo.restore(&mut partial),
-        Err(TransferError::Cancelled)
-    ));
+    assert_eq!(
+        moved.undo.restore(&mut partial).unwrap(),
+        UndoOutcome::Stopped {
+            restored: 1,
+            remaining: 1
+        }
+    );
+    assert!(partial.results.cancelled);
     assert_eq!(moved.undo.len(), 1);
     assert_eq!(
         partial
@@ -184,13 +215,98 @@ fn undo_final_rename_refuses_a_target_created_after_preflight() {
         }
         false
     });
-    assert!(progress
+    let error = progress
         .undo
         .restore(&mut Progress::with_cancellation(cancel))
-        .is_err());
+        .unwrap_err();
+    let UndoError::Incomplete {
+        restored: 0,
+        remaining: 1,
+        cause,
+    } = undo_error(&error)
+    else {
+        panic!("Expected an occupied original name error, got {error:?}");
+    };
+    assert!(matches!(
+        undo_error(cause),
+        UndoError::OriginalOccupied { target, source: Some(source) }
+            if target.path() == original.path().canonicalize().unwrap()
+                && source.kind() == std::io::ErrorKind::AlreadyExists
+    ));
     assert_eq!(fs::read(original.path()).unwrap(), b"new occupant");
     assert_eq!(fs::read(current.path()).unwrap(), b"original bytes");
     assert_eq!(progress.undo.len(), 1);
+}
+
+#[test]
+fn undo_retires_a_restored_root_when_post_rename_verification_is_interrupted() {
+    let root = tempfile::tempdir().unwrap();
+    let folder = root.path().canonicalize().unwrap();
+    let target: Location = folder.join("target").into();
+    fs::create_dir(target.path()).unwrap();
+    fs::write(folder.join("a"), b"a").unwrap();
+    fs::create_dir(folder.join("b")).unwrap();
+    fs::write(folder.join("b/child"), b"original child").unwrap();
+    fs::write(folder.join("c"), b"c").unwrap();
+    let sources = ["a", "b", "c"].map(|name| Location::Local(folder.join(name)));
+    let child = sources[1].join("child");
+
+    let mut moved = Progress::default();
+    run_move(&sources, &target, Decision::KeepBoth, &mut moved);
+    assert_eq!(moved.undo.len(), 3);
+    let mut attempt = Progress::default();
+    let error = moved
+        .undo
+        .restore_checking(&mut attempt, |path| {
+            if path == &child {
+                Err(TransferError::Cancelled)
+            } else {
+                entry_metadata(path)
+            }
+        })
+        .unwrap_err();
+
+    assert!(matches!(&error, TransferError::PublicationUnconfirmed(_)));
+    let UndoError::Incomplete {
+        restored: 1,
+        remaining: 1,
+        cause,
+    } = undo_error(&error)
+    else {
+        panic!("Expected one confirmed restoration and one unchecked root, got {error:?}");
+    };
+    assert!(
+        matches!(undo_error(cause), UndoError::Unconfirmed { from, to, cause: TransferError::Cancelled }
+        if from == &target.join("b") && to == &sources[1])
+    );
+    assert!(!attempt.results.cancelled);
+    let statuses = attempt
+        .results
+        .items
+        .iter()
+        .map(|item| item.outcome)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        statuses,
+        [
+            Outcome::Completed,
+            Outcome::PublicationUnconfirmed,
+            Outcome::NotStarted,
+            Outcome::PublicationUnconfirmed,
+        ]
+    );
+    assert_eq!(fs::read(child.path()).unwrap(), b"original child");
+    assert_eq!(fs::read(sources[2].path()).unwrap(), b"c");
+    assert_eq!(moved.undo.len(), 1);
+    assert_eq!(moved.undo.weight(), 1);
+    fs::write(child.path(), b"edited after restoration").unwrap();
+    assert_eq!(
+        moved.undo.restore(&mut Progress::default()).unwrap(),
+        UndoOutcome::Restored(1)
+    );
+    assert_eq!(fs::read(sources[0].path()).unwrap(), b"a");
+    assert_eq!(fs::read(child.path()).unwrap(), b"edited after restoration");
+    assert_eq!(fs::read_dir(target.path()).unwrap().count(), 0);
 }
 
 #[test]
@@ -259,9 +375,15 @@ pub(super) fn sftp_undo(root: &Location) {
         let mut attempt = Progress::default();
         let result = uncertain.undo.restore(&mut attempt);
         fs::set_permissions(source.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        let error = result.unwrap_err();
+        assert!(matches!(error, TransferError::PublicationUnconfirmed(_)));
         assert!(matches!(
-            result,
-            Err(TransferError::PublicationUnconfirmed(_))
+            undo_error(&error),
+            UndoError::Incomplete {
+                restored: 0,
+                remaining: 0,
+                cause: TransferError::PublicationUnconfirmed(Failure::Mutation(_))
+            }
         ));
         assert_eq!(
             uncertain.undo.len(),

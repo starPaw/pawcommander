@@ -416,6 +416,24 @@ impl Results {
         }
     }
 
+    pub(crate) fn moved_entry_with_error(
+        &mut self,
+        source: &Location,
+        error: Option<&TransferError>,
+    ) {
+        self.moved_entry(source, error.is_none(), error.map(crate::i18n::file_error));
+    }
+
+    pub(crate) fn unconfirmed_move_descendants(&mut self) {
+        if let Some((_, range)) = self.group.clone() {
+            for row in &mut self.items[range] {
+                if row.outcome == Outcome::NotStarted {
+                    row.outcome = Outcome::PublicationUnconfirmed;
+                }
+            }
+        }
+    }
+
     /// A verified copy alone does not establish removal of its source.
     pub fn copied_source_remaining(&mut self) {
         self.confirming_move = true;

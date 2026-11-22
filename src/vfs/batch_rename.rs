@@ -5,13 +5,12 @@ use super::transfer::{
 };
 use super::undo::{Capture, Parent, MAX_UNDO_ENTRIES};
 use super::Location;
-use crate::file_error::{BatchRenameError, Failure, MutationError};
+use crate::file_error::BatchRenameError;
 use crate::operations::{Cancellation, Progress, TransferError};
 use crate::result_history::Outcome;
 use icu_normalizer::ComposingNormalizerBorrowed;
 use regex::RegexBuilder;
 use std::collections::{HashMap, HashSet};
-use std::io;
 use std::path::Path;
 
 const MAX_RULE_BYTES: usize = 4096;
@@ -277,7 +276,15 @@ impl BatchRenamePreview {
                 }
                 manifest.verify(&cancel, |_, _| {})?;
                 self.check_row(row, &cancel)?;
-                rename(&source, &target).map_err(|error| occupied_rename(error, &target))?;
+                rename(&source, &target).map_err(|error| {
+                    error.map_occupied_rename(|source| {
+                        BatchRenameError::Occupied {
+                            target: target.clone(),
+                            source: Some(source),
+                        }
+                        .into()
+                    })
+                })?;
                 let receipt = capture.finish(&source, &manifest).map_err(|cause| {
                     TransferError::from(BatchRenameError::Unverified {
                         from: source.clone(),
@@ -356,24 +363,6 @@ fn ensure_vacant(target: &Location) -> Result<(), TransferError> {
     Ok(())
 }
 
-fn occupied_rename(error: TransferError, target: &Location) -> TransferError {
-    match error {
-        TransferError::Failed(Failure::Mutation(error)) => match *error {
-            MutationError::RenameLocal { source, .. }
-                if source.kind() == io::ErrorKind::AlreadyExists =>
-            {
-                BatchRenameError::Occupied {
-                    target: target.clone(),
-                    source: Some(source),
-                }
-                .into()
-            }
-            error => error.into(),
-        },
-        error => error,
-    }
-}
-
 fn case_sensitive(parent: &Location) -> bool {
     #[cfg(target_os = "macos")]
     if let Some(local) = parent.local() {
@@ -448,6 +437,8 @@ fn finish_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_error::Failure;
+    use crate::vfs::UndoOutcome;
     use std::fs;
 
     fn fixture(root: &Path, names: &[&str]) -> Vec<Location> {
@@ -536,7 +527,10 @@ mod tests {
             b"folder content"
         );
         assert!(sources.iter().all(|source| !source.path().exists()));
-        assert_eq!(progress.undo.restore(&mut Progress::default()).unwrap(), 3);
+        assert_eq!(
+            progress.undo.restore(&mut Progress::default()).unwrap(),
+            UndoOutcome::Restored(3)
+        );
         assert!(names.iter().all(|name| !root.join(name).exists()));
         assert_eq!(fs::read(sources[0].path()).unwrap(), b"cam-12.jpg");
         assert_eq!(fs::read(sources[1].path()).unwrap(), b"cam-31.png");
@@ -675,7 +669,10 @@ mod tests {
             assert_eq!(fs::read(root.join("1-one.txt")).unwrap(), b"one.txt");
             assert_eq!(fs::read(sources[1].path()).unwrap(), b"two.txt");
             assert_eq!(fs::read(sources[2].path()).unwrap(), b"three.txt");
-            assert_eq!(progress.undo.restore(&mut Progress::default()).unwrap(), 1);
+            assert_eq!(
+                progress.undo.restore(&mut Progress::default()).unwrap(),
+                UndoOutcome::Restored(1)
+            );
             assert_eq!(fs::read(sources[0].path()).unwrap(), b"one.txt");
             assert!(!root.join("1-one.txt").exists());
             if !stop {
@@ -758,7 +755,10 @@ mod tests {
         assert_eq!(outcomes[&sources[1]], Outcome::PublicationUnconfirmed);
         assert_eq!(outcomes[&sources[2]], Outcome::NotStarted);
         assert_eq!(progress.undo.len(), 1);
-        assert_eq!(progress.undo.restore(&mut Progress::default()).unwrap(), 1);
+        assert_eq!(
+            progress.undo.restore(&mut Progress::default()).unwrap(),
+            UndoOutcome::Restored(1)
+        );
         assert_eq!(fs::read(sources[0].path()).unwrap(), b"one.txt");
         assert_eq!(
             fs::read(sources[1].path()).unwrap(),

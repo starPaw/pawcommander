@@ -1066,6 +1066,8 @@ impl PawCommander {
     }
 
     pub(super) fn undo_operation(&mut self, ctx: &egui::Context, id: &str) {
+        use crate::vfs::UndoOutcome;
+
         if self.jobs.pending.len() >= MAX_PENDING_JOBS {
             self.notice = Some((crate::i18n::text!("Очередь заполнена (100 заданий). Дождитесь завершения или удалите ожидающее задание.").into(), true));
             return;
@@ -1088,27 +1090,21 @@ impl PawCommander {
                 label: label.into(),
                 description,
                 work: Box::new(move |progress| {
-                    let before = batch.len();
                     let result = batch.restore(progress);
-                    let remaining = batch.len();
                     progress.undo = batch;
-                    match result {
-                        Ok(completed) => Ok(crate::tr_format!(
-                            "Changes undone: {completed}",
-                            completed = completed
-                        )),
-                        Err(crate::operations::TransferError::Cancelled) => Ok(crate::tr_format!(
-                            "Undo stopped. Restored: {}. Remaining: {remaining}.",
-                            before - remaining,
+                    Ok(match result? {
+                        UndoOutcome::Restored(completed) => {
+                            crate::tr_format!("Changes undone: {completed}", completed = completed)
+                        }
+                        UndoOutcome::Stopped {
+                            restored,
+                            remaining,
+                        } => crate::tr_format!(
+                            "Undo stopped. Restored: {restored}. Remaining: {remaining}.",
+                            restored = restored,
                             remaining = remaining
-                        )),
-                        Err(error) => Err(crate::tr_format!(
-                            "{error}. Available for another attempt: {remaining}.",
-                            error = crate::i18n::file_error(&error),
-                            remaining = remaining
-                        )
-                        .into()),
-                    }
+                        ),
+                    })
                 }),
                 transfer: Some(TransferInteraction {
                     events,

@@ -6,7 +6,7 @@ use crate::file_error::{
     MetadataError, MetadataField, MetadataWarning, MutationError, PathError, PermissionError,
     PinError, PreviewError, ProbeAction, PublicationError, RecoveryNotice, ReplacementRefusal,
     RetryError, RetryProblem, ScanError, SearchError, SpaceError, SshStage, StagingCleanupError,
-    StagingError, StagingRecordAction, TransferPlanError,
+    StagingError, StagingRecordAction, TransferPlanError, UndoError,
 };
 #[cfg(target_os = "macos")]
 use crate::file_error::{
@@ -52,6 +52,7 @@ pub(crate) fn file_error(error: &TransferError) -> String {
                 Failure::ConflictClosed => text!("Диалог конфликта закрыт").into(),
                 Failure::Conflict(error) => conflict_error(error),
                 Failure::BatchRename(error) => batch_rename_error(error),
+                Failure::Undo(error) => undo_error(error),
                 #[cfg(target_os = "macos")]
                 Failure::FilePromise(error) => file_promise_error(error),
                 #[cfg(target_os = "macos")]
@@ -74,6 +75,49 @@ pub(crate) fn file_error(error: &TransferError) -> String {
             }
         }
         TransferError::Cancelled => crate::tr_format!("Operation cancelled"),
+    }
+}
+
+fn undo_error(error: &UndoError) -> String {
+    use UndoError::*;
+
+    match error {
+        OriginalOccupied { target, source } => {
+            let message =
+                crate::tr_format!("The original name {target} is occupied.", target = target);
+            match source {
+                Some(source) => format!("{message} ({source})"),
+                None => message,
+            }
+        }
+        FolderChanged(path) => {
+            crate::tr_format!("A folder required for Undo changed at {path}.", path = path)
+        }
+        ItemMissing(path) => {
+            crate::tr_format!("The item to restore is missing at {path}.", path = path)
+        }
+        ItemChanged(path) => {
+            crate::tr_format!("The item to restore changed at {path}.", path = path)
+        }
+        RestoredItemMismatch(path) => {
+            crate::tr_format!("The restored item does not match at {path}.", path = path)
+        }
+        Unconfirmed { from, to, cause } => crate::tr_format!(
+            "Could not confirm restoration from {source} to {target}. {error}",
+            source = from,
+            target = to,
+            error = file_error(cause)
+        ),
+        Incomplete {
+            restored,
+            remaining,
+            cause,
+        } => crate::tr_format!(
+            "Restored: {restored}. Available for another attempt: {remaining}.\n{error}",
+            restored = restored,
+            remaining = remaining,
+            error = file_error(cause)
+        ),
     }
 }
 

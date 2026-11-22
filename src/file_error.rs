@@ -24,6 +24,7 @@ mod staging;
 #[cfg(target_os = "macos")]
 mod sync;
 mod transfer_plan;
+mod undo;
 pub(crate) use archive::ArchiveError;
 pub(crate) use batch_rename::BatchRenameError;
 pub(crate) use checksum::{ChecksumError, ManifestLineError};
@@ -49,6 +50,7 @@ pub(crate) use staging::{StagingError, StagingRecordAction};
 #[cfg(target_os = "macos")]
 pub(crate) use sync::SyncError;
 pub(crate) use transfer_plan::TransferPlanError;
+pub(crate) use undo::UndoError;
 
 #[derive(Debug)]
 pub(crate) enum Failure {
@@ -78,6 +80,7 @@ pub(crate) enum Failure {
     ConflictClosed,
     Conflict(Box<ConflictError>),
     BatchRename(Box<BatchRenameError>),
+    Undo(Box<UndoError>),
     #[cfg(target_os = "macos")]
     FilePromise(Box<FilePromiseError>),
     #[cfg(target_os = "macos")]
@@ -129,6 +132,7 @@ impl Failure {
             Self::Listing(error) => Some(error.as_ref()),
             Self::Conflict(error) => Some(error.as_ref()),
             Self::BatchRename(error) => Some(error.as_ref()),
+            Self::Undo(error) => Some(error.as_ref()),
             #[cfg(target_os = "macos")]
             Self::FilePromise(error) => Some(error.as_ref()),
             #[cfg(target_os = "macos")]
@@ -173,6 +177,7 @@ impl fmt::Display for Failure {
             Self::ConflictClosed => f.write_str("Conflict dialog closed"),
             Self::Conflict(error) => fmt::Display::fmt(error, f),
             Self::BatchRename(error) => fmt::Display::fmt(error, f),
+            Self::Undo(error) => fmt::Display::fmt(error, f),
             #[cfg(target_os = "macos")]
             Self::FilePromise(error) => fmt::Display::fmt(error, f),
             #[cfg(target_os = "macos")]
