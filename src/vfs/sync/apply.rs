@@ -1,29 +1,30 @@
 use super::{
-    is_link, read_link, stale, Budget, Exclusions, Kind, Observed, Snapshot, SyncChange, SyncPlan,
-    SyncReport, SyncRow,
+    folder_error, is_link, read_link, read_metadata, stale, Budget, Exclusions, Kind, Observed,
+    Snapshot, SyncChange, SyncPlan, SyncReport, SyncRow, ONE_WAY_ROLES,
 };
 use crate::{
     file_error::{
-        AccessAction, AccessError, LocalPathAction, MetadataWarning, MutationError,
-        PublicationError,
+        AccessAction, AccessError, CopyVerificationError, LocalPathAction, MetadataWarning,
+        MutationError, PublicationError, SyncDifference, SyncError, SyncFolderRole,
+        SyncVerification,
     },
     operations::{AccessStream, Cancellation, Progress, TransferError},
     result_history::Outcome,
     vfs::{
         compare::scan,
-        copy_metadata, err,
+        copy_metadata,
         guarded_directory::{open_staging, retained, Directory},
-        read_scope::{changed_during_read, ReadScope},
+        read_scope::ReadScope,
         sftp::remote,
         staged_file::StagedFile,
         transfer::{
-            canonical, entry_metadata, with_preserved_staging, with_tracked_staging, EntryMetadata,
-            SourceReader, StagingNotice, TransferSourceEntry,
+            canonical, with_preserved_staging, with_tracked_staging, EntryMetadata, SourceReader,
+            StagingNotice, TransferSourceEntry,
         },
         Location,
     },
 };
-use std::{fs, io::Read, os::unix::fs::DirBuilderExt, path::Path};
+use std::{cmp::Ordering, fs, io::Read, os::unix::fs::DirBuilderExt, path::Path};
 
 struct GroupWarnings {
     metadata: Option<MetadataWarning>,
@@ -38,6 +39,7 @@ impl SyncPlan {
     pub(crate) fn apply(&self, progress: &mut Progress) -> SyncReport {
         let execution = Execution {
             folders: &self.folders,
+            roles: ONE_WAY_ROLES,
             observed: &self.observed,
             rows: &self.rows,
             exclusions: &self.exclusions,
@@ -64,6 +66,7 @@ pub(super) fn finish(
 
 pub(super) struct Execution<'a> {
     pub(super) folders: &'a [Location; 2],
+    pub(super) roles: [SyncFolderRole; 2],
     pub(super) observed: &'a [Snapshot; 2],
     pub(super) rows: &'a [SyncRow],
     pub(super) exclusions: &'a Exclusions,
@@ -103,19 +106,22 @@ impl Execution<'_> {
             let row = &group[0];
             let (key, _) = self.history_row(row);
             progress.results.begin(&key);
-            for (input, scope) in self.folders.iter().zip(scopes) {
-                scope.parent.verify()?;
-                if canonical(input)? != scope.parent.location.path() {
-                    return Err(stale(input));
+            let result = (|| {
+                for (side, (input, scope)) in self.folders.iter().zip(scopes).enumerate() {
+                    cancel.check()?;
+                    scope
+                        .verify_selected_root(input)
+                        .map_err(|cause| folder_error(self.roles[side], input, cause))?;
                 }
-            }
-            let source = 1 - row.destination;
-            let destination = row.destination;
-            progress.set_copy_endpoints(
-                &self.observed[source].root,
-                &self.observed[destination].root,
-            );
-            match self.apply_group(row, scopes, progress, staging.as_deref_mut()) {
+                let source = 1 - row.destination;
+                let destination = row.destination;
+                progress.set_copy_endpoints(
+                    &self.observed[source].root,
+                    &self.observed[destination].root,
+                );
+                self.apply_group(row, scopes, progress, staging.as_deref_mut())
+            })();
+            match result {
                 Ok(GroupWarnings { metadata, cleanup }) => {
                     let mut warning = metadata.as_ref().map(crate::i18n::metadata_warning);
                     if let Some(cleanup) = cleanup {
@@ -137,15 +143,17 @@ impl Execution<'_> {
                     }
                     *completed += group.len();
                 }
-                Err(error @ TransferError::PublicationUnconfirmed(_)) => {
-                    progress.results.record_with_error(
-                        &key,
-                        Outcome::PublicationUnconfirmed,
-                        Some(&error),
-                    );
+                Err(error) => {
+                    let outcome = match &error {
+                        TransferError::Cancelled => Outcome::Cancelled,
+                        TransferError::Failed(_) => Outcome::Failed,
+                        TransferError::PublicationUnconfirmed(_) => Outcome::PublicationUnconfirmed,
+                    };
+                    progress
+                        .results
+                        .record_with_error(&key, outcome, Some(&error));
                     return Err(error);
                 }
-                Err(error) => return Err(error),
             }
         }
         Ok(())
@@ -163,31 +171,34 @@ impl Execution<'_> {
         let source = &self.observed[1 - row.destination];
         let destination = &self.observed[row.destination];
         let relative = row.path.as_path();
-        let parent_path = relative.parent().ok_or_else(changed_during_read)?;
-        let name = relative.file_name().ok_or_else(changed_during_read)?;
         let target = destination.root.join(relative);
+        let parent_path = relative.parent().ok_or_else(|| stale(&target))?;
+        let name = relative.file_name().ok_or_else(|| stale(&target))?;
         let cancel = progress.cancellation();
+        let target_parent = destination.root.join(parent_path);
         let parent_entry = destination
             .entries
             .get(parent_path)
-            .ok_or_else(changed_during_read)?;
+            .ok_or_else(|| stale(&target_parent))?;
         let parent = Directory::at(
             destination_scope,
             parent_path,
             &parent_entry.version.metadata,
             &cancel,
-        )?;
+        )
+        .map_err(|cause| folder_error(self.roles[row.destination], &target_parent, cause))?;
         let deletion_source = if row.change == SyncChange::Delete {
+            let source_parent = source.root.join(parent_path);
             let entry = source
                 .entries
                 .get(parent_path)
-                .ok_or_else(changed_during_read)?;
-            Some(Directory::at(
-                source_scope,
-                parent_path,
-                &entry.version.metadata,
-                &cancel,
-            )?)
+                .ok_or_else(|| stale(&source_parent))?;
+            Some(
+                Directory::at(source_scope, parent_path, &entry.version.metadata, &cancel)
+                    .map_err(|cause| {
+                        folder_error(self.roles[1 - row.destination], &source_parent, cause)
+                    })?,
+            )
         } else {
             None
         };
@@ -379,7 +390,9 @@ fn stage_source(
     let cancel = progress.cancellation();
     for (path, expected) in source.subtree(relative) {
         progress.checkpoint()?;
-        let suffix = path.strip_prefix(relative).map_err(err)?;
+        let suffix = path
+            .strip_prefix(relative)
+            .map_err(|_| stale(&source.root.join(path)))?;
         let target = if suffix.as_os_str().is_empty() {
             payload.clone()
         } else {
@@ -388,24 +401,28 @@ fn stage_source(
         match &expected.kind {
             Kind::Directory => make_directory(&target)?,
             Kind::File(_) => {
-                scope
-                    .read_checked(path, &cancel, |source, size, input| {
-                        expected
-                            .version
-                            .verify_metadata(source, &input.metadata(source)?)?;
-                        let mut output = StagedFile::open(&target, cancel.clone())?;
-                        let copied = progress.copy(
-                            source.path(),
-                            Some(size),
-                            &mut AccessStream::new(input, source).take(size),
-                            &mut AccessStream::new(&mut output, &target),
-                        )?;
-                        if copied != size {
-                            return Err(stale(source));
-                        }
-                        output.close()
-                    })?
-                    .ok_or_else(changed_during_read)?;
+                let mut file = scope.require_file(path, &cancel)?;
+                let (source, size, input) = file.stream();
+                expected
+                    .version
+                    .verify_metadata(source, &input.metadata(source)?)?;
+                let mut output = StagedFile::open(&target, cancel.clone())?;
+                let copied = progress.copy(
+                    source.path(),
+                    Some(size),
+                    &mut AccessStream::new(input, source).take(size),
+                    &mut AccessStream::new(&mut output, &target),
+                )?;
+                if copied != size {
+                    return Err(CopyVerificationError::SourceSize {
+                        source: source.clone(),
+                        expected: size,
+                        actual: copied,
+                    }
+                    .into());
+                }
+                output.close()?;
+                file.verify(&cancel)?;
             }
             Kind::Link(link) => {
                 if let Some(path) = target.local() {
@@ -436,12 +453,19 @@ fn preserve_attributes(
     // Apply directory permissions after their descendants have been prepared.
     for (path, target_entry) in staged.entries.iter().rev() {
         progress.checkpoint()?;
-        let suffix = path.strip_prefix(incoming).map_err(err)?;
-        let source_entry = source
-            .entries
-            .get(&relative.join(suffix))
-            .ok_or_else(changed_during_read)?;
         let target = staged.root.join(path);
+        let suffix = path.strip_prefix(incoming).map_err(|_| stale(&target))?;
+        let source_path = relative.join(suffix);
+        let source_entry =
+            source
+                .entries
+                .get(&source_path)
+                .ok_or_else(|| SyncError::VerificationMismatch {
+                    check: SyncVerification::StagedCopy,
+                    difference: SyncDifference::Unexpected,
+                    original: source.root.join(&source_path),
+                    inspected: target.clone(),
+                })?;
         let attributes = copy_metadata::Attributes::from_entry(&source_entry.version.metadata);
         let issue = match source_entry.kind {
             Kind::Directory => {
@@ -469,17 +493,15 @@ fn required_tree(
 ) -> Result<Snapshot, TransferError> {
     let cancel = progress.cancellation();
     cancel.check()?;
-    scope.parent.verify()?;
-    let relative_parent = path.parent().ok_or_else(changed_during_read)?;
-    let parent = scope
-        .checked_directory(relative_parent, &cancel)?
-        .ok_or_else(changed_during_read)?;
+    scope.verify_root()?;
+    let location = scope.parent.location.join(path);
+    let relative_parent = path.parent().ok_or_else(|| stale(&location))?;
+    let parent = scope.require_directory(relative_parent, &cancel)?;
     if canonical(&parent)? != parent.path() {
         return Err(stale(&parent));
     }
     let mut snapshot = Snapshot::empty(scope);
-    let location = snapshot.root.join(path);
-    let metadata = entry_metadata(&location)?.ok_or_else(|| stale(&location))?;
+    let metadata = read_metadata(&location)?;
     if metadata.is_directory() {
         snapshot.observe(
             scope,
@@ -493,8 +515,8 @@ fn required_tree(
         let kind = if metadata.is_file() {
             Kind::File(
                 scope
-                    .digest(path, progress, &cancel)?
-                    .ok_or_else(changed_during_read)?,
+                    .require_file(path, &cancel)?
+                    .digest(progress, &cancel)?,
             )
         } else if is_link(&metadata) {
             Kind::Link(read_link(&location)?.into_os_string())
@@ -505,12 +527,13 @@ fn required_tree(
             metadata,
             children: None,
         };
-        version.verify(&location, &cancel, false)?;
+        cancel.check()?;
+        version.verify_metadata(&location, &read_metadata(&location)?)?;
         snapshot
             .entries
             .insert(path.to_owned(), Observed { kind, version });
     }
-    scope.parent.verify()?;
+    scope.verify_root()?;
     Ok(snapshot)
 }
 
@@ -529,15 +552,57 @@ fn check_tree(
     check: Check,
     cancel: &Cancellation,
 ) -> Result<(), TransferError> {
+    let join_suffix = |path: &Path, suffix: &Path| {
+        if suffix.as_os_str().is_empty() {
+            path.to_owned()
+        } else {
+            path.join(suffix)
+        }
+    };
+    let mismatch = |suffix: &Path, difference| {
+        let inspected = actual.root.join(join_suffix(actual_root, suffix));
+        let check = match check {
+            Check::Contents => SyncVerification::StagedCopy,
+            Check::Held => SyncVerification::HeldOriginal,
+            Check::Original => {
+                return match difference {
+                    SyncDifference::Missing => SyncError::PlanEntryMissing(inspected).into(),
+                    SyncDifference::Unexpected => SyncError::PlanEntryAdded(inspected).into(),
+                    SyncDifference::Changed => stale(&inspected),
+                };
+            }
+        };
+        SyncError::VerificationMismatch {
+            check,
+            difference,
+            original: expected.root.join(join_suffix(root, suffix)),
+            inspected,
+        }
+        .into()
+    };
     let mut actual_entries = actual.subtree(actual_root);
     for (path, entry) in expected.subtree(root) {
         cancel.check()?;
-        let suffix = path.strip_prefix(root).map_err(err)?;
-        let expected_path = actual_root.join(suffix);
+        let suffix = path
+            .strip_prefix(root)
+            .map_err(|_| stale(&expected.root.join(path)))?;
+        let expected_path = join_suffix(actual_root, suffix);
         let location = actual.root.join(&expected_path);
-        let (actual_path, current) = actual_entries.next().ok_or_else(|| stale(&location))?;
-        if actual_path != &expected_path || entry.kind != current.kind {
-            return Err(stale(&location));
+        let Some((actual_path, current)) = actual_entries.next() else {
+            return Err(mismatch(suffix, SyncDifference::Missing));
+        };
+        match actual_path.cmp(&expected_path) {
+            Ordering::Greater => return Err(mismatch(suffix, SyncDifference::Missing)),
+            Ordering::Less => {
+                let extra = actual_path
+                    .strip_prefix(actual_root)
+                    .map_err(|_| stale(&actual.root.join(actual_path)))?;
+                return Err(mismatch(extra, SyncDifference::Unexpected));
+            }
+            Ordering::Equal => {}
+        }
+        if entry.kind != current.kind {
+            return Err(mismatch(suffix, SyncDifference::Changed));
         }
         let matches = match check {
             Check::Contents => true,
@@ -555,17 +620,106 @@ fn check_tree(
                         _ => true,
                     }
             }
-            _ => entry
-                .version
-                .verify_metadata(&location, &current.version.metadata)
-                .is_ok(),
+            _ => {
+                current.version.metadata.check_sftp_source(&location)?;
+                entry
+                    .version
+                    .matches_metadata(&current.version.metadata)
+                    .map_err(|cause| {
+                        AccessError::new(&location, AccessAction::ReadMetadata, cause)
+                    })?
+            }
         };
         if !matches {
-            return Err(stale(&location));
+            return Err(mismatch(suffix, SyncDifference::Changed));
         }
     }
     if let Some((extra, _)) = actual_entries.next() {
-        return Err(stale(&actual.root.join(extra)));
+        let suffix = extra
+            .strip_prefix(actual_root)
+            .map_err(|_| stale(&actual.root.join(extra)))?;
+        return Err(mismatch(suffix, SyncDifference::Unexpected));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn staged_file_verification_displays_both_file_paths_verbatim() {
+        let temp = tempfile::tempdir().unwrap();
+        let scope = ReadScope::open(&Location::Local(temp.path().to_owned())).unwrap();
+        let original = Path::new("original");
+        let incoming = Path::new("incoming");
+        let [source, staged] = [original, incoming].map(|path| scope.parent.location.join(path));
+        fs::write(source.path(), b"from source").unwrap();
+        fs::write(staged.path(), b"bad payload").unwrap();
+        let mut progress = Progress::default();
+        let exclusions = Exclusions::default();
+        let expected = required_tree(&scope, original, &exclusions, &mut progress).unwrap();
+        let actual = required_tree(&scope, incoming, &exclusions, &mut progress).unwrap();
+        let error = check_tree(
+            &expected,
+            original,
+            &actual,
+            incoming,
+            Check::Contents,
+            &Cancellation::default(),
+        )
+        .unwrap_err();
+        let TransferError::Failed(crate::file_error::Failure::Sync(error)) = error else {
+            panic!("expected a sync verification error");
+        };
+        let SyncError::VerificationMismatch {
+            check: SyncVerification::StagedCopy,
+            difference: SyncDifference::Changed,
+            original,
+            inspected,
+        } = *error
+        else {
+            panic!("expected both verification paths");
+        };
+        assert_eq!(original.display(), source.display());
+        assert_eq!(inspected.display(), staged.display());
+    }
+
+    #[test]
+    fn staged_verification_reports_the_unexpected_path_before_an_expected_sibling() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = ["source", "staging"].map(|name| temp.path().join(name));
+        for (base, folder) in roots.iter().zip(["original", "incoming"]) {
+            fs::create_dir_all(base.join(folder)).unwrap();
+            fs::write(base.join(folder).join("z-expected"), b"contents").unwrap();
+        }
+        fs::write(roots[1].join("incoming/a-unexpected"), b"independent bytes").unwrap();
+        let [source, staging] = roots.map(|path| ReadScope::open(&Location::Local(path)).unwrap());
+        let original = Path::new("original");
+        let incoming = Path::new("incoming");
+        let mut progress = Progress::default();
+        let exclusions = Exclusions::default();
+        let expected = required_tree(&source, original, &exclusions, &mut progress).unwrap();
+        let actual = required_tree(&staging, incoming, &exclusions, &mut progress).unwrap();
+        let error = check_tree(
+            &expected,
+            original,
+            &actual,
+            incoming,
+            Check::Contents,
+            &Cancellation::default(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, TransferError::Failed(crate::file_error::Failure::Sync(error))
+                if matches!(error.as_ref(), SyncError::VerificationMismatch {
+                    check: SyncVerification::StagedCopy,
+                    difference: SyncDifference::Unexpected,
+                    original,
+                    inspected,
+                } if original == &expected.root.join("original/a-unexpected")
+                    && inspected == &actual.root.join("incoming/a-unexpected"))
+            )
+        );
+    }
 }

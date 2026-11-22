@@ -6,6 +6,7 @@ use super::{
     PawCommander,
 };
 use crate::{
+    file_error::SyncError,
     i18n::text,
     operations::TransferError,
     shortcuts::Command,
@@ -421,7 +422,7 @@ impl PawCommander {
             ),
         };
         let [left, right] = folders;
-        self.start_stoppable_job(
+        self.start_typed_stoppable_job(
             ctx,
             label,
             format!("{} {direction} {}", left.display(), right.display()),
@@ -439,11 +440,7 @@ impl PawCommander {
                         "Synchronization stopped. Completed: {completed}.",
                         completed = completed
                     )),
-                    Err(error) => Err(crate::tr_format!(
-                        "{error}\nCompleted: {completed}.",
-                        completed = completed,
-                        error = crate::i18n::file_error(&error)
-                    )),
+                    Err(error) => Err(SyncError::applying(completed, error)),
                 }
             },
         );

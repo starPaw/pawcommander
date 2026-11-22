@@ -258,6 +258,7 @@ impl TwoWayPlan {
             .collect();
         let execution = Execution {
             folders: &self.folders,
+            roles: TWO_WAY_ROLES,
             observed: &self.observed,
             rows: &rows,
             exclusions: &self.exclusions,

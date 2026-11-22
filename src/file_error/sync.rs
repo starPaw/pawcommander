@@ -10,11 +10,34 @@ pub(crate) enum SyncFolderRole {
 }
 
 #[derive(Debug)]
+pub(crate) enum SyncVerification {
+    StagedCopy,
+    HeldOriginal,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum SyncDifference {
+    Missing,
+    Unexpected,
+    Changed,
+}
+
+#[derive(Debug)]
 pub(crate) enum SyncError {
     Folder {
         role: SyncFolderRole,
         folder: Location,
         cause: Box<TransferError>,
+    },
+    Apply {
+        completed: usize,
+        cause: Box<TransferError>,
+    },
+    VerificationMismatch {
+        check: SyncVerification,
+        difference: SyncDifference,
+        original: Location,
+        inspected: Location,
     },
     EntryTypeChanged(Location),
     LinkTargetChanged(Location),
@@ -36,9 +59,45 @@ pub(crate) enum SyncError {
     ResultMismatch(Location),
 }
 
+impl SyncError {
+    pub(crate) fn applying(completed: usize, cause: TransferError) -> TransferError {
+        if matches!(cause, TransferError::Cancelled) {
+            return cause;
+        }
+        let unconfirmed = matches!(cause, TransferError::PublicationUnconfirmed(_));
+        let error: TransferError = Self::Apply {
+            completed,
+            cause: Box::new(cause),
+        }
+        .into();
+        if unconfirmed {
+            error.with_unconfirmed_publication()
+        } else {
+            error
+        }
+    }
+}
+
 impl fmt::Display for SyncError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Apply { completed, cause } => {
+                write!(
+                    f,
+                    "Synchronization stopped after {completed} completed changes: {cause}"
+                )
+            }
+            Self::VerificationMismatch {
+                check,
+                difference,
+                original,
+                inspected,
+            } => {
+                write!(
+                    f,
+                    "{check:?} does not match {original}: {difference:?} item at {inspected}"
+                )
+            }
             Self::Folder {
                 role,
                 folder,
@@ -84,7 +143,7 @@ impl fmt::Display for SyncError {
 impl Error for SyncError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Folder { cause, .. } => Some(cause.as_ref()),
+            Self::Folder { cause, .. } | Self::Apply { cause, .. } => Some(cause.as_ref()),
             _ => None,
         }
     }

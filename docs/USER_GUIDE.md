@@ -331,7 +331,7 @@ Enable **Remove destination-only items** to include extra files and folders from
 
 Choose **Apply plan** to queue the displayed changes. When the job starts, PawCommander checks both folders again. If the plan has become stale, the job ends before changing files. Copies and replacements are checked in private staging before publication. The job processes destination-only deletions after the copies and replacements. Local deletions go to the Trash, and deletions from an SFTP folder are permanent.
 
-Use **Stop** to stop before the next change publishes. Completed paths and the outcome of the active change appear in **Result history**. If publication or restoration cannot be confirmed, the result gives the temporary folder to inspect.
+Use **Stop** to stop before the next change publishes. **Result history** shows completed paths and the active operation's outcome, path and cause. A failed check of a staged copy or held original identifies the item and the temporary path where it was checked. If publication or restoration cannot be confirmed, the result gives the temporary folder to inspect.
 
 ## Two-way folder synchronization on macOS
 
