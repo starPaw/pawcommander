@@ -4,7 +4,7 @@ use super::transfer::{
     TransferSourceEntry, TransferSourceManifest,
 };
 use super::Location;
-use crate::file_error::MutationError;
+use crate::file_error::{MutationError, UndoError};
 use crate::operations::{Cancellation, Progress, TransferError};
 use crate::result_history::Outcome;
 use std::collections::BTreeMap;
@@ -150,20 +150,28 @@ pub(super) struct UndoEntry {
 }
 
 impl UndoEntry {
-    fn verify(&self, cancel: &Cancellation) -> Result<(), TransferError> {
+    fn verify_folders(&self) -> Result<(), TransferError> {
         for parent in &self.capture.parents {
-            parent.verify()?;
+            if !parent.matches()? {
+                return Err(UndoError::FolderChanged(parent.location.clone()).into());
+            }
         }
+        Ok(())
+    }
+
+    fn verify(&self, cancel: &Cancellation) -> Result<(), TransferError> {
+        self.verify_folders()?;
         if entry_metadata(&self.capture.original)?.is_some() {
-            return Err(crate::tr_format!(
-                "Undo not started: original name {} is occupied. The existing item was preserved.",
-                self.capture.original
-            )
+            return Err(UndoError::OriginalOccupied {
+                target: self.capture.original.clone(),
+                source: None,
+            }
             .into());
         }
         for (path, expected) in &self.entries {
             cancel.check()?;
-            let actual = entry_metadata(path)?.ok_or_else(|| unavailable(path))?;
+            let actual =
+                entry_metadata(path)?.ok_or_else(|| UndoError::ItemMissing(path.clone()))?;
             // Ignore rename-only ctime changes, so two renames can be undone
             // in reverse order. Identity, contents metadata and children must match.
             let unchanged = expected.matches_moved_target(&actual)
@@ -175,69 +183,93 @@ impl UndoEntry {
                     _ => true,
                 };
             if !unchanged {
-                return Err(unavailable(path).into());
+                return Err(UndoError::ItemChanged(path.clone()).into());
             }
             if let Some(names) = &expected.children
                 && *names != source_children(path, cancel, true)?
             {
-                return Err(unavailable(path).into());
+                return Err(UndoError::ItemChanged(path.clone()).into());
             }
         }
-        for parent in &self.capture.parents {
-            parent.verify()?;
-        }
+        self.verify_folders()?;
         cancel.check()?;
         Ok(())
     }
 
-    fn restore(&self, progress: &mut Progress) -> Result<(), TransferError> {
+    fn restore(
+        &self,
+        progress: &mut Progress,
+        read_restored: &mut impl FnMut(&Location) -> Result<Option<EntryMetadata>, TransferError>,
+    ) -> Result<(), TransferError> {
         let source = &self.capture.current;
         let target = &self.capture.original;
         let cancel = progress.cancellation();
+        cancel.check()?;
         self.verify(&cancel)?;
         for path in self.entries.keys() {
             progress.results.capturing(source, target, path);
         }
         progress.results.captured();
         progress.item(source.path());
+        cancel.check()?;
         // No replacement option. The final OS/SFTP rename also refuses an
         // occupied target, including one that appeared after preflight.
-        rename_for_publication(source, target)?;
+        rename_for_publication(source, target).map_err(|error| {
+            error.map_occupied_rename(|source| {
+                UndoError::OriginalOccupied {
+                    target: target.clone(),
+                    source: Some(source),
+                }
+                .into()
+            })
+        })?;
+        self.verify_restored(progress, read_restored)
+            .map_err(|cause| {
+                // Every verification error follows an acknowledged rename.
+                TransferError::from(UndoError::Unconfirmed {
+                    from: source.clone(),
+                    to: target.clone(),
+                    cause,
+                })
+                .with_unconfirmed_publication()
+            })
+    }
+
+    fn verify_restored(
+        &self,
+        progress: &mut Progress,
+        read_restored: &mut impl FnMut(&Location) -> Result<Option<EntryMetadata>, TransferError>,
+    ) -> Result<(), TransferError> {
+        let source = &self.capture.current;
+        let target = &self.capture.original;
         let mut failure = None;
         for (path, expected) in &self.entries {
             let relative = path
                 .path()
                 .strip_prefix(source.path())
-                .map_err(|_| TransferError::PublicationUnconfirmed(unavailable(path).into()))?;
+                .map_err(|_| UndoError::RestoredItemMismatch(path.clone()))?;
             let restored = if relative.as_os_str().is_empty() {
                 target.clone()
             } else {
                 target.join(relative)
             };
-            let check = entry_metadata(&restored).and_then(|actual| {
+            let check = read_restored(&restored).and_then(|actual| {
                 if actual.is_some_and(|actual| expected.matches_moved_target(&actual)) {
                     Ok(())
                 } else {
-                    Err(unavailable(&restored).into())
+                    Err(UndoError::RestoredItemMismatch(restored).into())
                 }
             });
             if path != source {
-                progress.results.moved_entry(
-                    path,
-                    check.is_ok(),
-                    check.as_ref().err().map(crate::i18n::file_error),
-                );
+                progress
+                    .results
+                    .moved_entry_with_error(path, check.as_ref().err());
             }
             if failure.is_none() {
                 failure = check.err();
             }
         }
-        // Acknowledged renames with unverifiable results must not offer a
-        // second inverse action.
-        match failure {
-            Some(error) => Err(error.with_unconfirmed_publication()),
-            None => Ok(()),
-        }
+        failure.map_or(Ok(()), Err)
     }
 }
 
@@ -245,6 +277,12 @@ impl UndoEntry {
 pub(crate) struct UndoBatch {
     entries: Vec<UndoEntry>,
     weight: usize,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum UndoOutcome {
+    Restored(usize),
+    Stopped { restored: usize, remaining: usize },
 }
 
 impl UndoBatch {
@@ -266,7 +304,15 @@ impl UndoBatch {
         }
     }
 
-    pub fn restore(&mut self, progress: &mut Progress) -> Result<usize, TransferError> {
+    pub fn restore(&mut self, progress: &mut Progress) -> Result<UndoOutcome, TransferError> {
+        self.restore_checking(progress, entry_metadata)
+    }
+
+    pub(super) fn restore_checking(
+        &mut self,
+        progress: &mut Progress,
+        mut read_restored: impl FnMut(&Location) -> Result<Option<EntryMetadata>, TransferError>,
+    ) -> Result<UndoOutcome, TransferError> {
         progress
             .results
             .plan(self.entries.iter().rev().map(|entry| {
@@ -275,32 +321,57 @@ impl UndoBatch {
                     Some(entry.capture.original.display()),
                 )
             }));
-        let mut completed = 0;
+        let mut restored = 0;
         while let Some(entry) = self.entries.last() {
             progress.results.begin(&entry.capture.current);
-            let result = entry.restore(progress);
+            let result = entry.restore(progress, &mut read_restored);
             let outcome = match &result {
                 Ok(()) => Outcome::Completed,
                 Err(TransferError::Cancelled) => {
                     progress.results.cancelled = true;
                     Outcome::Cancelled
                 }
-                Err(TransferError::PublicationUnconfirmed(_)) => Outcome::PublicationUnconfirmed,
+                Err(TransferError::PublicationUnconfirmed(_)) => {
+                    progress.results.unconfirmed_move_descendants();
+                    Outcome::PublicationUnconfirmed
+                }
                 Err(TransferError::Failed(_)) => Outcome::Failed,
             };
-            progress.results.record(
+            progress.results.record_with_error(
                 &entry.capture.current,
-                Some(entry.capture.original.display()),
                 outcome,
-                result.as_ref().err().map(crate::i18n::file_error),
+                result.as_ref().err(),
             );
-            if result.is_ok() || matches!(result, Err(TransferError::PublicationUnconfirmed(_))) {
+            // A root may already have moved after an unconfirmed result.
+            if matches!(
+                outcome,
+                Outcome::Completed | Outcome::PublicationUnconfirmed
+            ) {
                 self.weight -= self.entries.pop().unwrap().entries.len();
             }
-            result?;
-            completed += 1;
+            match result {
+                Ok(()) => restored += 1,
+                Err(TransferError::Cancelled) => {
+                    return Ok(UndoOutcome::Stopped {
+                        restored,
+                        remaining: self.len(),
+                    });
+                }
+                Err(cause) => {
+                    let failure = TransferError::from(UndoError::Incomplete {
+                        restored,
+                        remaining: self.len(),
+                        cause,
+                    });
+                    return Err(if outcome == Outcome::PublicationUnconfirmed {
+                        failure.with_unconfirmed_publication()
+                    } else {
+                        failure
+                    });
+                }
+            }
         }
-        Ok(completed)
+        Ok(UndoOutcome::Restored(restored))
     }
 }
 
@@ -338,12 +409,9 @@ pub(crate) fn rename_with_undo(
                 } else {
                     Outcome::Failed
                 };
-                progress.results.record(
-                    source,
-                    Some(target.display()),
-                    outcome,
-                    Some(crate::i18n::file_error(&error)),
-                );
+                progress
+                    .results
+                    .record_with_error(source, outcome, Some(&error));
                 return Err(error);
             }
         }

@@ -218,6 +218,20 @@ impl TransferError {
         }
     }
 
+    pub(crate) fn map_occupied_rename(self, conflict: impl FnOnce(io::Error) -> Self) -> Self {
+        match self {
+            Self::Failed(Failure::Mutation(error)) => match *error {
+                MutationError::RenameLocal { source, .. }
+                    if source.kind() == io::ErrorKind::AlreadyExists =>
+                {
+                    conflict(source)
+                }
+                error => error.into(),
+            },
+            error => error,
+        }
+    }
+
     pub(crate) fn with_publication_context(
         self,
         context: impl FnOnce(Self) -> PublicationError,
