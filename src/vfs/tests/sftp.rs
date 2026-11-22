@@ -473,7 +473,9 @@ fn check_changed_promised_source_after_preflight(local_root: &Location, remote_r
 
 #[cfg(target_os = "macos")]
 fn check_sftp_editor(local_root: &Location, remote_root: &Location, setstat_denied: bool) {
+    use crate::file_error::{AccessAction, AccessCause, Failure, RemoteEditError};
     use crate::result_history::Outcome;
+    use crate::vfs::RemoteEditSaveOutcome;
     use std::os::unix::fs::PermissionsExt;
 
     let directory = remote_root.with_path(remote_root.path().with_file_name("editor"));
@@ -485,6 +487,8 @@ fn check_sftp_editor(local_root: &Location, remote_root: &Location, setstat_deni
     let mut edit =
         crate::vfs::RemoteEdit::download(source.clone(), &copies, &mut Progress::default())
             .unwrap();
+    let server_path = source.with_path(fs::canonicalize(source.path()).unwrap());
+    assert_eq!(edit.target(), &server_path);
     assert_eq!(fs::read(edit.copy()).unwrap(), b"original");
     assert_eq!(
         fs::metadata(edit.copy().parent().unwrap())
@@ -497,29 +501,42 @@ fn check_sftp_editor(local_root: &Location, remote_root: &Location, setstat_deni
     fs::write(edit.copy(), b"edited!!").unwrap();
     let mut cancelled = Progress::default();
     cancelled.cancellation().request();
-    assert!(edit.save(&mut cancelled).is_err());
+    assert!(matches!(
+        edit.save(&mut cancelled),
+        Err(TransferError::Cancelled)
+    ));
+    assert!(cancelled.results.cancelled);
     assert_eq!(cancelled.results.items[0].outcome, Outcome::Cancelled);
     assert_eq!(fs::read(source.path()).unwrap(), b"original");
 
     let mut progress = Progress::default();
     let result = edit.save(&mut progress);
     if setstat_denied {
-        assert!(result.is_err());
+        assert!(
+            matches!(result, Err(TransferError::Failed(Failure::Access(error)))
+            if error.action == AccessAction::WriteMetadata
+                && error.location.path().ends_with("payload")
+                && matches!(&error.cause, AccessCause::Sftp(source) if matches!(source.code(), ssh2::ErrorCode::SFTP(_))))
+        );
+        assert_eq!(progress.results.items[0].outcome, Outcome::Failed);
         assert_eq!(fs::read(source.path()).unwrap(), b"original");
     } else {
-        assert_eq!(
+        assert!(matches!(
             result.unwrap(),
-            crate::i18n::text!("Правка сохранена на сервере.")
-        );
+            RemoteEditSaveOutcome::Saved {
+                cleanup_warning: None
+            }
+        ));
+        assert_eq!(progress.results.items[0].outcome, Outcome::Completed);
         assert_eq!(fs::read(source.path()).unwrap(), b"edited!!");
         assert_eq!(
             fs::metadata(source.path()).unwrap().permissions().mode() & 0o777,
             0o640
         );
-        assert_eq!(
+        assert!(matches!(
             edit.save(&mut Progress::default()).unwrap(),
-            crate::i18n::text!("На сервере уже сохранена эта версия.")
-        );
+            RemoteEditSaveOutcome::AlreadyCurrent
+        ));
         let modified = fs::metadata(source.path()).unwrap().modified().unwrap();
         fs::write(source.path(), b"external").unwrap();
         fs::OpenOptions::new()
@@ -529,11 +546,14 @@ fn check_sftp_editor(local_root: &Location, remote_root: &Location, setstat_deni
             .set_times(fs::FileTimes::new().set_modified(modified))
             .unwrap();
         fs::write(edit.copy(), b"new edit").unwrap();
-        assert_eq!(
-            edit.save(&mut Progress::default()).unwrap_err(),
-            crate::i18n::text!(
-                "Файл на сервере изменился или недоступен. Рабочая копия сохранена."
-            )
+        let conflict = edit.save(&mut Progress::default()).unwrap_err();
+        assert!(
+            matches!(
+                &conflict,
+                TransferError::Failed(Failure::RemoteEdit(error))
+                    if matches!(error.as_ref(), RemoteEditError::RevisionChanged(path) if path == &server_path)
+            ),
+            "{conflict:?}"
         );
         assert_eq!(fs::read(source.path()).unwrap(), b"external");
     }
@@ -545,6 +565,16 @@ fn check_sftp_editor(local_root: &Location, remote_root: &Location, setstat_deni
             b"new edit"
         }
     );
+    let moved_copy = edit.copy().with_extension("retained");
+    let server_before = fs::read(source.path()).unwrap();
+    fs::rename(edit.copy(), &moved_copy).unwrap();
+    assert!(matches!(
+        edit.save(&mut Progress::default()).unwrap_err(),
+        TransferError::Failed(Failure::RemoteEdit(error))
+            if matches!(error.as_ref(), RemoteEditError::WorkingCopyMissing(path) if path == edit.copy())
+    ));
+    assert_eq!(fs::read(source.path()).unwrap(), server_before);
+    fs::rename(moved_copy, edit.copy()).unwrap();
     assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
 }
 

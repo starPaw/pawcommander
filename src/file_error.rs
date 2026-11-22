@@ -11,6 +11,8 @@ mod compatible_plan;
 mod conflict;
 mod cross_move;
 #[cfg(target_os = "macos")]
+mod external_editor;
+#[cfg(target_os = "macos")]
 mod file_promise;
 #[cfg(target_os = "macos")]
 mod file_template;
@@ -34,6 +36,8 @@ pub(crate) use checksum::{ChecksumError, ManifestLineError};
 pub(crate) use compatible_plan::CompatiblePlanError;
 pub(crate) use conflict::{ConflictError, ReplacementRefusal};
 pub(crate) use cross_move::CrossMoveError;
+#[cfg(target_os = "macos")]
+pub(crate) use external_editor::RemoteEditError;
 #[cfg(target_os = "macos")]
 pub(crate) use file_promise::FilePromiseError;
 #[cfg(target_os = "macos")]
@@ -86,6 +90,8 @@ pub(crate) enum Failure {
     BatchRename(Box<BatchRenameError>),
     CrossMove(Box<CrossMoveError>),
     MoveHistory(Box<MoveHistoryError>),
+    #[cfg(target_os = "macos")]
+    RemoteEdit(Box<RemoteEditError>),
     Undo(Box<UndoError>),
     #[cfg(target_os = "macos")]
     FilePromise(Box<FilePromiseError>),
@@ -140,6 +146,8 @@ impl Failure {
             Self::BatchRename(error) => Some(error.as_ref()),
             Self::CrossMove(error) => Some(error.as_ref()),
             Self::MoveHistory(error) => Some(error.as_ref()),
+            #[cfg(target_os = "macos")]
+            Self::RemoteEdit(error) => Some(error.as_ref()),
             Self::Undo(error) => Some(error.as_ref()),
             #[cfg(target_os = "macos")]
             Self::FilePromise(error) => Some(error.as_ref()),
@@ -187,6 +195,8 @@ impl fmt::Display for Failure {
             Self::BatchRename(error) => fmt::Display::fmt(error, f),
             Self::CrossMove(error) => fmt::Display::fmt(error, f),
             Self::MoveHistory(error) => fmt::Display::fmt(error, f),
+            #[cfg(target_os = "macos")]
+            Self::RemoteEdit(error) => fmt::Display::fmt(error, f),
             Self::Undo(error) => fmt::Display::fmt(error, f),
             #[cfg(target_os = "macos")]
             Self::FilePromise(error) => fmt::Display::fmt(error, f),

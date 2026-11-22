@@ -1,7 +1,8 @@
 use super::{dialogs::Dialog, PawCommander};
 use crate::i18n::text;
+use crate::operations::TransferError;
 use crate::tools::custom_action::Invocation;
-use crate::vfs::{Location, RemoteEdit};
+use crate::vfs::{Location, RemoteEdit, RemoteEditSaveOutcome};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -156,11 +157,11 @@ impl PawCommander {
         let label = text!("Подготовка рабочей копии SFTP");
         let (send, receive) = mpsc::channel();
         self.remote_editor.work = Some(receive);
-        self.start_stoppable_job(ctx, label, format!("{label} · {path}"), move |progress| {
+        self.start_typed_stoppable_job(ctx, label, format!("{label} · {path}"), move |progress| {
             let copies = dirs::data_local_dir()
                 .ok_or_else(|| text!("Не найдена папка данных приложения."))?
                 .join("PawCommander/Editor Copies");
-            let edit = RemoteEdit::download(path, &copies, progress).map_err(|e| e.to_string())?;
+            let edit = RemoteEdit::download(path, &copies, progress)?;
             let _ = send.send(Finished::Downloaded(edit, command));
             Ok(text!("Рабочая копия готова.").into())
         });
@@ -221,13 +222,17 @@ impl PawCommander {
         self.remote_editor.work = Some(receive);
         self.remote_editor.feedback = None;
         self.notice = None;
-        self.start_stoppable_job(
+        self.start_typed_stoppable_job(
             ctx,
             label,
             format!("{label} · {}", edit.target()),
             move |progress| {
-                let result = edit.save(progress);
-                let _ = send.send(Finished::Saved(edit, result.clone()));
+                let result = edit.save(progress).map(save_message);
+                let feedback = match &result {
+                    Err(TransferError::Cancelled) => Ok(crate::tr_format!("Operation cancelled")),
+                    _ => result.as_ref().cloned().map_err(crate::i18n::file_error),
+                };
+                let _ = send.send(Finished::Saved(edit, feedback));
                 result
             },
         );
@@ -299,5 +304,19 @@ impl PawCommander {
         } else if finish {
             self.remote_editor = Session::default();
         }
+    }
+}
+
+fn save_message(outcome: RemoteEditSaveOutcome) -> String {
+    match outcome {
+        RemoteEditSaveOutcome::AlreadyCurrent => {
+            text!("На сервере уже сохранена эта версия.").into()
+        }
+        RemoteEditSaveOutcome::Saved {
+            cleanup_warning: None,
+        } => text!("Правка сохранена на сервере.").into(),
+        RemoteEditSaveOutcome::Saved {
+            cleanup_warning: Some(warning),
+        } => crate::i18n::file_error(&warning),
     }
 }

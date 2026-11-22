@@ -11,8 +11,8 @@ use crate::file_error::{
 };
 #[cfg(target_os = "macos")]
 use crate::file_error::{
-    CompatiblePlanError, FilePromiseError, FileTemplateError, ResumeCheckError, ResumeCheckProblem,
-    ResumeRecordEvent, ResumeRole, SyncError,
+    CompatiblePlanError, FilePromiseError, FileTemplateError, RemoteEditError, ResumeCheckError,
+    ResumeCheckProblem, ResumeRecordEvent, ResumeRole, SyncError,
 };
 use crate::file_error::{
     RecoveryRecordAction, RecoveryRecordError, RecoveryRecordProblem, RecoveryRecordSection,
@@ -55,6 +55,8 @@ pub(crate) fn file_error(error: &TransferError) -> String {
                 Failure::BatchRename(error) => batch_rename_error(error),
                 Failure::CrossMove(error) => cross_move_error(error),
                 Failure::MoveHistory(error) => move_history_error(error),
+                #[cfg(target_os = "macos")]
+                Failure::RemoteEdit(error) => remote_edit_error(error),
                 Failure::Undo(error) => undo_error(error),
                 #[cfg(target_os = "macos")]
                 Failure::FilePromise(error) => file_promise_error(error),
@@ -322,6 +324,35 @@ fn compatible_plan_error(error: &CompatiblePlanError) -> String {
         PathBudget { source, limit } => crate::tr_format!(
             "The compatible-name plan exceeded {limit} bytes of paths while checking {source}. Select fewer items.",
             limit = super::display::integer(*limit), source = source
+        ),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn remote_edit_error(error: &RemoteEditError) -> String {
+    match error {
+        RemoteEditError::SftpRequired(path) => {
+            crate::tr_format!("Expected an SFTP source at {path}.", path = path)
+        }
+        RemoteEditError::WorkingCopyMissing(path) => crate::tr_format!(
+            "The working copy is missing at {path}.",
+            path = path.display()
+        ),
+        RemoteEditError::RevisionChanged(path) => crate::tr_format!(
+            "The server file at {path} changed or is unavailable.",
+            path = path
+        ),
+        RemoteEditError::MissingAccessMetadata(path) => crate::tr_format!(
+            "The server did not report the owner or permissions of {path}.",
+            path = path
+        ),
+        RemoteEditError::UnsupportedMode(path) => crate::tr_format!(
+            "The server file at {path} has special permissions that cannot be preserved.",
+            path = path
+        ),
+        RemoteEditError::AccessMismatch(path) => crate::tr_format!(
+            "Could not verify ownership or permissions of the temporary file at {path}.",
+            path = path
         ),
     }
 }
