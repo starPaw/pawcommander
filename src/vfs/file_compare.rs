@@ -14,7 +14,10 @@ use crate::{
     operations::{Cancellation, Progress, TransferError},
     preview::decode_comparison_text,
 };
-use std::{io::Read, path::Path};
+use std::{
+    io::{self, Read},
+    path::Path,
+};
 
 pub(crate) use lines::{DiffKind, DiffRow, TextDifference};
 
@@ -113,7 +116,13 @@ fn compare_readers<R: Read>(
         };
         (first.map(|index| index as u64), kind)
     } else {
-        let (first, looks_like_text) = stream_difference([left, right], sizes, cancel)?;
+        let (first, looks_like_text) =
+            stream_difference([left, right], sizes, cancel).map_err(|error| match error {
+                StreamDifferenceError::Cancelled => TransferError::Cancelled,
+                StreamDifferenceError::Read { right, source } => {
+                    side_error(usize::from(right), source.into())
+                }
+            })?;
         let kind = if first.is_none() {
             FileDifference::Equal
         } else if looks_like_text {
@@ -147,22 +156,34 @@ fn read_small(
     Ok(bytes)
 }
 
+pub(super) enum StreamDifferenceError {
+    Cancelled,
+    Read { right: bool, source: io::Error },
+}
+
 pub(super) fn stream_difference(
     inputs: [&mut impl Read; 2],
     sizes: [u64; 2],
     cancel: &Cancellation,
-) -> Result<(Option<u64>, bool), TransferError> {
+) -> Result<(Option<u64>, bool), StreamDifferenceError> {
     let [left, right] = inputs;
     let [mut a, mut b] = [[0; BLOCK]; 2];
     let [first_a, first_b] = sizes.map(|size| size.min(BLOCK as u64) as usize);
-    cancel.check()?;
+    let check = || cancel.check().map_err(|_| StreamDifferenceError::Cancelled);
+    check()?;
     left.read_exact(&mut a[..first_a])
-        .map_err(|error| side_error(0, error.into()))?;
-    cancel.check()?;
+        .map_err(|source| StreamDifferenceError::Read {
+            right: false,
+            source,
+        })?;
+    check()?;
     right
         .read_exact(&mut b[..first_b])
-        .map_err(|error| side_error(1, error.into()))?;
-    cancel.check()?;
+        .map_err(|source| StreamDifferenceError::Read {
+            right: true,
+            source,
+        })?;
+    check()?;
     let looks_like_text = decode_comparison_text(&a[..first_a], sizes[0] > first_a as u64)
         .is_some()
         && decode_comparison_text(&b[..first_b], sizes[1] > first_b as u64).is_some();
@@ -173,14 +194,20 @@ pub(super) fn stream_difference(
     let mut position = first_a as u64;
     while position < common {
         let count = (common - position).min(BLOCK as u64) as usize;
-        cancel.check()?;
+        check()?;
         left.read_exact(&mut a[..count])
-            .map_err(|error| side_error(0, error.into()))?;
-        cancel.check()?;
+            .map_err(|source| StreamDifferenceError::Read {
+                right: false,
+                source,
+            })?;
+        check()?;
         right
             .read_exact(&mut b[..count])
-            .map_err(|error| side_error(1, error.into()))?;
-        cancel.check()?;
+            .map_err(|source| StreamDifferenceError::Read {
+                right: true,
+                source,
+            })?;
+        check()?;
         if let Some(index) = difference_at(&a[..count], &b[..count]) {
             return Ok((Some(position + index as u64), looks_like_text));
         }

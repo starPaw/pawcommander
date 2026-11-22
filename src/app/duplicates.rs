@@ -1,5 +1,7 @@
 use super::{
-    comparison::{show_progress, ComparisonBody, ComparisonDialog, ComparisonResponse, Phase},
+    comparison::{
+        show_progress_with_stop, ComparisonBody, ComparisonDialog, ComparisonResponse, Phase,
+    },
     PawCommander,
 };
 use crate::{
@@ -70,9 +72,12 @@ impl DuplicateSearch {
             ui.separator();
             match &mut self.phase {
                 Phase::Ready => {}
-                Phase::Running(worker) => {
-                    show_progress(ui, worker, crate::i18n::key!("Ищем дубликаты…"))
-                }
+                Phase::Running(worker) => show_progress_with_stop(
+                    ui,
+                    worker,
+                    crate::i18n::key!("Ищем дубликаты…"),
+                    crate::i18n::key!("Останавливаем поиск дубликатов…"),
+                ),
                 Phase::Finished(result) => {
                     show_results(
                         ui,
@@ -88,7 +93,9 @@ impl DuplicateSearch {
                     ui.label(text!("Поиск дубликатов остановлен"));
                 }
                 Phase::Failed(error) => {
-                    ui.colored_label(ui.visuals().error_fg_color, error);
+                    let message =
+                        egui::RichText::new(error.as_str()).color(ui.visuals().error_fg_color);
+                    ui.add(egui::Label::new(message).wrap().selectable(true));
                 }
             }
             ui.add_space(8.0);
@@ -170,24 +177,24 @@ fn show_results(
     run: u64,
     reviewing: bool,
 ) {
+    let details_top = ui.next_widget_position().y;
     if result.skipped > 0 {
-        let skipped = result.skipped;
-        let detail = result
-            .examples
-            .iter()
-            .map(|(path, error)| format!("{} · {}", path.display(), crate::i18n::file_error(error)))
-            .collect::<Vec<_>>()
-            .join("\n");
-        ui.label(crate::tr_format!(
-            "Skipped unavailable or changed entries: {skipped}",
-            skipped = skipped
-        ))
-        .on_hover_text(detail);
+        if !result.groups.is_empty() {
+            ui.label(text!(
+                "Результаты относятся к файлам, которые удалось проверить."
+            ));
+        }
+        show_skipped(ui, result, run);
     }
     if result.groups.is_empty() {
-        ui.label(text!("Дубликаты не найдены"));
+        ui.label(if result.skipped == 0 {
+            text!("Дубликаты не найдены")
+        } else {
+            text!("Среди проверенных файлов дубликаты не найдены")
+        });
         return;
     }
+    let details_height = ui.next_widget_position().y - details_top;
     ui.label(text!(
         "Оставьте один файл в каждой группе и отметьте копии для корзины.",
     ));
@@ -196,7 +203,7 @@ fn show_results(
         .interact_size
         .y
         .max(ui.text_style_height(&egui::TextStyle::Body));
-    let height = (ui.ctx().content_rect().height() * 0.52).clamp(90.0, 420.0);
+    let height = (ui.ctx().content_rect().height() * 0.52 - details_height).clamp(90.0, 420.0);
     egui::ScrollArea::both()
         .id_salt(("duplicate-rows", run))
         .max_height(height)
@@ -248,6 +255,35 @@ fn show_results(
                     });
                 });
             }
+        });
+}
+
+fn show_skipped(ui: &mut egui::Ui, result: &SearchResult, run: u64) {
+    let skipped = result.skipped;
+    let summary = crate::tr_format!(
+        "Skipped unavailable or changed entries: {skipped}",
+        skipped = skipped
+    );
+    egui::CollapsingHeader::new(summary)
+        .id_salt(("duplicate-skipped", run))
+        .show(ui, |ui| {
+            let shown = result.examples.len();
+            if shown < skipped {
+                ui.weak(crate::tr_format!(
+                    "Showing {shown} of {skipped} skipped entries.",
+                    shown = shown,
+                    skipped = skipped
+                ));
+            }
+            egui::ScrollArea::vertical()
+                .id_salt(("duplicate-skipped-details", run))
+                .max_height(125.0)
+                .show(ui, |ui| {
+                    for (location, error) in &result.examples {
+                        let message = crate::i18n::duplicate_search_skip(location, error);
+                        ui.add(egui::Label::new(message).wrap().selectable(true));
+                    }
+                });
         });
 }
 
