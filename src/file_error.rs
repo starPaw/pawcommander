@@ -243,6 +243,14 @@ pub(crate) enum SshStage {
     Channel,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum SftpStateLock {
+    Sessions,
+    OpeningRegistry,
+    OpeningSession,
+    DirectoryPoll,
+}
+
 #[derive(Debug)]
 pub(crate) enum ConnectionError {
     InvalidEndpoint,
@@ -270,7 +278,20 @@ pub(crate) enum ConnectionError {
         address: String,
         cause: TransferError,
     },
-    Automatic(TransferError),
+    ExpectedSftp(Location),
+    SftpStatePoisoned {
+        endpoint: String,
+        lock: SftpStateLock,
+    },
+    CachedChannel {
+        endpoint: String,
+        source: ssh2::Error,
+    },
+    Automatic {
+        endpoint: String,
+        previous_channel: Option<ssh2::Error>,
+        cause: TransferError,
+    },
     KeyPasswordConflict,
     KeyFileRequired,
     ImportedKeyNotFile(PathBuf),
@@ -320,7 +341,30 @@ impl fmt::Display for ConnectionError {
                 let role = if *jump { "Jump host" } else { "Target host" };
                 write!(f, "{role} {address} · {cause}")
             }
-            Self::Automatic(cause) => write!(f, "Automatic SFTP connection: {cause}"),
+            Self::ExpectedSftp(location) => write!(f, "Expected an SFTP address at {location}"),
+            Self::SftpStatePoisoned { endpoint, lock } => {
+                write!(f, "SFTP {lock:?} lock poisoned for {endpoint}")
+            }
+            Self::CachedChannel { endpoint, source } => {
+                write!(
+                    f,
+                    "Could not open an SFTP channel on the session for {endpoint}: {source}"
+                )
+            }
+            Self::Automatic {
+                endpoint,
+                previous_channel,
+                cause,
+            } => {
+                write!(
+                    f,
+                    "Could not open an SFTP connection for {endpoint}: {cause}"
+                )?;
+                if let Some(source) = previous_channel {
+                    write!(f, " (previous channel: {source})")?;
+                }
+                Ok(())
+            }
             Self::KeyPasswordConflict => f.write_str("Clear the account password to save the key"),
             Self::KeyFileRequired => f.write_str("Choose a private key file"),
             Self::ImportedKeyNotFile(path) => {
@@ -364,11 +408,11 @@ impl Error for ConnectionError {
         match self {
             Self::Resolve { source, .. } | Self::Transport(source) => Some(source),
             Self::Connect { last, .. } => last.as_ref().map(|(_, error)| error as &dyn Error),
-            Self::Ssh { source, .. } => Some(source),
+            Self::Ssh { source, .. } | Self::CachedChannel { source, .. } => Some(source),
             Self::HostKey(error) => Some(error),
             #[cfg(target_os = "macos")]
             Self::Forward { source, .. } => Some(source),
-            Self::Route { cause, .. } | Self::Automatic(cause) => Some(cause),
+            Self::Route { cause, .. } | Self::Automatic { cause, .. } => Some(cause),
             Self::ImportedKeyEncoding { source, .. } => Some(source),
             Self::Credential(error) => Some(error.as_ref()),
             _ => None,

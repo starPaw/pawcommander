@@ -1,7 +1,6 @@
-use super::err;
 use super::location::{Endpoint, Location};
 use crate::file_error::{
-    AccessAction, AccessError, ConnectionError, MutationError, ScanError, SshStage,
+    AccessAction, AccessError, ConnectionError, MutationError, ScanError, SftpStateLock, SshStage,
 };
 use crate::operations::TransferError;
 use libssh2_sys::{
@@ -15,7 +14,7 @@ use std::fs;
 use std::io::Read;
 use std::net::{Shutdown, TcpStream, ToSocketAddrs};
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError, Weak};
 use std::time::Duration;
 use zeroize::Zeroizing;
 
@@ -49,12 +48,37 @@ pub(crate) struct ConnectedLocation {
     pub saved_profile: bool,
 }
 
-static SESSIONS: OnceLock<Mutex<HashMap<Endpoint, Arc<Session>>>> = OnceLock::new();
+type SessionCache = HashMap<Endpoint, Arc<Session>>;
+static SESSIONS: OnceLock<Mutex<SessionCache>> = OnceLock::new();
 type OpeningGate = Mutex<()>;
 static OPENING: OnceLock<Mutex<HashMap<Endpoint, Weak<OpeningGate>>>> = OnceLock::new();
 
-pub(super) fn sessions() -> &'static Mutex<HashMap<Endpoint, Arc<Session>>> {
+pub(super) fn sessions() -> &'static Mutex<SessionCache> {
     SESSIONS.get_or_init(Default::default)
+}
+
+pub(super) fn poisoned_state(endpoint: &Endpoint, lock: SftpStateLock) -> TransferError {
+    ConnectionError::SftpStatePoisoned {
+        endpoint: endpoint.label(),
+        lock,
+    }
+    .into()
+}
+
+pub(super) fn lock_sessions(
+    endpoint: &Endpoint,
+) -> Result<MutexGuard<'static, SessionCache>, TransferError> {
+    sessions()
+        .lock()
+        .map_err(|_| poisoned_state(endpoint, SftpStateLock::Sessions))
+}
+
+pub(super) fn try_session(endpoint: &Endpoint) -> Result<Option<Arc<Session>>, TransferError> {
+    match sessions().try_lock() {
+        Ok(cache) => Ok(cache.get(endpoint).cloned()),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(TryLockError::Poisoned(_)) => Err(poisoned_state(endpoint, SftpStateLock::Sessions)),
+    }
 }
 
 #[cfg(test)]
@@ -509,10 +533,7 @@ fn connect_reviewed(
     } else {
         false
     };
-    let replaced = sessions()
-        .lock()
-        .map_err(err)?
-        .insert(endpoint.clone(), Arc::new(session));
+    let replaced = lock_sessions(&endpoint)?.insert(endpoint.clone(), Arc::new(session));
     drop(replaced);
     Ok(ConnectedLocation {
         location,
@@ -537,28 +558,50 @@ pub(super) fn should_reopen(error: &ssh2::Error) -> bool {
     )
 }
 
+pub(super) enum CachedChannel {
+    Ready(Sftp),
+    Missing,
+    NeedsReconnect(ssh2::Error),
+}
+
+impl CachedChannel {
+    pub(super) fn ready(self) -> Option<Sftp> {
+        match self {
+            Self::Ready(channel) => Some(channel),
+            Self::Missing | Self::NeedsReconnect(_) => None,
+        }
+    }
+}
+
 pub(super) fn cached_channel(
     endpoint: &Endpoint,
     session: &Arc<Session>,
-) -> Result<Option<Sftp>, TransferError> {
+) -> Result<CachedChannel, TransferError> {
     match session.sftp() {
-        Ok(channel) => Ok(Some(channel)),
+        Ok(channel) => Ok(CachedChannel::Ready(channel)),
         Err(error) if should_reopen(&error) => {
-            let mut cache = sessions().lock().map_err(err)?;
+            let mut cache = lock_sessions(endpoint)?;
             if cache
                 .get(endpoint)
                 .is_some_and(|current| Arc::ptr_eq(current, session))
             {
                 cache.remove(endpoint);
             }
-            Ok(None)
+            Ok(CachedChannel::NeedsReconnect(error))
         }
-        Err(error) => Err(ConnectionError::Automatic(ssh_failure(SshStage::Channel)(error)).into()),
+        Err(source) => Err(ConnectionError::CachedChannel {
+            endpoint: endpoint.label(),
+            source,
+        }
+        .into()),
     }
 }
 
-fn opening_gate(endpoint: &Endpoint) -> Result<Arc<OpeningGate>, String> {
-    let mut opening = OPENING.get_or_init(Default::default).lock().map_err(err)?;
+fn opening_gate(endpoint: &Endpoint) -> Result<Arc<OpeningGate>, TransferError> {
+    let mut opening = OPENING
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| poisoned_state(endpoint, SftpStateLock::OpeningRegistry))?;
     opening.retain(|_, gate| gate.strong_count() != 0);
     let slot = opening.entry(endpoint.clone()).or_default();
     if let Some(gate) = slot.upgrade() {
@@ -569,11 +612,11 @@ fn opening_gate(endpoint: &Endpoint) -> Result<Arc<OpeningGate>, String> {
     Ok(gate)
 }
 
-pub(super) fn cached(endpoint: &Endpoint) -> Result<Option<Sftp>, TransferError> {
-    let session = sessions().lock().map_err(err)?.get(endpoint).cloned();
+pub(super) fn cached(endpoint: &Endpoint) -> Result<CachedChannel, TransferError> {
+    let session = lock_sessions(endpoint)?.get(endpoint).cloned();
     match session {
         Some(session) => cached_channel(endpoint, &session),
-        None => Ok(None),
+        None => Ok(CachedChannel::Missing),
     }
 }
 
@@ -582,16 +625,35 @@ pub(super) fn remote(location: &Location) -> Result<Sftp, TransferError> {
         if location.is_archive() {
             return Err(MutationError::ReadOnlyArchive(location.clone()).into());
         }
-        return Err(crate::i18n::text!("Ожидалось подключение SFTP").into());
+        return Err(ConnectionError::ExpectedSftp(location.clone()).into());
     };
-    if let Some(channel) = cached(endpoint)? {
-        return Ok(channel);
-    }
+    let previous_channel = match cached(endpoint)? {
+        CachedChannel::Ready(channel) => return Ok(channel),
+        CachedChannel::Missing => None,
+        CachedChannel::NeedsReconnect(source) => Some(source),
+    };
     let gate = opening_gate(endpoint)?;
-    let _opening = gate.lock().map_err(err)?;
-    if let Some(channel) = cached(endpoint)? {
-        return Ok(channel);
-    }
+    let _opening = gate
+        .lock()
+        .map_err(|_| poisoned_state(endpoint, SftpStateLock::OpeningSession))?;
+    // Another worker may have reconnected while this one waited for the endpoint.
+    let previous_channel = match cached(endpoint)? {
+        CachedChannel::Ready(channel) => return Ok(channel),
+        CachedChannel::Missing => previous_channel,
+        CachedChannel::NeedsReconnect(source) => Some(source),
+    };
+    open_for_operation(endpoint).map_err(|cause| match cause {
+        TransferError::Failed(_) => ConnectionError::Automatic {
+            endpoint: endpoint.label(),
+            previous_channel,
+            cause,
+        }
+        .into(),
+        other => other,
+    })
+}
+
+fn open_for_operation(endpoint: &Endpoint) -> Result<Sftp, TransferError> {
     // Reopen a channel before the caller issues a request. Never retry the
     // request itself or move an existing file handle to another SSH session.
     let session = open_connection(
@@ -618,20 +680,12 @@ pub(super) fn remote(location: &Location) -> Result<Sftp, TransferError> {
             saved.as_ref().map(|s| s.passphrase.as_str()).unwrap_or(""),
             saved.as_ref().map(|s| s.private_key.as_str()),
         ),
-    )
-    .map_err(ConnectionError::Automatic)
-    .map_err(|error| at_target(endpoint, error.into()))?;
-    let channel = session
-        .sftp()
-        .map_err(ssh_failure(SshStage::Channel))
-        .map_err(ConnectionError::Automatic)
-        .map_err(|error| at_target(endpoint, error.into()))?;
+    )?;
+    let channel = session.sftp().map_err(ssh_failure(SshStage::Channel))?;
     // The SFTP dialog may have published a manually authenticated session
     // while this worker was opening its own channel.
     let session = Arc::new(session);
-    sessions()
-        .lock()
-        .map_err(err)?
+    lock_sessions(endpoint)?
         .entry(endpoint.clone())
         .or_insert_with(|| Arc::clone(&session));
     Ok(channel)

@@ -27,6 +27,7 @@ impl SftpSearchConnection {
         let endpoint = location.sftp_endpoint().ok_or_else(unavailable)?;
         let channel = cached(endpoint)
             .map_err(|error| AccessError::new(location, AccessAction::OpenFile, error))?
+            .ready()
             .ok_or_else(unavailable)?;
         Ok(Self {
             endpoint: endpoint.clone(),

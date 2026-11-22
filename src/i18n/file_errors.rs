@@ -7,8 +7,8 @@ use crate::file_error::{
     ManifestLineError, MetadataError, MetadataField, MetadataWarning, MoveHistoryError,
     MutationError, PathError, PermissionError, PinError, PreviewError, ProbeAction,
     PublicationError, RecoveryNotice, ReplacementRefusal, RetryError, RetryProblem, ScanError,
-    SearchError, SpaceError, SshStage, StagingCleanupError, StagingError, StagingRecordAction,
-    TransferPlanError, UndoError,
+    SearchError, SftpStateLock, SpaceError, SshStage, StagingCleanupError, StagingError,
+    StagingRecordAction, TransferPlanError, UndoError,
 };
 #[cfg(target_os = "macos")]
 use crate::file_error::{
@@ -1122,23 +1122,33 @@ fn archive_error(error: &ArchiveError) -> String {
 
 fn connection_error(error: &ConnectionError) -> String {
     match error {
-        ConnectionError::InvalidEndpoint => text!("Укажите сервер, пользователя и порт 1–65535").into(),
+        ConnectionError::InvalidEndpoint => {
+            text!("Укажите сервер, пользователя и порт 1–65535").into()
+        }
         ConnectionError::Resolve { host, source } => crate::tr_format!(
             "Could not resolve SFTP host {host}: {error}",
             host = host,
             error = source
         ),
-        ConnectionError::Connect { endpoint, last: Some((address, source)) } => crate::tr_format!(
+        ConnectionError::Connect {
+            endpoint,
+            last: Some((address, source)),
+        } => crate::tr_format!(
             "Could not connect to the SFTP server {endpoint} ({address}): {error}",
             endpoint = endpoint,
             address = address,
             error = source
         ),
-        ConnectionError::Connect { endpoint, last: None } => crate::tr_format!(
-            "No addresses found for the SFTP server {endpoint}", endpoint = endpoint
+        ConnectionError::Connect {
+            endpoint,
+            last: None,
+        } => crate::tr_format!(
+            "No addresses found for the SFTP server {endpoint}",
+            endpoint = endpoint
         ),
         ConnectionError::Transport(source) => crate::tr_format!(
-            "Could not configure the SSH connection: {error}", error = source
+            "Could not configure the SSH connection: {error}",
+            error = source
         ),
         ConnectionError::Ssh { stage, source } => {
             let prefix = match stage {
@@ -1149,7 +1159,7 @@ fn connection_error(error: &ConnectionError) -> String {
                 SshStage::InteractiveAuthentication => text!("Сервер не подтвердил интерактивную аутентификацию"),
                 SshStage::Channel => text!("Не удалось открыть канал SFTP"),
                 SshStage::Agent => return crate::tr_format!(
-                    "SSH agent ({error}). Add a key to the agent or supply a key or password in SFTP.",
+                    "SSH agent ({error}). Add your key to the agent or use the SFTP dialog to sign in with a key, password or MFA.",
                     error = source
                 ),
             };
@@ -1162,19 +1172,43 @@ fn connection_error(error: &ConnectionError) -> String {
             address = target,
             error = source
         ),
-        ConnectionError::Route { jump, address, cause } => {
+        ConnectionError::Route {
+            jump,
+            address,
+            cause,
+        } => {
             let message = file_error(cause);
             if *jump {
-                crate::tr_format!("Jump host {address} · {error}", address = address, error = message)
+                crate::tr_format!(
+                    "Jump host {address} · {error}",
+                    address = address,
+                    error = message
+                )
             } else {
-                crate::tr_format!("Target host {address} · {error}", address = address, error = message)
+                crate::tr_format!(
+                    "Target host {address} · {error}",
+                    address = address,
+                    error = message
+                )
             }
         }
-        ConnectionError::Automatic(cause) => crate::tr_format!(
-            "Could not open the SFTP connection ({error}). Use the SFTP dialog to sign in with a password or MFA.",
-            error = file_error(cause)
+        ConnectionError::ExpectedSftp(location) => {
+            format!("{} · {location}", text!("Ожидалось подключение SFTP"))
+        }
+        ConnectionError::SftpStatePoisoned { endpoint, lock } => sftp_state_error(endpoint, *lock),
+        ConnectionError::CachedChannel { endpoint, source } => crate::tr_format!(
+            "Could not open an SFTP channel on the existing SSH session for {endpoint} ({error}).",
+            endpoint = endpoint,
+            error = source
         ),
-        ConnectionError::KeyPasswordConflict => text!("Для сохранения ключа очистите пароль аккаунта").into(),
+        ConnectionError::Automatic {
+            endpoint,
+            previous_channel,
+            cause,
+        } => automatic_sftp_error(endpoint, previous_channel.as_ref(), cause),
+        ConnectionError::KeyPasswordConflict => {
+            text!("Для сохранения ключа очистите пароль аккаунта").into()
+        }
         ConnectionError::KeyFileRequired => text!("Укажите файл приватного ключа").into(),
         ConnectionError::ImportedKeyNotFile(path) => crate::tr_format!(
             "The private key path {path} must refer to a regular file.",
@@ -1195,14 +1229,82 @@ fn connection_error(error: &ConnectionError) -> String {
             "The initial SFTP path {path} is not a folder.",
             path = location
         ),
-        ConnectionError::AuthenticationUnconfirmed { interactive: true } =>
-            text!("Сервер не подтвердил интерактивную аутентификацию").into(),
-        ConnectionError::AuthenticationUnconfirmed { interactive: false } =>
-            text!("Сервер не подтвердил аутентификацию").into(),
-        ConnectionError::UnsupportedAuthentication => text!("Сервер не предложил доступный способ аутентификации").into(),
-        ConnectionError::InteractiveTimeout => text!("Время интерактивной SSH-аутентификации истекло").into(),
+        ConnectionError::AuthenticationUnconfirmed { interactive: true } => {
+            text!("Сервер не подтвердил интерактивную аутентификацию").into()
+        }
+        ConnectionError::AuthenticationUnconfirmed { interactive: false } => {
+            text!("Сервер не подтвердил аутентификацию").into()
+        }
+        ConnectionError::UnsupportedAuthentication => {
+            text!("Сервер не предложил доступный способ аутентификации").into()
+        }
+        ConnectionError::InteractiveTimeout => {
+            text!("Время интерактивной SSH-аутентификации истекло").into()
+        }
         ConnectionError::HostKeyTimeout => text!("Время проверки ключа сервера SSH истекло").into(),
         ConnectionError::Finalized => text!("Подключение SSH уже завершено").into(),
+    }
+}
+
+fn sftp_state_error(endpoint: &str, lock: SftpStateLock) -> String {
+    let state = match lock {
+        SftpStateLock::Sessions => text!("Кэш сеансов"),
+        SftpStateLock::OpeningRegistry => text!("Список открываемых сеансов"),
+        SftpStateLock::OpeningSession => text!("Открытие сеанса"),
+        SftpStateLock::DirectoryPoll => text!("Фоновое обновление папок"),
+    };
+    crate::tr_format!(
+        "Could not access SFTP session state for {endpoint} ({state}).",
+        endpoint = endpoint,
+        state = state
+    )
+}
+
+fn automatic_sftp_error(
+    endpoint: &str,
+    previous_channel: Option<&ssh2::Error>,
+    cause: &TransferError,
+) -> String {
+    let summary = if previous_channel.is_some() {
+        crate::tr_format!(
+            "Could not restore the SFTP connection to {endpoint}.",
+            endpoint = endpoint
+        )
+    } else {
+        crate::tr_format!(
+            "Could not open the SFTP connection to {endpoint}.",
+            endpoint = endpoint
+        )
+    };
+    let mut message = format!("{summary}\n{}", file_error(cause));
+    if let Some(source) = previous_channel {
+        message.push('\n');
+        message.push_str(&crate::tr_format!(
+            "A channel could not be opened on the previous SFTP session ({error}).",
+            error = source
+        ));
+    }
+    if automatic_login_failed(cause) {
+        message.push('\n');
+        message.push_str(text!(
+            "Для входа с паролем или MFA воспользуйтесь формой SFTP."
+        ));
+    }
+    message
+}
+
+fn automatic_login_failed(error: &TransferError) -> bool {
+    let TransferError::Failed(Failure::Connection(cause)) = error else {
+        return false;
+    };
+    match cause.as_ref() {
+        ConnectionError::Ssh {
+            stage: SshStage::Authentication,
+            ..
+        }
+        | ConnectionError::AuthenticationUnconfirmed { .. } => true,
+        ConnectionError::Route { cause, .. } => automatic_login_failed(cause),
+        _ => false,
     }
 }
 

@@ -8,15 +8,19 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
+fn session_socket(session: &ssh2::Session) -> TcpStream {
+    // SAFETY: the session owns the socket until the duplicate has been created.
+    let fd = unsafe { BorrowedFd::borrow_raw(session.as_raw_fd()) };
+    TcpStream::from(fd.try_clone_to_owned().unwrap())
+}
+
 fn disconnect_at_request(
     fixture: &Path,
     source: &Location,
     session: &ssh2::Session,
     wait: Duration,
 ) -> thread::JoinHandle<String> {
-    // SAFETY: the cached session is held until we have duplicated its socket.
-    let fd = unsafe { BorrowedFd::borrow_raw(session.as_raw_fd()) };
-    let socket = TcpStream::from(fd.try_clone_to_owned().unwrap());
+    let socket = session_socket(session);
     let name = source.path().file_name().unwrap().to_str().unwrap();
     let marker = fixture.join(format!("held-{name}"));
     thread::spawn(move || {
@@ -355,6 +359,102 @@ fn check_lost_permissions_replies(fixture: &Path, remote_root: &Location) {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn check_connection_diagnostics(fixture: &Path, remote_root: &Location) {
+    use crate::file_error::{ConnectionError, HostKeyError, SshStage};
+    use crate::vfs::sftp::should_reopen;
+    use std::error::Error;
+
+    let endpoint = remote_root.sftp_endpoint().unwrap();
+    let sentinel = remote_root.join("connection-sentinel.txt");
+    fs::write(sentinel.path(), b"preserve this file").unwrap();
+    assert!(read_directory(remote_root, &|| false)
+        .unwrap()
+        .iter()
+        .any(|entry| entry.path == sentinel));
+    let original = sessions().lock().unwrap()[endpoint].clone();
+    session_socket(&original).shutdown(Shutdown::Both).unwrap();
+
+    let known_hosts = fixture.join("known_hosts");
+    let trusted = fs::read_to_string(&known_hosts).unwrap();
+    let other_key = fs::read_to_string(fixture.join("other.pub")).unwrap();
+    let scope = format!("[{}]:{}", endpoint.host_name(), endpoint.port);
+    let different_key = other_key
+        .split_ascii_whitespace()
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(" ");
+    fs::write(&known_hosts, format!("{scope} {different_key}\n")).unwrap();
+    let reconnect = read_directory(remote_root, &|| false);
+    let cold_open = read_directory(remote_root, &|| false);
+    fs::write(&known_hosts, &trusted).unwrap();
+
+    for (result, had_channel) in [(reconnect, true), (cold_open, false)] {
+        let error = result.expect_err("the changed host key must block SFTP access");
+        let TransferError::Failed(Failure::Connection(failure)) = &error else {
+            panic!("missing automatic connection error: {error:?}");
+        };
+        let ConnectionError::Automatic {
+            endpoint: actual,
+            previous_channel,
+            cause: TransferError::Failed(Failure::Connection(cause)),
+        } = failure.as_ref()
+        else {
+            panic!("missing original SSH failure: {failure:?}");
+        };
+        assert_eq!(actual, &endpoint.label());
+        assert_eq!(previous_channel.is_some(), had_channel);
+        if let Some(previous) = previous_channel {
+            assert!(should_reopen(previous), "{previous:?}");
+        }
+        assert!(
+            matches!(cause.as_ref(),
+                ConnectionError::HostKey(HostKeyError::KnownHostsChanged { path, received })
+                    if path == &known_hosts && received.starts_with("SHA256:")
+            ),
+            "{cause:?}"
+        );
+        assert!(cause.source().unwrap().is::<HostKeyError>());
+        let message = crate::i18n::file_error(&error);
+        assert!(message.contains(&endpoint.label()), "{message}");
+        assert!(message.contains(known_hosts.to_str().unwrap()), "{message}");
+        assert!(!message.contains("MFA"), "{message}");
+    }
+    assert!(!sessions().lock().unwrap().contains_key(endpoint));
+    assert!(read_directory(remote_root, &|| false)
+        .unwrap()
+        .iter()
+        .any(|entry| entry.path == sentinel));
+    let recovered = sessions().lock().unwrap().remove(endpoint).unwrap();
+    assert!(!Arc::ptr_eq(&original, &recovered));
+
+    let authorized = fixture.join("client.pub");
+    let client = fs::read(&authorized).unwrap();
+    fs::write(&authorized, other_key).unwrap();
+    let refused = read_directory(remote_root, &|| false);
+    fs::write(&authorized, client).unwrap();
+    let error = refused.expect_err("the test key is no longer authorized");
+    assert!(
+        matches!(&error,
+            TransferError::Failed(Failure::Connection(reason))
+                if matches!(reason.as_ref(),
+                    ConnectionError::Automatic {
+                        endpoint: actual,
+                        previous_channel: None,
+                        cause: TransferError::Failed(Failure::Connection(cause)),
+                    } if actual == &endpoint.label()
+                        && matches!(cause.as_ref(), ConnectionError::Ssh { stage: SshStage::Agent, .. })
+                )
+        ),
+        "{error:?}"
+    );
+    let message = crate::i18n::file_error(&error);
+    assert_eq!(message.matches("MFA").count(), 1, "{message}");
+    assert_eq!(fs::read(sentinel.path()).unwrap(), b"preserve this file");
+    fs::remove_file(sentinel.path()).unwrap();
+    println!("Automatic SFTP errors retained the endpoint, changed-key cause and original disconnect. Reopening succeeded with the restored host key. Authentication refusal retained its own guidance.");
+}
+
 #[test]
 #[ignore = "requires the disposable reply-drop subsystem from scripts/test-sftp.sh"]
 fn sftp_reconnect_checks_lost_publication_replies() {
@@ -374,6 +474,8 @@ fn sftp_reconnect_checks_lost_publication_replies() {
         path: fixture.join("output"),
     };
     fs::create_dir(remote_root.path()).unwrap();
+    #[cfg(target_os = "macos")]
+    check_connection_diagnostics(&fixture, &remote_root);
     check_lost_deletion_reply(&fixture, &remote_root);
     #[cfg(target_os = "macos")]
     check_lost_permissions_replies(&fixture, &remote_root);

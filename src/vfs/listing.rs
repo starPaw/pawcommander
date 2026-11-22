@@ -1,7 +1,6 @@
-use super::err;
 use super::location::{validate_name, Location};
-use super::sftp::{cached_channel, remote, sessions};
-use crate::file_error::{ListingError, ListingErrorKind, ScanError};
+use super::sftp::{cached_channel, lock_sessions, poisoned_state, remote, try_session};
+use crate::file_error::{ListingError, ListingErrorKind, ScanError, SftpStateLock};
 use crate::operations::TransferError;
 use crate::{archive, fs_ops};
 use ssh2::{ErrorCode, File, FileStat, Sftp};
@@ -89,17 +88,14 @@ pub fn read_automatic_directory(
     let _poll = match REMOTE_POLL.try_lock() {
         Ok(poll) => poll,
         Err(TryLockError::WouldBlock) => return Ok(None),
-        Err(error) => return Err(err(error).into()),
+        Err(TryLockError::Poisoned(_)) => {
+            return Err(poisoned_state(endpoint, SftpStateLock::DirectoryPoll))
+        }
     };
-    let session = match sessions().try_lock() {
-        Ok(sessions) => sessions.get(endpoint).cloned(),
-        Err(TryLockError::WouldBlock) => return Ok(None),
-        Err(error) => return Err(err(error).into()),
-    };
-    let Some(session) = session else {
+    let Some(session) = try_session(endpoint)? else {
         return Ok(None);
     };
-    let Some(channel) = cached_channel(endpoint, &session)? else {
+    let Some(channel) = cached_channel(endpoint, &session)?.ready() else {
         return Ok(None);
     };
     read_sftp_directory(location, &channel, cancelled).map(Some)
@@ -117,12 +113,12 @@ pub fn visit_connected_directory(
     let Location::Sftp { endpoint, .. } = location else {
         return visit_directory(location, cancelled, visit);
     };
-    let session = sessions().lock().map_err(err)?.get(endpoint).cloned();
+    let session = lock_sessions(endpoint)?.get(endpoint).cloned();
     if cancelled() {
         return Ok(());
     }
     let channel = match session {
-        Some(session) => cached_channel(endpoint, &session)?,
+        Some(session) => cached_channel(endpoint, &session)?.ready(),
         None => None,
     };
     let channel = channel.ok_or_else(|| {
@@ -145,7 +141,7 @@ pub fn visit_address_directory(
         return visit_directory(location, cancelled, visit);
     };
     let connected = {
-        let sessions = sessions().lock().map_err(err)?;
+        let sessions = lock_sessions(endpoint)?;
         let exact = sessions.get_key_value(endpoint);
         let matched = exact.or_else(|| {
             if !allow_unique_session {
@@ -161,7 +157,7 @@ pub fn visit_address_directory(
         matched.map(|(endpoint, session)| (endpoint.clone(), session.clone()))
     };
     if let Some((endpoint, session)) = connected.filter(|_| !cancelled())
-        && let Some(channel) = cached_channel(&endpoint, &session)?
+        && let Some(channel) = cached_channel(&endpoint, &session)?.ready()
     {
         let location = Location::Sftp {
             endpoint,
