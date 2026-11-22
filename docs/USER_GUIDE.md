@@ -311,6 +311,8 @@ To transfer a collection, open its common parent folder first. Under **Import an
 
 An import or export error names the collection file. If a particular entry caused the error, the message also shows its position and path. Export preserves files already using the chosen name.
 
+Portable collections also work on SMB shares. If a PawCommander connection drops or the mounted share changes during import, the collection stays out of the catalog. An SMB export uses an unused filename. If the connection drops after creation and the export reports an unconfirmed write, check the new file before retrying.
+
 ## Create files from templates on macOS
 
 Open a local or SFTP folder and choose **New file** from Settings or the command palette. Choose blank text, Markdown, JSON, CSV or a saved template and enter the file name. Built-in templates let you edit their contents and select UTF-8, UTF-8 with BOM, UTF-16 LE or BE with BOM, Windows-1251 or Windows-1252. If the text contains characters that the chosen encoding cannot represent, the dialog asks you to change the encoding.

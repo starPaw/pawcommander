@@ -155,6 +155,11 @@ impl ReadScope {
         Ok(())
     }
 
+    #[cfg(target_os = "macos")]
+    pub(super) fn owned_smb_mount(&self) -> Option<&MutationMount> {
+        self.mount.as_ref().filter(|mount| mount.is_owned())
+    }
+
     pub(super) fn verify_root(&self) -> Result<(), TransferError> {
         #[cfg(target_os = "macos")]
         self.verify_mount()?;
@@ -389,6 +394,16 @@ pub(super) fn local_subdirectory(
     relative: &Path,
     cancel: &Cancellation,
 ) -> io::Result<Option<OwnedFd>> {
+    local_subdirectory_with_flags(root, relative, cancel, directory_flags())
+}
+
+#[cfg(unix)]
+pub(super) fn local_subdirectory_with_flags(
+    root: &OwnedFd,
+    relative: &Path,
+    cancel: &Cancellation,
+    flags: rustix::fs::OFlags,
+) -> io::Result<Option<OwnedFd>> {
     use rustix::fs::{openat, Mode};
 
     let mut directory = None;
@@ -401,7 +416,7 @@ pub(super) fn local_subdirectory(
             openat(
                 directory.as_ref().unwrap_or(root),
                 name,
-                directory_flags(),
+                flags,
                 Mode::empty(),
             )
             .map_err(io::Error::from)?,

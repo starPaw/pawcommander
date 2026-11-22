@@ -444,8 +444,7 @@ impl CollectionsDialog {
                 let root = root.clone();
                 self.start(ui.ctx(), move |progress| {
                     let group = collections::import(&root, &source, progress)?;
-                    let mut group = group;
-                    let states = group.refresh(progress)?;
+                    let states = group.members.iter().map(|_| None).collect();
                     Ok(ResultView::Imported {
                         update: Update { group, states },
                         source,

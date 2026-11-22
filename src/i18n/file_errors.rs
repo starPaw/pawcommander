@@ -2432,6 +2432,8 @@ fn mutation_error(error: &MutationError, unconfirmed: bool) -> String {
                 SmbMutationAction::EditArchive => text!("Не удалось изменить архив"),
                 SmbMutationAction::CreateChecksumManifest => text!("Не удалось создать манифест SHA-256"),
                 SmbMutationAction::VerifyChecksumManifest => text!("Не удалось сверить манифест SHA-256"),
+                SmbMutationAction::ImportCollection => text!("Не удалось импортировать коллекцию"),
+                SmbMutationAction::ExportCollection => text!("Не удалось экспортировать коллекцию"),
             };
             crate::tr_format!(
                 "{action} at {path} ({error})",
