@@ -55,7 +55,7 @@ pub(crate) use checksum::{
 };
 pub(crate) use compare::{compare_folders, Comparison, ComparisonMode, ComparisonStatus};
 #[cfg(target_os = "macos")]
-pub(crate) use external_editor::RemoteEdit;
+pub(crate) use external_editor::{RemoteEdit, SaveOutcome as RemoteEditSaveOutcome};
 pub(crate) use file_compare::{
     compare_files, DiffKind, DiffRow, FileComparison, FileDifference, TextDifference,
 };

@@ -268,6 +268,17 @@ impl PawCommander {
     }
 
     #[cfg(target_os = "macos")]
+    pub(super) fn start_typed_stoppable_job(
+        &mut self,
+        ctx: &egui::Context,
+        label: &str,
+        description: String,
+        work: impl FnOnce(&mut Progress) -> Result<String, TransferError> + Send + 'static,
+    ) {
+        self.start_conflict_job(ctx, label, description, move |progress, _| work(progress));
+    }
+
+    #[cfg(target_os = "macos")]
     pub(super) fn enqueue_compatible_names(
         &mut self,
         plan: crate::vfs::compatible_names::Plan,
@@ -435,7 +446,7 @@ impl PawCommander {
         );
     }
 
-    pub(super) fn start_conflict_job(
+    pub(super) fn start_conflict_job<E: Into<TransferError>>(
         &mut self,
         ctx: &egui::Context,
         label: &str,
@@ -443,7 +454,7 @@ impl PawCommander {
         work: impl FnOnce(
                 &mut Progress,
                 &mut dyn FnMut(Conflict) -> Result<Answer, TransferError>,
-            ) -> Result<String, String>
+            ) -> Result<String, E>
             + Send
             + 'static,
     ) {
@@ -459,7 +470,7 @@ impl PawCommander {
                     work(progress, &mut |conflict| {
                         ask_conflict(&events, &worker_ctx, &cancel, conflict)
                     })
-                    .map_err(TransferError::from)
+                    .map_err(Into::into)
                 }),
                 transfer: Some(TransferInteraction {
                     events: receive,
