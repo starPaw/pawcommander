@@ -1,7 +1,7 @@
 //! Bounded reads rooted at a folder, with identity and version checks.
 use super::{
     transfer::{
-        checked_source_metadata, entry_metadata, EntryMetadata, SourceReader, TransferSourceEntry,
+        entry_metadata, read_entry_metadata, EntryMetadata, SourceReader, TransferSourceEntry,
     },
     undo::Parent,
     Location,
@@ -11,7 +11,6 @@ use crate::{
         AccessAction, AccessError, Failure, ListingError, ListingErrorKind, MutationError,
         ScanError,
     },
-    i18n::text,
     operations::{Cancellation, Progress, TransferError},
 };
 use std::path::{Component, Path};
@@ -31,6 +30,13 @@ pub(super) struct CheckedFile<'a> {
     source: Location,
     stamp: TransferSourceEntry,
     input: SourceReader,
+    presence: FilePresence,
+}
+
+#[derive(Clone, Copy)]
+enum FilePresence {
+    Optional,
+    Required,
 }
 
 impl CheckedFile<'_> {
@@ -50,7 +56,8 @@ impl CheckedFile<'_> {
             &self.source,
             &self.input.metadata(&self.source)?,
         )?;
-        let Some((source, mut current)) = self.scope.input(self.path, cancel)? else {
+        let Some((source, mut current)) = self.scope.input(self.path, cancel, self.presence)?
+        else {
             return Err(ScanError::FileChanged(self.source.clone()).into());
         };
         verify_version(&self.stamp, &source, &current.metadata(&source)?)
@@ -122,7 +129,25 @@ impl ReadScope {
         path: &'a Path,
         cancel: &Cancellation,
     ) -> Result<Option<CheckedFile<'a>>, TransferError> {
-        let Some((source, mut input)) = self.input(path, cancel)? else {
+        self.open_file_with_presence(path, cancel, FilePresence::Optional)
+    }
+
+    pub(super) fn require_file<'a>(
+        &'a self,
+        path: &'a Path,
+        cancel: &Cancellation,
+    ) -> Result<CheckedFile<'a>, TransferError> {
+        self.open_file_with_presence(path, cancel, FilePresence::Required)?
+            .ok_or_else(|| ScanError::FileMissing(self.parent.location.join(path)).into())
+    }
+
+    fn open_file_with_presence<'a>(
+        &'a self,
+        path: &'a Path,
+        cancel: &Cancellation,
+        presence: FilePresence,
+    ) -> Result<Option<CheckedFile<'a>>, TransferError> {
+        let Some((source, mut input)) = self.input(path, cancel, presence)? else {
             return Ok(None);
         };
         let metadata = input.metadata(&source)?;
@@ -139,6 +164,7 @@ impl ReadScope {
                 children: None,
             },
             input,
+            presence,
         }))
     }
 
@@ -146,6 +172,7 @@ impl ReadScope {
         &self,
         path: &Path,
         cancel: &Cancellation,
+        presence: FilePresence,
     ) -> Result<Option<(Location, SourceReader)>, TransferError> {
         cancel.check()?;
         #[cfg(unix)]
@@ -153,7 +180,9 @@ impl ReadScope {
             let source = self.parent.location.join(path);
             return match local_input(root, path, &source, cancel) {
                 Ok(file) => Ok(Some((source, SourceReader::Local(file)))),
-                Err(TransferError::Failed(Failure::Access(error))) if error.cause.is_absent() => {
+                Err(TransferError::Failed(Failure::Access(error)))
+                    if matches!(presence, FilePresence::Optional) && error.cause.is_absent() =>
+                {
                     Ok(None)
                 }
                 Err(error) => Err(error),
@@ -166,9 +195,16 @@ impl ReadScope {
             return Ok(None);
         };
         let source = directory.join(path.file_name().ok_or_else(unsupported)?);
-        let Some(metadata) = checked_source_metadata(&source)? else {
-            return Ok(None);
+        let metadata = match read_entry_metadata(&source) {
+            Ok(metadata) => metadata,
+            Err(cause) if matches!(presence, FilePresence::Optional) && cause.is_absent() => {
+                return Ok(None);
+            }
+            Err(cause) => {
+                return Err(AccessError::new(&source, AccessAction::ReadMetadata, cause).into());
+            }
         };
+        metadata.check_sftp_source(&source)?;
         if !metadata.is_file() {
             return Err(ScanError::ExpectedRegularFile(source).into());
         }
@@ -350,8 +386,9 @@ fn local_input(
         })
 }
 
+#[cfg(target_os = "macos")]
 pub(super) fn changed_during_read() -> TransferError {
-    text!("Файл изменился во время чтения").into()
+    crate::i18n::text!("Файл изменился во время чтения").into()
 }
 
 #[cfg(all(test, unix))]

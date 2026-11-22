@@ -1672,6 +1672,26 @@ fn scan_error(error: &ScanError) -> String {
             return text!("Достигнут предел сравнения: 100 000 объектов или 32 МиБ данных о путях",)
                 .into()
         }
+        ScanError::ComparisonFolder { file, cause } => {
+            return crate::tr_format!(
+                "Could not verify the folder containing {file}.\n{error}",
+                file = file.display().escape_debug(),
+                error = file_error(cause)
+            );
+        }
+        ScanError::ShortComparisonRead {
+            file,
+            expected,
+            actual,
+        } => {
+            return crate::tr_format!(
+                "Expected {expected} bytes from {file} but read {actual}.",
+                file = file.display().escape_debug(),
+                expected = expected,
+                actual = actual
+            );
+        }
+        ScanError::FileMissing(location) => (text!("Файл отсутствует"), location),
         ScanError::FileChanged(location) => (text!("Файл изменился во время чтения"), location),
         ScanError::ExpectedRegularFile(location) => (
             text!("Для проверки подходят только обычные файлы без ссылок"),

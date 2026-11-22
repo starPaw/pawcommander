@@ -118,7 +118,15 @@ impl FileComparisonDialog {
                     show_result(ui, result, &mut self.show_matches, self.run)
                 }
                 Phase::Failed(error) => {
-                    ui.colored_label(ui.visuals().error_fg_color, error);
+                    let height = (ctx.content_rect().height() * 0.35).clamp(90.0, 280.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt(("file-comparison-error", self.run))
+                        .max_height(height)
+                        .show(ui, |ui| {
+                            let message =
+                                RichText::new(error.as_str()).color(ui.visuals().error_fg_color);
+                            ui.add(egui::Label::new(message).wrap().selectable(true));
+                        });
                 }
                 Phase::Stopped => {
                     ui.label(text!("Сравнение остановлено"));

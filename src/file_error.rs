@@ -703,6 +703,16 @@ pub(crate) enum ScanError {
     UnsupportedComparisonType(Location),
     MissingComparisonMetadata(Location),
     ComparisonLimit,
+    ComparisonFolder {
+        file: Location,
+        cause: Box<TransferError>,
+    },
+    ShortComparisonRead {
+        file: Location,
+        expected: u64,
+        actual: u64,
+    },
+    FileMissing(Location),
     FileChanged(Location),
     ExpectedRegularFile(Location),
     #[cfg(target_os = "macos")]
@@ -769,6 +779,17 @@ impl fmt::Display for ScanError {
             Self::ComparisonLimit => {
                 f.write_str("Folder comparison exceeded its entry or path limit")
             }
+            Self::ComparisonFolder { file, cause } => {
+                write!(f, "Could not verify the folder containing {file}: {cause}")
+            }
+            Self::ShortComparisonRead {
+                file,
+                expected,
+                actual,
+            } => {
+                write!(f, "Expected {expected} bytes from {file} but read {actual}")
+            }
+            Self::FileMissing(location) => write!(f, "File missing at {location}"),
             Self::FileChanged(location) => write!(f, "File {location} changed while reading"),
             Self::ExpectedRegularFile(location) => {
                 write!(f, "Expected a regular file at {location}")
@@ -813,6 +834,7 @@ impl Error for ScanError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::PropertiesStart(source) => Some(source),
+            Self::ComparisonFolder { cause, .. } => Some(cause.as_ref()),
             #[cfg(target_os = "macos")]
             Self::FolderFingerprint { source, .. } => Some(source),
             _ => None,

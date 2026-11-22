@@ -318,6 +318,8 @@ formats! {
     "Analysis stopped after exceeding the limit of {maximum} entries.\n{location}" => ("Анализ остановлен. Превышен лимит в {maximum} объектов.\n{location}", "Analýza se zastavila po překročení limitu {maximum} položek.\n{location}"),
     "Analysis stopped after exceeding the path budget of {maximum} bytes.\n{location}" => ("Анализ остановлен. Общая длина путей превысила {maximum} байт.\n{location}", "Analýza se zastavila, protože souhrnná délka cest překročila {maximum} bajtů.\n{location}"),
     "Analysis stopped after exceeding the depth limit of {maximum} levels.\n{location}" => ("Анализ остановлен. Превышена глубина в {maximum} уровней.\n{location}", "Analýza se zastavila po překročení hloubky {maximum} úrovní.\n{location}"),
+    "Could not verify the folder containing {file}.\n{error}" => ("Не удалось проверить папку с файлом {file}.\n{error}", "Složku se souborem {file} se nepodařilo ověřit.\n{error}"),
+    "Expected {expected} bytes from {file} but read {actual}." => ("Из файла {file} прочитано {actual} байт из ожидаемых {expected}.", "Ze souboru {file} bylo přečteno {actual} z očekávaných {expected} bajtů."),
     "{size} (partial)" => ("{size} (частично)", "{size} (částečně)"),
     "\nAllocated: {bytes} bytes" => ("\nВыделено: {bytes} байт", "\nPřiděleno: {bytes} B"),
     "\nAllocated space counted: {bytes} bytes (partial)" => ("\nУчтено на диске: {bytes} байт (частично)", "\nZapočtené přidělené místo: {bytes} B (částečně)"),

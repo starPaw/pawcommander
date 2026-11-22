@@ -6,11 +6,13 @@ mod tests;
 pub(super) use tests::file_comparison_round_trip;
 
 use super::{
-    read_scope::{changed_during_read, CheckedFile, ReadScope},
+    compare::side_error,
+    read_scope::{CheckedFile, ReadScope},
+    transfer::canonical,
     Location,
 };
 use crate::{
-    i18n::text,
+    file_error::{AccessError, MutationError, ScanError},
     operations::{Cancellation, Progress, TransferError},
     preview::decode_comparison_text,
 };
@@ -58,14 +60,18 @@ pub(crate) fn compare_files(
         .file(&cancel)
         .map_err(|error| side_error(1, error))?;
     let result = compare_readers([left.stream(), right.stream()], progress, &cancel)?;
-    left.verify(&cancel).map_err(|error| side_error(0, error))?;
-    right
-        .verify(&cancel)
+    first_root
+        .verify(&mut left, &cancel)
+        .map_err(|error| side_error(0, error))?;
+    second_root
+        .verify(&mut right, &cancel)
         .map_err(|error| side_error(1, error))?;
     Ok(result)
 }
 
 struct FileInput<'a> {
+    file: &'a Location,
+    parent: Location,
     scope: ReadScope,
     name: &'a Path,
 }
@@ -73,19 +79,64 @@ struct FileInput<'a> {
 impl<'a> FileInput<'a> {
     fn open(path: &'a Location) -> Result<Self, TransferError> {
         if path.is_archive() {
-            return Err(crate::archive::readonly().into());
+            return Err(MutationError::ReadOnlyArchive(path.clone()).into());
         }
-        let parent = path.parent().ok_or_else(missing)?;
-        let name = path.path().file_name().map(Path::new).ok_or_else(missing)?;
+        let unsupported = || ScanError::ExpectedRegularFile(path.clone());
+        let parent = path.parent().ok_or_else(unsupported)?;
+        let name = path
+            .path()
+            .file_name()
+            .map(Path::new)
+            .ok_or_else(unsupported)?;
+        let containing_folder = |cause| folder_error(path, cause);
+        let scope = ReadScope::open(&parent).map_err(containing_folder)?;
+        #[cfg(target_os = "macos")]
+        if scope.descriptor.is_some() {
+            // Confirm that the opened directory and the current path identify the same folder.
+            super::guarded_directory::Directory::from_scope(&scope).map_err(containing_folder)?;
+        }
         Ok(Self {
-            scope: ReadScope::open(&parent)?,
+            file: path,
+            parent,
+            scope,
             name,
         })
     }
 
     fn file(&self, cancel: &Cancellation) -> Result<CheckedFile<'_>, TransferError> {
-        self.scope.open_file(self.name, cancel)?.ok_or_else(missing)
+        self.scope.require_file(self.name, cancel)
     }
+
+    fn verify(
+        &self,
+        input: &mut CheckedFile<'_>,
+        cancel: &Cancellation,
+    ) -> Result<(), TransferError> {
+        input.verify(cancel)?;
+        let containing_folder = |cause| folder_error(self.file, cause);
+        // The descriptor can still read a folder that has moved away from the selected path.
+        self.scope.verify_root().map_err(containing_folder)?;
+        let captured = self.scope.parent.location.path();
+        if self.parent.path() != captured
+            && canonical(&self.parent).map_err(containing_folder)? != captured
+        {
+            return Err(containing_folder(
+                ScanError::FolderUnavailable(self.parent.clone()).into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn folder_error(file: &Location, cause: TransferError) -> TransferError {
+    if matches!(cause, TransferError::Cancelled) {
+        return cause;
+    }
+    ScanError::ComparisonFolder {
+        file: file.clone(),
+        cause: Box::new(cause),
+    }
+    .into()
 }
 
 fn compare_readers<R: Read>(
@@ -120,7 +171,11 @@ fn compare_readers<R: Read>(
             stream_difference([left, right], sizes, cancel).map_err(|error| match error {
                 StreamDifferenceError::Cancelled => TransferError::Cancelled,
                 StreamDifferenceError::Read { right, source } => {
-                    side_error(usize::from(right), source.into())
+                    let location = if right { right_path } else { left_path };
+                    side_error(
+                        usize::from(right),
+                        AccessError::read(location, source).into(),
+                    )
                 }
             })?;
         let kind = if first.is_none() {
@@ -146,12 +201,19 @@ fn read_small(
     progress: &mut Progress,
 ) -> Result<Vec<u8>, TransferError> {
     let mut bytes = Vec::with_capacity(size as usize);
-    let read = progress.read_stream(source.path(), size, input, |input| {
-        input.read_to_end(&mut bytes)?;
-        Ok(())
-    })?;
+    let read = progress
+        .read_stream(source.path(), size, input, |input| {
+            input.read_to_end(&mut bytes)?;
+            Ok(())
+        })
+        .map_err(|error| AccessError::read(source, error))?;
     if read != size {
-        return Err(changed_during_read());
+        return Err(ScanError::ShortComparisonRead {
+            file: source.clone(),
+            expected: size,
+            actual: read,
+        }
+        .into());
     }
     Ok(bytes)
 }
@@ -221,20 +283,4 @@ fn difference_at(left: &[u8], right: &[u8]) -> Option<usize> {
         .zip(right)
         .position(|(a, b)| a != b)
         .or_else(|| (left.len() != right.len()).then_some(left.len().min(right.len())))
-}
-
-fn missing() -> TransferError {
-    text!("Файл отсутствует").into()
-}
-
-fn side_error(side: usize, error: TransferError) -> TransferError {
-    if matches!(error, TransferError::Cancelled) {
-        return error;
-    }
-    let pane = if side == 0 {
-        text!("Левая панель")
-    } else {
-        text!("Правая панель")
-    };
-    format!("{pane} · {error}").into()
 }

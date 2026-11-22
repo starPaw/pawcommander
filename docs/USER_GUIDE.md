@@ -353,7 +353,7 @@ Changing the exclusion rules starts a new comparison scope for two-way sync. The
 
 Select one regular file in each pane and choose **Compare files** from the command palette or Settings. Local and SFTP files can be compared. The result shows both sizes and the first differing byte. For text, the dialog shows additions, removals and neighboring lines with their original line numbers. **Show matches** expands the rest of the text. Byte differences remain visible when decoded lines match across encodings or line endings.
 
-Text comparison accepts UTF-8 and auto-detects UTF-16 with a byte-order mark. It supports up to 2 MiB and 30,000 lines per file. The viewer shortens very long displayed lines and can group extensive edits into one block. Comparison by bytes also works for binary files and files beyond the text limits. Use **Stop** to end the comparison.
+Text comparison accepts UTF-8 and auto-detects UTF-16 with a byte-order mark. It supports up to 2 MiB and 30,000 lines per file. The viewer shortens very long displayed lines and can group extensive edits into one block. Comparison by bytes also works for binary files and files beyond the text limits. Use **Stop** to end the comparison. If a file becomes unavailable or changes, the dialog shows the affected pane, path and cause. Choose **Compare again** after resolving the problem.
 
 For two local files, **Open in external tool** hands both paths to the executable set under **Settings → Tools**. The executable accepts the left and right paths as its two arguments. An empty setting uses FileMerge when PawCommander finds it. Use **Check again** to refresh automatic detection. [Apple's FileMerge command reference](https://developer.apple.com/documentation/xcode/xcode-command-line-tool-reference)
 
