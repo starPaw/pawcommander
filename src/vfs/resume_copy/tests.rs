@@ -782,6 +782,135 @@ fn move_recovery_preserves_held_source_and_recognizes_acknowledged_removal() {
 }
 
 #[test]
+fn draft_receipt_failure_removes_only_the_empty_preparation() {
+    for folder in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let parent = root.join("destination");
+        let source: Location = root.join("source").into();
+        let target: Location = parent.join("data").into();
+        let recovery = root.join("recovery");
+        fs::create_dir(&parent).unwrap();
+        if folder {
+            fs::create_dir(source.path()).unwrap();
+        } else {
+            fs::write(source.path(), b"original").unwrap();
+            fs::write(target.path(), b"older destination").unwrap();
+        }
+        fs::write(&recovery, b"keep the existing recovery path").unwrap();
+        let item = TransferItem::new(source.clone(), source.clone(), target.clone());
+        let mut progress = Progress::default();
+        let expected = entry_metadata(&target).unwrap();
+        let published = || panic!("publication must not start without a receipt");
+        let result = if folder {
+            copy_folder(&item, &recovery, &mut progress, published)
+        } else {
+            copy(
+                &item,
+                expected.as_ref(),
+                &recovery,
+                &mut progress,
+                published,
+            )
+        };
+        let TransferError::Failed(Failure::Staging(error)) = result.unwrap_err() else {
+            panic!("expected a receipt creation error");
+        };
+        assert!(matches!(
+            *error,
+            StagingError::ResumeReceipt { staging, source }
+                if staging.parent().unwrap().path() == parent && source.path == receipts(&recovery)
+        ));
+        assert!(staged_payload(&parent).is_none());
+        assert!(!progress.partial_copy_retained);
+        assert_eq!(
+            fs::read(&recovery).unwrap(),
+            b"keep the existing recovery path"
+        );
+        if folder {
+            assert!(source.path().is_dir() && !target.path().exists());
+        } else {
+            assert_eq!(fs::read(source.path()).unwrap(), b"original");
+            assert_eq!(fs::read(target.path()).unwrap(), b"older destination");
+        }
+    }
+}
+
+#[test]
+fn stopped_preparation_preserves_a_replaced_file_or_nonempty_folder() {
+    for folder in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let parent = root.join("destination");
+        let source: Location = root.join("source").into();
+        let target: Location = parent.join("data").into();
+        let recovery = root.join("recovery");
+        fs::create_dir(&parent).unwrap();
+        if folder {
+            fs::create_dir(source.path()).unwrap();
+        } else {
+            fs::write(source.path(), b"original").unwrap();
+        }
+        let item = TransferItem::new(source.clone(), source.clone(), target.clone());
+        let mut progress = Progress::default();
+        let saved = root.join("original-empty-payload");
+        let (watch, saved_payload) = (parent.clone(), saved.clone());
+        progress.cancellation().set_checkpoint(move || {
+            let Some(payload) = staged_payload(&watch).filter(|path| path.exists()) else {
+                return false;
+            };
+            if folder {
+                fs::write(payload.join("foreign"), b"preserve me").unwrap();
+            } else {
+                // Keep the old inode live so the replacement has a different identity.
+                fs::rename(&payload, &saved_payload).unwrap();
+                fs::write(&payload, b"").unwrap();
+            }
+            true
+        });
+        let published = || panic!("publication must not start after Stop");
+        let result = if folder {
+            copy_folder(&item, &recovery, &mut progress, published)
+        } else {
+            copy(&item, None, &recovery, &mut progress, published)
+        };
+        let TransferError::Failed(Failure::StagingCleanup(error)) = result.unwrap_err() else {
+            panic!("expected both cancellation and cleanup failure");
+        };
+        let payload = staged_payload(&parent).unwrap();
+        assert!(matches!(error.operation, Some(TransferError::Cancelled)));
+        assert!(progress.results.cancelled);
+        assert_eq!(error.staging.path(), payload.parent().unwrap());
+        assert!(!progress.partial_copy_retained && !target.path().exists());
+        assert!(scan(&recovery).0.is_empty());
+        if folder {
+            assert!(matches!(
+                error.cleanup,
+                TransferError::Failed(Failure::Access(access))
+                    if access.location.path() == payload
+                        && matches!(access.action, AccessAction::RemoveStagingDirectory)
+                        && matches!(&access.cause, crate::file_error::AccessCause::Local(cause)
+                            if cause.raw_os_error() == Some(libc::ENOTEMPTY))
+            ));
+            assert_eq!(fs::read(payload.join("foreign")).unwrap(), b"preserve me");
+        } else {
+            assert_resume_check(
+                &error.cleanup,
+                ResumeRole::Staged,
+                &payload,
+                ResumeCheckProblem::Changed,
+            );
+            assert_eq!(fs::metadata(&payload).unwrap().len(), 0);
+            assert_ne!(
+                fs::metadata(&payload).unwrap().ino(),
+                fs::metadata(&saved).unwrap().ino()
+            );
+            assert_eq!(fs::read(source.path()).unwrap(), b"original");
+        }
+    }
+}
+
+#[test]
 fn aborted_move_preparation_cleans_only_known_staging() {
     for stop in [false, true] {
         let temp = tempfile::tempdir().unwrap();

@@ -2,7 +2,7 @@
 //! Moves retain original access times separately because reading changes them.
 use super::{
     checked_digest, copy_metadata, copy_suffix, discard_empty_stage, entry_metadata, file_scope,
-    finish_cancelled_cleanup, finish_published_copy, manifest_error, register_copy,
+    finish_cancelled_cleanup, finish_published_copy, manifest_error, prepare_draft,
     remove_staged_entry, rename_for_publication, required_metadata, retained_error, stage_contents,
     stage_identity, verify_stamp, verify_target, Cancellation, Completion, EntryMetadata,
     FileProof, Intent, Location, Original, Paths, Progress, Receipt, RenamedIdentity, SavedTime,
@@ -432,10 +432,7 @@ pub(super) fn start(
         None
     };
     let cancel = progress.cancellation();
-    with_preserved_staging(&target, &cancel, |stage, preserve| {
-        *preserve = false;
-        check_copy_space(snapshot.bytes, &target, stage)?;
-        mkdir(&stage.join("payload"), &target)?;
+    with_preserved_staging(&target, &cancel, |stage, _| {
         let record = Receipt {
             intent,
             source: (&source).into(),
@@ -447,14 +444,15 @@ pub(super) fn start(
             folder_access_times: None,
             previous: None,
         };
-        let ticket = register_copy(
+        let ticket = prepare_draft(
             directory,
             stage,
+            &target,
             record,
+            snapshot.bytes,
             original_access_times.as_deref(),
-            &cancel,
+            progress,
         )?;
-        *preserve = true;
         let paths = ticket.paths()?;
         finish(&ticket, &paths, Some(snapshot), progress, published)?;
         after(&ticket, &paths, progress)
@@ -646,7 +644,7 @@ fn at(root: &Location, relative: &Path) -> Location {
     }
 }
 
-fn mkdir(location: &Location, report_at: &Location) -> Result<(), TransferError> {
+pub(super) fn mkdir(location: &Location, report_at: &Location) -> Result<(), TransferError> {
     let action = AccessAction::CreateDirectory;
     if let Some(path) = location.local() {
         fs::DirBuilder::new()

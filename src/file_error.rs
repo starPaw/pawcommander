@@ -992,7 +992,8 @@ impl StagingCleanupError {
                 StagingError::Journal {
                     action: StagingRecordAction::Register,
                     ..
-                }
+                } | StagingError::ResumeReceipt { .. }
+                    | StagingError::ResumeReceiptCleanup { .. }
             ),
             _ => false,
         }
