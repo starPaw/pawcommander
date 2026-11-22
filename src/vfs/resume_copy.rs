@@ -248,6 +248,16 @@ struct SourceStagePreparation {
     marker_opened: bool,
 }
 
+enum EmptyPayload {
+    File(Option<FileStamp>),
+    Directory(Option<(u64, u64)>),
+}
+
+struct DraftMarker {
+    name: String,
+    stamp: Option<FileStamp>,
+}
+
 // Keep the version-one file record readable, including copies interrupted by an
 // earlier build. Folder receipts add a different proof under the same field.
 #[derive(Deserialize, Serialize)]
@@ -374,11 +384,8 @@ fn start_file(
             None
         }
     };
-    with_preserved_staging(&target, &cancel, |stage, preserve| {
-        *preserve = false;
-        check_copy_space(original.stamp.size(), &target, stage)?;
-        let payload = stage.join("payload");
-        StagedFile::open_for(&payload, &target, cancel.clone())?.close()?;
+    with_preserved_staging(&target, &cancel, |stage, _| {
+        let bytes = original.stamp.size();
         let receipt = Receipt {
             intent,
             source: (&source).into(),
@@ -390,43 +397,130 @@ fn start_file(
             folder_access_times: None,
             previous,
         };
-        let ticket = register_copy(directory, stage, receipt, None, &cancel)?;
-        *preserve = true;
+        let ticket = prepare_draft(directory, stage, &target, receipt, bytes, None, progress)?;
         let paths = ticket.paths()?;
         finish_copy(&ticket, &paths, progress, false, published)?;
         after(&ticket, &paths, progress)
     })
 }
 
-fn register_copy(
+fn prepare_draft(
     directory: &Path,
     stage: &Location,
+    target: &Location,
     receipt: Receipt,
+    bytes: u64,
     folder_access_times: Option<&[Option<SavedTime>]>,
-    cancel: &Cancellation,
+    progress: &mut Progress,
 ) -> Result<Ticket, TransferError> {
-    let directory = receipts(directory);
-    let ticket = Ticket::create(&directory, receipt, folder_access_times).map_err(|source| {
-        StagingError::ResumeReceipt {
-            staging: stage.clone(),
-            source,
+    let cancel = progress.cancellation();
+    let identity = receipt.stage_identity;
+    let mut payload_proof = None;
+    let mut marker_proof = None;
+    let result = (|| {
+        check_copy_space(bytes, target, stage)?;
+        cancel.check()?;
+        let payload = stage.join("payload");
+        if matches!(&receipt.original, Original::Folder(_)) {
+            tree::mkdir(&payload, target)?;
+            payload_proof = Some(EmptyPayload::Directory(stage_identity(&payload)?));
+        } else {
+            let file = StagedFile::open_for(&payload, target, cancel.clone())?;
+            payload_proof = Some(EmptyPayload::File(staged_local_stamp(&payload, &file)?));
+            file.close()?;
         }
-    })?;
-    if let Err(cause) = create_owner_marker(stage, ticket.name(), cancel) {
-        if let Err(source) = ticket.finish() {
-            return Err(StagingError::ResumeReceiptCleanup { cause, source }.into());
+        cancel.check()?;
+        let ticket = Ticket::create(&receipts(directory), receipt, folder_access_times).map_err(
+            |source| StagingError::ResumeReceipt {
+                staging: stage.clone(),
+                source,
+            },
+        )?;
+        let marking = (|| {
+            let path = stage.join(ticket.name());
+            let marker = StagedFile::open(&path, cancel.clone())?;
+            marker_proof = Some(DraftMarker {
+                name: ticket.name().to_owned(),
+                stamp: staged_local_stamp(&path, &marker)?,
+            });
+            marker.close()
+        })();
+        if let Err(cause) = marking {
+            if let Err(source) = ticket.finish() {
+                return Err(StagingError::ResumeReceiptCleanup { cause, source }.into());
+            }
+            return Err(cause);
         }
-        return Err(cause);
-    }
-    Ok(ticket)
+        Ok(ticket)
+    })();
+    result.map_err(|cause| {
+        progress.results.cancelled |= match &cause {
+            TransferError::Cancelled => true,
+            TransferError::Failed(Failure::Staging(error)) => matches!(
+                error.as_ref(),
+                StagingError::ResumeReceiptCleanup {
+                    cause: TransferError::Cancelled,
+                    ..
+                }
+            ),
+            _ => false,
+        };
+        match discard_prepared_draft(stage, identity, payload_proof, marker_proof) {
+            Ok(()) => cause,
+            Err(cleanup) => {
+                StagingCleanupError::failed_cleanup(Some(cause), cleanup, stage, target)
+            }
+        }
+    })
 }
 
-fn create_owner_marker(
+fn staged_local_stamp(
+    path: &Location,
+    file: &StagedFile,
+) -> Result<Option<FileStamp>, TransferError> {
+    file.local_metadata()?
+        .as_ref()
+        .map(|metadata| FileStamp::from(path, metadata, ResumeRole::Staged))
+        .transpose()
+}
+
+fn discard_prepared_draft(
     stage: &Location,
-    name: &str,
-    cancel: &Cancellation,
+    identity: Option<(u64, u64)>,
+    payload: Option<EmptyPayload>,
+    marker: Option<DraftMarker>,
 ) -> Result<(), TransferError> {
-    StagedFile::open(&stage.join(name), cancel.clone())?.close()
+    if identity.is_none() && marker.is_none() {
+        return Err(StagingError::IdentityUnavailable(stage.clone()).into());
+    }
+    let children: &[&str] = if payload.is_some() { &["payload"] } else { &[] };
+    check_stage_entries(
+        stage,
+        identity,
+        marker.as_ref().map(|marker| marker.name.as_str()),
+        children,
+    )?;
+    if let Some(marker) = &marker {
+        verify_empty_staged_file(&stage.join(&marker.name), marker.stamp)?;
+    }
+    if let Some(payload) = payload {
+        let path = stage.join("payload");
+        let directory = match payload {
+            EmptyPayload::File(stamp) => {
+                verify_empty_staged_file(&path, stamp)?;
+                false
+            }
+            EmptyPayload::Directory(identity) => {
+                check_stage_identity(&path, identity)?;
+                true
+            }
+        };
+        remove_staged_entry(&path, directory)?;
+    }
+    if let Some(marker) = marker {
+        remove_staged_entry(&stage.join(&marker.name), false)?;
+    }
+    remove_staged_entry(stage, true)
 }
 
 pub(super) fn copy_folder(
@@ -1448,10 +1542,21 @@ fn stage_contents(
     owner: &str,
     extra: &[&str],
 ) -> Result<(), TransferError> {
+    check_stage_entries(stage, identity, Some(owner), extra)?;
+    verify_empty_staged_file(&stage.join(owner), None)
+}
+
+fn check_stage_entries(
+    stage: &Location,
+    identity: Option<(u64, u64)>,
+    owner: Option<&str>,
+    extra: &[&str],
+) -> Result<(), TransferError> {
     check_stage_identity(stage, identity)?;
     let role = ResumeRole::Staged;
     let action = AccessAction::ReadChildren;
-    let expected: BTreeSet<OsString> = std::iter::once(owner)
+    let expected: BTreeSet<OsString> = owner
+        .into_iter()
         .chain(extra.iter().copied())
         .map(OsString::from)
         .collect();
@@ -1494,15 +1599,24 @@ fn stage_contents(
     if let Some(name) = expected.difference(&contents).next() {
         return Err(role.error(&stage.join(name), ResumeCheckProblem::Missing));
     }
-    let marker = stage.join(owner);
-    let metadata = required_metadata(&marker, role)?;
-    let actual = FileStamp::from(&marker, &metadata, role)?.size();
-    if actual != 0 {
+    Ok(())
+}
+
+fn verify_empty_staged_file(
+    path: &Location,
+    expected: Option<FileStamp>,
+) -> Result<(), TransferError> {
+    let role = ResumeRole::Staged;
+    let actual = FileStamp::from(path, &required_metadata(path, role)?, role)?;
+    if expected.is_some_and(|expected| expected != actual) {
+        return Err(role.error(path, ResumeCheckProblem::Changed));
+    }
+    if actual.size() != 0 {
         return Err(role.error(
-            &marker,
+            path,
             ResumeCheckProblem::SizeMismatch {
                 expected: 0,
-                actual,
+                actual: actual.size(),
             },
         ));
     }

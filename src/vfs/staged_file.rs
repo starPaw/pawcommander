@@ -148,6 +148,22 @@ impl StagedFile {
         }
         Ok(())
     }
+    #[cfg(target_os = "macos")]
+    pub(super) fn local_metadata(
+        &self,
+    ) -> Result<Option<super::transfer::EntryMetadata>, TransferError> {
+        use super::transfer::{EntryMetadata, LocalEntryMetadata};
+
+        let OutputFile::Local(file) = self.file.get_ref() else {
+            return Ok(None);
+        };
+        let metadata = file.metadata().map_err(|error| {
+            AccessError::new(&self.report_at, AccessAction::ReadOpenMetadata, error)
+        })?;
+        Ok(Some(EntryMetadata::Local(LocalEntryMetadata::from_file(
+            file, metadata,
+        ))))
+    }
 }
 
 impl Write for StagedFile {
