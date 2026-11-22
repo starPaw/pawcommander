@@ -11,6 +11,7 @@ use crate::{
     file_error::{
         AccessAction, AccessCause, AccessError, MetadataError, MetadataField, MetadataWarning,
     },
+    fs_ops::local_copy_write_error,
     operations::{Progress, TransferError},
 };
 use libssh2_sys::{
@@ -153,6 +154,7 @@ fn wire_time(value: Option<SystemTime>) -> Option<u64> {
 fn local_attribute(
     result: io::Result<()>,
     target: &Location,
+    action: AccessAction,
     causes: &mut Vec<AccessCause>,
 ) -> Result<(), TransferError> {
     match result {
@@ -165,8 +167,7 @@ fn local_attribute(
             causes.push(error.into());
             Ok(())
         }
-        result => result
-            .map_err(|error| AccessError::new(target, AccessAction::WriteMetadata, error).into()),
+        result => result.map_err(|error| local_copy_write_error(target, action, error)),
     }
 }
 
@@ -195,6 +196,7 @@ fn local_apply(
         local_attribute(
             file.set_times(FileTimes::new().set_accessed(accessed)),
             target,
+            AccessAction::WriteMetadata,
             &mut causes,
         )?;
     }
@@ -205,6 +207,7 @@ fn local_apply(
         local_attribute(
             file.set_times(FileTimes::new().set_modified(modified)),
             target,
+            AccessAction::WriteMetadata,
             &mut causes,
         )?;
     }
@@ -215,6 +218,7 @@ fn local_apply(
         local_attribute(
             file.set_permissions(fs::Permissions::from_mode(permissions)),
             target,
+            AccessAction::WritePermissions,
             &mut causes,
         )?;
     }
@@ -348,14 +352,16 @@ fn empty_stat() -> FileStat {
 }
 
 fn apply_path(
-    target: &Location,
+    location: &Location,
+    report_at: &Location,
     wanted: &Attributes,
     channel: Option<&Sftp>,
     mode: Mode,
     existing: Option<&TransferSourceEntry>,
 ) -> Result<Option<MetadataWarning>, TransferError> {
     if let Some(channel) = channel {
-        return RemoteObject::Path(channel, target.path()).apply(wanted, mode, target, existing);
+        return RemoteObject::Path(channel, location.path())
+            .apply(wanted, mode, report_at, existing);
     }
     let mut options = OpenOptions::new();
     options.read(true);
@@ -365,7 +371,7 @@ fn apply_path(
     }
     // A directory handle may be unavailable on a local backend. Treat its
     // attribute operation as unsupported before publishing the private copy.
-    let file = match options.open(target.path()) {
+    let file = match options.open(location.path()) {
         Ok(file) => file,
         Err(error)
             if matches!(
@@ -374,19 +380,19 @@ fn apply_path(
             ) =>
         {
             if let Some(existing) = existing {
-                let actual = entry_metadata(target)?
-                    .ok_or_else(|| MetadataError::TargetChanged(target.clone()))?;
-                existing.verify_metadata(target, &actual)?;
+                let actual = entry_metadata(location)?
+                    .ok_or_else(|| MetadataError::TargetChanged(report_at.clone()))?;
+                existing.verify_metadata(report_at, &actual)?;
             }
-            let metadata = fs::symlink_metadata(target.path())
-                .map_err(|error| AccessError::new(target, AccessAction::ReadMetadata, error))?;
+            let metadata = fs::symlink_metadata(location.path())
+                .map_err(|error| AccessError::new(report_at, AccessAction::ReadMetadata, error))?;
             let current = Attributes::from_local(&metadata);
-            wanted.check_shape(&current, target)?;
+            wanted.check_shape(&current, report_at)?;
             return Ok(wanted.warning(&current, false, vec![error.into()]));
         }
-        Err(error) => return Err(AccessError::new(target, AccessAction::OpenFile, error).into()),
+        Err(error) => return Err(AccessError::new(report_at, AccessAction::OpenFile, error).into()),
     };
-    local_apply(&file, wanted, mode, target, existing)
+    local_apply(&file, wanted, mode, report_at, existing)
 }
 
 fn mapped(source: &Location, target: &Location, entry: &Location) -> Location {
@@ -404,6 +410,7 @@ fn mapped(source: &Location, target: &Location, entry: &Location) -> Location {
 pub(super) fn stage(
     source: &Location,
     payload: &Location,
+    target: &Location,
     manifest: &TransferSourceManifest,
     mode: Mode,
     progress: &mut Progress,
@@ -412,14 +419,15 @@ pub(super) fn stage(
     for (original, entry) in manifest.entries.iter().rev() {
         progress.checkpoint()?;
         let copy = mapped(source, payload, original);
-        let warning = apply_path(
+        let result = apply_path(
             &copy,
+            &mapped(source, target, original),
             &Attributes::from_entry(&entry.metadata),
             channel.as_ref(),
             mode,
             None,
-        )?;
-        progress.results.note_metadata(original, warning);
+        );
+        record_staged_metadata(original, progress, result)?;
     }
     Ok(())
 }
@@ -433,6 +441,7 @@ pub(super) fn access_time(metadata: &EntryMetadata) -> Option<SystemTime> {
 pub(super) fn stage_resumed_entry(
     source: &Location,
     payload: &Location,
+    target: &Location,
     metadata: &EntryMetadata,
     accessed: Option<SystemTime>,
     mode: Mode,
@@ -441,9 +450,25 @@ pub(super) fn stage_resumed_entry(
     let mut attributes = Attributes::from_entry(metadata);
     attributes.accessed = accessed;
     let channel = payload.remote().then(|| remote(payload)).transpose()?;
-    let warning = apply_path(payload, &attributes, channel.as_ref(), mode, None)?;
-    progress.results.note_metadata(source, warning);
-    Ok(())
+    let result = apply_path(payload, target, &attributes, channel.as_ref(), mode, None);
+    record_staged_metadata(source, progress, result)
+}
+
+fn record_staged_metadata(
+    source: &Location,
+    progress: &mut Progress,
+    result: Result<Option<MetadataWarning>, TransferError>,
+) -> Result<(), TransferError> {
+    match result {
+        Ok(warning) => {
+            progress.results.note_metadata(source, warning);
+            Ok(())
+        }
+        Err(error) => {
+            progress.results.staged_with_error(source, &error);
+            Err(error)
+        }
+    }
 }
 
 pub(super) fn finish_file(
@@ -474,6 +499,7 @@ pub(super) fn finish_directory(
 ) -> Result<Option<MetadataWarning>, TransferError> {
     let channel = target.remote().then(|| remote(target)).transpose()?;
     apply_path(
+        target,
         target,
         wanted,
         channel.as_ref(),
@@ -557,6 +583,7 @@ mod tests {
         local_attribute(
             Err(io::Error::from_raw_os_error(libc::EACCES)),
             &target,
+            AccessAction::WritePermissions,
             &mut causes,
         )
         .unwrap();
@@ -580,6 +607,7 @@ mod tests {
         let error = local_attribute(
             Err(io::Error::from_raw_os_error(libc::EIO)),
             &target,
+            AccessAction::WritePermissions,
             &mut Vec::new(),
         )
         .unwrap_err();
@@ -587,7 +615,7 @@ mod tests {
             panic!("expected a typed metadata write failure");
         };
         assert_eq!(error.location, target);
-        assert_eq!(error.action, AccessAction::WriteMetadata);
+        assert_eq!(error.action, AccessAction::WritePermissions);
         assert!(matches!(error.cause, AccessCause::Local(source)
             if source.raw_os_error() == Some(libc::EIO)));
     }

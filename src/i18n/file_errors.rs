@@ -973,7 +973,7 @@ fn space_error(error: &SpaceError) -> String {
         ),
         SpaceError::LocalWrite { directory, source } => crate::tr_format!(
             "Not enough free space while copying into “{parent}”: {error}",
-            parent = directory.display(), error = source
+            parent = directory.display(), error = access_io_message(source)
         ),
         SpaceError::Insufficient { directory, required, available } => crate::tr_format!(
             "Not enough free space in “{parent}”: about {required} bytes needed, {available} bytes available",
@@ -1238,6 +1238,7 @@ fn access_error(error: &AccessError) -> String {
             return crate::tr_format!("Could not open {}: {error}", error.location, error = cause);
         }
         AccessAction::CreateFile => text!("Не удалось создать файл"),
+        AccessAction::CreateDirectory => text!("Не удалось создать папку"),
         AccessAction::CreateStagingDirectory => {
             text!("Не удалось создать временную папку для копирования")
         }
@@ -1245,14 +1246,14 @@ fn access_error(error: &AccessError) -> String {
         AccessAction::ReadChildren => text!("Не удалось прочитать папку"),
         AccessAction::ReadFile => text!("Не удалось прочитать файл"),
         AccessAction::ReadLink => text!("Не удалось прочитать символическую ссылку"),
-        #[cfg(target_os = "macos")]
         AccessAction::CreateLink => text!("Не удалось создать символическую ссылку"),
         AccessAction::WriteFile => text!("Не удалось записать файл"),
         AccessAction::FlushFile => text!("Не удалось записать буфер файла"),
         AccessAction::SyncFile => text!("Не удалось сохранить данные файла"),
         AccessAction::CloseFile => text!("Не удалось закрыть файл"),
         AccessAction::SeekFile => text!("Не удалось перейти к нужной позиции в файле"),
-        AccessAction::WriteMetadata => text!("Не удалось сохранить сведения о файле"),
+        AccessAction::WriteMetadata => text!("Не удалось сохранить метаданные объекта"),
+        AccessAction::WritePermissions => text!("Не удалось применить права доступа"),
         #[cfg(target_os = "macos")]
         AccessAction::CheckSmbVolume => text!("Не удалось проверить SMB-том назначения"),
         #[cfg(target_os = "macos")]

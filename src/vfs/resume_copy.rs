@@ -990,6 +990,7 @@ fn finish_copy(
         copy_metadata::stage_resumed_entry(
             &paths.source,
             &payload,
+            &paths.target,
             &source_metadata,
             receipt.source_accessed.as_ref().and_then(SavedTime::get),
             receipt.intent.metadata(),

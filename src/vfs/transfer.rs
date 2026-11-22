@@ -1336,7 +1336,14 @@ fn copy_transfer(
         let publication = (|| {
             progress.checkpoint()?;
             if preserve_metadata {
-                copy_metadata::stage(&item.source, &payload, &manifest, metadata, progress)?;
+                copy_metadata::stage(
+                    &item.source,
+                    &payload,
+                    &item.target,
+                    &manifest,
+                    metadata,
+                    progress,
+                )?;
             }
             manifest.verify(&cancel, |source, error| {
                 progress.results.staged(
@@ -2335,7 +2342,9 @@ pub(super) fn copy_tree_entry(
                 use std::os::unix::fs::DirBuilderExt;
                 directory.mode(0o700);
             }
-            directory.create(path).map_err(local_write_error)?;
+            directory.create(path).map_err(|error| {
+                local_write_error(access_io(target, AccessAction::CreateDirectory, error))
+            })?;
         } else {
             remote(staged)?
                 .mkdir(staged.path(), 0o700)
