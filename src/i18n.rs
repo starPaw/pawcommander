@@ -12,7 +12,10 @@ pub(crate) use file_errors::{
     history_error, metadata_warning, recovery_record_error, replacement_refusal, transfer_failure,
 };
 #[cfg(target_os = "macos")]
-pub(crate) use file_errors::{disk_usage_limit, duplicate_search_skip, duplicate_trash_summary};
+pub(crate) use file_errors::{
+    collection_error, collection_unavailable, disk_usage_limit, duplicate_search_skip,
+    duplicate_trash_summary,
+};
 #[cfg(target_os = "macos")]
 pub(crate) use formats::czech_format;
 pub(crate) use formats::russian_format;

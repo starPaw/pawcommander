@@ -4,7 +4,7 @@ use super::{
     location::validate_name,
     read_scope::ReadScope,
     staged_file::StagedFile,
-    transfer::{entry_metadata, with_staging_typed},
+    transfer::with_staging_typed,
     Location,
 };
 use crate::{
@@ -244,7 +244,7 @@ impl NewFile {
         let destination = Directory::from_scope(&scope)?;
         let name = OsStr::new(&self.name);
         let target = destination.location.join(name);
-        require_absent(&destination, &target)?;
+        destination.require_absent(name)?;
         let cancel = progress.cancellation();
         let bytes = self.source.bytes(progress)?;
         progress.item(target.path());
@@ -258,7 +258,7 @@ impl NewFile {
                     .map_err(|error| AccessError::write(&target, error))?;
             }
             output.close()?;
-            require_absent(&destination, &target)?;
+            destination.require_absent(name)?;
             cancel.check()?;
             match stage.rename(OsStr::new("payload"), &destination, name) {
                 Ok(()) => {
@@ -278,14 +278,6 @@ impl NewFile {
 
 pub(crate) fn validate_filename(name: &str) -> Result<(), PathError> {
     validate_name(name)
-}
-
-fn require_absent(destination: &Directory, target: &Location) -> Result<(), TransferError> {
-    destination.verify()?;
-    if entry_metadata(target)?.is_some() {
-        return Err(MutationError::DestinationExists(target.clone()).into());
-    }
-    Ok(())
 }
 
 fn read_source(source: &Location, progress: &mut Progress) -> Result<Vec<u8>, TransferError> {

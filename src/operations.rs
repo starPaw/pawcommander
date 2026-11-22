@@ -384,6 +384,13 @@ impl From<crate::file_error::SyncError> for TransferError {
     }
 }
 
+#[cfg(target_os = "macos")]
+impl From<crate::file_error::CollectionError> for TransferError {
+    fn from(error: crate::file_error::CollectionError) -> Self {
+        Self::Failed(Failure::Collection(Box::new(error)))
+    }
+}
+
 impl From<crate::file_error::StagingError> for TransferError {
     fn from(error: crate::file_error::StagingError) -> Self {
         Self::Failed(Failure::Staging(Box::new(error)))

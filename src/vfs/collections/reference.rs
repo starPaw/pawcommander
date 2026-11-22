@@ -1,4 +1,10 @@
-use crate::{app::SavedPath, i18n::text, operations::TransferError};
+use super::Unavailable;
+use crate::{
+    app::SavedPath,
+    file_error::{AccessAction, AccessError, CollectionError},
+    operations::TransferError,
+    vfs::Location,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::{CStr, CString, OsStr},
@@ -40,39 +46,30 @@ struct Volume {
     uuid: Option<[u8; 16]>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Unavailable {
-    Missing,
-    InTrash,
-    Read(String),
-}
-
-impl Unavailable {
-    pub(crate) fn message(&self) -> &str {
-        match self {
-            Self::Missing => text!("Объект отсутствует или том недоступен"),
-            Self::InTrash => text!("Объект в Корзине"),
-            Self::Read(error) => error,
-        }
-    }
-}
-
 impl Reference {
     pub(super) fn capture(source: &Path) -> Result<Self, TransferError> {
-        let before = fs::symlink_metadata(source)?;
+        let before = fs::symlink_metadata(source)
+            .map_err(|cause| access(source, AccessAction::ReadMetadata, cause))?;
         if !before.is_file() && !before.is_dir() {
-            return Err(text!("Выберите обычные файлы или папки").into());
+            return Err(CollectionError::RegularItem(Location::Local(source.to_owned())).into());
         }
-        let path = fs::canonicalize(source)?;
-        let volume = Volume::of(&path)?;
+        let path = fs::canonicalize(source)
+            .map_err(|cause| access(source, AccessAction::ResolvePath, cause))?;
+        let volume =
+            Volume::of(&path).map_err(|cause| access(&path, AccessAction::ReadMetadata, cause))?;
         if in_trash(&path, &volume.mount) {
-            return Err(text!("Объект в Корзине").into());
+            return Err(CollectionError::Trashed(Location::Local(path)).into());
         }
         let identity = Identity::capture(&before, &volume);
-        if !identity.matches_metadata(&fs::symlink_metadata(&path)?)
-            || !identity.matches_metadata(&fs::symlink_metadata(source)?)
+        let current = |path: &Path| {
+            fs::symlink_metadata(path).map_err(|cause| {
+                TransferError::from(access(path, AccessAction::ReadMetadata, cause))
+            })
+        };
+        if !identity.matches_metadata(&current(&path)?)
+            || !identity.matches_metadata(&current(source)?)
         {
-            return Err(text!("Файл или папка изменились").into());
+            return Err(CollectionError::Changed(Location::Local(source.to_owned())).into());
         }
         Ok(Self {
             path: path.as_path().into(),
@@ -104,7 +101,8 @@ impl Reference {
         let Some(path) = volume.path_for(self.identity.inode) else {
             return Err(previous);
         };
-        let path = fs::canonicalize(path).map_err(unavailable)?;
+        let path = fs::canonicalize(&path)
+            .map_err(|cause| unavailable(&path, AccessAction::ResolvePath, cause))?;
         self.identity = self.check(&path)?;
         self.path = path.as_path().into();
         Ok(path)
@@ -114,14 +112,18 @@ impl Reference {
         if !path.is_absolute() {
             return Err(Unavailable::Missing);
         }
-        let meta = fs::symlink_metadata(path).map_err(unavailable)?;
+        let meta = fs::symlink_metadata(path)
+            .map_err(|cause| unavailable(path, AccessAction::ReadMetadata, cause))?;
         if !self.identity.matches_kind(&meta) {
             return Err(Unavailable::Missing);
         }
-        let volume = Volume::of(path).map_err(unavailable)?;
+        let volume = Volume::of(path)
+            .map_err(|cause| unavailable(path, AccessAction::ReadMetadata, cause))?;
         let identity = Identity::capture(&meta, &volume);
         if !self.identity.same_item(&identity)
-            || fs::canonicalize(path).map_err(unavailable)? != path
+            || fs::canonicalize(path)
+                .map_err(|cause| unavailable(path, AccessAction::ResolvePath, cause))?
+                != path
         {
             return Err(Unavailable::Missing);
         }
@@ -293,9 +295,10 @@ fn in_trash(path: &Path, mount: &Path) -> bool {
         })
 }
 
-fn unavailable(error: io::Error) -> Unavailable {
-    match error.kind() {
-        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory => Unavailable::Missing,
-        _ => Unavailable::Read(error.to_string()),
-    }
+fn access(path: &Path, action: AccessAction, cause: io::Error) -> AccessError {
+    AccessError::new(&Location::Local(path.to_owned()), action, cause)
+}
+
+fn unavailable(path: &Path, action: AccessAction, cause: io::Error) -> Unavailable {
+    Unavailable::Access(Box::new(access(path, action, cause)))
 }
