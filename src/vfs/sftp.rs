@@ -500,10 +500,10 @@ fn connect_reviewed(
     }
     control.finalize()?;
     let saved_profile = if let Some(mut key) = imported.filter(|_| used_key) {
-        let secret = Zeroizing::new(crate::credentials::SavedKey {
+        let secret = crate::credentials::SavedKey {
             private_key: std::mem::take(&mut *key),
             passphrase: phrase.into(),
-        });
+        };
         crate::credentials::save(&endpoint, &secret)?;
         true
     } else {

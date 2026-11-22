@@ -402,6 +402,12 @@ impl From<ConnectionError> for TransferError {
     }
 }
 
+impl From<crate::file_error::CredentialError> for TransferError {
+    fn from(error: crate::file_error::CredentialError) -> Self {
+        ConnectionError::Credential(Box::new(error)).into()
+    }
+}
+
 impl From<HostKeyError> for TransferError {
     fn from(error: HostKeyError) -> Self {
         ConnectionError::HostKey(error).into()

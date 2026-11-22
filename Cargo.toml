@@ -45,6 +45,7 @@ alacritty_terminal = { version = "=0.26.0", default-features = false }
 git2 = { version = "=0.21.0", default-features = false, features = ["vendored-libgit2"] }
 block2 = "=0.6.2"
 apple-native-keyring-store = { version = "=1.0.2", features = ["keychain"] }
+security-framework = "=3.7.0"
 objc2 = "=0.6.5"
 objc2-foundation = { version = "=0.3.2", features = ["NSArray", "NSDictionary", "NSError", "NSGeometry", "NSObject", "NSOperation", "NSString", "NSThread", "NSURL"] }
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "block2", "NSApplication", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSEvent", "NSFilePromiseProvider", "NSGraphicsContext", "NSImage", "NSMenu", "NSMenuItem", "NSOpenPanel", "NSPanel", "NSPasteboard", "NSPasteboardItem", "NSResponder", "NSSavePanel", "NSView", "NSWindow", "NSWorkspace"] }

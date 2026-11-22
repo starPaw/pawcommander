@@ -538,7 +538,8 @@ impl PawCommander {
             form.passphrase.clear();
             self.sftp_form = None;
             self.start_job(ctx, crate::i18n::text!("Удаление сохранённого секрета"), move || {
-                crate::credentials::forget(&endpoint)?;
+                crate::credentials::forget(&endpoint)
+                    .map_err(|error| crate::i18n::credential_error(&error))?;
                 Ok(crate::i18n::text!("Сохранённый ключ и фраза удалены. Исходный файл ключа и открытое SSH-соединение сохранены.").into())
             });
         }
