@@ -12,8 +12,9 @@ use crate::file_error::{
 };
 #[cfg(target_os = "macos")]
 use crate::file_error::{
-    CompatiblePlanError, FilePromiseError, FileTemplateError, RemoteEditError, ResumeCheckError,
-    ResumeCheckProblem, ResumeRecordEvent, ResumeRole, SyncError,
+    CompatiblePlanError, DuplicateError, DuplicateRole, FilePromiseError, FileTemplateError,
+    RemoteEditError, ResumeCheckError, ResumeCheckProblem, ResumeRecordEvent, ResumeRole,
+    SyncError,
 };
 use crate::file_error::{
     RecoveryRecordAction, RecoveryRecordError, RecoveryRecordProblem, RecoveryRecordSection,
@@ -38,6 +39,8 @@ fn file_failure(reason: &Failure, unconfirmed: bool) -> String {
         Failure::Preview(error) => preview_error(error),
         Failure::Search(error) => search_error(error),
         Failure::Scan(error) => scan_error(error),
+        #[cfg(target_os = "macos")]
+        Failure::Duplicate(error) => duplicate_error(error),
         Failure::Checksum(error) => checksum_error(error),
         Failure::CopyVerification(error) => copy_verification_error(error),
         Failure::Archive(error) => archive_error(error),
@@ -79,6 +82,98 @@ fn file_failure(reason: &Failure, unconfirmed: bool) -> String {
         Failure::RecoveryRecord(error) => recovery_record_error(error),
         Failure::StagingCleanup(error) => staging_cleanup_error(error),
         _ => reason.to_string(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn duplicate_trash_summary(
+    completed: usize,
+    cleanup_warnings: usize,
+    cancelled: bool,
+) -> String {
+    let count = if cleanup_warnings == 0 {
+        crate::tr_format!("Moved to Trash: {completed}.", completed = completed)
+    } else {
+        crate::tr_format!(
+            "Moved to Trash: {completed}. Cleanup warnings: {cleanup_warnings}.",
+            completed = completed,
+            cleanup_warnings = cleanup_warnings
+        )
+    };
+    if cancelled {
+        format!("{}. {count}", text!("Операция остановлена"))
+    } else {
+        count
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn duplicate_error(error: &DuplicateError) -> String {
+    match error {
+        DuplicateError::Changed { location, cause } => {
+            let message = crate::tr_format!(
+                "An item changed after the search or is unavailable: {location}. Run a fresh search.",
+                location = location
+            );
+            duplicate_change_detail(message, cause.as_ref())
+        }
+        DuplicateError::Verify { location, role, cause } => {
+            let message = match role {
+                DuplicateRole::Folder => crate::tr_format!(
+                    "Could not verify the searched folder at {location}.", location = location
+                ),
+                DuplicateRole::Protected => crate::tr_format!(
+                    "Could not verify the protected file at {location}.", location = location
+                ),
+                DuplicateRole::Selected => crate::tr_format!(
+                    "Could not verify the selected copy at {location}.", location = location
+                ),
+            };
+            if let TransferError::Failed(Failure::Duplicate(changed)) = cause
+                && let DuplicateError::Changed { location: item, cause } = changed.as_ref()
+                && item == location
+            {
+                let explanation = text!("Объект изменился после поиска или недоступен. Выполните поиск заново.");
+                return duplicate_change_detail(format!("{message}\n{explanation}"), cause.as_ref());
+            }
+            format!("{message}\n{}", file_error(cause))
+        }
+        DuplicateError::DifferentContents { selected, protected } => crate::tr_format!(
+            "The selected copy {selected} differs from the protected file {protected}. Run a fresh search.",
+            selected = selected, protected = protected
+        ),
+        DuplicateError::Trash { location, source } => crate::tr_format!(
+            "Could not move item “{}” to Trash: {error}",
+            location, error = source
+        ),
+        DuplicateError::Restored { location, cause } => crate::tr_format!(
+            "{reason}\nThe file was restored to {location}.",
+            reason = file_error(cause), location = location
+        ),
+        DuplicateError::Restore { original, held, cause, restore } => crate::tr_format!(
+            "{reason}\nRestoration is unconfirmed. Check {original} and the temporary path {held}.\n{restore}",
+            reason = file_error(cause), original = original, held = held, restore = file_error(restore)
+        ),
+        DuplicateError::CleanupAfterTrash(error) => crate::tr_format!(
+            "Moved {location} to Trash. Could not clean up the temporary folder at {staging}.\n{error}",
+            location = error.target, staging = error.staging, error = file_error(&error.cleanup)
+        ),
+        DuplicateError::Batch { completed, cleanup_warnings, cause } => format!(
+            "{}\n{}", file_error(cause), duplicate_trash_summary(*completed, *cleanup_warnings, false)
+        ),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn duplicate_change_detail(message: String, cause: Option<&TransferError>) -> String {
+    match cause {
+        None => message,
+        Some(TransferError::Failed(Failure::Mutation(error)))
+            if matches!(error.as_ref(), MutationError::SourceChanged(_)) =>
+        {
+            message
+        }
+        Some(cause) => format!("{message}\n{}", file_error(cause)),
     }
 }
 

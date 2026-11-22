@@ -13,6 +13,8 @@ mod copy_verification;
 mod credential;
 mod cross_move;
 #[cfg(target_os = "macos")]
+mod duplicates;
+#[cfg(target_os = "macos")]
 mod external_editor;
 #[cfg(target_os = "macos")]
 mod file_promise;
@@ -42,6 +44,8 @@ pub(crate) use credential::{
     CredentialAction, CredentialError, CredentialFailure, SecretFormatError,
 };
 pub(crate) use cross_move::CrossMoveError;
+#[cfg(target_os = "macos")]
+pub(crate) use duplicates::{DuplicateError, DuplicateRole, MacTrashError};
 #[cfg(target_os = "macos")]
 pub(crate) use external_editor::RemoteEditError;
 #[cfg(target_os = "macos")]
@@ -79,6 +83,8 @@ pub(crate) enum Failure {
     Preview(Box<PreviewError>),
     Search(Box<SearchError>),
     Scan(Box<ScanError>),
+    #[cfg(target_os = "macos")]
+    Duplicate(Box<DuplicateError>),
     Permissions(Box<PermissionError>),
     Checksum(Box<ChecksumError>),
     CopyVerification(Box<CopyVerificationError>),
@@ -146,6 +152,8 @@ impl Error for Failure {
             Self::Preview(error) => Some(error.as_ref()),
             Self::Search(error) => Some(error.as_ref()),
             Self::Scan(error) => Some(error.as_ref()),
+            #[cfg(target_os = "macos")]
+            Self::Duplicate(error) => Some(error.as_ref()),
             Self::Permissions(error) => Some(error.as_ref()),
             Self::Checksum(error) => Some(error.as_ref()),
             Self::CopyVerification(error) => Some(error.as_ref()),
@@ -192,6 +200,8 @@ impl fmt::Display for Failure {
             Self::Preview(error) => fmt::Display::fmt(error, f),
             Self::Search(error) => fmt::Display::fmt(error, f),
             Self::Scan(error) => fmt::Display::fmt(error, f),
+            #[cfg(target_os = "macos")]
+            Self::Duplicate(error) => fmt::Display::fmt(error, f),
             Self::Permissions(error) => fmt::Display::fmt(error, f),
             Self::Checksum(error) => fmt::Display::fmt(error, f),
             Self::CopyVerification(error) => fmt::Display::fmt(error, f),

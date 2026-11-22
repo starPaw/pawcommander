@@ -269,8 +269,13 @@ impl PawCommander {
     pub(super) fn enqueue_duplicate_trash(&mut self, plan: TrashPlan, ctx: &egui::Context) {
         let label = text!("Перемещение дубликатов в корзину");
         let description = format!("{label} ({}) · {}", plan.count(), plan.root().display());
-        self.start_stoppable_job(ctx, label, description, move |progress| {
-            plan.apply(progress)
+        self.start_typed_stoppable_job(ctx, label, description, move |progress| {
+            let report = plan.apply(progress)?;
+            Ok(crate::i18n::duplicate_trash_summary(
+                report.completed,
+                report.cleanup_warnings,
+                report.cancelled,
+            ))
         });
     }
 }
