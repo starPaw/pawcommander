@@ -711,7 +711,15 @@ pub(super) fn transfer_run(
             None
         };
         let undo_capture = (kind == TransferKind::Move && !copy_move && expected.is_none())
-            .then(|| super::undo::Capture::before(&item.source, &item.target).ok())
+            .then(|| {
+                super::undo::Capture::before(
+                    &item.source,
+                    &item.target,
+                    #[cfg(target_os = "macos")]
+                    None,
+                )
+                .ok()
+            })
             .flatten();
         let mut committed = false;
         let mut source_removed = false;

@@ -31,6 +31,7 @@ pub(crate) fn check_transfer_mount(
     checked_mount(path).map_err(|cause| TransferPlanError::smb_mount(path, role, cause).into())
 }
 
+#[derive(Clone)]
 pub(crate) struct MutationMount {
     action: SmbMutationAction,
     saved: Option<(PathBuf, [i32; 2])>,
@@ -42,6 +43,10 @@ impl MutationMount {
             action,
             saved: None,
         }
+    }
+
+    pub(crate) fn with_action(self, action: SmbMutationAction) -> Self {
+        Self { action, ..self }
     }
 
     pub(crate) fn check(&mut self, path: &Path) -> Result<(), TransferError> {
