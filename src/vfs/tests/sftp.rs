@@ -119,6 +119,38 @@ fn key_import_failures_are_typed_before_opening_a_connection() {
 }
 
 #[cfg(target_os = "macos")]
+#[test]
+fn channel_failure_on_existing_session_preserves_the_endpoint_and_ssh_error() {
+    use crate::file_error::{ConnectionError, Failure};
+    use crate::vfs::sftp::cached_channel;
+    use std::error::Error;
+
+    let endpoint = Endpoint {
+        host: "example.invalid".into(),
+        port: 2222,
+        user: "fixture".into(),
+        key: None,
+        jump: None,
+    };
+    let session = Arc::new(ssh2::Session::new().unwrap());
+    let error = cached_channel(&endpoint, &session)
+        .err()
+        .expect("an unauthenticated session cannot open an SFTP channel");
+    let TransferError::Failed(Failure::Connection(reason)) = &error else {
+        panic!("missing typed connection error: {error:?}");
+    };
+    assert!(matches!(reason.as_ref(),
+        ConnectionError::CachedChannel { endpoint: actual, source }
+            if actual == &endpoint.label()
+                && source.code() == ssh2::ErrorCode::Session(libssh2_sys::LIBSSH2_ERROR_INVAL)
+    ));
+    assert!(reason.source().unwrap().is::<ssh2::Error>());
+    let message = crate::i18n::file_error(&error);
+    assert!(message.contains(&endpoint.label()), "{message}");
+    assert!(!message.contains("MFA"), "{message}");
+}
+
+#[cfg(target_os = "macos")]
 fn check_sftp_connection_errors(root: &Path) {
     use crate::file_error::{ConnectionError, Failure, SshStage};
     use crate::vfs::{

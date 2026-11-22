@@ -64,9 +64,7 @@ impl RootId {
                 })
             }
             Location::Sftp { endpoint, .. } => {
-                let session = sftp::sessions()
-                    .lock()
-                    .map_err(err)?
+                let session = sftp::lock_sessions(endpoint)?
                     .get(endpoint)
                     .cloned()
                     .ok_or_else(|| text!("Не удалось подтвердить сервер для общего состояния"))?;
