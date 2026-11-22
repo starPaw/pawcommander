@@ -229,7 +229,7 @@ fn save_profile(
     if folders[0] == folders[1] {
         return Err(text!("Выберите две разные папки для профиля.").into());
     }
-    Exclusions::parse(&options.exclusions).map_err(|error| error.to_string())?;
+    Exclusions::parse(&options.exclusions).map_err(|error| crate::i18n::file_error(&error))?;
     let profile = SyncProfile {
         name: name.to_owned(),
         folders: std::array::from_fn(|side| SavedLocation::from(&folders[side])),
@@ -284,7 +284,9 @@ mod tests {
         assert!(restored[0].options.delete_extra);
         assert_eq!(restored[0].options.exclusions, options.exclusions);
         options.exclusions = "../whole-disk".into();
-        assert!(save_profile(&mut restored, Some(0), "Renamed", &pair, &options).is_err());
-        assert_eq!(restored[0].name, "Daily sync");
+        let error = save_profile(&mut restored, Some(0), "Renamed", &pair, &options).unwrap_err();
+        let validation = Exclusions::parse(&options.exclusions).err().unwrap();
+        assert_eq!(error, crate::i18n::file_error(&validation));
+        assert_eq!(ron::to_string(&restored).unwrap(), saved);
     }
 }

@@ -14,8 +14,8 @@ use crate::file_error::{
 use crate::file_error::{
     CompatiblePlanError, DuplicateError, DuplicateRole, FilePromiseError, FileTemplateError,
     RemoteEditError, ResumeCheckError, ResumeCheckProblem, ResumeRecordEvent, ResumeRole,
-    ScanLimit, ScanLimitKind, SyncDifference, SyncError, SyncFolderRole, SyncStateAction,
-    SyncStateKind, SyncStateProblem, SyncVerification,
+    ScanLimit, ScanLimitKind, SyncDifference, SyncError, SyncExclusionProblem, SyncFolderRole,
+    SyncStateAction, SyncStateKind, SyncStateProblem, SyncVerification,
 };
 use crate::file_error::{
     RecoveryRecordAction, RecoveryRecordError, RecoveryRecordProblem, RecoveryRecordSection,
@@ -1123,6 +1123,22 @@ fn sync_error(error: &SyncError) -> String {
         SyncError::ExcludedPath { target, excluded } => crate::tr_format!(
             "Replacing or deleting {location} would affect the excluded path {excluded}.",
             location = target, excluded = excluded.display()
+        ),
+        SyncError::InvalidExclusion { line, problem } => {
+            let reason = match problem {
+                SyncExclusionProblem::AbsolutePath => text!("Укажите путь относительно папки синхронизации."),
+                SyncExclusionProblem::MissingName => text!("Добавьте имя после «./»."),
+                SyncExclusionProblem::EmptyComponent => text!("Удалите лишние косые черты, в том числе в конце пути."),
+                SyncExclusionProblem::DotComponent => text!("Уберите «.» или «..» из частей пути."),
+                SyncExclusionProblem::NulCharacter => text!("Удалите нулевой символ."),
+            };
+            crate::tr_format!("Invalid exclusion on line {line}. {reason}", line = line, reason = reason)
+        }
+        SyncError::ExclusionsTextLimit(limit) => crate::tr_format!(
+            "The exclusions list exceeds {limit} bytes.", limit = super::display::integer(*limit)
+        ),
+        SyncError::ExclusionsCountLimit { limit, line } => crate::tr_format!(
+            "Line {line} exceeds the limit of {limit} distinct exclusions.", line = line, limit = limit
         ),
         SyncError::State { kind, path, problem } => sync_state_error(*kind, path, problem),
         SyncError::DataDirectoryUnavailable => text!("Папка данных приложения недоступна").into(),

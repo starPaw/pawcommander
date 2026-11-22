@@ -349,6 +349,8 @@ Open the two local or SFTP folders, then open **Folder sync preview**. Choose th
 
 Enter one exclusion per line. A name such as `*.tmp` or `.git` matches at any depth. Use `cache/previews` for a path from the folder root, or `./cache` to match `cache` only at the root. `*` and `?` match within a name. Matching is case-insensitive. Excluding a folder also excludes its contents. The preview counts each excluded folder once per pane. Deleting or replacing a folder that contains an excluded item stops planning and identifies the protected path.
 
+The list supports up to 64 distinct rules within 8 KiB of text. The preview and profile editor show the line to fix when an exclusion is invalid or adds a rule beyond the count limit.
+
 Changing the exclusion rules starts a new comparison scope for two-way sync. The next verified save or successful application establishes the shared state for that scope.
 
 ## Compare files

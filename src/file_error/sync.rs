@@ -23,6 +23,27 @@ pub(crate) enum SyncDifference {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SyncExclusionProblem {
+    AbsolutePath,
+    MissingName,
+    EmptyComponent,
+    DotComponent,
+    NulCharacter,
+}
+
+impl fmt::Display for SyncExclusionProblem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::AbsolutePath => "Use a relative name or path",
+            Self::MissingName => "Expected a name after ./",
+            Self::EmptyComponent => "Empty path component",
+            Self::DotComponent => "Path contains . or ..",
+            Self::NulCharacter => "Path contains a NUL character",
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SyncStateKind {
     Directory,
     CommonState,
@@ -132,6 +153,15 @@ pub(crate) enum SyncError {
         target: Location,
         excluded: PathBuf,
     },
+    InvalidExclusion {
+        line: usize,
+        problem: SyncExclusionProblem,
+    },
+    ExclusionsTextLimit(usize),
+    ExclusionsCountLimit {
+        limit: usize,
+        line: usize,
+    },
     State {
         kind: SyncStateKind,
         path: PathBuf,
@@ -216,6 +246,16 @@ impl fmt::Display for SyncError {
                 "Replacing or deleting {target} would affect excluded path {}",
                 excluded.display()
             ),
+            Self::InvalidExclusion { line, problem } => {
+                write!(f, "Invalid exclusion on line {line}: {problem}")
+            }
+            Self::ExclusionsTextLimit(limit) => write!(f, "Exclusions exceed {limit} bytes"),
+            Self::ExclusionsCountLimit { limit, line } => {
+                write!(
+                    f,
+                    "Found more than {limit} distinct exclusions at line {line}"
+                )
+            }
             Self::State {
                 kind,
                 path,

@@ -232,13 +232,19 @@ fn show_exclusions(ui: &mut egui::Ui, input: &mut String) -> bool {
         .id_salt("sync-exclusions")
         .show(ui, |ui| {
             ui.small(text!("Одно имя или относительный путь на строку. Подстановки * и ? работают внутри имени."));
-            ui.add(
-                egui::TextEdit::multiline(input)
-                    .desired_rows(3)
-                    .desired_width(ui.available_width())
-                    .char_limit(8192)
-                    .hint_text("*.tmp\n.git\ncache/previews"),
-            ).changed()
+            egui::ScrollArea::vertical()
+                .id_salt("sync-exclusions-input")
+                .max_height(128.0)
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(input)
+                            .desired_rows(3)
+                            .desired_width(ui.available_width())
+                            // Keep one character past the byte limit so an oversized paste fails validation.
+                            .char_limit(Exclusions::MAX_TEXT_BYTES + 1)
+                            .hint_text("*.tmp\n.git\ncache/previews"),
+                    ).changed()
+                }).inner
         }).body_returned.unwrap_or_default()
 }
 
