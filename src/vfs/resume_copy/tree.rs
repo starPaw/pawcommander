@@ -8,11 +8,13 @@ use super::{
     RenamedIdentity, SavedTime, Ticket, TransferError,
 };
 use crate::file_error::{
-    AccessAction, AccessError, RecoveryRecordProblem, ResumeCheckProblem, ResumeRole,
+    AccessAction, AccessError, MutationError, PublicationError, RecoveryNotice,
+    RecoveryRecordProblem, ResumeCheckProblem, ResumeRole, StagingCleanupError, StagingError,
 };
 use crate::fs_ops::local_copy_write_error;
 use crate::operations::AccessStream;
 use crate::vfs::{
+    mutations::remove_remote_entry,
     sftp::remote,
     transfer::{
         check_copy_space, source_children, with_preserved_staging, TransferSourceEntry,
@@ -376,16 +378,12 @@ impl Snapshot {
                 )?;
             }
             let current = required_metadata(&copy, role)?;
-            if recorded.is_directory() {
+            let directory = recorded.is_directory();
+            if directory {
                 if !current.is_directory()
                     || (copy.local().is_some() && !recorded.same_object(&current))
                 {
                     return Err(role.error(&copy, ResumeCheckProblem::Changed));
-                }
-                if let Some(path) = copy.local() {
-                    fs::remove_dir(path)?;
-                } else {
-                    remote(&copy)?.rmdir(copy.path()).map_err(crate::vfs::err)?;
                 }
             } else {
                 // Never follow a staged symbolic link or remove a replacement directory.
@@ -397,14 +395,8 @@ impl Snapshot {
                 if !same {
                     return Err(role.error(&copy, ResumeCheckProblem::Changed));
                 }
-                if let Some(path) = copy.local() {
-                    fs::remove_file(path)?;
-                } else {
-                    remote(&copy)?
-                        .unlink(copy.path())
-                        .map_err(crate::vfs::err)?;
-                }
             }
+            remove_staged_entry(&copy, directory)?;
         }
         Ok(())
     }
@@ -497,6 +489,7 @@ fn finish(
     let payload = paths.stage.join("payload");
     let cancel = progress.cancellation();
     let mut committed = false;
+    let mut stage_checked = false;
     let mut draft_verified = false;
     let local_names = !paths.source.remote() && !paths.target.remote();
     let result = (|| {
@@ -507,6 +500,7 @@ fn finish(
             return Ok(Completion::AlreadyPresent);
         }
         stage_contents(&paths.stage, receipt.stage_identity, owner, &["payload"])?;
+        stage_checked = true;
         verify_target(None, &paths.target, false, progress)?;
         let resuming = snapshot.is_none();
         if resuming {
@@ -572,19 +566,68 @@ fn finish(
             discard_stage(&paths.stage, receipt.stage_identity, owner, &[])?;
         }
     } else if matches!(&result, Err(TransferError::Cancelled)) {
+        progress.results.cancelled = true;
         let Some(snapshot) = snapshot.filter(|_| draft_verified) else {
-            return result;
+            progress.partial_copy_retained = stage_checked;
+            return if stage_checked {
+                Err(PublicationError::Retained {
+                    staging: paths.stage.clone(),
+                    notice: RecoveryNotice::InspectStaging,
+                    cause: TransferError::Cancelled,
+                }
+                .into())
+            } else {
+                result
+            };
         };
-        stage_contents(&paths.stage, receipt.stage_identity, owner, &["payload"])?;
-        let present = snapshot.inventory(&payload, false, &Cancellation::default())?;
-        snapshot.verify_bytes(paths, &payload, &present, false, &mut Progress::default())?;
-        snapshot.discard(&payload, &present)?;
-        discard_stage(&paths.stage, receipt.stage_identity, owner, &[])?;
+        let cleanup = (|| {
+            stage_contents(&paths.stage, receipt.stage_identity, owner, &["payload"])?;
+            let present = snapshot.inventory(&payload, false, &Cancellation::default())?;
+            snapshot.verify_bytes(paths, &payload, &present, false, &mut Progress::default())?;
+            snapshot.discard(&payload, &present)?;
+            // An empty staging folder or an unremoved receipt holds no partial copy.
+            progress.partial_copy_retained = false;
+            stage_contents(&paths.stage, receipt.stage_identity, owner, &[])?;
+            remove_staged_entry(&paths.stage.join(owner), false)?;
+            remove_staged_entry(&paths.stage, true)
+        })();
+        if let Err(cleanup) = cleanup {
+            return Err(StagingCleanupError::failed_cleanup(
+                result.err(),
+                cleanup,
+                &paths.stage,
+                &paths.target,
+            ));
+        }
+        ticket
+            .finish()
+            .map_err(|source| StagingError::ResumeReceiptCleanup {
+                cause: TransferError::Cancelled,
+                source,
+            })?;
+        return result;
     } else {
         return result.map_err(|error| retained_error(&paths.stage, error));
     }
     finish_record(ticket, paths, progress, committed)?;
     result
+}
+
+fn remove_staged_entry(location: &Location, directory: bool) -> Result<(), TransferError> {
+    if let Some(path) = location.local() {
+        let (result, action) = if directory {
+            (fs::remove_dir(path), AccessAction::RemoveStagingDirectory)
+        } else {
+            (fs::remove_file(path), AccessAction::RemoveStagingItem)
+        };
+        result.map_err(|error| AccessError::new(location, action, error).into())
+    } else {
+        let sftp = remote(location).map_err(|reason| MutationError::OpenSftpRemoval {
+            location: location.clone(),
+            reason,
+        })?;
+        remove_remote_entry(&sftp, location, directory)
+    }
 }
 
 pub(super) fn verify_move_source(

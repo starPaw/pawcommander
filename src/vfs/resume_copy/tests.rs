@@ -1015,35 +1015,76 @@ fn stopping_a_folder_copy_cleans_only_a_verified_draft() {
         let root = temp.path().canonicalize().unwrap();
         let recovery = root.join("recovery");
         let source = root.join("tree");
+        let pending: Location = root.join("after").into();
         let output = root.join("destination");
         fs::create_dir(&output).unwrap();
         setup_folder(&source, &tail);
+        fs::write(pending.path(), b"pending source").unwrap();
+        fs::write(output.join("existing"), b"existing target").unwrap();
         let observed = output.clone();
-        let result = first_copy(
-            &source.clone().into(),
+        let (mut progress, _) = Progress::tracked_transfer();
+        progress.resume_directory = Some(recovery.clone());
+        progress.cancellation().set_checkpoint(move || {
+            let ready = tail_progress(&observed).is_some_and(|len| len >= 128 * 1024);
+            if ready && foreign {
+                let draft = staged_payload(&observed).unwrap();
+                fs::write(draft.join("outside-data"), b"preserve me").unwrap();
+            }
+            ready
+        });
+        let original: Location = source.clone().into();
+        let selected = [original.clone(), pending.clone()];
+        let result = transfer_with_conflicts(
+            &selected,
             &output.clone().into(),
-            &recovery,
-            move || {
-                let ready = tail_progress(&observed).is_some_and(|len| len >= 128 * 1024);
-                if ready && foreign {
-                    let draft = staged_payload(&observed).unwrap();
-                    fs::write(draft.join("outside-data"), b"preserve me").unwrap();
-                }
-                ready
-            },
+            TransferKind::Copy,
+            &mut progress,
+            |_| panic!("unexpected conflict"),
+            |_, _| panic!("a copy must leave the source in place"),
         );
+        assert!(progress.results.cancelled);
+        assert_eq!(progress.results.items[1].outcome, Outcome::NotStarted);
+        assert_eq!(fs::read(source.join("a-finished")).unwrap(), HEAD);
         assert_eq!(fs::read(source.join("z-child/large")).unwrap(), tail);
+        assert_eq!(
+            fs::read(output.join("existing")).unwrap(),
+            b"existing target"
+        );
         assert!(!output.join("tree").exists());
+        assert!(!output.join("after").exists());
         if foreign {
-            assert!(result.is_err());
+            let failure = result.unwrap_err();
+            assert!(failure.summary.cancelled);
+            assert_eq!(failure.summary.completed, 0);
+            assert_eq!(failure.summary.remaining, selected);
             let draft = staged_payload(&output).unwrap();
+            let obstacle = draft.join("outside-data");
+            let TransferError::Failed(Failure::StagingCleanup(error)) = failure.error else {
+                panic!("expected the cancellation and cleanup error together");
+            };
+            assert!(matches!(error.operation, Some(TransferError::Cancelled)));
+            assert_eq!(error.staging.path(), draft.parent().unwrap());
+            assert_eq!(error.target.path(), output.join("tree"));
+            assert_resume_check(
+                &error.cleanup,
+                ResumeRole::Staged,
+                &obstacle,
+                ResumeCheckProblem::Unexpected,
+            );
+            assert_eq!(fs::read(obstacle).unwrap(), b"preserve me");
+            assert_eq!(fs::read(draft.join("a-finished")).unwrap(), HEAD);
+            assert!(progress.partial_copy_retained);
             assert_eq!(
-                fs::read(draft.join("outside-data")).unwrap(),
-                b"preserve me"
+                progress.results.items[0].outcome,
+                Outcome::PartialCopyRetained
             );
             assert_eq!(scan(&recovery).0.len(), 1);
         } else {
-            result.unwrap();
+            let summary = result.unwrap();
+            assert!(summary.cancelled);
+            assert_eq!(summary.completed, 0);
+            assert_eq!(progress.results.items[0].outcome, Outcome::Cancelled);
+            assert!(!progress.partial_copy_retained);
             assert!(staged_payload(&output).is_none());
             assert!(scan(&recovery).0.is_empty());
         }

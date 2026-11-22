@@ -499,7 +499,13 @@ pub fn transfer_with_conflicts(
             summary.cancelled = true;
             Ok(summary)
         }
-        Err(error) => Err(TransferFailure { error, summary }),
+        Err(error) => {
+            #[cfg(target_os = "macos")]
+            {
+                summary.cancelled = progress.results.cancelled;
+            }
+            Err(TransferFailure { error, summary })
+        }
     }
 }
 

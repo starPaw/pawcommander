@@ -1243,6 +1243,8 @@ fn access_error(error: &AccessError) -> String {
             text!("Не удалось создать временную папку для копирования")
         }
         AccessAction::RemoveStagingDirectory => text!("Не удалось удалить временную папку"),
+        #[cfg(target_os = "macos")]
+        AccessAction::RemoveStagingItem => text!("Не удалось удалить временный элемент"),
         AccessAction::ReadChildren => text!("Не удалось прочитать папку"),
         AccessAction::ReadFile => text!("Не удалось прочитать файл"),
         AccessAction::ReadLink => text!("Не удалось прочитать символическую ссылку"),
@@ -1967,6 +1969,15 @@ fn staging_cleanup_error(error: &StagingCleanupError) -> String {
     if matches!(error.cleanup, TransferError::PublicationUnconfirmed(_)) {
         return crate::tr_format!(
             "{outcome}. Cleanup at {staging} is unconfirmed: {e}",
+            outcome = outcome,
+            staging = error.staging,
+            e = detail
+        );
+    }
+    #[cfg(target_os = "macos")]
+    if matches!(error.operation, Some(TransferError::Cancelled)) {
+        return crate::tr_format!(
+            "{outcome}. Could not clean up the temporary folder at {staging}. {e}",
             outcome = outcome,
             staging = error.staging,
             e = detail
