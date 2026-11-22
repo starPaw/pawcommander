@@ -5,6 +5,8 @@ use super::mutations::remove_remote_tree;
 use super::sftp::remote;
 use super::{TransferFailure, TransferSummary, MAX_TREE_DEPTH};
 use crate::conflict::{Answer, Conflict, Decision, EntryDetails};
+#[cfg(target_os = "macos")]
+use crate::file_error::SmbTransferRole;
 use crate::file_error::{
     AccessAction, AccessCause, AccessError, ConflictError, CopyVerificationError,
     DescendantProblem, Failure, MoveHistoryError, MutationError, ProbeAction, PublicationError,
@@ -274,6 +276,12 @@ impl TransferItem {
         .into()
     }
 
+    #[cfg(target_os = "macos")]
+    fn check_smb_mounts(&self) -> Result<Option<[i32; 2]>, TransferError> {
+        checked_smb_mount(&self.source, SmbTransferRole::Source)?;
+        checked_smb_mount(&self.target, SmbTransferRole::Destination)
+    }
+
     pub(super) fn verify_approved_source(
         &self,
         current: Option<&EntryMetadata>,
@@ -316,7 +324,9 @@ fn replacement_refusal(
     target: &EntryMetadata,
 ) -> Result<Option<ReplacementRefusal>, TransferError> {
     #[cfg(target_os = "macos")]
-    if mounted_smb(&item.target) {
+    if checked_smb_mount(&item.target, SmbTransferRole::Destination)?.is_some()
+        || mounted_smb(&item.target)
+    {
         return Ok(Some(ReplacementRefusal::Smb));
     }
     if !source.is_file() {
@@ -352,6 +362,15 @@ pub(super) fn transfer_plan(
     {
         return Err(MutationError::ReadOnlyArchive(archive.clone()).into());
     }
+    #[cfg(target_os = "macos")]
+    for (location, role) in std::iter::once((destination, SmbTransferRole::Destination)).chain(
+        sources
+            .iter()
+            .map(|source| (source, SmbTransferRole::Source)),
+    ) {
+        progress.checkpoint()?;
+        checked_smb_mount(location, role)?;
+    }
     if let Some(dest) = destination.local()
         && sources.iter().all(|p| !p.remote())
     {
@@ -360,6 +379,13 @@ pub(super) fn transfer_plan(
         let plan = fs_ops::plan_transfer(&paths, dest, progress)?;
         for item in &plan {
             progress.checkpoint()?;
+            #[cfg(target_os = "macos")]
+            {
+                if item.source != item.original {
+                    crate::smb::check_transfer_mount(&item.source, SmbTransferRole::Source)?;
+                }
+                crate::smb::check_transfer_mount(&item.target, SmbTransferRole::Destination)?;
+            }
             if kind == TransferKind::Move && item.source == item.target {
                 return Err(TransferPlanError::SameFolder {
                     source: item.original.clone().into(),
@@ -390,6 +416,12 @@ pub(super) fn transfer_plan(
 
     let mut names: HashMap<&str, &Location> = HashMap::new();
     let mut plan = Vec::new();
+    #[cfg(target_os = "macos")]
+    let managed_destination = resolve_managed_smb_alias(destination, SmbTransferRole::Destination)?;
+    #[cfg(target_os = "macos")]
+    let target_folder = managed_destination.as_ref().unwrap_or(destination);
+    #[cfg(not(target_os = "macos"))]
+    let target_folder = destination;
     for source in sources {
         progress.checkpoint()?;
         progress.item(source.path());
@@ -398,7 +430,9 @@ pub(super) fn transfer_plan(
             .file_name()
             .ok_or_else(|| TransferPlanError::MissingName(source.clone()))?;
         let name = sftp_transfer_name(name, || source.clone())?;
-        let target = destination.join(name);
+        let target = target_folder.join(name);
+        #[cfg(target_os = "macos")]
+        checked_smb_mount(&target, SmbTransferRole::Destination)?;
         if let Some(first) = names.insert(name, source) {
             return Err(TransferPlanError::DuplicateTarget {
                 first: first.clone(),
@@ -431,7 +465,12 @@ pub(super) fn transfer_plan(
                 .into());
             }
         }
-        plan.push(TransferItem::new(source.clone(), source.clone(), target));
+        #[cfg(target_os = "macos")]
+        let resolved_source = resolve_managed_smb_alias(source, SmbTransferRole::Source)?
+            .unwrap_or_else(|| source.clone());
+        #[cfg(not(target_os = "macos"))]
+        let resolved_source = source.clone();
+        plan.push(TransferItem::new(source.clone(), resolved_source, target));
     }
     Ok(plan)
 }
@@ -545,6 +584,8 @@ pub(super) fn transfer_run(
         .map(|item| {
             progress.checkpoint()?;
             progress.item(item.original.path());
+            #[cfg(target_os = "macos")]
+            checked_smb_mount(&item.target, SmbTransferRole::Destination)?;
             if kind == TransferKind::Move && item.source == item.target {
                 return Err(TransferPlanError::SameFolder {
                     source: item.original.clone(),
@@ -564,6 +605,8 @@ pub(super) fn transfer_run(
         progress.results.begin(&item.original);
         if let Some(target_meta) = target_meta {
             progress.item(item.original.path());
+            #[cfg(target_os = "macos")]
+            checked_smb_mount(&item.source, SmbTransferRole::Source)?;
             index += 1;
             let source_meta = read_entry_metadata(&item.source).map_err(|cause| {
                 AccessError::new(&item.source, AccessAction::ReadMetadata, cause)
@@ -605,6 +648,8 @@ pub(super) fn transfer_run(
                     continue;
                 }
                 Decision::KeepBoth => {
+                    #[cfg(target_os = "macos")]
+                    item.check_smb_mounts()?;
                     item.target = keep_both_name(&item.target, &reserved, &cancel)?;
                     reserved.insert(item.target.clone());
                 }
@@ -631,6 +676,8 @@ pub(super) fn transfer_run(
         progress.checkpoint()?;
         progress.results.begin(&item.original);
         progress.item(item.source.path());
+        #[cfg(target_os = "macos")]
+        item.check_smb_mounts()?;
         if let Some(retry) = &progress.retry {
             retry.verify(&item, &cancel)?;
         }
@@ -1045,11 +1092,16 @@ pub(super) fn copy_item_cancellable(
 ) -> Result<(), TransferError> {
     progress.set_copy_endpoints(&item.source, &item.target);
     #[cfg(target_os = "macos")]
-    if mounted_smb(&item.target) {
+    let expected_mount = {
+        progress.checkpoint()?;
+        item.check_smb_mounts()?
+    };
+    #[cfg(target_os = "macos")]
+    if expected_mount.is_some() || mounted_smb(&item.target) {
         if expected.is_some() {
             return Err(item.replacement_unavailable(ReplacementRefusal::Smb));
         }
-        return copy_to_smb(item, progress, published);
+        return copy_to_smb(item, expected_mount, progress, published);
     }
     #[cfg(target_os = "macos")]
     if let Some(directory) = progress.resume_directory.clone() {
@@ -1099,8 +1151,44 @@ pub(super) fn mounted_smb(location: &Location) -> bool {
 }
 
 #[cfg(target_os = "macos")]
+pub(super) fn checked_smb_mount(
+    location: &Location,
+    role: SmbTransferRole,
+) -> Result<Option<[i32; 2]>, TransferError> {
+    if let Some(path) = location.local() {
+        crate::smb::check_transfer_mount(path, role)
+    } else {
+        Ok(None)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_managed_smb_alias(
+    location: &Location,
+    role: SmbTransferRole,
+) -> Result<Option<Location>, TransferError> {
+    let Some(path) = location.local() else {
+        return Ok(None);
+    };
+    let resolved = match role {
+        // Preserve a selected symlink as an entry. Only its parent is resolved.
+        SmbTransferRole::Source => path
+            .parent()
+            .zip(path.file_name())
+            .and_then(|(parent, name)| parent.canonicalize().ok().map(|parent| parent.join(name))),
+        SmbTransferRole::Destination => path.canonicalize().ok(),
+    };
+    let Some(resolved) = resolved.filter(|resolved| resolved != path) else {
+        return Ok(None);
+    };
+    let mount = crate::smb::check_transfer_mount(&resolved, role)?;
+    Ok(mount.map(|_| Location::Local(resolved)))
+}
+
+#[cfg(target_os = "macos")]
 fn copy_to_smb(
     item: &TransferItem,
+    expected_mount: Option<[i32; 2]>,
     progress: &mut Progress,
     published: impl FnOnce(),
 ) -> Result<(), TransferError> {
@@ -1130,7 +1218,7 @@ fn copy_to_smb(
     source.verify_metadata(&item.source, &input.metadata(&item.source)?)?;
     source.verify(&item.source, &cancel, true)?;
     progress.checkpoint()?;
-    let mut file = crate::smb::open_upload(target)?;
+    let mut file = crate::smb::open_upload(target, expected_mount)?;
     let target_error = |action, error| AccessError::new(target, action, error);
     let describe_source_error = |error| match &error {
         TransferError::Failed(Failure::Mutation(reason))

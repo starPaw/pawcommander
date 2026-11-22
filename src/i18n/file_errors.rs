@@ -786,6 +786,18 @@ fn transfer_plan_error(error: &TransferPlanError) -> String {
     };
     match error {
         MissingName(path) => crate::tr_format!("Path {path} has no file name.", path = path),
+        #[cfg(target_os = "macos")]
+        SmbMount { path, role, cause } => {
+            let error = crate::i18n::smb_error(cause);
+            match role {
+                crate::file_error::SmbTransferRole::Source => crate::tr_format!(
+                    "Could not use SMB source {path}. {error}", path = path.display(), error = error
+                ),
+                crate::file_error::SmbTransferRole::Destination => crate::tr_format!(
+                    "Could not use SMB destination {path}. {error}", path = path.display(), error = error
+                ),
+            }
+        }
         MissingParent(path) => crate::tr_format!("Path {path} has no parent folder.", path = path),
         NonUtf8Name(path) => crate::tr_format!(
             "SFTP transfer requires a UTF-8 name. {path}",
