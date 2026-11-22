@@ -390,6 +390,16 @@ pub(crate) fn rename_with_undo(
         .plan([(source.clone(), Some(target.display()))]);
     progress.results.begin(source);
     progress.item(source.path());
+    #[cfg(target_os = "macos")]
+    let local_mount = if let Some(path) = source.local() {
+        progress.check_cancelled()?;
+        let mut mount =
+            crate::smb::MutationMount::new(crate::file_error::SmbMutationAction::Rename);
+        mount.check(path)?;
+        Some((path, mount))
+    } else {
+        None
+    };
     let evidence = Capture::before(source, &target).ok().and_then(|capture| {
         TransferSourceManifest::capture_move_observed(
             source,
@@ -416,7 +426,16 @@ pub(crate) fn rename_with_undo(
             }
         }
     } else {
-        super::mutations::rename_entry(source, name)?
+        #[cfg(target_os = "macos")]
+        let result = match local_mount {
+            Some((path, mount)) => {
+                crate::fs_ops::rename_entry_checked(path, name, mount).map(Location::Local)
+            }
+            None => super::mutations::rename_entry(source, name),
+        };
+        #[cfg(not(target_os = "macos"))]
+        let result = super::mutations::rename_entry(source, name);
+        result?
     };
     progress.results.target(source, renamed.display());
     if let Some((capture, manifest)) = evidence

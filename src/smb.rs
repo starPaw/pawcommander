@@ -1,7 +1,7 @@
 //! Native SMB shares use a unique, protected mount point and an OS credential entry.
 use crate::file_error::{
-    AccessAction, AccessError, CredentialFailure, PublicationError, SmbTransferRole,
-    TransferPlanError,
+    AccessAction, AccessError, CredentialFailure, MutationError, PublicationError,
+    SmbMutationAction, SmbTransferRole, TransferPlanError,
 };
 use crate::operations::TransferError;
 use crate::vfs::Location;
@@ -22,7 +22,7 @@ mod error;
 mod paths;
 pub(crate) use discovery::{Discovery, DiscoveryWarnings};
 pub(crate) use error::{MountFailure, PasswordAction, PathAction, RecordProblem, SmbError};
-pub(crate) use paths::{check_location, check_transfer_mount};
+pub(crate) use paths::{check_location, check_transfer_mount, MutationMount};
 
 const SERVICE: &str = "dev.pawcommander.smb.v1";
 const RECORD: &str = "connection.json";
@@ -428,6 +428,53 @@ pub(crate) fn is_smb_path(path: &Path) -> bool {
     mount_id(path, false).is_ok_and(|id| id.is_some())
 }
 
+fn directory_mount(directory: &impl AsRawFd) -> io::Result<Option<[i32; 2]>> {
+    let mut mount = [0; 2];
+    let mut is_smb = false;
+    let status =
+        unsafe { paw_smb_directory_id(directory.as_raw_fd(), mount.as_mut_ptr(), &mut is_smb) };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status));
+    }
+    Ok(is_smb.then_some(mount))
+}
+
+fn verify_mutation_directory(
+    handle: &impl AsRawFd,
+    directory: &Path,
+    path: &Path,
+    action: SmbMutationAction,
+    expected: [i32; 2],
+) -> Result<(), TransferError> {
+    let inspect = || -> Result<(), SmbError> {
+        let actual = directory_mount(handle).map_err(PathAction::InspectMount.at(directory))?;
+        if actual != Some(expected) {
+            return Err(SmbError::MountChanged(directory.to_owned()));
+        }
+        Ok(())
+    };
+    inspect().map_err(|cause| MutationError::smb_mount(path, action, cause).into())
+}
+
+fn open_mutation_parent(
+    path: &Path,
+    action: SmbMutationAction,
+    expected: [i32; 2],
+) -> Result<File, TransferError> {
+    let directory = path
+        .parent()
+        .ok_or_else(|| MutationError::ModifyRoot(path.to_owned()))?;
+    let parent = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_SEARCH | libc::O_NOFOLLOW)
+        .open(directory)
+        .map_err(|error| {
+            MutationError::smb_mount(path, action, PathAction::OpenMount.at(directory)(error))
+        })?;
+    verify_mutation_directory(&parent, directory, path, action, expected)?;
+    Ok(parent)
+}
+
 pub(crate) fn open_upload(
     target: &Location,
     expected_mount: Option<[i32; 2]>,
@@ -451,13 +498,8 @@ pub(crate) fn open_upload(
     let check_volume = |error| AccessError::new(&directory, AccessAction::CheckSmbVolume, error);
     // Check the opened directory and create relative to that handle so an
     // unmount or parent rename cannot redirect the upload to local storage.
-    let mut mount = [0; 2];
-    let mut is_smb = false;
-    let status = unsafe { paw_smb_directory_id(parent_fd, mount.as_mut_ptr(), &mut is_smb) };
-    if status != 0 {
-        return Err(check_volume(io::Error::from_raw_os_error(status)).into());
-    }
-    if expected_mount.is_some_and(|expected| !is_smb || mount != expected) {
+    let mount = directory_mount(&parent).map_err(check_volume)?;
+    if expected_mount.is_some() && mount != expected_mount {
         return Err(TransferPlanError::smb_mount(
             path,
             SmbTransferRole::Destination,
@@ -465,7 +507,7 @@ pub(crate) fn open_upload(
         )
         .into());
     }
-    if !is_smb {
+    if mount.is_none() {
         return Err(check_volume(io::Error::from(io::ErrorKind::Unsupported)).into());
     }
     let name = CString::new(path.file_name().ok_or_else(invalid)?.as_bytes()).map_err(|error| {
@@ -560,6 +602,24 @@ unsafe extern "C" {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn smb_mutation_parent_rejects_a_local_replacement() {
+        use crate::file_error::Failure;
+
+        let fixture = tempfile::tempdir().unwrap();
+        let parent = fixture.path().canonicalize().unwrap();
+        let target = parent.join("new-folder");
+        let error =
+            open_mutation_parent(&target, SmbMutationAction::CreateFolder, [1, 2]).unwrap_err();
+        assert!(
+            matches!(error, TransferError::Failed(Failure::Mutation(error))
+            if matches!(error.as_ref(), MutationError::SmbMount {
+                path, action: SmbMutationAction::CreateFolder, cause,
+            } if path == &target && matches!(cause.as_ref(), SmbError::MountChanged(path) if path == &parent)))
+        );
+        assert!(!target.exists());
+    }
 
     #[test]
     fn endpoint_normalizes_share_and_keeps_credentials_out_of_the_address() {

@@ -10,6 +10,8 @@ use crate::operations::{
     access_io, AccessStream, Cancellation, CopyReader, Progress, TransferError,
 };
 use crate::vfs::{DeletionFailure, Location, MAX_TREE_DEPTH};
+#[cfg(target_os = "macos")]
+use crate::{file_error::SmbMutationAction, smb::MutationMount};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
@@ -188,17 +190,50 @@ pub fn visit_directory(
 
 pub fn create_directory(parent: &Path, name: &str) -> Result<PathBuf, TransferError> {
     validate_name(name)?;
+    #[cfg(target_os = "macos")]
+    let mut mount = {
+        let mut mount = MutationMount::new(SmbMutationAction::CreateFolder);
+        mount.check(&parent.join(name))?;
+        mount
+    };
     let parent = directory_path(parent)?;
     let destination = parent.join(name);
-    fs::create_dir(&destination).map_err(|error| {
-        MutationError::local(&destination, LocalPathAction::CreateDirectory, error)
-    })?;
+    let error_at =
+        |error| MutationError::local(&destination, LocalPathAction::CreateDirectory, error);
+    #[cfg(target_os = "macos")]
+    {
+        mount.check(&destination)?;
+        if let Some(parent) = mount.open_parent(&destination)? {
+            use rustix::fs::{mkdirat, Mode};
+
+            mkdirat(&parent, name, Mode::from_raw_mode(0o777))
+                .map_err(|error| error_at(error.into()))?;
+            return Ok(destination);
+        }
+    }
+    fs::create_dir(&destination).map_err(error_at)?;
     Ok(destination)
 }
 
 pub fn rename_entry(source: &Path, name: &str) -> Result<PathBuf, TransferError> {
+    rename_entry_checked(
+        source,
+        name,
+        #[cfg(target_os = "macos")]
+        MutationMount::new(SmbMutationAction::Rename),
+    )
+}
+
+pub(crate) fn rename_entry_checked(
+    source: &Path,
+    name: &str,
+    #[cfg(target_os = "macos")] mut mount: MutationMount,
+) -> Result<PathBuf, TransferError> {
     validate_name(name)?;
-    let source = entry_path(source)?;
+    #[cfg(target_os = "macos")]
+    let source = entry_path(source, |path| mount.check(path))?;
+    #[cfg(not(target_os = "macos"))]
+    let source = entry_path(source, |_| Ok(()))?;
     fs::symlink_metadata(&source)
         .map_err(|error| MutationError::local(&source, LocalPathAction::ReadMetadata, error))?;
     let destination = source
@@ -208,7 +243,26 @@ pub fn rename_entry(source: &Path, name: &str) -> Result<PathBuf, TransferError>
     if source == destination {
         return Ok(source);
     }
+    #[cfg(target_os = "macos")]
+    mount.check(&destination)?;
     ensure_absent(&destination)?;
+    #[cfg(target_os = "macos")]
+    if let Some(parent) = mount.open_parent(&source)? {
+        use rustix::fs::{renameat_with, RenameFlags};
+
+        let original_name = source
+            .file_name()
+            .ok_or_else(|| MutationError::RenameRoot(source.clone().into()))?;
+        renameat_with(
+            &parent,
+            original_name,
+            &parent,
+            name,
+            RenameFlags::NOREPLACE,
+        )
+        .map_err(|error| rename_error(&source, &destination, error.into()))?;
+        return Ok(destination);
+    }
     rename_with_context(&source, &destination)?;
     Ok(destination)
 }
@@ -229,7 +283,12 @@ pub(crate) fn plan_transfer(
     progress.checkpoint()?;
     progress.item(destination);
     let resolved_destination = directory_path(destination)?;
-    let sources = normalize_selection(sources, progress)?;
+    let sources = normalize_selection(
+        sources,
+        progress,
+        #[cfg(target_os = "macos")]
+        None,
+    )?;
     let mut names = HashMap::new();
     let mut plan = Vec::<LocalTransfer>::new();
     for LocalSelection {
@@ -237,6 +296,7 @@ pub(crate) fn plan_transfer(
         source,
         covered,
         metadata,
+        ..
     } in sources
     {
         progress.checkpoint()?;
@@ -280,7 +340,12 @@ fn transfer(sources: &[PathBuf], destination: &Path, kind: TransferKind) -> Resu
 }
 
 pub fn trash_entries(paths: &[PathBuf], progress: &mut Progress) -> Result<usize, DeletionFailure> {
-    let paths = normalize_selection(paths, progress)?;
+    let paths = normalize_selection(
+        paths,
+        progress,
+        #[cfg(target_os = "macos")]
+        Some(SmbMutationAction::Trash),
+    )?;
     progress.results.plan(
         paths
             .iter()
@@ -292,6 +357,11 @@ pub fn trash_entries(paths: &[PathBuf], progress: &mut Progress) -> Result<usize
         let path = &entry.source;
         progress.item(path);
         let result = (|| {
+            #[cfg(target_os = "macos")]
+            if let Some(mount) = &entry.mount {
+                progress.check_cancelled()?;
+                mount.recheck()?;
+            }
             let cancel = progress.cancellation();
             let captured = SourceManifest::capture_observed(path, &cancel, &mut |observed, _| {
                 if let Ok(relative) = observed.strip_prefix(path) {
@@ -307,6 +377,11 @@ pub fn trash_entries(paths: &[PathBuf], progress: &mut Progress) -> Result<usize
                 }
             };
             progress.check_cancelled()?;
+            #[cfg(target_os = "macos")]
+            let _parent = match &entry.mount {
+                Some(mount) => mount.open_parent(path)?,
+                None => None,
+            };
             // Use the operating system's Trash, with no permanent-deletion fallback.
             trash::delete(path).map_err(|source| MutationError::Trash {
                 path: path.clone(),
@@ -352,7 +427,10 @@ fn directory_path(path: &Path) -> Result<PathBuf, TransferError> {
 
 /// Resolve parent aliases but preserve the final component: canonicalizing a
 /// selected symlink itself would accidentally operate on the link's target.
-fn entry_path(path: &Path) -> Result<PathBuf, TransferError> {
+fn entry_path(
+    path: &Path,
+    mut verify: impl FnMut(&Path) -> Result<(), TransferError>,
+) -> Result<PathBuf, TransferError> {
     let absolute = if path.is_absolute() {
         path.to_owned()
     } else {
@@ -363,12 +441,16 @@ fn entry_path(path: &Path) -> Result<PathBuf, TransferError> {
             })?
             .join(path)
     };
+    verify(&absolute)?;
     let root = || MutationError::ModifyRoot(absolute.clone());
     let name = absolute.file_name().ok_or_else(root)?;
     let parent = absolute.parent().ok_or_else(root)?;
     let parent = fs::canonicalize(parent)
         .map_err(|error| MutationError::local(parent, LocalPathAction::ResolveParent, error))?;
     let entry = parent.join(name);
+    if entry != absolute {
+        verify(&entry)?;
+    }
     let metadata = fs::symlink_metadata(&entry)
         .map_err(|error| MutationError::local(&entry, LocalPathAction::ReadMetadata, error))?;
     if metadata.file_type().is_symlink() {
@@ -376,9 +458,12 @@ fn entry_path(path: &Path) -> Result<PathBuf, TransferError> {
     } else {
         // Resolve the actual spelling on case-insensitive volumes as well as
         // parent aliases, so descendant protection compares canonical paths.
-        fs::canonicalize(&entry).map_err(|error| {
-            MutationError::local(entry, LocalPathAction::ResolveEntry, error).into()
-        })
+        let canonical = fs::canonicalize(&entry)
+            .map_err(|error| MutationError::local(&entry, LocalPathAction::ResolveEntry, error))?;
+        if canonical != entry {
+            verify(&canonical)?;
+        }
+        Ok(canonical)
     }
 }
 
@@ -387,54 +472,71 @@ struct LocalSelection {
     source: PathBuf,
     covered: Vec<PathBuf>,
     metadata: fs::Metadata,
+    #[cfg(target_os = "macos")]
+    mount: Option<MutationMount>,
 }
 
 fn normalize_selection(
     paths: &[PathBuf],
     progress: &mut Progress,
+    #[cfg(target_os = "macos")] action: Option<SmbMutationAction>,
 ) -> Result<Vec<LocalSelection>, TransferError> {
     let mut entries = Vec::with_capacity(paths.len());
     for original in paths {
         progress.checkpoint()?;
         progress.item(original);
-        let path = entry_path(original)?;
-        let metadata = fs::symlink_metadata(&path)
-            .map_err(|error| MutationError::local(&path, LocalPathAction::ReadMetadata, error))?;
-        entries.push((path, metadata));
+        #[cfg(target_os = "macos")]
+        let mut mount = action.map(MutationMount::new);
+        #[cfg(target_os = "macos")]
+        let source = entry_path(original, |path| match &mut mount {
+            Some(mount) => mount.check(path),
+            None => Ok(()),
+        })?;
+        #[cfg(not(target_os = "macos"))]
+        let source = entry_path(original, |_| Ok(()))?;
+        let metadata = fs::symlink_metadata(&source)
+            .map_err(|error| MutationError::local(&source, LocalPathAction::ReadMetadata, error))?;
+        entries.push(LocalSelection {
+            original: original.clone(),
+            source,
+            covered: Vec::new(),
+            metadata,
+            #[cfg(target_os = "macos")]
+            mount,
+        });
     }
     let mut first = HashMap::with_capacity(entries.len());
-    for (index, (path, _)) in entries.iter().enumerate() {
+    for (index, entry) in entries.iter().enumerate() {
         progress.checkpoint()?;
-        first.entry(path.as_path()).or_insert(index);
+        first.entry(entry.source.as_path()).or_insert(index);
     }
     let mut retained = vec![false; entries.len()];
     let mut covered = vec![Vec::new(); entries.len()];
-    for (index, (path, _)) in entries.iter().enumerate() {
+    for (index, entry) in entries.iter().enumerate() {
         progress.checkpoint()?;
+        let path = &entry.source;
         // The outermost selected directory covers all selected entries in
         // its tree, including paths spelled through other parent aliases.
         let representative = path
             .ancestors()
             .skip(1)
             .filter_map(|ancestor| first.get(ancestor).copied())
-            .filter(|&ancestor| entries[ancestor].1.is_dir())
+            .filter(|&ancestor| entries[ancestor].metadata.is_dir())
             .last()
             .unwrap_or(first[path.as_path()]);
         if index == representative {
             retained[index] = true;
         } else {
-            covered[representative].push(paths[index].clone());
+            covered[representative].push(entry.original.clone());
         }
     }
     Ok(entries
         .into_iter()
         .enumerate()
         .filter(|(index, _)| retained[*index])
-        .map(|(index, (source, metadata))| LocalSelection {
-            original: paths[index].clone(),
-            source,
-            covered: std::mem::take(&mut covered[index]),
-            metadata,
+        .map(|(index, mut entry)| {
+            entry.covered = std::mem::take(&mut covered[index]);
+            entry
         })
         .collect())
 }

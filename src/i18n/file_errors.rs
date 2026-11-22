@@ -2345,6 +2345,21 @@ fn mutation_error(error: &MutationError, unconfirmed: bool) -> String {
             };
             format!("{action} «{}»: {source}", path.display())
         }
+        #[cfg(target_os = "macos")]
+        SmbMount { path, action, cause } => {
+            use crate::file_error::SmbMutationAction;
+
+            let action = match action {
+                SmbMutationAction::CreateFile => text!("Не удалось создать файл"),
+                SmbMutationAction::CreateFolder => text!("Не удалось создать папку"),
+                SmbMutationAction::Rename => text!("Не удалось переименовать элемент"),
+                SmbMutationAction::Trash => text!("Не удалось переместить элемент в Корзину"),
+            };
+            crate::tr_format!(
+                "{action} at {path} ({error})",
+                action = action, path = path.display(), error = crate::i18n::smb_error(cause)
+            )
+        }
         CurrentDirectory { source, .. } => {
             crate::tr_format!("Could not determine the current folder: {e}", e = source)
         }

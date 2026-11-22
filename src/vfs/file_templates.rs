@@ -1,20 +1,21 @@
 //! Snapshot templates and publish files through guarded, exclusive staging.
 use super::{
-    guarded_directory::{open_staging, Directory},
+    guarded_directory::{open_staging, stale, Directory},
     location::validate_name,
     read_scope::ReadScope,
     staged_file::StagedFile,
-    transfer::with_staging_typed,
+    transfer::{with_smb_file_staging, with_staging_typed, FILE_STAGING_PAYLOAD},
     Location,
 };
 use crate::{
     file_error::{
         AccessError, Failure, FileTemplateError, MutationError, PathError, RecoveryNotice,
-        ScanError,
+        ScanError, SmbMutationAction,
     },
     operations::{Progress, TransferError},
     preview::encoding::Codec,
     result_history::Outcome,
+    smb::MutationMount,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
@@ -259,27 +260,55 @@ impl NewFile {
 
     fn publish(self, progress: &mut Progress, published: &mut bool) -> Result<(), TransferError> {
         progress.check_cancelled()?;
+        let requested = self.target();
+        let mut mount = MutationMount::new(SmbMutationAction::CreateFile);
+        if let Some(path) = requested.local() {
+            mount.check(path)?;
+        }
         let scope = ReadScope::open(&self.directory)?;
         let destination = Directory::from_scope(&scope)?;
         let name = OsStr::new(&self.name);
         let target = destination.location.join(name);
+        if let Some(path) = target.local() {
+            mount.check(path)?;
+        }
+        let smb_parent = if mount.is_owned() {
+            let parent = destination
+                .descriptor
+                .as_ref()
+                .ok_or_else(|| stale(&target))?;
+            mount.verify_directory(parent, destination.location.path(), target.path())?;
+            Some(parent)
+        } else {
+            None
+        };
         destination.require_absent(name)?;
         let cancel = progress.cancellation();
         let bytes = self.source.bytes(progress)?;
+        cancel.check()?;
+        mount.recheck()?;
         progress.item(target.path());
-        with_staging_typed(&target, Some(&cancel), |stage, preserve| {
+        let write_and_publish = |stage: &Location, preserve: &mut bool| {
             let stage = Directory::from_scope(&open_staging(stage)?)?;
-            let payload = stage.location.join("payload");
-            let mut output = StagedFile::open_for(&payload, &target, cancel.clone())?;
+            let payload = OsStr::new(FILE_STAGING_PAYLOAD);
+            let mut output = if mount.is_owned() {
+                let handle = stage.descriptor.as_ref().ok_or_else(|| stale(&target))?;
+                mount.verify_directory(handle, stage.location.path(), target.path())?;
+                let file = stage.exclusive_file(payload)?;
+                StagedFile::from_local(file, &target, cancel.clone())
+            } else {
+                StagedFile::open_for(&stage.location.join(payload), &target, cancel.clone())?
+            };
             for chunk in bytes.chunks(64 * 1024) {
                 output
                     .write_all(chunk)
                     .map_err(|error| AccessError::write(&target, error))?;
             }
             output.close()?;
+            mount.recheck()?;
             destination.require_absent(name)?;
             cancel.check()?;
-            match stage.rename(OsStr::new("payload"), &destination, name) {
+            match stage.rename(payload, &destination, name) {
                 Ok(()) => {
                     *published = true;
                     Ok(())
@@ -291,7 +320,12 @@ impl NewFile {
                 }
                 Err(error) => Err(error),
             }
-        })
+        };
+        if let Some(parent) = smb_parent {
+            with_smb_file_staging(&target, &cancel, parent, write_and_publish)
+        } else {
+            with_staging_typed(&target, Some(&cancel), write_and_publish)
+        }
     }
 }
 
