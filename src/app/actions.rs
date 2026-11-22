@@ -343,12 +343,7 @@ impl PawCommander {
                 }
             }
             #[cfg(target_os = "macos")]
-            Action::OpenSmb(index) => {
-                if let Some(share) = self.smb.shares.get(index) {
-                    let location = share.path.clone().into();
-                    self.tab_mut().navigate(location, ctx);
-                }
-            }
+            Action::OpenSmb(index) => self.open_smb(index, ctx),
             #[cfg(target_os = "macos")]
             Action::DisconnectSmb(index) => self.disconnect_smb(index, ctx),
             Action::ConnectSftp => {

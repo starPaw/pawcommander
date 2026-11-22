@@ -90,6 +90,10 @@ pub(crate) enum SmbError {
     },
     MissingMount(PathBuf),
     MountChanged(PathBuf),
+    OpenShare {
+        address: String,
+        cause: Box<Self>,
+    },
     Local {
         action: PathAction,
         path: PathBuf,
@@ -155,6 +159,9 @@ impl fmt::Display for SmbError {
                 write!(f, "Expected SMB mount missing at {}", path.display())
             }
             Self::MountChanged(path) => write!(f, "SMB mount changed at {}", path.display()),
+            Self::OpenShare { address, cause } => {
+                write!(f, "Could not open SMB share {address}: {cause}")
+            }
             Self::Local {
                 action,
                 path,
@@ -218,6 +225,7 @@ impl Error for SmbError {
                 ..
             } => Some(source.as_ref()),
             Self::DiscoveryWorkerStart(source) => Some(source),
+            Self::OpenShare { cause, .. } => Some(cause.as_ref()),
             Self::Password { cause, .. } => Some(cause),
             Self::SetupCleanup { primary, .. } => Some(primary.as_ref()),
             Self::DisconnectCleanup { cleanup, .. } => Some(cleanup.as_ref()),
