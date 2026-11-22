@@ -122,13 +122,32 @@ impl MountedShare {
         &self.record.endpoint
     }
 
-    pub(crate) fn disconnect(&self) -> Result<Option<SmbError>, SmbError> {
+    fn has_expected_mount(&self) -> Result<bool, SmbError> {
         match mount_id(&self.path, true).map_err(PathAction::InspectMount.at(&self.path))? {
-            Some(id) if id == self.record.id => {
-                unmount(&self.path).map_err(PathAction::Unmount.at(&self.path))?;
+            Some(id) if id == self.record.id => Ok(true),
+            Some(_) => Err(SmbError::MountChanged(self.path.clone())),
+            None => Ok(false),
+        }
+    }
+
+    pub(crate) fn check_open(&self) -> Result<(), SmbError> {
+        let result = self.has_expected_mount().and_then(|mounted| {
+            if !mounted {
+                return Err(SmbError::MissingMount(self.path.clone()));
             }
-            Some(_) => return Err(SmbError::MountChanged(self.path.clone())),
-            None => {}
+            fs::read_dir(&self.path)
+                .map(|_| ())
+                .map_err(PathAction::ReadShare.at(&self.path))
+        });
+        result.map_err(|cause| SmbError::OpenShare {
+            address: self.endpoint().address.clone(),
+            cause: Box::new(cause),
+        })
+    }
+
+    pub(crate) fn disconnect(&self) -> Result<Option<SmbError>, SmbError> {
+        if self.has_expected_mount()? {
+            unmount(&self.path).map_err(PathAction::Unmount.at(&self.path))?;
         }
         let record = self.base.join(RECORD);
         Ok(remove_mountpoint(&self.base, &self.path, Some(&record))
@@ -171,7 +190,7 @@ fn connect_in(
         .find(|share| share.endpoint() == &endpoint)
     {
         if password.is_empty() && !remember {
-            fs::read_dir(&share.path).map_err(PathAction::ReadShare.at(&share.path))?;
+            share.check_open()?;
             return Ok(Connected {
                 share,
                 warning: None,
@@ -663,6 +682,31 @@ mod tests {
             assert_eq!(base.read_dir().unwrap().count(), 1);
         }
         assert_eq!(fs::read(sentinel).unwrap(), b"original record bytes");
+    }
+
+    #[test]
+    fn reopening_detached_smb_does_not_accept_its_local_mountpoint() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().join("connection-detached");
+        let endpoint = Endpoint::parse("smb://nas/Files", "", true).unwrap();
+        let path = endpoint.mountpoint(&base);
+        fs::create_dir_all(&path).unwrap();
+        let local = path.join("local-sentinel");
+        fs::write(&local, b"unrelated bytes").unwrap();
+        let share = MountedShare {
+            path: path.clone(),
+            base,
+            record: Record {
+                endpoint,
+                id: [12, 42],
+            },
+        };
+        let error = share.check_open().unwrap_err();
+        assert!(matches!(&error, SmbError::OpenShare { address, cause }
+            if address == "smb://nas/Files" && matches!(cause.as_ref(), SmbError::MissingMount(mount) if mount == &path)));
+        let message = crate::i18n::smb_error(&error);
+        assert!(message.contains("smb://nas/Files") && message.contains(path.to_str().unwrap()));
+        assert_eq!(fs::read(local).unwrap(), b"unrelated bytes");
     }
 
     #[test]

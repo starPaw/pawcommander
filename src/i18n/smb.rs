@@ -29,6 +29,9 @@ pub(crate) fn smb_error(error: &SmbError) -> String {
         SmbError::MountChanged(path) => crate::tr_format!(
             "The SMB mount at {path} changed. The current mount was left in place.", path = path.display()
         ),
+        SmbError::OpenShare { address, cause } => crate::tr_format!(
+            "Could not open SMB share {address}. {error}", address = address, error = smb_error(cause)
+        ),
         SmbError::Local { action, path, source } => {
             let action = match action {
                 PathAction::CreateStorage => text!("Не удалось создать папку данных SMB"),

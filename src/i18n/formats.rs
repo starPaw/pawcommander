@@ -260,6 +260,7 @@ formats! {
     "{action} at {path} ({error})" => ("{action} «{path}» ({error})", "{action} v „{path}“ ({error})"),
     "SMB share {address} is already mounted at {path}. Disconnect it before changing the password." => ("Папка SMB {address} уже подключена в «{path}». Отключите её перед сменой пароля.", "Sdílení SMB {address} je už připojeno v „{path}“. Před změnou hesla jej odpojte."),
     "Could not mount SMB share {address} at {path} ({error})" => ("Не удалось подключить папку SMB {address} в «{path}» ({error})", "Sdílení SMB {address} se nepodařilo připojit do „{path}“ ({error})"),
+    "Could not open SMB share {address}. {error}" => ("Не удалось открыть папку SMB {address}. {error}", "Sdílení SMB {address} se nepodařilo otevřít. {error}"),
     "Could not start SMB discovery ({error})" => ("Не удалось запустить поиск подключений SMB ({error})", "Vyhledání připojení SMB se nepodařilo spustit ({error})"),
     "Invalid SMB connection record at {path}. {error}" => ("Некорректная запись подключения SMB в «{path}». {error}", "Neplatný záznam připojení SMB v „{path}“. {error}"),
     "The connection record exceeds {limit} bytes." => ("Размер записи подключения превышает {limit} байт.", "Záznam připojení překračuje {limit} bajtů."),

@@ -69,13 +69,34 @@ struct Target {
     folder: Location,
 }
 
+impl Target {
+    fn active(app: &PawCommander) -> Self {
+        Self {
+            pane: app.active,
+            tab: app.tab().id,
+            folder: app.tab().path.clone(),
+        }
+    }
+
+    fn navigate(self, app: &mut PawCommander, path: PathBuf, ctx: &egui::Context) {
+        let pane = &mut app.panes[self.pane];
+        if (app.settings.split || self.pane == 0)
+            && pane.tab().id == self.tab
+            && pane.tab().path == self.folder
+        {
+            pane.tab_mut().navigate(path.into(), ctx);
+        }
+    }
+}
+
 enum Change {
     Connected(Box<smb::Connected>, Target),
+    Opened(PathBuf, Target),
     Disconnected(PathBuf, Option<smb::SmbError>),
 }
 
 pub(super) struct Connections {
-    pub(super) shares: Vec<smb::MountedShare>,
+    shares: Vec<smb::MountedShare>,
     discovery: Option<Receiver<smb::Discovery>>,
     discovery_warnings: smb::DiscoveryWarnings,
     pending: Option<Receiver<Result<Change, smb::SmbError>>>,
@@ -151,23 +172,22 @@ impl PawCommander {
         current: &Location,
         actions: &mut Vec<Action>,
     ) {
+        let idle = !self.smb.busy();
         if ui
-            .add_enabled(
-                !self.smb.busy(),
-                egui::Button::new(text!("SMB · Подключиться")),
-            )
+            .add_enabled(idle, egui::Button::new(text!("SMB · Подключиться")))
             .clicked()
         {
             actions.push(Action::ConnectSmb);
         }
-        let can_disconnect = !self.smb.busy() && !self.jobs.is_busy();
+        let can_disconnect = idle && !self.jobs.is_busy();
         for (index, share) in self.smb.shares.iter().enumerate() {
             let endpoint = share.endpoint();
             let selected = current
                 .local()
                 .is_some_and(|path| path.starts_with(&share.path));
             let response = ui
-                .add(
+                .add_enabled(
+                    idle,
                     egui::Button::new(&endpoint.address)
                         .selected(selected)
                         .truncate(),
@@ -240,15 +260,28 @@ impl PawCommander {
         };
         let remember = !guest && form.remember;
         self.smb.last = form.address;
-        let target = Target {
-            pane: self.active,
-            tab: self.tab().id,
-            folder: self.tab().path.clone(),
-        };
-        self.start_smb(ctx, text!("Подключение к SMB…"), move || {
-            smb::connect(endpoint, password, remember)
-                .map(|share| Change::Connected(Box::new(share), target))
-        });
+        let target = Target::active(self);
+        self.start_smb(
+            ctx,
+            Some(text!("Подключение к SMB…")),
+            move || {
+                smb::connect(endpoint, password, remember)
+                    .map(|share| Change::Connected(Box::new(share), target))
+            },
+        );
+    }
+
+    pub(super) fn open_smb(&mut self, index: usize, ctx: &egui::Context) {
+        if self.smb.busy() {
+            return;
+        }
+        if let Some(share) = self.smb.shares.get(index).cloned() {
+            let target = Target::active(self);
+            self.start_smb(ctx, None, move || {
+                share.check_open()?;
+                Ok(Change::Opened(share.path, target))
+            });
+        }
     }
 
     pub(super) fn disconnect_smb(&mut self, index: usize, ctx: &egui::Context) {
@@ -256,7 +289,7 @@ impl PawCommander {
             return;
         }
         if let Some(share) = self.smb.shares.get(index).cloned() {
-            self.start_smb(ctx, text!("Отключение SMB…"), move || {
+            self.start_smb(ctx, Some(text!("Отключение SMB…")), move || {
                 let warning = share.disconnect()?;
                 Ok(Change::Disconnected(share.path, warning))
             });
@@ -266,7 +299,7 @@ impl PawCommander {
     fn start_smb(
         &mut self,
         ctx: &egui::Context,
-        notice: &str,
+        notice: Option<&str>,
         work: impl FnOnce() -> Result<Change, smb::SmbError> + Send + 'static,
     ) {
         if self.volumes.ejecting() {
@@ -276,7 +309,9 @@ impl PawCommander {
         match spawn(ctx, work) {
             Ok(result) => {
                 self.smb.pending = Some(result);
-                self.notice = Some((notice.into(), false));
+                if let Some(notice) = notice {
+                    self.notice = Some((notice.into(), false));
+                }
             }
             Err(error) => {
                 self.notice = Some((
@@ -317,19 +352,17 @@ impl PawCommander {
         self.smb.pending = None;
         match result {
             Ok(Change::Connected(connected, target)) => {
-                let location = connected.share.path.clone().into();
+                let path = connected.share.path.clone();
                 self.smb.add(connected.share);
-                let pane = &mut self.panes[target.pane];
-                if (self.settings.split || target.pane == 0)
-                    && pane.tab().id == target.tab
-                    && pane.tab().path == target.folder
-                {
-                    pane.tab_mut().navigate(location, ctx);
-                }
+                target.navigate(self, path, ctx);
                 self.notice = Some(match connected.warning {
                     Some(warning) => (crate::i18n::smb_error(&warning), true),
                     None => (text!("Папка SMB подключена.").into(), false),
                 });
+            }
+            Ok(Change::Opened(path, target)) => {
+                target.navigate(self, path, ctx);
+                return;
             }
             Ok(Change::Disconnected(path, warning)) => {
                 self.smb.shares.retain(|share| share.path != path);
