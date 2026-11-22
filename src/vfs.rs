@@ -126,7 +126,7 @@ impl std::error::Error for TransferFailure {
     }
 }
 
-const MAX_TREE_DEPTH: usize = 128;
+pub(crate) const MAX_TREE_DEPTH: usize = 128;
 
 fn err(error: impl fmt::Display) -> String {
     error.to_string()

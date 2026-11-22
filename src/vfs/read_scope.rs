@@ -328,11 +328,12 @@ fn local_input(
     source: &Location,
     cancel: &Cancellation,
 ) -> Result<std::fs::File, TransferError> {
+    use crate::operations::access_io;
     use rustix::fs::{openat, statat, AtFlags, FileType, Mode, OFlags};
     let unsupported = || ScanError::ExpectedRegularFile(source.clone());
-    let open_error = |error| AccessError::new(source, AccessAction::OpenFile, error);
     let relative = path.parent().ok_or_else(unsupported)?;
-    let directory = local_subdirectory(root, relative, cancel).map_err(open_error)?;
+    let directory = local_subdirectory(root, relative, cancel)
+        .map_err(|error| access_io(source, AccessAction::OpenFile, error))?;
     let parent = directory.as_ref().unwrap_or(root);
     let name = path.file_name().ok_or_else(unsupported)?;
     let stat = statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|error| {
@@ -344,9 +345,31 @@ fn local_input(
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
     openat(parent, name, flags, Mode::empty())
         .map(std::fs::File::from)
-        .map_err(|error| open_error(error.into()).into())
+        .map_err(|error| {
+            AccessError::new(source, AccessAction::OpenFile, io::Error::from(error)).into()
+        })
 }
 
 pub(super) fn changed_during_read() -> TransferError {
     text!("Файл изменился во время чтения").into()
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use rustix::fs::{open, Mode};
+
+    #[test]
+    fn cancellation_while_opening_a_source_subdirectory_stays_cancelled() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = open(fixture.path(), directory_flags(), Mode::empty()).unwrap();
+        let path = Path::new("nested/file");
+        let source = Location::Local(fixture.path().join(path));
+        let cancel = Cancellation::default();
+        cancel.request();
+        assert!(matches!(
+            local_input(&root, path, &source, &cancel),
+            Err(TransferError::Cancelled)
+        ));
+    }
 }

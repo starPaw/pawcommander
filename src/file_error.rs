@@ -119,14 +119,20 @@ impl From<MutationError> for Failure {
     }
 }
 
+impl From<ScanError> for Failure {
+    fn from(error: ScanError) -> Self {
+        Self::Scan(Box::new(error))
+    }
+}
+
 impl From<PublicationError> for Failure {
     fn from(error: PublicationError) -> Self {
         Self::Publication(Box::new(error))
     }
 }
 
-impl Failure {
-    pub(crate) fn source(&self) -> Option<&(dyn Error + 'static)> {
+impl Error for Failure {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Message(_) | Self::ConflictClosed => None,
             Self::Io { source, .. } => Some(source),
@@ -569,6 +575,7 @@ pub(crate) enum ScanError {
     MissingSftpFileType(Location),
     SftpCopySymlink(Location),
     SftpCopySpecialFile(Location),
+    LocalCopySpecialFile(Location),
     #[cfg(target_os = "macos")]
     DiskUsageRequiresLocalFolder,
     #[cfg(target_os = "macos")]
@@ -640,6 +647,9 @@ impl fmt::Display for ScanError {
             }
             Self::SftpCopySpecialFile(location) => {
                 write!(f, "Cannot copy a special file over SFTP: {location}")
+            }
+            Self::LocalCopySpecialFile(location) => {
+                write!(f, "Cannot copy a special file at {location}")
             }
             #[cfg(target_os = "macos")]
             Self::DiskUsageRequiresLocalFolder => {

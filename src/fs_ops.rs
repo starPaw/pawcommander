@@ -2,14 +2,14 @@
 //! volume before publication. This does not snapshot a changing filesystem.
 
 use crate::file_error::{
-    AccessAction, AccessCause, AccessError, CopyVerificationError, ListingError, ListingErrorKind,
-    LocalPathAction, MutationError, PathError, SpaceError, StagingCleanupError, StagingError,
-    TransferPlanError,
+    AccessAction, AccessCause, AccessError, CopyVerificationError, Failure, ListingError,
+    ListingErrorKind, LocalPathAction, MutationError, PathError, ScanError, SpaceError,
+    StagingCleanupError, StagingError, TransferPlanError,
 };
 use crate::operations::{
     access_io, AccessStream, Cancellation, CopyReader, Progress, TransferError,
 };
-use crate::vfs::{DeletionFailure, Location};
+use crate::vfs::{DeletionFailure, Location, MAX_TREE_DEPTH};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
@@ -617,7 +617,7 @@ pub(crate) fn copy_atomically_cancellable(
         if let Some(error) = error {
             progress.results.staged(
                 &location,
-                Some(error.to_string()),
+                Some(crate::i18n::access_io_message(error)),
                 TransferError::is_cancelled_io(error),
             );
         } else {
@@ -667,7 +667,7 @@ pub(crate) fn copy_atomically_cancellable(
         manifest.verify(&cancel, |source, error| {
             progress.results.staged(
                 &crate::vfs::Location::Local(source.to_path_buf()),
-                Some(error.to_string()),
+                Some(crate::i18n::access_io_message(error)),
                 TransferError::is_cancelled_io(error),
             );
         })
@@ -820,15 +820,37 @@ struct SourceManifest {
 }
 
 fn source_changed(path: &Path) -> io::Error {
-    io::Error::other(crate::i18n::source_changed_during_copy(path.display()))
+    io::Error::other(Failure::from(MutationError::SourceChanged(
+        path.to_owned().into(),
+    )))
+}
+
+fn source_io(path: &Path, action: AccessAction, error: io::Error) -> io::Error {
+    access_io(&Location::Local(path.to_owned()), action, error)
+}
+
+fn source_metadata(path: &Path) -> io::Result<fs::Metadata> {
+    fs::symlink_metadata(path).map_err(|error| source_io(path, AccessAction::ReadMetadata, error))
+}
+
+fn source_link(path: &Path) -> io::Result<PathBuf> {
+    fs::read_link(path).map_err(|error| source_io(path, AccessAction::ReadLink, error))
+}
+
+fn unsupported_copy_source(path: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        Failure::from(ScanError::LocalCopySpecialFile(path.to_owned().into())),
+    )
 }
 
 fn directory_names(path: &Path, cancel: &Cancellation) -> io::Result<Vec<OsString>> {
     let mut names = Vec::new();
     cancel.check()?;
-    for entry in fs::read_dir(path)? {
+    let read_error = |error| source_io(path, AccessAction::ReadChildren, error);
+    for entry in fs::read_dir(path).map_err(read_error)? {
         cancel.check()?;
-        names.push(entry?.file_name());
+        names.push(entry.map_err(read_error)?.file_name());
     }
     cancel.check()?;
     names.sort();
@@ -860,7 +882,8 @@ pub(crate) fn source_metadata_matches(
 
 impl SourceEntry {
     fn verify_metadata(&self, path: &Path, actual: &fs::Metadata) -> io::Result<()> {
-        let matches = source_metadata_matches(&self.metadata, actual)?;
+        let matches = source_metadata_matches(&self.metadata, actual)
+            .map_err(|error| source_io(path, AccessAction::ReadMetadata, error))?;
         if matches {
             Ok(())
         } else {
@@ -870,8 +893,7 @@ impl SourceEntry {
 
     fn verify(&self, path: &Path, cancel: &Cancellation) -> io::Result<()> {
         cancel.check()?;
-        let actual = fs::symlink_metadata(path)
-            .map_err(|e| io::Error::other(format!("{}: {e}", source_changed(path))))?;
+        let actual = source_metadata(path)?;
         self.verify_metadata(path, &actual)?;
         if let Some(names) = &self.children
             && *names != directory_names(path, cancel)?
@@ -879,7 +901,7 @@ impl SourceEntry {
             return Err(source_changed(path));
         }
         if let Some(link) = &self.link
-            && *link != fs::read_link(path)?
+            && *link != source_link(path)?
         {
             return Err(source_changed(path));
         }
@@ -934,35 +956,38 @@ impl SourceManifest {
         observe: &mut impl FnMut(&Path, Option<&io::Error>),
     ) -> io::Result<()> {
         cancel.check()?;
-        if depth > 128 {
-            return Err(io::Error::other(crate::i18n::text!(
-                "слишком большая глубина папок"
+        if depth > MAX_TREE_DEPTH {
+            return Err(io::Error::other(Failure::from(
+                ScanError::TransferDepthLimit {
+                    location: path.to_owned().into(),
+                    limit: MAX_TREE_DEPTH,
+                },
             )));
         }
-        let metadata = fs::symlink_metadata(path)?;
+        let metadata = source_metadata(path)?;
         // Do not silently claim a metadata check when the filesystem cannot
         // supply the modification time.
-        metadata.modified()?;
+        metadata
+            .modified()
+            .map_err(|error| source_io(path, AccessAction::ReadMetadata, error))?;
         let children = if metadata.is_dir() {
             Some(directory_names(path, cancel)?)
         } else {
             None
         };
         let link = if metadata.is_symlink() {
-            Some(fs::read_link(path)?)
+            Some(source_link(path)?)
         } else {
             None
         };
         if metadata.is_file() {
-            self.bytes = self
-                .bytes
-                .checked_add(metadata.len())
-                .ok_or_else(|| io::Error::other(crate::i18n::text!("слишком большой размер")))?;
+            self.bytes = self.bytes.checked_add(metadata.len()).ok_or_else(|| {
+                io::Error::other(Failure::from(ScanError::TransferSizeOverflow(
+                    path.to_owned().into(),
+                )))
+            })?;
         } else if !metadata.is_dir() && !metadata.is_symlink() {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                crate::i18n::text!("специальный файл"),
-            ));
+            return Err(unsupported_copy_source(path));
         }
         if let Some(names) = &children {
             for name in names {
@@ -1028,8 +1053,8 @@ fn copy_tree_entry(
         .ok_or_else(|| source_changed(source))?;
     entry.verify(source, &cancel)?;
     let metadata = &entry.metadata;
-    if metadata.file_type().is_symlink() {
-        copy_symlink(source, staged, metadata)?;
+    if let Some(link) = &entry.link {
+        copy_symlink(link, staged, metadata)?;
     } else if metadata.is_dir() {
         fs::create_dir(staged)?;
         for name in entry.children.as_ref().expect("directory manifest") {
@@ -1049,8 +1074,7 @@ fn copy_tree_entry(
         let output_path = Location::Local(target.to_owned());
         let input_error = |action, error| access_io(&input_path, action, error);
         let output_error = |action, error| access_io(&output_path, action, error);
-        let mut input = open_regular_source(source)
-            .map_err(|error| input_error(AccessAction::OpenFile, error))?;
+        let mut input = open_regular_source(source)?;
         let current = input
             .metadata()
             .map_err(|error| input_error(AccessAction::ReadOpenMetadata, error))?;
@@ -1122,13 +1146,7 @@ fn copy_tree_entry(
             .map_err(|error| output_error(AccessAction::WriteMetadata, error))?;
         return Ok(());
     } else {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            crate::tr_format!(
-                "“{}” is a special file (socket, device, or pipe). You can copy regular files, folders and symbolic links",
-                source.display()
-            ),
-        ));
+        return Err(unsupported_copy_source(source));
     }
     after_entry(source)
 }
@@ -1149,10 +1167,16 @@ pub(crate) fn open_regular_source(source: &Path) -> io::Result<fs::File> {
         use std::os::windows::fs::OpenOptionsExt;
         options.custom_flags(0x00200000); // FILE_FLAG_OPEN_REPARSE_POINT
     }
-    let input = options.open(source)?;
-    let metadata = input.metadata()?;
+    let input = options
+        .open(source)
+        .map_err(|error| source_io(source, AccessAction::OpenFile, error))?;
+    let metadata = input
+        .metadata()
+        .map_err(|error| source_io(source, AccessAction::ReadOpenMetadata, error))?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err(source_changed(source));
+        return Err(io::Error::other(Failure::from(
+            ScanError::ExpectedRegularFile(source.to_owned().into()),
+        )));
     }
     Ok(input)
 }
@@ -1193,14 +1217,13 @@ pub(crate) fn same_windows_file(source: &Path, target: &Path) -> bool {
 }
 
 #[cfg(unix)]
-fn copy_symlink(source: &Path, destination: &Path, _: &fs::Metadata) -> io::Result<()> {
-    std::os::unix::fs::symlink(fs::read_link(source)?, destination)
+fn copy_symlink(target: &Path, destination: &Path, _: &fs::Metadata) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, destination)
 }
 
 #[cfg(windows)]
-fn copy_symlink(source: &Path, destination: &Path, metadata: &fs::Metadata) -> io::Result<()> {
+fn copy_symlink(target: &Path, destination: &Path, metadata: &fs::Metadata) -> io::Result<()> {
     use std::os::windows::fs::FileTypeExt;
-    let target = fs::read_link(source)?;
     if metadata.file_type().is_symlink_dir() {
         std::os::windows::fs::symlink_dir(target, destination)
     } else {
@@ -1683,7 +1706,7 @@ mod tests {
             fs::write(&source, b"original").unwrap();
             fs::write(&destination, b"previous target").unwrap();
             let mut published = false;
-            let result = copy_atomically_checked(
+            let result = copy_atomically_cancellable(
                 &source,
                 &destination,
                 &mut Progress::default(),
@@ -1715,10 +1738,22 @@ mod tests {
                 },
             );
             let error = result.unwrap_err();
-            assert!(
-                error.contains("changed during copying"),
-                "{mutation}: {error}"
-            );
+            if mutation == "remove" {
+                let TransferError::Failed(Failure::Access(error)) = error else {
+                    panic!("expected the original metadata failure, got {error:?}");
+                };
+                assert_eq!(error.location.path(), source);
+                assert_eq!(error.action, AccessAction::ReadMetadata);
+                assert!(
+                    matches!(&error.cause, AccessCause::Local(cause) if cause.kind() == io::ErrorKind::NotFound)
+                );
+            } else {
+                assert!(
+                    matches!(&error, TransferError::Failed(Failure::Mutation(reason))
+                    if matches!(reason.as_ref(), MutationError::SourceChanged(location) if location.path() == source)),
+                    "{mutation}: {error}"
+                );
+            }
             assert!(!published, "{mutation}");
             assert_eq!(fs::read(&destination).unwrap(), b"previous target");
             assert!(!fs::read_dir(root.path()).unwrap().any(|entry| {
@@ -2150,7 +2185,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn regular_source_open_refuses_a_replacement_symlink() {
         use std::os::unix::fs::symlink;
@@ -2159,7 +2194,15 @@ mod tests {
         let replacement = root.path().join("replacement");
         fs::write(&actual, b"private").unwrap();
         symlink(&actual, &replacement).unwrap();
-        assert!(open_regular_source(&replacement).is_err());
+        let error = TransferError::from(open_regular_source(&replacement).unwrap_err());
+        let TransferError::Failed(Failure::Access(error)) = error else {
+            panic!("expected the original open failure, got {error:?}");
+        };
+        assert_eq!(error.location.path(), replacement);
+        assert_eq!(error.action, AccessAction::OpenFile);
+        assert!(
+            matches!(&error.cause, AccessCause::Local(cause) if cause.raw_os_error() == Some(libc::ELOOP))
+        );
         assert_eq!(fs::read(actual).unwrap(), b"private");
     }
 
@@ -2173,7 +2216,9 @@ mod tests {
 
         const CHILD_FIFO: &str = "PAWCOMMANDER_TEST_REGULAR_SOURCE_FIFO";
         if let Some(fifo) = std::env::var_os(CHILD_FIFO) {
-            assert!(open_regular_source(Path::new(&fifo)).is_err());
+            let error = TransferError::from(open_regular_source(Path::new(&fifo)).unwrap_err());
+            assert!(matches!(error, TransferError::Failed(Failure::Scan(reason))
+                if matches!(reason.as_ref(), ScanError::ExpectedRegularFile(location) if location.path() == Path::new(&fifo))));
             return;
         }
 
