@@ -13,6 +13,8 @@ use crate::{
 };
 use std::path::{Component, Path};
 
+#[cfg(target_os = "macos")]
+use crate::smb::MutationMount;
 #[cfg(unix)]
 use std::{io, os::fd::OwnedFd};
 
@@ -20,6 +22,8 @@ pub(super) struct ReadScope {
     pub(super) parent: Parent,
     #[cfg(unix)]
     pub(super) descriptor: Option<OwnedFd>,
+    #[cfg(target_os = "macos")]
+    mount: Option<MutationMount>,
 }
 
 pub(super) struct CheckedFile<'a> {
@@ -78,32 +82,82 @@ impl CheckedFile<'_> {
 
 impl ReadScope {
     pub(super) fn open(location: &Location) -> Result<Self, TransferError> {
+        Self::open_using(
+            location,
+            #[cfg(target_os = "macos")]
+            None,
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn open_with_smb(
+        location: &Location,
+        mount: &mut MutationMount,
+    ) -> Result<Self, TransferError> {
+        Self::open_using(location, Some(mount))
+    }
+
+    fn open_using(
+        location: &Location,
+        #[cfg(target_os = "macos")] mut mount: Option<&mut MutationMount>,
+    ) -> Result<Self, TransferError> {
         if location.is_archive() {
             return Err(MutationError::ReadOnlyArchive(location.clone()).into());
         }
         let parent = Parent::capture(location).map_err(folder_error)?;
+        #[cfg(target_os = "macos")]
+        if let Some(mount) = mount.as_deref_mut()
+            && let Some(path) = parent.location.local()
+        {
+            mount.check(path)?;
+            mount.recheck()?;
+        }
         #[cfg(unix)]
         let descriptor = parent
             .location
             .local()
             .map(|path| {
                 use rustix::fs::{open, Mode};
-                open(path, directory_flags(), Mode::empty()).map_err(|error| {
+                let descriptor = open(path, directory_flags(), Mode::empty()).map_err(|error| {
                     TransferError::from(ListingError::new(
                         parent.location.clone(),
                         ListingErrorKind::OpenLocal(error.into()),
                     ))
-                })
+                })?;
+                #[cfg(target_os = "macos")]
+                if let Some(mount) = mount.as_deref()
+                    && mount.is_owned()
+                {
+                    let directory = std::fs::File::from(descriptor);
+                    mount.verify_directory(&directory, path, path)?;
+                    if !parent.matches_handle(&directory)? {
+                        return Err(ScanError::FolderUnavailable(parent.location.clone()).into());
+                    }
+                    return Ok(directory.into());
+                }
+                Ok::<_, TransferError>(descriptor)
             })
             .transpose()?;
         Ok(Self {
             parent,
             #[cfg(unix)]
             descriptor,
+            #[cfg(target_os = "macos")]
+            mount: mount.map(|mount| mount.clone()),
         })
     }
 
+    #[cfg(target_os = "macos")]
+    pub(super) fn verify_mount(&self) -> Result<(), TransferError> {
+        if let Some(mount) = &self.mount {
+            mount.recheck()?;
+        }
+        Ok(())
+    }
+
     pub(super) fn verify_root(&self) -> Result<(), TransferError> {
+        #[cfg(target_os = "macos")]
+        self.verify_mount()?;
         self.parent.verify().map_err(folder_error)
     }
 
@@ -196,11 +250,21 @@ impl ReadScope {
         #[cfg(unix)]
         if let Some(root) = &self.descriptor {
             let source = self.parent.location.join(path);
+            #[cfg(target_os = "macos")]
+            self.verify_mount()?;
             return match local_input(root, path, &source, cancel) {
-                Ok(file) => Ok(Some((source, SourceReader::Local(file)))),
+                Ok(file) => {
+                    #[cfg(target_os = "macos")]
+                    if let Some(mount) = &self.mount {
+                        mount.verify_file(&file, source.path())?;
+                    }
+                    Ok(Some((source, SourceReader::Local(file))))
+                }
                 Err(TransferError::Failed(Failure::Access(error)))
                     if matches!(presence, Presence::Optional) && error.cause.is_absent() =>
                 {
+                    #[cfg(target_os = "macos")]
+                    self.verify_mount()?;
                     Ok(None)
                 }
                 Err(error) => Err(error),

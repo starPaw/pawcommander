@@ -18,7 +18,10 @@ use crate::{
 };
 use std::{collections::HashSet, fs};
 #[cfg(target_os = "macos")]
-use {super::archive_smb, crate::file_error::SmbMutationAction};
+use {
+    super::{archive_smb, smb_output},
+    crate::file_error::SmbMutationAction,
+};
 
 #[cfg(test)]
 mod tests;
@@ -89,7 +92,7 @@ fn extract(
     #[cfg(target_os = "macos")]
     let mut mount = {
         cancel.check()?;
-        archive_smb::guard(directory, SmbMutationAction::ExtractArchive)?
+        smb_output::guard(directory, SmbMutationAction::ExtractArchive)?
     };
     if let Some(path) = sources.first().and_then(Location::archive_source) {
         progress.item(path);
@@ -98,7 +101,7 @@ fn extract(
     totals.selected = trees.len();
     let parent = Parent::capture(directory)?;
     #[cfg(target_os = "macos")]
-    let smb_destination = archive_smb::is_destination(&mut mount, &parent.location)?;
+    let smb_destination = smb_output::is_destination(&mut mount, &parent.location)?;
     let targets = trees
         .iter()
         .map(|tree| {
@@ -113,7 +116,7 @@ fn extract(
         cancel.check()?;
         #[cfg(target_os = "macos")]
         if !mount.is_owned() {
-            archive_smb::check(&mut mount, target)?;
+            smb_output::check(&mut mount, target)?;
         }
         count += usize::from(entry_metadata(target)?.is_some());
     }

@@ -37,6 +37,8 @@ pub(crate) mod search;
 mod sftp;
 #[cfg(target_os = "macos")]
 mod sftp_properties;
+#[cfg(target_os = "macos")]
+mod smb_output;
 mod staged_file;
 #[cfg(target_os = "macos")]
 mod sync;
