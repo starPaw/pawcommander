@@ -2408,6 +2408,7 @@ fn mutation_error(error: &MutationError, unconfirmed: bool) -> String {
                 SmbMutationAction::BatchRename => text!("Не удалось выполнить пакетное переименование"),
                 SmbMutationAction::CreateLink => text!("Не удалось создать ссылку"),
                 SmbMutationAction::InspectLinkTarget => text!("Не удалось проверить цель ссылки"),
+                SmbMutationAction::Undo => text!("Не удалось отменить изменение"),
             };
             crate::tr_format!(
                 "{action} at {path} ({error})",

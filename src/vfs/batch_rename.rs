@@ -273,7 +273,8 @@ impl BatchRenamePreview {
         self.apply_using(progress, |source, target| {
             #[cfg(target_os = "macos")]
             if let Some(parent) = self.mount.open_parent(source.path())? {
-                return crate::fs_ops::rename_in_open_directory(
+                return crate::fs_ops::rename_between_open_directories(
+                    &parent,
                     &parent,
                     source.path(),
                     target.path(),
@@ -309,7 +310,12 @@ impl BatchRenamePreview {
             progress.results.begin(&row.source);
             let mut apply_row = || -> Result<(), TransferError> {
                 let (source, target) = self.check_row(row, &cancel)?;
-                let capture = Capture::before(&source, &target)?;
+                let capture = Capture::before(
+                    &source,
+                    &target,
+                    #[cfg(target_os = "macos")]
+                    Some(&self.mount),
+                )?;
                 let manifest = TransferSourceManifest::capture_move_observed(
                     &source,
                     &cancel,

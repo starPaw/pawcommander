@@ -8,6 +8,15 @@ use crate::file_error::{MutationError, UndoError};
 use crate::operations::{Cancellation, Progress, TransferError};
 use crate::result_history::Outcome;
 use std::collections::BTreeMap;
+#[cfg(target_os = "macos")]
+use {
+    super::transfer::LocalEntryMetadata,
+    crate::{
+        file_error::{AccessAction, AccessError, SmbMutationAction},
+        smb::MutationMount,
+    },
+    std::fs::File,
+};
 
 pub(super) const MAX_UNDO_ENTRIES: usize = 100_000;
 
@@ -52,6 +61,23 @@ impl Parent {
         };
         Ok(same && canonical(&self.location)? == self.location.path())
     }
+
+    #[cfg(target_os = "macos")]
+    fn verify_handle(&self, handle: &File) -> Result<(), TransferError> {
+        let actual = handle.metadata().map_err(|error| {
+            AccessError::new(&self.location, AccessAction::ReadOpenMetadata, error)
+        })?;
+        if !actual.is_dir()
+            || !self
+                .metadata
+                .same_object(&EntryMetadata::Local(LocalEntryMetadata::from_file(
+                    handle, actual,
+                )))
+        {
+            return Err(UndoError::FolderChanged(self.location.clone()).into());
+        }
+        Ok(())
+    }
 }
 
 fn unavailable(location: &Location) -> MutationError {
@@ -63,13 +89,31 @@ pub(super) struct Capture {
     original: Location,
     current: Location,
     parents: [Parent; 2],
+    #[cfg(target_os = "macos")]
+    mount: MutationMount,
 }
 
 impl Capture {
-    pub(super) fn before(source: &Location, target: &Location) -> Result<Self, TransferError> {
+    pub(super) fn before(
+        source: &Location,
+        target: &Location,
+        #[cfg(target_os = "macos")] forward_mount: Option<&MutationMount>,
+    ) -> Result<Self, TransferError> {
         if source == target || !source.same_backend(target) || source.is_archive() {
             return Err(unavailable(source).into());
         }
+        #[cfg(target_os = "macos")]
+        let mut mount = {
+            let mut mount = forward_mount
+                .cloned()
+                .unwrap_or_else(|| MutationMount::new(SmbMutationAction::Undo));
+            for location in [source, target] {
+                if let Some(path) = location.local() {
+                    mount.check(path)?;
+                }
+            }
+            mount
+        };
         let parents = [
             Parent::capture(&source.parent().ok_or_else(|| unavailable(source))?)?,
             Parent::capture(&target.parent().ok_or_else(|| unavailable(target))?)?,
@@ -89,6 +133,17 @@ impl Capture {
         if original == current {
             return Err(unavailable(&current).into());
         }
+        #[cfg(target_os = "macos")]
+        {
+            for (requested, resolved) in [(source, &original), (target, &current)] {
+                if requested != resolved
+                    && let Some(path) = resolved.local()
+                {
+                    mount.check(path)?;
+                }
+            }
+            mount.recheck()?;
+        }
         if entry_metadata(&current)?.is_some() {
             return Err(MutationError::DestinationExists(current).into());
         }
@@ -96,7 +151,15 @@ impl Capture {
             original,
             current,
             parents,
+            #[cfg(target_os = "macos")]
+            mount,
         })
+    }
+
+    fn verify_mount(&self) -> Result<(), TransferError> {
+        #[cfg(target_os = "macos")]
+        self.mount.recheck()?;
+        Ok(())
     }
 
     pub(super) fn finish(
@@ -104,6 +167,7 @@ impl Capture {
         source: &Location,
         manifest: &TransferSourceManifest,
     ) -> Result<UndoEntry, TransferError> {
+        self.verify_mount()?;
         for parent in &self.parents {
             parent.verify()?;
         }
@@ -136,10 +200,36 @@ impl Capture {
         if entries.is_empty() || entries.len() > MAX_UNDO_ENTRIES {
             return Err(unavailable(&self.current).into());
         }
-        Ok(UndoEntry {
-            capture: self,
-            entries,
-        })
+        self.verify_mount()?;
+        #[cfg(target_os = "macos")]
+        let capture = Self {
+            mount: self.mount.with_action(SmbMutationAction::Undo),
+            ..self
+        };
+        #[cfg(not(target_os = "macos"))]
+        let capture = self;
+        Ok(UndoEntry { capture, entries })
+    }
+
+    fn restore_original_name(&self) -> Result<(), TransferError> {
+        let source = &self.current;
+        let target = &self.original;
+        #[cfg(target_os = "macos")]
+        if let Some(source_parent) = self.mount.open_parent(source.path())? {
+            self.parents[1].verify_handle(&source_parent)?;
+            let target_parent = self
+                .mount
+                .open_parent(target.path())?
+                .ok_or_else(|| unavailable(target))?;
+            self.parents[0].verify_handle(&target_parent)?;
+            return crate::fs_ops::rename_between_open_directories(
+                &source_parent,
+                &target_parent,
+                source.path(),
+                target.path(),
+            );
+        }
+        rename_for_publication(source, target)
     }
 }
 
@@ -151,6 +241,7 @@ pub(super) struct UndoEntry {
 
 impl UndoEntry {
     fn verify_folders(&self) -> Result<(), TransferError> {
+        self.capture.verify_mount()?;
         for parent in &self.capture.parents {
             if !parent.matches()? {
                 return Err(UndoError::FolderChanged(parent.location.clone()).into());
@@ -214,7 +305,7 @@ impl UndoEntry {
         cancel.check()?;
         // No replacement option. The final OS/SFTP rename also refuses an
         // occupied target, including one that appeared after preflight.
-        rename_for_publication(source, target).map_err(|error| {
+        self.capture.restore_original_name().map_err(|error| {
             error.map_occupied_rename(|source| {
                 UndoError::OriginalOccupied {
                     target: target.clone(),
@@ -240,6 +331,7 @@ impl UndoEntry {
         progress: &mut Progress,
         read_restored: &mut impl FnMut(&Location) -> Result<Option<EntryMetadata>, TransferError>,
     ) -> Result<(), TransferError> {
+        self.capture.verify_mount()?;
         let source = &self.capture.current;
         let target = &self.capture.original;
         let mut failure = None;
@@ -269,7 +361,7 @@ impl UndoEntry {
                 failure = check.err();
             }
         }
-        failure.map_or(Ok(()), Err)
+        failure.map_or_else(|| self.capture.verify_mount(), Err)
     }
 }
 
@@ -393,14 +485,19 @@ pub(crate) fn rename_with_undo(
     #[cfg(target_os = "macos")]
     let local_mount = if let Some(path) = source.local() {
         progress.check_cancelled()?;
-        let mut mount =
-            crate::smb::MutationMount::new(crate::file_error::SmbMutationAction::Rename);
+        let mut mount = MutationMount::new(SmbMutationAction::Rename);
         mount.check(path)?;
         Some((path, mount))
     } else {
         None
     };
-    let evidence = Capture::before(source, &target).ok().and_then(|capture| {
+    let capture = Capture::before(
+        source,
+        &target,
+        #[cfg(target_os = "macos")]
+        local_mount.as_ref().map(|(_, mount)| mount),
+    );
+    let evidence = capture.ok().and_then(|capture| {
         TransferSourceManifest::capture_move_observed(
             source,
             &progress.cancellation(),
@@ -444,4 +541,29 @@ pub(crate) fn rename_with_undo(
         progress.undo.push(entry);
     }
     Ok(renamed)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+    use crate::file_error::Failure;
+    use std::fs;
+
+    #[test]
+    fn undo_rejects_a_replacement_parent_handle_on_the_same_volume() {
+        let fixture = tempfile::tempdir().unwrap();
+        let folder = fixture.path().canonicalize().unwrap().join("folder");
+        fs::create_dir(&folder).unwrap();
+        let saved = Parent::capture(&Location::Local(folder.clone())).unwrap();
+        let original = File::open(&folder).unwrap();
+        fs::rename(&folder, folder.with_file_name("retained")).unwrap();
+        fs::create_dir(&folder).unwrap();
+
+        assert!(saved.verify_handle(&original).is_ok());
+        let error = saved
+            .verify_handle(&File::open(&folder).unwrap())
+            .unwrap_err();
+        assert!(matches!(error, TransferError::Failed(Failure::Undo(reason))
+            if matches!(reason.as_ref(), UndoError::FolderChanged(path) if path.path() == folder)));
+    }
 }

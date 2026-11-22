@@ -248,7 +248,7 @@ pub(crate) fn rename_entry_checked(
     ensure_absent(&destination)?;
     #[cfg(target_os = "macos")]
     if let Some(parent) = mount.open_parent(&source)? {
-        rename_in_open_directory(&parent, &source, &destination)?;
+        rename_between_open_directories(&parent, &parent, &source, &destination)?;
         return Ok(destination);
     }
     rename_with_context(&source, &destination)?;
@@ -1402,19 +1402,25 @@ pub(crate) fn rename_with_context(source: &Path, destination: &Path) -> Result<(
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn rename_in_open_directory(
-    parent: &fs::File,
+pub(crate) fn rename_between_open_directories(
+    source_parent: &fs::File,
+    destination_parent: &fs::File,
     source: &Path,
     destination: &Path,
 ) -> Result<(), TransferError> {
     use rustix::fs::{renameat_with, RenameFlags};
 
-    debug_assert_eq!(source.parent(), destination.parent());
     let name = |path: &Path| MutationError::RenameRoot(path.to_owned().into());
     let from = source.file_name().ok_or_else(|| name(source))?;
     let to = destination.file_name().ok_or_else(|| name(destination))?;
-    renameat_with(parent, from, parent, to, RenameFlags::NOREPLACE)
-        .map_err(|error| rename_error(source, destination, error.into()))
+    renameat_with(
+        source_parent,
+        from,
+        destination_parent,
+        to,
+        RenameFlags::NOREPLACE,
+    )
+    .map_err(|error| rename_error(source, destination, error.into()))
 }
 
 // Native no-replacement renames close the check-then-rename overwrite race.

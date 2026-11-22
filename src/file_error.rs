@@ -1266,6 +1266,7 @@ pub(crate) enum SmbMutationAction {
     BatchRename,
     CreateLink,
     InspectLinkTarget,
+    Undo,
 }
 
 #[derive(Debug)]

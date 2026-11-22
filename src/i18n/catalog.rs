@@ -1356,6 +1356,7 @@ catalog! {
     "Текущий объект" => ("Current item", "Aktuální položka"),
     "Журнал результатов" => ("Result history", "Historie výsledků"),
     "Отмена изменений" => ("Undo changes", "Vrátit změny"),
+    "Не удалось отменить изменение" => ("Could not undo the change", "Změnu se nepodařilo vrátit"),
     "Undo недоступен для этой операции" => ("Undo is unavailable for this operation", "Tuto operaci nelze vrátit"),
     "Очередь заполнена (100 заданий). Дождитесь завершения или удалите ожидающее задание." => ("Queue is full (100 jobs). Wait for completion or remove a pending job.", "Fronta je plná (100 úloh). Počkejte na dokončení nebo odeberte čekající úlohu."),
     "Эти вырезанные объекты уже ожидают перемещения." => ("These cut items are already scheduled to move.", "Tyto vyjmuté položky už čekají na přesun."),
