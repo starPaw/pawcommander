@@ -19,7 +19,7 @@ pub(super) struct Form {
 }
 
 impl Form {
-    pub(super) fn endpoint(&self) -> Result<smb::Endpoint, String> {
+    pub(super) fn endpoint(&self) -> Result<smb::Endpoint, smb::SmbError> {
         smb::Endpoint::parse(&self.address.url, &self.address.user, self.address.guest)
     }
 
@@ -58,7 +58,7 @@ impl Form {
         if !self.address.url.is_empty()
             && let Err(error) = self.endpoint()
         {
-            ui.colored_label(ui.visuals().error_fg_color, error);
+            ui.colored_label(ui.visuals().error_fg_color, crate::i18n::smb_error(&error));
         }
     }
 }
@@ -71,13 +71,13 @@ struct Target {
 
 enum Change {
     Connected(Box<smb::Connected>, Target),
-    Disconnected(PathBuf, Option<String>),
+    Disconnected(PathBuf, Option<smb::SmbError>),
 }
 
 pub(super) struct Connections {
     pub(super) shares: Vec<smb::MountedShare>,
     discovery: Option<Receiver<Vec<smb::MountedShare>>>,
-    pending: Option<Receiver<Result<Change, String>>>,
+    pending: Option<Receiver<Result<Change, smb::SmbError>>>,
     last: Address,
 }
 
@@ -186,7 +186,7 @@ impl PawCommander {
         let endpoint = match form.endpoint() {
             Ok(endpoint) => endpoint,
             Err(error) => {
-                self.notice = Some((error, true));
+                self.notice = Some((crate::i18n::smb_error(&error), true));
                 return;
             }
         };
@@ -225,7 +225,7 @@ impl PawCommander {
         &mut self,
         ctx: &egui::Context,
         notice: &str,
-        work: impl FnOnce() -> Result<Change, String> + Send + 'static,
+        work: impl FnOnce() -> Result<Change, smb::SmbError> + Send + 'static,
     ) {
         if self.volumes.ejecting() {
             self.notice = Some((super::volumes::wait_for_eject().into(), true));
@@ -264,9 +264,7 @@ impl PawCommander {
         let result = match pending.try_recv() {
             Ok(result) => result,
             Err(TryRecvError::Empty) => return,
-            Err(TryRecvError::Disconnected) => {
-                Err(text!("Задача SMB завершилась без результата.").into())
-            }
+            Err(TryRecvError::Disconnected) => Err(smb::SmbError::WorkerDisconnected),
         };
         self.smb.pending = None;
         match result {
@@ -281,7 +279,7 @@ impl PawCommander {
                     pane.tab_mut().navigate(location, ctx);
                 }
                 self.notice = Some(match connected.warning {
-                    Some(warning) => (warning, true),
+                    Some(warning) => (crate::i18n::smb_error(&warning), true),
                     None => (text!("Папка SMB подключена.").into(), false),
                 });
             }
@@ -299,11 +297,11 @@ impl PawCommander {
                     }
                 }
                 self.notice = Some(match warning {
-                    Some(warning) => (warning, true),
+                    Some(warning) => (crate::i18n::smb_error(&warning), true),
                     None => (text!("Папка SMB отключена.").into(), false),
                 });
             }
-            Err(error) => self.notice = Some((error, true)),
+            Err(error) => self.notice = Some((crate::i18n::smb_error(&error), true)),
         }
         self.directory_tree.refresh();
     }

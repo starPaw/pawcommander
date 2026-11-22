@@ -1,6 +1,5 @@
 //! Native SMB shares use a unique, protected mount point and an OS credential entry.
-use crate::file_error::{AccessAction, AccessError, PublicationError};
-use crate::i18n::text;
+use crate::file_error::{AccessAction, AccessError, CredentialFailure, PublicationError};
 use crate::operations::TransferError;
 use crate::vfs::Location;
 use serde::{Deserialize, Serialize};
@@ -16,6 +15,9 @@ use std::os::unix::{
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
+mod error;
+pub(crate) use error::{MountFailure, PasswordAction, PathAction, SmbError};
+
 const SERVICE: &str = "dev.pawcommander.smb.v1";
 const RECORD: &str = "connection.json";
 const MOUNT_DIR: &str = "mount";
@@ -28,10 +30,8 @@ pub(crate) struct Endpoint {
 }
 
 impl Endpoint {
-    pub(crate) fn parse(address: &str, user: &str, guest: bool) -> Result<Self, String> {
-        let invalid =
-            || text!("Введите SMB-адрес вида smb://сервер/папка без учётных данных.").to_owned();
-        let mut url = url::Url::parse(address.trim()).map_err(|_| invalid())?;
+    pub(crate) fn parse(address: &str, user: &str, guest: bool) -> Result<Self, SmbError> {
+        let mut url = url::Url::parse(address.trim()).map_err(SmbError::AddressSyntax)?;
         if url.scheme() != "smb"
             || url.host_str().is_none_or(str::is_empty)
             || !url.username().is_empty()
@@ -40,36 +40,40 @@ impl Endpoint {
             || url.fragment().is_some()
             || url.port() == Some(0)
         {
-            return Err(invalid());
+            return Err(SmbError::InvalidAddress);
         }
-        let host = percent_encoding::percent_decode_str(url.host_str().ok_or_else(invalid)?)
-            .decode_utf8()
-            .map_err(|_| invalid())?;
-        let host = url::Host::parse(&host).map_err(|_| invalid())?.to_string();
-        url.set_host(Some(&host)).map_err(|_| invalid())?;
-        let path = url.path().strip_suffix('/').unwrap_or(url.path());
-        let share =
-            percent_encoding::percent_decode_str(path.strip_prefix('/').ok_or_else(invalid)?)
+        let host =
+            percent_encoding::percent_decode_str(url.host_str().ok_or(SmbError::InvalidAddress)?)
                 .decode_utf8()
-                .map_err(|_| invalid())?
-                .into_owned();
+                .map_err(SmbError::AddressEncoding)?;
+        let host = url::Host::parse(&host)
+            .map_err(SmbError::AddressSyntax)?
+            .to_string();
+        url.set_host(Some(&host)).map_err(SmbError::AddressSyntax)?;
+        let path = url.path().strip_suffix('/').unwrap_or(url.path());
+        let share = percent_encoding::percent_decode_str(
+            path.strip_prefix('/').ok_or(SmbError::InvalidAddress)?,
+        )
+        .decode_utf8()
+        .map_err(SmbError::AddressEncoding)?
+        .into_owned();
         if share.is_empty()
             || matches!(share.as_str(), "." | "..")
             || share.contains(['/', '\\'])
             || share.chars().any(char::is_control)
         {
-            return Err(invalid());
+            return Err(SmbError::InvalidAddress);
         }
         url.path_segments_mut()
-            .map_err(|_| invalid())?
+            .map_err(|_| SmbError::InvalidAddress)?
             .clear()
             .push(&share);
         if url.port() == Some(445) {
-            url.set_port(None).map_err(|_| invalid())?;
+            url.set_port(None).map_err(|_| SmbError::InvalidAddress)?;
         }
         let user = user.trim();
         if !guest && (user.is_empty() || user.chars().any(char::is_control)) {
-            return Err(text!("Введите имя пользователя SMB.").into());
+            return Err(SmbError::InvalidUser);
         }
         Ok(Self {
             address: url.into(),
@@ -78,18 +82,24 @@ impl Endpoint {
         })
     }
 
-    fn credential(&self) -> Result<keyring::Entry, String> {
-        let account = serde_json::to_string(self).map_err(|_| smb_keychain_error())?;
-        crate::credentials::system_entry(SERVICE, &account).map_err(|_| smb_keychain_error())
+    fn credential(&self, action: PasswordAction) -> Result<keyring::Entry, SmbError> {
+        let account = serde_json::to_string(self)
+            .map_err(|source| self.password_error(action, CredentialFailure::Profile(source)))?;
+        crate::credentials::system_entry(SERVICE, &account)
+            .map_err(|source| self.password_error(action, source.into()))
+    }
+
+    fn password_error(&self, action: PasswordAction, cause: CredentialFailure) -> SmbError {
+        SmbError::Password {
+            action,
+            address: self.address.clone(),
+            cause,
+        }
     }
 
     fn mountpoint(&self, base: &Path) -> PathBuf {
         base.join(MOUNT_DIR).join(&self.share)
     }
-}
-
-fn smb_keychain_error() -> String {
-    text!("Не удалось открыть или обновить пароль SMB в Связке ключей.").into()
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -110,49 +120,40 @@ impl MountedShare {
         &self.record.endpoint
     }
 
-    pub(crate) fn disconnect(&self) -> Result<Option<String>, String> {
-        match mount_id(&self.path, true).map_err(mount_error)? {
-            Some(id) if id == self.record.id => unmount(&self.path).map_err(|error| {
-                crate::tr_format!(
-                    "Could not disconnect the SMB share ({error})",
-                    error = error
-                )
-            })?,
-            Some(_) => {
-                return Err(
-                    text!("Подключение SMB изменилось. Обновите список подключений.").into(),
-                )
+    pub(crate) fn disconnect(&self) -> Result<Option<SmbError>, SmbError> {
+        match mount_id(&self.path, true).map_err(PathAction::InspectMount.at(&self.path))? {
+            Some(id) if id == self.record.id => {
+                unmount(&self.path).map_err(PathAction::Unmount.at(&self.path))?;
             }
+            Some(_) => return Err(SmbError::MountChanged(self.path.clone())),
             None => {}
         }
         Ok(remove_mountpoint(&self.base, &self.path)
             .err()
-            .map(|error| {
-                crate::tr_format!(
-                    "SMB disconnected. Could not remove its empty mount folder ({error})",
-                    error = error
-                )
+            .map(|cleanup| SmbError::DisconnectCleanup {
+                address: self.endpoint().address.clone(),
+                cleanup: Box::new(cleanup),
             }))
     }
 }
 
 pub(crate) struct Connected {
     pub(crate) share: MountedShare,
-    pub(crate) warning: Option<String>,
+    pub(crate) warning: Option<SmbError>,
 }
 
-fn root() -> io::Result<PathBuf> {
+fn root() -> Result<PathBuf, SmbError> {
     dirs::data_local_dir()
         .map(|root| root.join("PawCommander").join("smb"))
-        .ok_or_else(|| io::Error::other(text!("Нет папки данных для подключения SMB.")))
+        .ok_or(SmbError::DataDirectoryUnavailable)
 }
 
 pub(crate) fn connect(
     endpoint: Endpoint,
     password: Zeroizing<String>,
     remember: bool,
-) -> Result<Connected, String> {
-    connect_in(&root().map_err(mount_error)?, endpoint, password, remember)
+) -> Result<Connected, SmbError> {
+    connect_in(&root()?, endpoint, password, remember)
 }
 
 fn connect_in(
@@ -160,51 +161,61 @@ fn connect_in(
     endpoint: Endpoint,
     mut password: Zeroizing<String>,
     remember: bool,
-) -> Result<Connected, String> {
+) -> Result<Connected, SmbError> {
     if let Some(share) = discover_in(root)
         .into_iter()
         .find(|share| share.endpoint() == &endpoint)
     {
         if password.is_empty() && !remember {
-            fs::read_dir(&share.path).map_err(mount_error)?;
+            fs::read_dir(&share.path).map_err(PathAction::ReadShare.at(&share.path))?;
             return Ok(Connected {
                 share,
                 warning: None,
             });
         }
-        return Err(text!("Папка уже подключена. Отключите её перед сменой пароля.").into());
+        return Err(SmbError::AlreadyMounted {
+            address: endpoint.address,
+            path: share.path,
+        });
     }
     if endpoint.user.is_some() && password.is_empty() {
-        match endpoint.credential()?.get_secret() {
+        match endpoint.credential(PasswordAction::Read)?.get_secret() {
             Ok(bytes) => {
                 let bytes = Zeroizing::new(bytes);
-                let value = std::str::from_utf8(&bytes).map_err(|_| smb_keychain_error())?;
+                let value =
+                    std::str::from_utf8(&bytes).map_err(|source| SmbError::PasswordEncoding {
+                        address: endpoint.address.clone(),
+                        source,
+                    })?;
                 password = Zeroizing::new(value.to_owned());
             }
             Err(keyring::Error::NoEntry) => {}
-            Err(_) => return Err(smb_keychain_error()),
+            Err(source) => return Err(endpoint.password_error(PasswordAction::Read, source.into())),
         }
     }
     if password.contains('\0') {
-        return Err(text!("Пароль SMB содержит нулевой байт.").into());
+        return Err(SmbError::InvalidPassword);
     }
-    fs::create_dir_all(root).map_err(mount_error)?;
-    let root = root.canonicalize().map_err(mount_error)?;
+    fs::create_dir_all(root).map_err(PathAction::CreateStorage.at(root))?;
+    let root = root
+        .canonicalize()
+        .map_err(PathAction::ResolveStorage.at(root))?;
     // Use only non-recursive cleanup for a directory that can cover remote data.
     let base = tempfile::Builder::new()
         .prefix("connection-")
-        .tempdir_in(root)
-        .map_err(mount_error)?
+        .tempdir_in(&root)
+        .map_err(PathAction::AllocateMount.at(&root))?
         .keep();
     let path = endpoint.mountpoint(&base);
-    let result = mount_new(&base, &path, endpoint, &password, remember);
-    if result.is_err() {
-        if mount_id(&path, true).is_ok_and(|id| id.is_some()) {
-            let _ = unmount(&path);
+    mount_new(&base, &path, endpoint, &password, remember).map_err(|primary| {
+        match cleanup_failed_mount(&base, &path) {
+            Ok(()) => primary,
+            Err(cleanup) => SmbError::SetupCleanup {
+                primary: Box::new(primary),
+                cleanup: Box::new(cleanup),
+            },
         }
-        let _ = remove_mountpoint(&base, &path);
-    }
-    result
+    })
 }
 
 fn mount_new(
@@ -213,29 +224,35 @@ fn mount_new(
     endpoint: Endpoint,
     password: &str,
     remember: bool,
-) -> Result<Connected, String> {
-    fs::create_dir_all(path).map_err(mount_error)?;
-    let covered = File::open(path).map_err(mount_error)?;
+) -> Result<Connected, SmbError> {
+    fs::create_dir_all(path).map_err(PathAction::PrepareMount.at(path))?;
+    let covered = File::open(path).map_err(PathAction::OpenMount.at(path))?;
     mount(&endpoint, path, password)?;
     let id = mount_id(path, true)
-        .map_err(mount_error)?
-        .ok_or_else(|| text!("macOS не вернула ожидаемую точку монтирования SMB.").to_owned())?;
+        .map_err(PathAction::InspectMount.at(path))?
+        .ok_or_else(|| SmbError::MissingMount(path.to_owned()))?;
     // This handle still refers to the empty local directory underneath the mount.
     covered
         .set_permissions(Permissions::from_mode(0o100))
-        .map_err(mount_error)?;
-    fs::read_dir(path).map_err(mount_error)?;
+        .map_err(PathAction::ProtectMount.at(path))?;
+    fs::read_dir(path).map_err(PathAction::ReadShare.at(path))?;
     let record = Record { endpoint, id };
-    let bytes = serde_json::to_vec(&record).map_err(|error| error.to_string())?;
-    fs::write(base.join(RECORD), bytes).map_err(mount_error)?;
+    let record_path = base.join(RECORD);
+    let bytes = serde_json::to_vec(&record).map_err(|source| SmbError::EncodeRecord {
+        path: record_path.clone(),
+        source,
+    })?;
+    fs::write(&record_path, bytes).map_err(PathAction::WriteRecord.at(&record_path))?;
     let warning = if remember && record.endpoint.user.is_some() {
         record
             .endpoint
-            .credential()
+            .credential(PasswordAction::Save)
             .and_then(|entry| {
-                entry
-                    .set_secret(password.as_bytes())
-                    .map_err(|_| smb_keychain_error())
+                entry.set_secret(password.as_bytes()).map_err(|source| {
+                    record
+                        .endpoint
+                        .password_error(PasswordAction::Save, source.into())
+                })
             })
             .err()
     } else {
@@ -297,51 +314,64 @@ fn discover_in(root: &Path) -> Vec<MountedShare> {
         .collect()
 }
 
-fn remove_mountpoint(base: &Path, path: &Path) -> io::Result<()> {
-    fn absent_ok(result: io::Result<()>) -> io::Result<()> {
+fn cleanup_failed_mount(base: &Path, path: &Path) -> Result<(), SmbError> {
+    if mount_id(path, true)
+        .map_err(PathAction::InspectMount.at(path))?
+        .is_some()
+    {
+        unmount(path).map_err(PathAction::Unmount.at(path))?;
+    }
+    remove_mountpoint(base, path)
+}
+
+fn remove_mountpoint(base: &Path, path: &Path) -> Result<(), SmbError> {
+    fn absent_ok(result: io::Result<()>, path: &Path) -> Result<(), SmbError> {
         match result {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            result => result,
+            result => result.map_err(PathAction::Cleanup.at(path)),
         }
     }
-    absent_ok(fs::remove_dir(path))?;
-    absent_ok(fs::remove_dir(base.join(MOUNT_DIR)))?;
-    absent_ok(fs::remove_file(base.join(RECORD)))?;
-    absent_ok(fs::remove_dir(base))?;
-    Ok(())
+    let container = base.join(MOUNT_DIR);
+    let record = base.join(RECORD);
+    absent_ok(fs::remove_dir(path), path)?;
+    absent_ok(fs::remove_dir(&container), &container)?;
+    absent_ok(fs::remove_file(&record), &record)?;
+    absent_ok(fs::remove_dir(base), base)
 }
 
-fn mount_error(error: io::Error) -> String {
-    crate::tr_format!("Could not open the SMB share ({error})", error = error)
-}
-
-fn mount(endpoint: &Endpoint, path: &Path, password: &str) -> Result<(), String> {
-    let address = CString::new(endpoint.address.as_str()).map_err(|e| e.to_string())?;
-    let path = path_cstring(path).map_err(mount_error)?;
+fn mount(endpoint: &Endpoint, path: &Path, password: &str) -> Result<(), SmbError> {
+    let address = CString::new(endpoint.address.as_str()).map_err(|_| SmbError::InvalidAddress)?;
+    let native_path = path_cstring(path).map_err(PathAction::PrepareMount.at(path))?;
     let user = endpoint
         .user
         .as_deref()
         .map(CString::new)
         .transpose()
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| SmbError::InvalidUser)?;
     // NetFS borrows these buffers only during this call. Credentials are separate from the URL.
     let status = unsafe {
         paw_smb_mount(
             address.as_ptr(),
-            path.as_ptr(),
+            native_path.as_ptr(),
             user.as_ref().map_or(std::ptr::null(), |user| user.as_ptr()),
             password.as_ptr(),
             password.len(),
         )
     };
-    match status {
-        0 => Ok(()),
-        status if status > 0 => Err(mount_error(io::Error::from_raw_os_error(status))),
-        status => Err(crate::tr_format!(
-            "Could not connect to SMB (NetFS {status})",
-            status = status
-        )),
-    }
+    mount_status(endpoint, path, status)
+}
+
+fn mount_status(endpoint: &Endpoint, path: &Path, status: c_int) -> Result<(), SmbError> {
+    let cause = match status {
+        0 => return Ok(()),
+        status if status > 0 => MountFailure::Posix(io::Error::from_raw_os_error(status)),
+        status => MountFailure::Status(status),
+    };
+    Err(SmbError::Mount {
+        address: endpoint.address.clone(),
+        path: path.to_owned(),
+        cause,
+    })
 }
 
 fn path_cstring(path: &Path) -> io::Result<CString> {
@@ -521,6 +551,57 @@ mod tests {
             );
         }
         assert!(Endpoint::parse("smb://nas/Files", "", false).is_err());
+        let error =
+            Endpoint::parse("smb://user:fixture-only-secret@nas:abc/Files", "", true).unwrap_err();
+        assert!(matches!(error, SmbError::AddressSyntax(_)));
+        assert!(
+            !format!("{error:?}\n{error}\n{}", crate::i18n::smb_error(&error))
+                .contains("fixture-only-secret")
+        );
+    }
+
+    #[test]
+    fn mount_diagnostics_include_the_share_path_and_original_status() {
+        let endpoint = Endpoint::parse("smb://nas/Files", "", true).unwrap();
+        let path = Path::new("/fixture/connection/mount/Files");
+        assert!(mount_status(&endpoint, path, 0).is_ok());
+        let positive = mount_status(&endpoint, path, libc::EACCES).unwrap_err();
+        assert!(
+            matches!(&positive, SmbError::Mount { address, path: mount, cause: MountFailure::Posix(source) }
+            if address == &endpoint.address && mount == path && source.raw_os_error() == Some(libc::EACCES))
+        );
+        let negative = mount_status(&endpoint, path, -5999).unwrap_err();
+        assert!(matches!(
+            &negative,
+            SmbError::Mount {
+                cause: MountFailure::Status(-5999),
+                ..
+            }
+        ));
+        for (error, status) in [(positive, "os error 13"), (negative, "-5999")] {
+            let message = crate::i18n::smb_error(&error);
+            assert!(message.contains(&endpoint.address));
+            assert!(message.contains(path.to_str().unwrap()));
+            assert!(message.contains(status));
+        }
+    }
+
+    #[test]
+    fn connection_storage_failure_preserves_the_local_path_and_original_errno() {
+        let temp = tempfile::tempdir().unwrap();
+        let blocker = temp.path().join("existing file");
+        fs::write(&blocker, b"preserve me").unwrap();
+        let root = blocker.join("smb");
+        let endpoint = Endpoint::parse("smb://nas/Files", "", true).unwrap();
+        let Err(error) = connect_in(&root, endpoint, Zeroizing::new(String::new()), false) else {
+            panic!("the file must prevent creation of an SMB data folder");
+        };
+        assert!(
+            matches!(&error, SmbError::Local { action: PathAction::CreateStorage, path, source }
+            if path == &root && source.raw_os_error() == Some(libc::ENOTDIR))
+        );
+        assert!(crate::i18n::smb_error(&error).contains(root.to_str().unwrap()));
+        assert_eq!(fs::read(blocker).unwrap(), b"preserve me");
     }
 
     #[test]
@@ -544,7 +625,23 @@ mod tests {
         assert!(!created.exists());
         let existing = path.join("keep");
         fs::write(&existing, b"keep").unwrap();
-        assert!(remove_mountpoint(&base, &path).is_err());
+        let share = MountedShare {
+            path: path.clone(),
+            base: base.clone(),
+            record: Record {
+                endpoint,
+                id: [0, 0],
+            },
+        };
+        let Some(SmbError::DisconnectCleanup { address, cleanup }) = share.disconnect().unwrap()
+        else {
+            panic!("a nonempty local mount point must produce a cleanup warning");
+        };
+        assert_eq!(address, "smb://nas/Files");
+        assert!(
+            matches!(*cleanup, SmbError::Local { action: PathAction::Cleanup, path: retained, source }
+            if retained == path && source.kind() == io::ErrorKind::DirectoryNotEmpty)
+        );
         assert_eq!(fs::read(&existing).unwrap(), b"keep");
         fs::remove_file(existing).unwrap();
         fs::write(base.join(RECORD), b"record").unwrap();
