@@ -2435,6 +2435,7 @@ fn mutation_error(error: &MutationError, unconfirmed: bool) -> String {
                 SmbMutationAction::ImportCollection => text!("Не удалось импортировать коллекцию"),
                 SmbMutationAction::ExportCollection => text!("Не удалось экспортировать коллекцию"),
                 SmbMutationAction::CompareFolders => text!("Не удалось сравнить папки"),
+                SmbMutationAction::CompareFiles => text!("Не удалось сравнить файлы"),
             };
             crate::tr_format!(
                 "{action} at {path} ({error})",
