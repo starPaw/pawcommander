@@ -11,7 +11,8 @@ use super::transfer::{
 };
 use super::Location;
 use crate::file_error::{
-    AccessAction, AccessError, CrossMoveError, LocalPathAction, MutationError, TransferPlanError,
+    AccessAction, AccessError, CopyVerificationError, CrossMoveError, LocalPathAction,
+    MutationError, TransferPlanError,
 };
 use crate::operations::{AccessStream, Cancellation, CopyReader, Progress, TransferError};
 use std::collections::BTreeMap;
@@ -179,7 +180,15 @@ fn verify_file_pair(
         size += n as u64;
     }
     let digest = hashed.finish().expect("mandatory move verification");
-    if size != before.size() || !before.matches_moved_target(&input.metadata(source)?) {
+    if size != before.size() {
+        return Err(CopyVerificationError::SourceSize {
+            source: source.clone(),
+            expected: before.size(),
+            actual: size,
+        }
+        .into());
+    }
+    if !before.matches_moved_target(&input.metadata(source)?) {
         return Err(changed(source).into());
     }
     let mut output = SourceReader::open(target)?;
@@ -189,6 +198,7 @@ fn verify_file_pair(
     progress
         .verify_copy_before_source_removal(
             displayed_source.path(),
+            target,
             size,
             digest,
             &mut AccessStream::new(&mut output, target),

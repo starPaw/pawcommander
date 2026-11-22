@@ -1,12 +1,12 @@
 use super::text;
 use crate::file_error::{
     AccessAction, AccessCause, AccessError, ArchiveError, ArchiveMemberError, BatchRenameError,
-    ChecksumError, ConflictError, ConnectionError, CrossMoveError, DescendantProblem, Failure,
-    HostKeyError, KnownHostEntryError, KnownHostsError, ListingError, ListingErrorKind,
-    LocalPathAction, ManifestLineError, MetadataError, MetadataField, MetadataWarning,
-    MoveHistoryError, MutationError, PathError, PermissionError, PinError, PreviewError,
-    ProbeAction, PublicationError, RecoveryNotice, ReplacementRefusal, RetryError, RetryProblem,
-    ScanError, SearchError, SpaceError, SshStage, StagingCleanupError, StagingError,
+    ChecksumError, ConflictError, ConnectionError, CopyVerificationError, CrossMoveError,
+    DescendantProblem, Failure, HostKeyError, KnownHostEntryError, KnownHostsError, ListingError,
+    ListingErrorKind, LocalPathAction, ManifestLineError, MetadataError, MetadataField,
+    MetadataWarning, MoveHistoryError, MutationError, PathError, PermissionError, PinError,
+    PreviewError, ProbeAction, PublicationError, RecoveryNotice, ReplacementRefusal, RetryError,
+    RetryProblem, ScanError, SearchError, SpaceError, SshStage, StagingCleanupError, StagingError,
     StagingRecordAction, TransferPlanError, UndoError,
 };
 #[cfg(target_os = "macos")]
@@ -32,6 +32,7 @@ pub(crate) fn file_error(error: &TransferError) -> String {
                 Failure::Search(error) => search_error(error),
                 Failure::Scan(error) => scan_error(error),
                 Failure::Checksum(error) => checksum_error(error),
+                Failure::CopyVerification(error) => copy_verification_error(error),
                 Failure::Archive(error) => archive_error(error),
                 Failure::Metadata(error) => metadata_error(error),
                 Failure::Space(error) => space_error(error),
@@ -80,6 +81,46 @@ pub(crate) fn file_error(error: &TransferError) -> String {
             }
         }
         TransferError::Cancelled => crate::tr_format!("Operation cancelled"),
+    }
+}
+
+fn copy_verification_error(error: &CopyVerificationError) -> String {
+    use CopyVerificationError::*;
+    match error {
+        SourceSize {
+            source,
+            expected,
+            actual,
+        } => crate::tr_format!(
+            "Read {actual} bytes while copying {source}. Expected {expected}.",
+            source = source,
+            expected = expected,
+            actual = actual
+        ),
+        CopySize {
+            target,
+            expected,
+            actual,
+        } => crate::tr_format!(
+            "Read {actual} bytes while verifying {target}. Expected {expected}.",
+            target = target,
+            expected = expected,
+            actual = actual
+        ),
+        ExtraData { target, expected } => crate::tr_format!(
+            "Verification found data beyond {expected} bytes at {target}.",
+            target = target,
+            expected = expected
+        ),
+        DigestMismatch(target) => crate::tr_format!(
+            "SHA-256 verification failed for {target}. The contents differ.",
+            target = target
+        ),
+        StagedNotRegular { staging, target } => crate::tr_format!(
+            "Expected a regular temporary file at {staging} for {target}.",
+            staging = staging,
+            target = target
+        ),
     }
 }
 
@@ -551,6 +592,13 @@ fn resume_check_error(error: &ResumeCheckError) -> String {
             let size = crate::tr_format!(
                 "Found {actual} bytes while verifying, expected {expected}.",
                 actual = actual,
+                expected = expected
+            );
+            return format!("{role} «{}». {size}", error.location);
+        }
+        ExtraData { expected } => {
+            let size = crate::tr_format!(
+                "Found more than {expected} bytes while verifying.",
                 expected = expected
             );
             return format!("{role} «{}». {size}", error.location);

@@ -6,10 +6,10 @@ use super::sftp::remote;
 use super::{TransferFailure, TransferSummary, MAX_TREE_DEPTH};
 use crate::conflict::{Answer, Conflict, Decision, EntryDetails};
 use crate::file_error::{
-    AccessAction, AccessCause, AccessError, ConflictError, DescendantProblem, Failure,
-    MoveHistoryError, MutationError, ProbeAction, PublicationError, RecoveryNotice,
-    ReplacementRefusal, ScanError, SftpSpaceFailure, SpaceError, StagingCleanupError, StagingError,
-    TransferPlanError,
+    AccessAction, AccessCause, AccessError, ConflictError, CopyVerificationError,
+    DescendantProblem, Failure, MoveHistoryError, MutationError, ProbeAction, PublicationError,
+    RecoveryNotice, ReplacementRefusal, ScanError, SftpSpaceFailure, SpaceError,
+    StagingCleanupError, StagingError, TransferPlanError,
 };
 use crate::fs_ops;
 use crate::fs_ops::TransferKind;
@@ -1153,7 +1153,12 @@ fn copy_to_smb(
         crate::smb::sync_upload(&file)
             .map_err(|error| target_error(AccessAction::SyncFile, error))?;
         if written != size {
-            return Err(source_changed().into());
+            return Err(CopyVerificationError::SourceSize {
+                source: item.source.clone(),
+                expected: size,
+                actual: written,
+            }
+            .into());
         }
         let actual = file
             .metadata()
@@ -1172,6 +1177,7 @@ fn copy_to_smb(
                 .map_err(|error| target_error(AccessAction::SeekFile, error))?;
             progress.verify_copy(
                 item.source.path(),
+                target,
                 size,
                 hash,
                 &mut AccessStream::new(&mut file, target),
@@ -1880,10 +1886,6 @@ pub(super) fn staged_copy(source: &Location, target: &Location) -> Result<(), St
     )
 }
 
-pub(super) fn changed_source(source: &Location) -> String {
-    crate::i18n::source_changed_during_copy(source)
-}
-
 pub(super) fn remote_source_matches(expected: &FileStat, actual: &FileStat) -> bool {
     // SFTP v3 exposes seconds, no inode or ctime. None is not evidence that a
     // regular file stayed unchanged: require at least type, size and mtime.
@@ -2325,7 +2327,7 @@ pub(super) fn copy_tree_entry(
     let entry = manifest
         .entries
         .get(source)
-        .ok_or_else(|| changed_source(source))?;
+        .ok_or_else(|| MutationError::SourceChanged(source.clone()))?;
     entry.verify(source, &cancel, false)?;
     let local_write_error =
         |error| fs_ops::local_copy_error(local_parent, error, ToString::to_string);
@@ -2371,7 +2373,7 @@ pub(super) fn copy_tree_entry(
         && matches!(opened_metadata, EntryMetadata::Local(_))
         && !entry.metadata.same_object(&opened_metadata)
     {
-        return Err(changed_source(source).into());
+        return Err(MutationError::SourceChanged(source.clone()).into());
     }
     entry.verify_metadata(source, &opened_metadata)?;
     // Bound reads to the captured size: a continuously growing source cannot
@@ -2436,24 +2438,34 @@ pub(super) fn copy_tree_entry(
     let source_hash = bounded.finish();
     observe(source, CopyPhase::Read)?;
     if written != expected_size {
-        return Err(changed_source(source).into());
+        return Err(CopyVerificationError::SourceSize {
+            source: source.clone(),
+            expected: expected_size,
+            actual: written,
+        }
+        .into());
     }
     entry.verify_metadata(source, &input.metadata(source)?)?;
     entry.verify(source, &cancel, false)?;
     cancel.check()?;
     if let Some(source_hash) = source_hash {
+        let wrong_type = || CopyVerificationError::StagedNotRegular {
+            staging: staged.clone(),
+            target: target.clone(),
+        };
+        // Inspect before opening so a staged link is never followed for readback.
+        if entry_metadata(staged)?.is_some_and(|entry| !entry.is_file()) {
+            return Err(wrong_type().into());
+        }
         let mut copied = SourceReader::open(staged)?;
         if !copied.metadata(staged)?.is_file() {
-            return Err(crate::tr_format!(
-                "Could not verify copy of {source}: staged item is no longer a regular file",
-                source = source
-            )
-            .into());
+            return Err(wrong_type().into());
         }
         observe(source, CopyPhase::Verifying)?;
         progress
             .verify_copy(
                 source.path(),
+                target,
                 expected_size,
                 source_hash,
                 &mut AccessStream::new(&mut copied, target),

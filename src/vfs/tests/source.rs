@@ -165,6 +165,62 @@ fn transfer_source_final_check_catches_early_edits_and_preserves_target() {
 
 #[cfg(unix)]
 #[test]
+fn staged_readback_refuses_a_link_and_preserves_the_approved_destination() {
+    use crate::file_error::{CopyVerificationError, Failure};
+    use std::os::unix::fs::symlink;
+
+    let fixture = tempfile::tempdir().unwrap();
+    let root = Location::Local(fixture.path().to_owned());
+    let source = root.join("source");
+    let target = root.join("target");
+    let other = root.join("other");
+    fs::write(source.path(), b"copy contents").unwrap();
+    fs::write(target.path(), b"old destination").unwrap();
+    fs::write(other.path(), b"copy contents").unwrap();
+    let previous = entry_metadata(&target).unwrap().unwrap();
+    let mut progress = Progress::default();
+    progress.set_copy_verification(true);
+    let mut substituted = None;
+    let error = copy_transfer_cancellable(
+        &TransferItem::new(source.clone(), source.clone(), target.clone()),
+        Some(&previous),
+        &mut progress,
+        &mut |_, phase| {
+            if phase == CopyPhase::Read {
+                let staging = fs::read_dir(root.path())
+                    .unwrap()
+                    .map(Result::unwrap)
+                    .find(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with(".pawcommander-transfer-")
+                    })
+                    .unwrap();
+                let payload = staging.path().join("payload");
+                fs::remove_file(&payload).unwrap();
+                symlink(other.path(), &payload).unwrap();
+                substituted = Some(Location::Local(payload));
+            }
+            Ok(())
+        },
+        || panic!("an unchecked payload must not be published"),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, TransferError::Failed(Failure::CopyVerification(reason))
+        if *reason == CopyVerificationError::StagedNotRegular {
+            staging: substituted.unwrap(), target: target.clone()
+        })
+    );
+    assert_eq!(fs::read(source.path()).unwrap(), b"copy contents");
+    assert_eq!(fs::read(other.path()).unwrap(), b"copy contents");
+    assert_eq!(fs::read(target.path()).unwrap(), b"old destination");
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 3);
+}
+
+#[cfg(unix)]
+#[test]
 fn sftp_name_validation_rejects_non_utf8_without_lossy_conversion() {
     use super::super::transfer::sftp_transfer_name;
     use crate::file_error::{Failure, TransferPlanError};

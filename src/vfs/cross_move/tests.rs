@@ -234,7 +234,10 @@ fn hash_is_mandatory_even_when_copy_verification_is_off() {
         &mut |_, _| Ok(()),
     );
     assert!(mutated.load(Ordering::Relaxed));
-    assert!(result.unwrap_err().to_string().contains("SHA-256"));
+    assert!(
+        matches!(result, Err(TransferError::Failed(Failure::CopyVerification(error)))
+        if *error == CopyVerificationError::DigestMismatch(item.target.clone()))
+    );
     assert_eq!(fs::read(item.source.path()).unwrap(), vec![17; size]);
     assert_eq!(fs::read(item.target.path()).unwrap(), b"existing target");
     assert!(!progress.copy_verification());

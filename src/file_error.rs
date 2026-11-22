@@ -9,6 +9,7 @@ mod checksum;
 #[cfg(target_os = "macos")]
 mod compatible_plan;
 mod conflict;
+mod copy_verification;
 mod cross_move;
 #[cfg(target_os = "macos")]
 mod external_editor;
@@ -35,6 +36,7 @@ pub(crate) use checksum::{ChecksumError, ManifestLineError};
 #[cfg(target_os = "macos")]
 pub(crate) use compatible_plan::CompatiblePlanError;
 pub(crate) use conflict::{ConflictError, ReplacementRefusal};
+pub(crate) use copy_verification::CopyVerificationError;
 pub(crate) use cross_move::CrossMoveError;
 #[cfg(target_os = "macos")]
 pub(crate) use external_editor::RemoteEditError;
@@ -75,6 +77,7 @@ pub(crate) enum Failure {
     Scan(Box<ScanError>),
     Permissions(Box<PermissionError>),
     Checksum(Box<ChecksumError>),
+    CopyVerification(Box<CopyVerificationError>),
     Archive(Box<ArchiveError>),
     Metadata(Box<MetadataError>),
     Space(Box<SpaceError>),
@@ -135,6 +138,7 @@ impl Failure {
             Self::Scan(error) => Some(error.as_ref()),
             Self::Permissions(error) => Some(error.as_ref()),
             Self::Checksum(error) => Some(error.as_ref()),
+            Self::CopyVerification(error) => Some(error.as_ref()),
             Self::Archive(error) => Some(error.as_ref()),
             Self::Metadata(error) => Some(error.as_ref()),
             Self::Space(error) => Some(error.as_ref()),
@@ -180,6 +184,7 @@ impl fmt::Display for Failure {
             Self::Scan(error) => fmt::Display::fmt(error, f),
             Self::Permissions(error) => fmt::Display::fmt(error, f),
             Self::Checksum(error) => fmt::Display::fmt(error, f),
+            Self::CopyVerification(error) => fmt::Display::fmt(error, f),
             Self::Archive(error) => fmt::Display::fmt(error, f),
             Self::Metadata(error) => fmt::Display::fmt(error, f),
             Self::Space(error) => fmt::Display::fmt(error, f),
