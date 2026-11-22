@@ -18,7 +18,10 @@ pub(crate) enum PathAction {
     ProtectMount,
     ReadShare,
     ReadRecord,
+    PrepareRecord,
     WriteRecord,
+    SyncRecord,
+    PublishRecord,
     Unmount,
     Cleanup,
 }

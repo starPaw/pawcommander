@@ -5,7 +5,7 @@ use crate::vfs::Location;
 use serde::{Deserialize, Serialize};
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::fs::{self, File, OpenOptions, Permissions};
-use std::io;
+use std::io::{self, Write};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::{
@@ -130,7 +130,8 @@ impl MountedShare {
             Some(_) => return Err(SmbError::MountChanged(self.path.clone())),
             None => {}
         }
-        Ok(remove_mountpoint(&self.base, &self.path)
+        let record = self.base.join(RECORD);
+        Ok(remove_mountpoint(&self.base, &self.path, Some(&record))
             .err()
             .map(|cleanup| SmbError::DisconnectCleanup {
                 address: self.endpoint().address.clone(),
@@ -240,12 +241,7 @@ fn mount_new(
         .map_err(PathAction::ProtectMount.at(path))?;
     fs::read_dir(path).map_err(PathAction::ReadShare.at(path))?;
     let record = Record { endpoint, id };
-    let record_path = base.join(RECORD);
-    let bytes = serde_json::to_vec(&record).map_err(|source| SmbError::EncodeRecord {
-        path: record_path.clone(),
-        source,
-    })?;
-    fs::write(&record_path, bytes).map_err(PathAction::WriteRecord.at(&record_path))?;
+    save_record(base, &record)?;
     let warning = if remember && record.endpoint.user.is_some() {
         record
             .endpoint
@@ -271,6 +267,30 @@ fn mount_new(
     })
 }
 
+fn save_record(base: &Path, record: &Record) -> Result<(), SmbError> {
+    let path = base.join(RECORD);
+    let bytes = serde_json::to_vec(record).map_err(|source| SmbError::EncodeRecord {
+        path: path.clone(),
+        source,
+    })?;
+    let mut pending = tempfile::Builder::new()
+        .prefix(".connection-")
+        .suffix(".pending")
+        .tempfile_in(base)
+        .map_err(PathAction::PrepareRecord.at(&path))?;
+    pending
+        .write_all(&bytes)
+        .map_err(PathAction::WriteRecord.at(pending.path()))?;
+    pending
+        .as_file()
+        .sync_all()
+        .map_err(PathAction::SyncRecord.at(pending.path()))?;
+    crate::fs_ops::rename_no_replace(pending.path(), &path)
+        .map_err(PathAction::PublishRecord.at(&path))?;
+    pending.disable_cleanup(true);
+    Ok(())
+}
+
 pub(crate) fn discover() -> Discovery {
     match root() {
         Ok(root) => discover_in(&root),
@@ -293,10 +313,11 @@ fn cleanup_failed_mount(base: &Path, path: &Path) -> Result<(), SmbError> {
     {
         unmount(path).map_err(PathAction::Unmount.at(path))?;
     }
-    remove_mountpoint(base, path)
+    // An unsuccessful setup has not published a record. An occupied record belongs to another writer.
+    remove_mountpoint(base, path, None)
 }
 
-fn remove_mountpoint(base: &Path, path: &Path) -> Result<(), SmbError> {
+fn remove_mountpoint(base: &Path, path: &Path, record: Option<&Path>) -> Result<(), SmbError> {
     fn absent_ok(result: io::Result<()>, path: &Path) -> Result<(), SmbError> {
         match result {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -304,10 +325,11 @@ fn remove_mountpoint(base: &Path, path: &Path) -> Result<(), SmbError> {
         }
     }
     let container = base.join(MOUNT_DIR);
-    let record = base.join(RECORD);
     absent_ok(fs::remove_dir(path), path)?;
     absent_ok(fs::remove_dir(&container), &container)?;
-    absent_ok(fs::remove_file(&record), &record)?;
+    if let Some(record) = record {
+        absent_ok(fs::remove_file(record), record)?;
+    }
     absent_ok(fs::remove_dir(base), base)
 }
 
@@ -577,6 +599,73 @@ mod tests {
     }
 
     #[test]
+    fn published_smb_record_is_private_and_readable_by_discovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let base = root.join("connection-recorded");
+        fs::create_dir(&base).unwrap();
+        let record = Record {
+            endpoint: Endpoint::parse("smb://NAS/Project%20Files", "alice", false).unwrap(),
+            id: [12, 42],
+        };
+        save_record(&base, &record).unwrap();
+        let path = base.join(RECORD);
+        assert_eq!(path.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(base.read_dir().unwrap().count(), 1);
+        let expected_mount = record.endpoint.mountpoint(&base);
+        let discovered = discovery::scan(&root, |mount| {
+            assert_eq!(mount, expected_mount);
+            Ok(Some(record.id))
+        });
+        assert!(discovered.warnings.entries.is_empty());
+        let [share] = discovered.shares.as_slice() else {
+            panic!("expected the published record");
+        };
+        assert_eq!(share.path, expected_mount);
+        assert_eq!(share.endpoint(), &record.endpoint);
+    }
+
+    #[test]
+    fn failed_smb_setup_preserves_occupied_record_files_and_links() {
+        use std::os::unix::fs::{symlink, MetadataExt};
+
+        let temp = tempfile::tempdir().unwrap();
+        let sentinel = temp.path().join("original");
+        fs::write(&sentinel, b"original record bytes").unwrap();
+        let record = Record {
+            endpoint: Endpoint::parse("smb://nas/Files", "", true).unwrap(),
+            id: [12, 42],
+        };
+        for (name, linked) in [("connection-file", false), ("connection-link", true)] {
+            let base = temp.path().join(name);
+            let mount = record.endpoint.mountpoint(&base);
+            fs::create_dir_all(&mount).unwrap();
+            let occupied = base.join(RECORD);
+            if linked {
+                symlink(&sentinel, &occupied).unwrap();
+            } else {
+                fs::copy(&sentinel, &occupied).unwrap();
+            }
+            let inode = occupied.symlink_metadata().unwrap().ino();
+            let error = save_record(&base, &record).unwrap_err();
+            assert!(
+                matches!(&error, SmbError::Local { action: PathAction::PublishRecord, path, source }
+                if path == &occupied && source.raw_os_error() == Some(libc::EEXIST))
+            );
+            let cleanup = cleanup_failed_mount(&base, &mount).unwrap_err();
+            assert!(
+                matches!(&cleanup, SmbError::Local { action: PathAction::Cleanup, path, source }
+                if path == &base && source.kind() == io::ErrorKind::DirectoryNotEmpty)
+            );
+            assert_eq!(occupied.symlink_metadata().unwrap().ino(), inode);
+            assert_eq!(occupied.is_symlink(), linked);
+            assert_eq!(fs::read(&occupied).unwrap(), b"original record bytes");
+            assert_eq!(base.read_dir().unwrap().count(), 1);
+        }
+        assert_eq!(fs::read(sentinel).unwrap(), b"original record bytes");
+    }
+
+    #[test]
     fn upload_and_cleanup_preserve_local_contents() {
         use crate::file_error::{AccessCause, Failure};
 
@@ -617,7 +706,7 @@ mod tests {
         assert_eq!(fs::read(&existing).unwrap(), b"keep");
         fs::remove_file(existing).unwrap();
         fs::write(base.join(RECORD), b"record").unwrap();
-        remove_mountpoint(&base, &path).unwrap();
+        assert!(share.disconnect().unwrap().is_none());
         assert!(!base.exists());
     }
 
