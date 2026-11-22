@@ -29,6 +29,15 @@ pub(crate) fn smb_error(error: &SmbError) -> String {
         SmbError::MountChanged(path) => crate::tr_format!(
             "The SMB mount at {path} changed. The current mount was left in place.", path = path.display()
         ),
+        SmbError::MissingRecord(path) => crate::tr_format!(
+            "The SMB connection record at {path} is missing.", path = path.display()
+        ),
+        SmbError::InvalidConnectionDirectory(path) => crate::tr_format!(
+            "Expected an SMB connection directory at {path}.", path = path.display()
+        ),
+        SmbError::PathOutsideShare { path, mount } => crate::tr_format!(
+            "The path {path} is outside the saved SMB mount {mount}.", path = path.display(), mount = mount.display()
+        ),
         SmbError::OpenShare { address, cause } => crate::tr_format!(
             "Could not open SMB share {address}. {error}", address = address, error = smb_error(cause)
         ),

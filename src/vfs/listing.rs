@@ -41,6 +41,8 @@ pub fn visit_directory(
     if cancelled() {
         return Ok(());
     }
+    #[cfg(target_os = "macos")]
+    crate::smb::check_location(location)?;
     if let Some(path) = location.local() {
         return fs_ops::visit_directory(path, cancelled, |entry| visit(entry.into()));
     }
@@ -60,6 +62,8 @@ pub fn read_directory(
     if cancelled() {
         return Ok(Vec::new());
     }
+    #[cfg(target_os = "macos")]
+    crate::smb::check_location(location)?;
     if let Some(path) = location.local() {
         return fs_ops::read_directory(path, cancelled)
             .map(|entries| entries.into_iter().map(FileEntry::from).collect());

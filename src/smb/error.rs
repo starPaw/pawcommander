@@ -90,6 +90,12 @@ pub(crate) enum SmbError {
     },
     MissingMount(PathBuf),
     MountChanged(PathBuf),
+    MissingRecord(PathBuf),
+    InvalidConnectionDirectory(PathBuf),
+    PathOutsideShare {
+        path: PathBuf,
+        mount: PathBuf,
+    },
     OpenShare {
         address: String,
         cause: Box<Self>,
@@ -159,6 +165,20 @@ impl fmt::Display for SmbError {
                 write!(f, "Expected SMB mount missing at {}", path.display())
             }
             Self::MountChanged(path) => write!(f, "SMB mount changed at {}", path.display()),
+            Self::MissingRecord(path) => {
+                write!(f, "SMB connection record missing at {}", path.display())
+            }
+            Self::InvalidConnectionDirectory(path) => write!(
+                f,
+                "Expected an SMB connection directory at {}",
+                path.display()
+            ),
+            Self::PathOutsideShare { path, mount } => write!(
+                f,
+                "Path {} is outside the saved SMB mount {}",
+                path.display(),
+                mount.display()
+            ),
             Self::OpenShare { address, cause } => {
                 write!(f, "Could not open SMB share {address}: {cause}")
             }

@@ -9,6 +9,8 @@ use super::state::{
     is_dot_file, Density, FileOrder, FolderMode, FolderView, FolderViewChange, FolderViews,
     PaneSession, SavedLocation, Settings, Sort, TabSession,
 };
+#[cfg(target_os = "macos")]
+use crate::file_error::{Failure, ListingErrorKind};
 use crate::operations::TransferError;
 use crate::tab_drag::{clamp_tab_slot, TabDrop};
 use crate::vfs as fs_ops;
@@ -194,6 +196,11 @@ impl Tab {
                     true
                 };
                 if let Some(archive) = path.archive_source() {
+                    #[cfg(target_os = "macos")]
+                    if let Err(error) = crate::smb::check_location(&path) {
+                        send(DirectoryRead::Archive(Err(error)));
+                        return;
+                    }
                     let result = match archive_index {
                         Some(index) => Ok(index),
                         None => crate::archive::Index::load(archive, &cancelled).map(Arc::new),
@@ -303,15 +310,20 @@ impl Tab {
                 }
             }
             Err(error) => {
+                #[cfg(target_os = "macos")]
+                let keep_listing = !matches!(&error, TransferError::Failed(Failure::Listing(listing))
+                    if matches!(listing.kind, ListingErrorKind::SmbMount(_)));
+                #[cfg(not(target_os = "macos"))]
+                let keep_listing = true;
                 let error = crate::i18n::file_error(&error);
                 self.reveal_after_load = None;
                 self.column_reveal = None;
-                if !self.has_complete_listing && !self.entries.is_empty() {
+                if keep_listing && !self.has_complete_listing && !self.entries.is_empty() {
                     self.error = Some(crate::tr_format!(
                         "Showing an incomplete folder listing. {error}",
                         error = error
                     ));
-                } else if mode == DirectoryLoadMode::Automatic {
+                } else if keep_listing && mode == DirectoryLoadMode::Automatic {
                     self.error = Some(if self.has_complete_listing {
                         crate::tr_format!("Auto refresh: {error}. Showing the last successful listing; will retry automatically.", error = error)
                     } else {
@@ -325,6 +337,9 @@ impl Tab {
                     self.previous_selection = None;
                     self.anchor = None;
                     self.cursor = None;
+                    if !keep_listing {
+                        self.archive_index = None;
+                    }
                 }
             }
         }
