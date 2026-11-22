@@ -13,6 +13,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 mod inspection;
+pub(crate) use inspection::{
+    InspectionBlocker, InspectionFinding, InspectionReport, InspectionRole,
+};
 
 const MAX_RETRY_ROOTS: usize = 100_000;
 
@@ -422,6 +425,48 @@ mod tests {
     use super::*;
     use crate::file_error::Failure;
     use std::fs;
+
+    #[test]
+    fn inspection_reports_which_path_prevents_retry_before_an_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing: Location = dir.path().join("missing-source").into();
+        let present: Location = dir.path().join("present-source").into();
+        let destination: Location = dir.path().join("destination").into();
+        let previous = dir.path().join("previous-destination");
+        fs::write(present.path(), b"present").unwrap();
+        fs::write(missing.path(), b"missing").unwrap();
+        fs::create_dir(destination.path()).unwrap();
+        let mut transfer = RetryTransfer::new(TransferKind::Copy, destination.clone());
+        let items = [missing.clone(), present.clone()].map(|source| {
+            let target = destination.join(source.path().file_name().unwrap());
+            TransferItem::new(source.clone(), source, target)
+        });
+        transfer.prepare(&items, &Cancellation::default()).unwrap();
+        fs::remove_file(missing.path()).unwrap();
+
+        let mut progress = crate::operations::Progress::default();
+        let (ready, pending) = transfer.inspect(&mut progress).unwrap();
+        assert_eq!(ready.unwrap().sources(), std::slice::from_ref(&present));
+        assert_eq!(pending.unwrap().sources(), std::slice::from_ref(&missing));
+        let row = &progress.results.items[0];
+        assert_eq!(row.outcome, Outcome::Failed);
+        assert!(row.reason.as_ref().unwrap().contains(&missing.display()));
+        assert_eq!(progress.results.items[1].outcome, Outcome::RetryReady);
+
+        fs::rename(destination.path(), previous).unwrap();
+        fs::create_dir(destination.path()).unwrap();
+        let mut progress = crate::operations::Progress::default();
+        let (ready, pending) = transfer.inspect(&mut progress).unwrap();
+        assert!(ready.is_none());
+        assert_eq!(pending.unwrap().sources(), [missing, present.clone()]);
+        let row = &progress.results.items[1];
+        assert_eq!(row.outcome, Outcome::Failed);
+        let reason = row.reason.as_ref().unwrap();
+        assert!(reason.contains(&destination.display()));
+        assert!(reason.contains(&present.display()));
+        assert_eq!(fs::read(present.path()).unwrap(), b"present");
+        assert!(fs::read_dir(destination.path()).unwrap().next().is_none());
+    }
 
     #[test]
     fn retry_reports_the_exact_path_of_each_retained_or_missing_artifact() {
