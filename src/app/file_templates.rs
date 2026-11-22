@@ -5,7 +5,7 @@ use super::{
     PawCommander,
 };
 use crate::{
-    i18n::text,
+    i18n::{file_error, file_template_encoding, text},
     operations::TransferError,
     shortcuts::Command,
     vfs::{
@@ -267,10 +267,14 @@ impl FileTemplatesDialog {
         ui.horizontal_wrapped(|ui| {
             ui.label(text!("Кодировка"));
             egui::ComboBox::from_id_salt("new-file-encoding")
-                .selected_text(self.encoding.label())
+                .selected_text(file_template_encoding(self.encoding))
                 .show_ui(ui, |ui| {
                     for encoding in TextEncoding::ALL {
-                        ui.selectable_value(&mut self.encoding, encoding, encoding.label());
+                        ui.selectable_value(
+                            &mut self.encoding,
+                            encoding,
+                            file_template_encoding(encoding),
+                        );
                     }
                 });
         });
@@ -279,7 +283,8 @@ impl FileTemplatesDialog {
         let field = ui.add(
             egui::TextEdit::multiline(&mut self.body)
                 .desired_rows(5)
-                .char_limit(file_templates::MAX_BYTES)
+                // Let validation see an oversized paste instead of saving its truncated prefix.
+                .char_limit(file_templates::MAX_BYTES + 1)
                 .desired_width(f32::INFINITY),
         );
         ui.ctx()
@@ -328,8 +333,8 @@ impl FileTemplatesDialog {
                 self.template_title = None;
             } else if save {
                 let title = title.trim().to_owned();
-                if let Err(error) = library.check_title(&title) {
-                    self.notice = Some((error, true));
+                if let Err(error) = library.check_new(&title) {
+                    self.notice = Some((file_error(&error), true));
                     return;
                 }
                 let filename = self.filename.clone();
@@ -382,7 +387,7 @@ impl FileTemplatesDialog {
                     self.choose(Choice::Saved(index), library);
                     (text!("Шаблон сохранён").into(), false)
                 }
-                Err(error) => (error, true),
+                Err(error) => (file_error(&error), true),
             },
             Phase::Failed(error) => (error, true),
             Phase::Stopped => (text!("Операция остановлена").into(), false),
@@ -395,7 +400,7 @@ impl FileTemplatesDialog {
         let notice = match pending.result.try_recv() {
             Ok(Ok(())) => return Some(self.creating.take().unwrap().target),
             Ok(Err(TransferError::Cancelled)) => (crate::tr_format!("Operation cancelled"), false),
-            Ok(Err(error)) => (crate::i18n::file_error(&error), true),
+            Ok(Err(error)) => (file_error(&error), true),
             Err(TryRecvError::Empty) => return None,
             Err(TryRecvError::Disconnected) => {
                 let path = pending.target.display().escape_debug().to_string();

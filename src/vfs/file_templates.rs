@@ -9,9 +9,9 @@ use super::{
 };
 use crate::{
     file_error::{
-        AccessError, FileTemplateError, MutationError, PathError, RecoveryNotice, ScanError,
+        AccessError, Failure, FileTemplateError, MutationError, PathError, RecoveryNotice,
+        ScanError,
     },
-    i18n::text,
     operations::{Progress, TransferError},
     preview::encoding::Codec,
     result_history::Outcome,
@@ -29,6 +29,7 @@ pub(crate) const MAX_BYTES: usize = 4 * 1024 * 1024;
 const MAX_ENCODED_BYTES: usize = MAX_BYTES.div_ceil(3) * 4;
 const MAX_LIBRARY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_TEMPLATES: usize = 64;
+const MAX_TITLE_CHARS: usize = 80;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum TextEncoding {
@@ -50,17 +51,6 @@ impl TextEncoding {
         Self::Windows1251,
         Self::Windows1252,
     ];
-
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Utf8 => "UTF-8",
-            Self::Utf8Bom => text!("UTF-8 с BOM"),
-            Self::Utf16Le => text!("UTF-16 LE с BOM"),
-            Self::Utf16Be => text!("UTF-16 BE с BOM"),
-            Self::Windows1251 => "Windows-1251",
-            Self::Windows1252 => "Windows-1252",
-        }
-    }
 
     fn bytes(self, value: &str) -> Result<Vec<u8>, TransferError> {
         if value.len() > MAX_BYTES * 4 {
@@ -94,7 +84,10 @@ pub(crate) enum Source {
         encoding: TextEncoding,
     },
     File(Location),
-    Stored(Arc<str>),
+    Stored {
+        title: String,
+        payload: Arc<str>,
+    },
 }
 
 impl Source {
@@ -103,15 +96,18 @@ impl Source {
         match self {
             Self::Text { value, encoding } => encoding.bytes(&value),
             Self::File(source) => read_source(&source, progress),
-            Self::Stored(encoded) => {
-                if encoded.len() > MAX_ENCODED_BYTES {
-                    return Err(FileTemplateError::TooLarge(None).into());
+            Self::Stored { title, payload } => {
+                if payload.len() > MAX_ENCODED_BYTES {
+                    return Err(FileTemplateError::SavedPayloadTooLarge(title).into());
                 }
-                let bytes = STANDARD
-                    .decode(encoded.as_bytes())
-                    .map_err(FileTemplateError::InvalidSavedPayload)?;
+                let bytes = match STANDARD.decode(payload.as_bytes()) {
+                    Ok(bytes) => bytes,
+                    Err(cause) => {
+                        return Err(FileTemplateError::InvalidSavedPayload { title, cause }.into())
+                    }
+                };
                 if bytes.len() > MAX_BYTES {
-                    return Err(FileTemplateError::TooLarge(None).into());
+                    return Err(FileTemplateError::SavedPayloadTooLarge(title).into());
                 }
                 Ok(bytes)
             }
@@ -132,34 +128,34 @@ pub(crate) struct SavedTemplate {
 }
 
 impl Library {
-    pub(crate) fn check_title(&self, title: &str) -> Result<(), String> {
-        let title = title.trim();
-        if title.is_empty() || title.chars().count() > 80 || title.chars().any(char::is_control) {
-            return Err(text!("Введите название шаблона до 80 символов").into());
-        }
+    pub(crate) fn check_new(&self, title: &str) -> Result<(), TransferError> {
+        let title = checked_title(title)?;
         let key = title.to_lowercase();
-        if self
+        if let Some(existing) = self
             .templates
             .iter()
-            .any(|template| template.title.to_lowercase() == key)
+            .find(|template| template.title.to_lowercase() == key)
         {
-            return Err(text!("Шаблон с таким названием уже есть").into());
+            return Err(FileTemplateError::DuplicateTitle(existing.title.clone()).into());
+        }
+        if self.templates.len() >= MAX_TEMPLATES {
+            return Err(FileTemplateError::LibraryCountLimit(MAX_TEMPLATES).into());
         }
         Ok(())
     }
 
-    pub(crate) fn insert(&mut self, template: SavedTemplate) -> Result<usize, String> {
-        self.check_title(&template.title)?;
-        let size = self
+    pub(crate) fn insert(&mut self, template: SavedTemplate) -> Result<usize, TransferError> {
+        self.check_new(&template.title)?;
+        let total = self
             .templates
             .iter()
-            .map(|item| item.payload.len())
-            .sum::<usize>();
-        let index = self.templates.len();
-        if index >= MAX_TEMPLATES || size.saturating_add(template.payload.len()) > MAX_LIBRARY_BYTES
-        {
-            return Err(text!("Достигнут предел сохранённых шаблонов").into());
+            .fold(template.payload.len(), |size, item| {
+                size.saturating_add(item.payload.len())
+            });
+        if total > MAX_LIBRARY_BYTES {
+            return Err(FileTemplateError::LibrarySizeLimit(MAX_LIBRARY_BYTES).into());
         }
+        let index = self.templates.len();
         self.templates.push(template);
         Ok(index)
     }
@@ -167,8 +163,25 @@ impl Library {
 
 impl SavedTemplate {
     pub(crate) fn source(&self) -> Source {
-        Source::Stored(self.payload.clone())
+        Source::Stored {
+            title: self.title.clone(),
+            payload: self.payload.clone(),
+        }
     }
+}
+
+fn checked_title(title: &str) -> Result<&str, TransferError> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err(FileTemplateError::EmptyTitle.into());
+    }
+    if title.chars().count() > MAX_TITLE_CHARS {
+        return Err(FileTemplateError::TitleTooLong(MAX_TITLE_CHARS).into());
+    }
+    if title.chars().any(char::is_control) {
+        return Err(FileTemplateError::TitleHasControl.into());
+    }
+    Ok(title)
 }
 
 pub(crate) fn save_template(
@@ -177,13 +190,19 @@ pub(crate) fn save_template(
     source: Source,
     progress: &mut Progress,
 ) -> Result<SavedTemplate, TransferError> {
-    validate_filename(&filename)?;
-    let bytes = source.bytes(progress)?;
     progress.check_cancelled()?;
+    let title = checked_title(&title)?.to_owned();
+    let capture = (|| {
+        validate_filename(&filename)?;
+        let bytes = source.bytes(progress)?;
+        let payload = STANDARD.encode(bytes).into();
+        progress.check_cancelled()?;
+        Ok(payload)
+    })();
     Ok(SavedTemplate {
+        payload: capture.map_err(|cause| FileTemplateError::saving(&title, cause))?,
         title,
         filename,
-        payload: STANDARD.encode(bytes).into(),
     })
 }
 
@@ -289,8 +308,17 @@ fn read_source(source: &Location, progress: &mut Progress) -> Result<Vec<u8>, Tr
     let cancel = progress.cancellation();
     let scope = ReadScope::open(&parent)?;
     let mut input = scope
-        .open_file(Path::new(name), &cancel)?
-        .ok_or_else(|| FileTemplateError::SourceMissing(source.clone()))?;
+        .require_file(Path::new(name), &cancel)
+        .map_err(|error| match error {
+            TransferError::Failed(Failure::Access(cause)) if cause.cause.is_absent() => {
+                FileTemplateError::SourceMissing {
+                    source: source.clone(),
+                    cause,
+                }
+                .into()
+            }
+            error => error,
+        })?;
     let mut bytes = Vec::new();
     {
         let (_, length, reader) = input.stream();
@@ -314,7 +342,7 @@ fn read_source(source: &Location, progress: &mut Progress) -> Result<Vec<u8>, Tr
         }
     }
     input.verify(&cancel)?;
-    scope.parent.verify()?;
+    scope.verify_selected_root(&parent)?;
     Ok(bytes)
 }
 
