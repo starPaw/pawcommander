@@ -982,8 +982,18 @@ impl StagingCleanupError {
         match &self.operation {
             None | Some(TransferError::Cancelled) => true,
             Some(TransferError::Failed(Failure::CrossMove(error))) => {
-                matches!(error.as_ref(), CrossMoveError::Restored { .. })
+                matches!(
+                    error.as_ref(),
+                    CrossMoveError::Prepare { .. } | CrossMoveError::Restored { .. }
+                )
             }
+            Some(TransferError::Failed(Failure::Staging(error))) => matches!(
+                error.as_ref(),
+                StagingError::Journal {
+                    action: StagingRecordAction::Register,
+                    ..
+                }
+            ),
             _ => false,
         }
     }

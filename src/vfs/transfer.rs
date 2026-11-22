@@ -1741,7 +1741,7 @@ impl LocalStaging {
         self.remove_on_drop = false;
     }
 
-    fn close(mut self) -> Result<(), TransferError> {
+    fn close(mut self, recursive: bool) -> Result<(), TransferError> {
         self.remove_on_drop = false;
         let staging = Location::Local(self.path.clone());
         if !self
@@ -1750,7 +1750,12 @@ impl LocalStaging {
         {
             return Err(StagingError::IdentityChanged(staging).into());
         }
-        fs::remove_dir_all(&self.path).map_err(|error| {
+        let result = if recursive {
+            fs::remove_dir_all(&self.path)
+        } else {
+            fs::remove_dir(&self.path)
+        };
+        result.map_err(|error| {
             AccessError::new(&staging, AccessAction::RemoveStagingDirectory, error).into()
         })
     }
@@ -1846,7 +1851,15 @@ fn staging_typed(
         let mut staging = LocalStaging::create(parent, prefix, proposed)?;
         let location = Location::Local(staging.path().into());
         if use_operation_marker && let Err(error) = crate::recovery::register_staging(&location) {
-            return StagingCleanupError::combine(Err(error), staging.close(), &location, target);
+            // A preserved stage has no payload yet. An independent entry can
+            // make rmdir fail without being removed along with the directory.
+            let recursive = !cfg!(target_os = "macos") || !preserve;
+            return StagingCleanupError::combine(
+                Err(error),
+                staging.close(recursive),
+                &location,
+                target,
+            );
         }
         if preserve {
             staging.keep();
@@ -1856,7 +1869,7 @@ fn staging_typed(
             staging.keep();
             return result;
         }
-        return StagingCleanupError::combine(result, staging.close(), &location, target);
+        return StagingCleanupError::combine(result, staging.close(true), &location, target);
     }
 
     let sftp = remote(target)?;
@@ -1875,6 +1888,16 @@ fn staging_typed(
         return Err(sftp_staging_create_failure(staging, create, inspect));
     }
     if use_operation_marker && let Err(error) = crate::recovery::register_staging(&staging) {
+        #[cfg(target_os = "macos")]
+        if preserve {
+            let cleanup = StagingError::IdentityUnavailable(staging.clone()).into();
+            return Err(StagingCleanupError::failed_cleanup(
+                Some(error),
+                cleanup,
+                &staging,
+                target,
+            ));
+        }
         let cleanup = remove_remote_tree(&sftp, &staging, MAX_TREE_DEPTH + 1);
         return StagingCleanupError::combine(Err(error), cleanup, &staging, target);
     }

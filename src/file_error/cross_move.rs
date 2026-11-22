@@ -14,6 +14,11 @@ pub(crate) enum CrossMoveError {
         expected: usize,
         actual: usize,
     },
+    #[cfg(target_os = "macos")]
+    Prepare {
+        original: Location,
+        cause: TransferError,
+    },
     Hold {
         original: Location,
         held: Location,
@@ -51,6 +56,10 @@ impl fmt::Display for CrossMoveError {
             Self::AccessTimes { source, expected, actual } => write!(
                 f, "Invalid saved access times for {source}: expected {expected} entries, found {actual}"
             ),
+            #[cfg(target_os = "macos")]
+            Self::Prepare { original, cause } => {
+                write!(f, "Preparing to move the original from {original} was interrupted. {cause}")
+            }
             Self::Hold { original, held, cause } => {
                 write!(f, "Check the original source {original} and temporary path {held}: {cause}")
             }
@@ -78,7 +87,8 @@ impl Error for CrossMoveError {
             } => Some(restore),
             Self::Hold { cause, .. } | Self::Restore { cause, .. } => Some(cause),
             #[cfg(target_os = "macos")]
-            Self::Restored {
+            Self::Prepare { cause, .. }
+            | Self::Restored {
                 cause: Some(cause), ..
             } => Some(cause),
             _ => None,

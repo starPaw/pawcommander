@@ -242,6 +242,12 @@ struct SourceStage {
     source_identity: RenamedIdentity,
 }
 
+struct SourceStagePreparation {
+    held: Location,
+    record: SourceStage,
+    marker_opened: bool,
+}
+
 // Keep the version-one file record readable, including copies interrupted by an
 // earlier build. Folder receipts add a different proof under the same field.
 #[derive(Deserialize, Serialize)]
@@ -658,20 +664,30 @@ fn record_source_stage(
     held: &Location,
     source_identity: RenamedIdentity,
     cancel: &Cancellation,
-) -> Result<SourceStage, TransferError> {
+    preparation: &mut Option<SourceStagePreparation>,
+) -> Result<(), TransferError> {
     let stage = held
         .parent()
         .ok_or_else(|| ResumeRole::HeldOriginal.error(held, ResumeCheckProblem::InvalidPath))?;
     let identity = stage_identity(&stage)?;
-    create_owner_marker(&stage, ticket.name(), cancel)?;
+    let preparation = preparation.insert(SourceStagePreparation {
+        held: held.clone(),
+        record: SourceStage {
+            stage_name: stage.name(),
+            stage_identity: identity,
+            source_identity,
+        },
+        marker_opened: false,
+    });
+    let marker = StagedFile::open(&stage.join(ticket.name()), cancel.clone())?;
+    // An exclusive open establishes ownership even if closing the empty file fails.
+    preparation.marker_opened = true;
+    marker.close()?;
     stage_contents(&stage, identity, ticket.name(), &[])?;
-    let record = SourceStage {
-        stage_name: stage.name(),
-        stage_identity: identity,
-        source_identity,
-    };
-    ticket.record(&Event::Removing(HeldSource::Verified(record.clone())))?;
-    Ok(record)
+    ticket.record(&Event::Removing(HeldSource::Verified(
+        preparation.record.clone(),
+    )))?;
+    Ok(())
 }
 
 fn finish_move(
@@ -728,7 +744,7 @@ fn finish_move(
             cross_move::incomplete(&paths.target, error, progress)
         })?;
         source.report(item, progress);
-        let mut held_stage: Option<(Location, SourceStage)> = None;
+        let mut held_stage: Option<SourceStagePreparation> = None;
         let cancel = progress.cancellation();
         cross_move::remove_verified(
             item,
@@ -737,25 +753,45 @@ fn finish_move(
             progress,
             removed,
             &mut |location, phase| {
-                if phase == Phase::Restored {
+                if matches!(phase, Phase::Restored | Phase::QuarantineAborted) {
                     observe(location, phase)?;
-                    let (_, record) = held_stage
-                        .as_ref()
-                        .filter(|(root, _)| root == location)
-                        .ok_or_else(|| ticket.error(RecoveryRecordProblem::InvalidProof))?;
                     let stage = location
                         .parent()
                         .ok_or_else(|| ticket.error(RecoveryRecordProblem::InvalidPaths))?;
-                    return discard_empty_stage(&stage, record.stage_identity, ticket.name());
+                    let preparation = held_stage
+                        .as_ref()
+                        .filter(|preparation| &preparation.held == location);
+                    if let Some(preparation) = preparation.filter(|value| value.marker_opened) {
+                        return discard_empty_stage(
+                            &stage,
+                            preparation.record.stage_identity,
+                            ticket.name(),
+                        );
+                    }
+                    if phase == Phase::Restored {
+                        return Err(ticket.error(RecoveryRecordProblem::InvalidProof).into());
+                    }
+                    // No marker was acknowledged. Only an empty local directory with
+                    // the same identity can be removed without that proof.
+                    let identity = preparation
+                        .and_then(|value| value.record.stage_identity)
+                        .ok_or_else(|| StagingError::IdentityUnavailable(stage.clone()))?;
+                    check_stage_identity(&stage, Some(identity))?;
+                    return remove_staged_entry(&stage, true);
                 }
                 // Sync the location before rename and the completion after the last unlink.
                 if phase == Phase::QuarantinePlanned {
-                    let record = record_source_stage(ticket, location, source_identity, &cancel)?;
-                    held_stage = Some((location.clone(), record));
+                    record_source_stage(
+                        ticket,
+                        location,
+                        source_identity,
+                        &cancel,
+                        &mut held_stage,
+                    )?;
                 } else if phase == Phase::Removed
                     && held_stage
                         .as_ref()
-                        .is_some_and(|(root, _)| root == location)
+                        .is_some_and(|preparation| &preparation.held == location)
                 {
                     ticket
                         .record(&Event::Removed)
@@ -764,14 +800,14 @@ fn finish_move(
                 observe(location, phase)
             },
         )?;
-        let (_, record) = held_stage.ok_or_else(|| {
+        let preparation = held_stage.ok_or_else(|| {
             completed_record_error(
                 &paths.target,
                 true,
                 ticket.error(RecoveryRecordProblem::InvalidProof),
             )
         })?;
-        Some(record)
+        Some(preparation.record)
     } else {
         // The receipt already confirms removal. The original name may have been reused.
         removed();

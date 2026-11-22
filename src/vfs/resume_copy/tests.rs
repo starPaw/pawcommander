@@ -782,6 +782,129 @@ fn move_recovery_preserves_held_source_and_recognizes_acknowledged_removal() {
 }
 
 #[test]
+fn aborted_move_preparation_cleans_only_known_staging() {
+    for stop in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let recovery = root.join("recovery");
+        let source: Location = root.join("left/data").into();
+        let target: Location = root.join("right/data").into();
+        fs::create_dir(source.parent().unwrap().path()).unwrap();
+        fs::create_dir(target.parent().unwrap().path()).unwrap();
+        fs::write(source.path(), b"original data").unwrap();
+        let original_inode = fs::metadata(source.path()).unwrap().ino();
+        let item = TransferItem::new(source.clone(), source.clone(), target.clone());
+        let mut progress = Progress::default();
+        progress.resume_directory = Some(recovery.clone());
+        let cancel = progress.cancellation();
+        let saved = root.join("saved-receipt");
+        let mut replaced = None;
+        let mut stage = None;
+        let mut published = false;
+        let error = cross_move::run(
+            &item,
+            None,
+            &mut progress,
+            || published = true,
+            || panic!("source removal must not run"),
+            &mut |path, phase| {
+                match phase {
+                    Phase::Copied if !stop => {
+                        let receipt = fs::read_dir(receipts(&recovery))
+                            .unwrap()
+                            .next()
+                            .unwrap()
+                            .unwrap()
+                            .path();
+                        fs::rename(&receipt, &saved).unwrap();
+                        fs::write(&receipt, b"keep the unrelated receipt").unwrap();
+                        replaced = Some(receipt);
+                    }
+                    Phase::QuarantinePlanned if stop => cancel.request(),
+                    Phase::QuarantineAborted => {
+                        let directory = path.parent().unwrap();
+                        if stop {
+                            fs::write(directory.join("independent").path(), b"keep this").unwrap();
+                        }
+                        stage = Some(directory);
+                    }
+                    Phase::Quarantined => panic!("the source must never be moved into staging"),
+                    _ => {}
+                }
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(published && !progress.partial_copy_retained);
+        assert_eq!(progress.results.cancelled, stop);
+        assert_eq!(fs::read(source.path()).unwrap(), b"original data");
+        assert_eq!(fs::metadata(source.path()).unwrap().ino(), original_inode);
+        assert_eq!(fs::read(target.path()).unwrap(), b"original data");
+        let stage = stage.unwrap();
+        assert!(!stage.join("source").path().exists());
+        let TransferError::Failed(Failure::Mutation(error)) = error else {
+            panic!("expected the incomplete move");
+        };
+        let MutationError::MoveIncomplete {
+            target: copy,
+            cause,
+        } = *error
+        else {
+            panic!("expected the incomplete move");
+        };
+        assert_eq!(copy, target);
+        let operation = if stop {
+            let TransferError::Failed(Failure::StagingCleanup(error)) = cause else {
+                panic!("expected both cancellation and cleanup failure");
+            };
+            assert_eq!(error.staging, stage);
+            assert!(!error.completed_move);
+            let independent = stage.join("independent");
+            assert_resume_check(
+                &error.cleanup,
+                ResumeRole::Staged,
+                independent.path(),
+                ResumeCheckProblem::Unexpected,
+            );
+            assert_eq!(fs::read(independent.path()).unwrap(), b"keep this");
+            fs::remove_file(independent.path()).unwrap();
+            error.operation.unwrap()
+        } else {
+            assert!(!stage.path().exists());
+            cause
+        };
+        let TransferError::Failed(Failure::CrossMove(error)) = operation else {
+            panic!("expected a source preparation error");
+        };
+        let CrossMoveError::Prepare { original, cause } = *error else {
+            panic!("expected the original path and the preparation cause");
+        };
+        assert_eq!(original, source);
+        if stop {
+            assert!(matches!(cause, TransferError::Cancelled));
+        } else {
+            let receipt = replaced.unwrap();
+            assert!(matches!(
+                cause, TransferError::Failed(Failure::RecoveryRecord(error))
+                    if error.path == receipt && matches!(error.problem, RecoveryRecordProblem::IdentityChanged)
+            ));
+            assert_eq!(fs::read(&receipt).unwrap(), b"keep the unrelated receipt");
+            fs::rename(&saved, receipt).unwrap();
+        }
+        let (offers, errors) = scan(&recovery);
+        assert!(errors.is_empty() && offers.len() == 1);
+        let existing_copy = fs::metadata(target.path()).unwrap().ino();
+        let (mut progress, mut view) = Progress::tracked_transfer();
+        let result = resume(&recovery, &offers[0].id, &mut progress).unwrap();
+        assert!(result.moving && result.kind == Completion::AlreadyPresent);
+        assert_eq!(view.snapshot().total_written, 0);
+        assert_eq!(fs::metadata(target.path()).unwrap().ino(), existing_copy);
+        assert!(!source.path().exists() && !stage.path().exists());
+        assert!(scan(&recovery).0.is_empty());
+    }
+}
+
+#[test]
 fn restored_move_preserves_the_primary_error_and_an_unrelated_staging_entry() {
     for stop in [false, true] {
         let temp = tempfile::tempdir().unwrap();
