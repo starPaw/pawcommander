@@ -23,6 +23,7 @@ fn remote_source_comparison_requires_observable_metadata_and_ignores_atime() {
         "missing-size",
         "missing-mtime",
         "missing-type",
+        "missing-type-bits",
     ] {
         let mut actual = expected.clone();
         match change {
@@ -35,6 +36,7 @@ fn remote_source_comparison_requires_observable_metadata_and_ignores_atime() {
             "missing-size" => actual.size = None,
             "missing-mtime" => actual.mtime = None,
             "missing-type" => actual.perm = None,
+            "missing-type-bits" => actual.perm = Some(0o644),
             _ => unreachable!(),
         }
         assert!(!remote_source_matches(&expected, &actual), "{change}");
@@ -45,6 +47,89 @@ fn remote_source_comparison_requires_observable_metadata_and_ignores_atime() {
     // Identical observable metadata cannot distinguish a same-second edit
     // or an inode replacement on SFTP v3. Do not claim snapshot semantics.
     assert!(remote_source_matches(&expected, &expected));
+}
+
+#[test]
+fn remote_source_recheck_identifies_missing_fields_at_the_full_path() {
+    use super::super::transfer::{EntryMetadata, TransferSourceEntry};
+    use crate::file_error::{Failure, ScanError};
+    use std::mem::discriminant;
+
+    let source = resolve(
+        "sftp://user@localhost/folder/report",
+        &Location::Local(PathBuf::from("/")),
+    )
+    .unwrap();
+    let stat = FileStat {
+        size: Some(8),
+        uid: None,
+        gid: None,
+        perm: Some(0o100644),
+        atime: None,
+        mtime: Some(20),
+    };
+    let entry = TransferSourceEntry {
+        metadata: EntryMetadata::Remote(stat.clone()),
+        children: None,
+    };
+    for (perm, size, mtime, expected) in [
+        (
+            None,
+            stat.size,
+            stat.mtime,
+            ScanError::MissingSftpFileType(source.clone()),
+        ),
+        (
+            Some(0o644),
+            stat.size,
+            stat.mtime,
+            ScanError::MissingSftpFileType(source.clone()),
+        ),
+        (
+            stat.perm,
+            None,
+            stat.mtime,
+            ScanError::MissingSftpFileSize(source.clone()),
+        ),
+        (
+            stat.perm,
+            stat.size,
+            None,
+            ScanError::MissingSftpModificationTime(source.clone()),
+        ),
+        (
+            stat.perm,
+            None,
+            None,
+            ScanError::MissingSftpFileVersion(source.clone()),
+        ),
+    ] {
+        let actual = EntryMetadata::Remote(FileStat {
+            perm,
+            size,
+            mtime,
+            ..stat.clone()
+        });
+        let error = entry.verify_metadata(&source, &actual).unwrap_err();
+        let TransferError::Failed(Failure::Scan(reason)) = error else {
+            panic!("unexpected source check failure: {error:?}");
+        };
+        assert_eq!(discriminant(reason.as_ref()), discriminant(&expected));
+        match *reason {
+            ScanError::MissingSftpFileType(location)
+            | ScanError::MissingSftpFileSize(location)
+            | ScanError::MissingSftpModificationTime(location)
+            | ScanError::MissingSftpFileVersion(location) => assert_eq!(location, source),
+            other => panic!("unexpected scan error: {other:?}"),
+        }
+    }
+    let directory = EntryMetadata::Remote(FileStat {
+        perm: Some(0o40755),
+        size: None,
+        mtime: None,
+        ..stat
+    });
+    assert!(directory.check_sftp_source(&source).is_ok());
 }
 
 #[test]

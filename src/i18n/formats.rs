@@ -57,8 +57,6 @@ formats! {
     "Unsupported SFTP transfer name in {source}: {error}" => ("Неподдерживаемое имя для передачи SFTP в {source}: {error}", "Nepodporovaný název pro přenos SFTP v {source}: {error}"),
     "Invalid name for SFTP: {}" => ("Недопустимое имя SFTP: {}", "Neplatný název pro SFTP: {}"),
     "Duplicate names in source {source}" => ("Повторяющиеся имена в источнике {source}", "Duplicitní názvy ve zdroji {source}"),
-    "The server did not report the type, size, or modification time of {source}. The source cannot be checked safely" => ("Сервер не сообщил тип, размер или время изменения {source}; безопасная проверка источника недоступна", "Server nesdělil typ, velikost nebo čas změny {source}. Zdroj nelze bezpečně ověřit"),
-    "SFTP copying of links and special files is unavailable: {source}" => ("SFTP-копирование ссылок и специальных файлов пока недоступно: {source}", "Kopírování odkazů a zvláštních souborů přes SFTP není dostupné: {source}"),
     "Could not verify the open SFTP source file (fstat): {e}" => ("Не удалось проверить открытый исходный файл SFTP (fstat): {e}", "Otevřený zdrojový soubor SFTP se nepodařilo ověřit (fstat): {e}"),
     "Could not move item “{}” to Trash: {error}. Already moved: {completed}." => ("Не удалось переместить «{}» в корзину: {error}. Уже перемещено в корзину: {completed}.", "Položku „{}“ se nepodařilo přesunout do koše: {error}. Již přesunuto: {completed}."),
     "Could not move item “{}” to Trash: {error}" => ("Не удалось переместить «{}» в корзину: {error}", "Položku „{}“ se nepodařilo přesunout do koše: {error}"),

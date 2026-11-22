@@ -556,12 +556,14 @@ pub(crate) enum ScanError {
     ComparisonLimit,
     FileChanged(Location),
     ExpectedRegularFile(Location),
-    MissingFileVersion(Location),
     #[cfg(target_os = "macos")]
     MissingLocalFileSize,
-    #[cfg(target_os = "macos")]
     MissingSftpFileSize(Location),
+    MissingSftpModificationTime(Location),
+    MissingSftpFileVersion(Location),
     MissingSftpFileType(Location),
+    SftpCopySymlink(Location),
+    SftpCopySpecialFile(Location),
     #[cfg(target_os = "macos")]
     DiskUsageRequiresLocalFolder,
     #[cfg(target_os = "macos")]
@@ -611,18 +613,28 @@ impl fmt::Display for ScanError {
             Self::ExpectedRegularFile(location) => {
                 write!(f, "Expected a regular file at {location}")
             }
-            Self::MissingFileVersion(location) => write!(
-                f,
-                "The server omitted the size or modification time for {location}"
-            ),
             #[cfg(target_os = "macos")]
             Self::MissingLocalFileSize => f.write_str("File size is unavailable"),
-            #[cfg(target_os = "macos")]
             Self::MissingSftpFileSize(location) => {
                 write!(f, "Missing SFTP file size for {location}")
             }
+            Self::MissingSftpModificationTime(location) => {
+                write!(f, "Missing SFTP modification time for {location}")
+            }
+            Self::MissingSftpFileVersion(location) => {
+                write!(
+                    f,
+                    "Missing SFTP file size and modification time for {location}"
+                )
+            }
             Self::MissingSftpFileType(location) => {
                 write!(f, "Missing SFTP file type for {location}")
+            }
+            Self::SftpCopySymlink(location) => {
+                write!(f, "Cannot copy a symbolic link over SFTP: {location}")
+            }
+            Self::SftpCopySpecialFile(location) => {
+                write!(f, "Cannot copy a special file over SFTP: {location}")
             }
             #[cfg(target_os = "macos")]
             Self::DiskUsageRequiresLocalFolder => {

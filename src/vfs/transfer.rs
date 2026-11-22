@@ -15,7 +15,7 @@ use crate::fs_ops::TransferKind;
 use crate::operations::{
     access_io, AccessStream, Cancellation, CopyReader, Progress, TransferError,
 };
-use ssh2::{ErrorCode, FileStat, OpenFlags, OpenType, RenameFlags};
+use ssh2::{ErrorCode, FileStat, FileType, OpenFlags, OpenType, RenameFlags};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
@@ -90,6 +90,26 @@ impl EntryMetadata {
             Self::Local(meta) => meta.is_file(),
             Self::Remote(stat) => stat.is_file(),
         }
+    }
+
+    pub(super) fn check_sftp_source(&self, source: &Location) -> Result<(), TransferError> {
+        let Self::Remote(stat) = self else {
+            return Ok(());
+        };
+        let error = match (stat.file_type(), stat.size, stat.mtime) {
+            (FileType::Other(0), _, _) => ScanError::MissingSftpFileType(source.clone()),
+            (FileType::RegularFile, None, None) => {
+                ScanError::MissingSftpFileVersion(source.clone())
+            }
+            (FileType::RegularFile, None, Some(_)) => {
+                ScanError::MissingSftpFileSize(source.clone())
+            }
+            (FileType::RegularFile, Some(_), None) => {
+                ScanError::MissingSftpModificationTime(source.clone())
+            }
+            _ => return Ok(()),
+        };
+        Err(error.into())
     }
 
     #[cfg(target_os = "macos")]
@@ -194,6 +214,16 @@ pub(super) fn entry_metadata(location: &Location) -> Result<Option<EntryMetadata
         Err(cause) if cause.is_absent() => Ok(None),
         Err(cause) => Err(AccessError::new(location, AccessAction::ReadMetadata, cause).into()),
     }
+}
+
+pub(super) fn checked_source_metadata(
+    source: &Location,
+) -> Result<Option<EntryMetadata>, TransferError> {
+    let metadata = entry_metadata(source)?;
+    if let Some(metadata) = &metadata {
+        metadata.check_sftp_source(source)?;
+    }
+    Ok(metadata)
 }
 
 fn read_entry_metadata(location: &Location) -> Result<EntryMetadata, AccessCause> {
@@ -1022,7 +1052,7 @@ pub(super) fn copy_item_cancellable(
     }
     #[cfg(target_os = "macos")]
     if let Some(directory) = progress.resume_directory.clone() {
-        let metadata = entry_metadata(&item.source)?;
+        let metadata = checked_source_metadata(&item.source)?;
         // Route from the same observation used to check the promised type.
         item.verify_promised_kind(metadata.as_ref())?;
         if let Some(metadata) = metadata {
@@ -1080,14 +1110,11 @@ fn copy_to_smb(
     let cancel = progress.cancellation();
     progress.checkpoint()?;
     let source_changed = || ScanError::FileChanged(item.source.clone());
-    let metadata = entry_metadata(&item.source)?;
+    let metadata = checked_source_metadata(&item.source)?;
     item.verify_promised_kind(metadata.as_ref())?;
     let metadata = metadata.ok_or_else(source_changed)?;
     if !metadata.is_file() {
         return Err(MutationError::SmbSourceNotRegular(item.source.clone()).into());
-    }
-    if matches!(&metadata, EntryMetadata::Remote(stat) if stat.size.is_none()) {
-        return Err(ScanError::MissingFileVersion(item.source.clone()).into());
     }
     if let Some(retry) = &progress.retry {
         retry.verify_snapshot(item, Some(&metadata))?;
@@ -1865,8 +1892,7 @@ pub(super) fn changed_source(source: &Location) -> String {
 pub(super) fn remote_source_matches(expected: &FileStat, actual: &FileStat) -> bool {
     // SFTP v3 exposes seconds, no inode or ctime. None is not evidence that a
     // regular file stayed unchanged: require at least type, size and mtime.
-    expected.perm.is_some()
-        && actual.perm.is_some()
+    expected.file_type() != FileType::Other(0)
         && (!expected.is_file() || (expected.size.is_some() && expected.mtime.is_some()))
         && expected.size == actual.size
         && expected.mtime == actual.mtime
@@ -1902,6 +1928,7 @@ impl TransferSourceEntry {
         source: &Location,
         actual: &EntryMetadata,
     ) -> Result<(), TransferError> {
+        actual.check_sftp_source(source)?;
         if self
             .matches_metadata(actual)
             .map_err(|error| AccessError::new(source, AccessAction::ReadMetadata, error))?
@@ -2136,7 +2163,7 @@ impl TransferSourceManifest {
             }
             .into());
         }
-        let metadata = entry_metadata(source)?;
+        let metadata = checked_source_metadata(source)?;
         #[cfg(target_os = "macos")]
         if depth == 0
             && let ManifestMode::FilePromise(kind) = self.mode
@@ -2150,22 +2177,20 @@ impl TransferSourceManifest {
                     .map_err(|error| AccessError::new(source, AccessAction::ReadMetadata, error))?;
                 (meta.is_dir(), meta.is_file())
             }
-            EntryMetadata::Remote(stat) => {
-                if stat.perm.is_none()
-                    || (stat.is_file() && (stat.size.is_none() || stat.mtime.is_none()))
-                {
-                    return Err(crate::tr_format!("The server did not report the type, size, or modification time of {source}. The source cannot be checked safely", source = source).into());
-                }
-                (stat.is_dir(), stat.is_file())
-            }
+            EntryMetadata::Remote(stat) => (stat.is_dir(), stat.is_file()),
         };
         let native_names = self.mode.uses_native_names();
         if !native_names && !is_dir && !is_file {
-            return Err(crate::tr_format!(
-                "SFTP copying of links and special files is unavailable: {source}",
-                source = source
-            )
-            .into());
+            let symlink = match &metadata {
+                EntryMetadata::Local(meta) => meta.is_symlink(),
+                EntryMetadata::Remote(stat) => stat.file_type().is_symlink(),
+            };
+            let error = if symlink {
+                ScanError::SftpCopySymlink(source.clone())
+            } else {
+                ScanError::SftpCopySpecialFile(source.clone())
+            };
+            return Err(error.into());
         }
         let children = if is_dir {
             Some(source_children(source, cancel, native_names)?)
