@@ -1,13 +1,14 @@
 use super::text;
 use crate::file_error::{
     AccessAction, AccessCause, AccessError, ArchiveError, ArchiveMemberError, BatchRenameError,
-    ChecksumError, ConflictError, ConnectionError, CopyVerificationError, CrossMoveError,
-    DescendantProblem, Failure, HostKeyError, KnownHostEntryError, KnownHostsError, ListingError,
-    ListingErrorKind, LocalPathAction, ManifestLineError, MetadataError, MetadataField,
-    MetadataWarning, MoveHistoryError, MutationError, PathError, PermissionError, PinError,
-    PreviewError, ProbeAction, PublicationError, RecoveryNotice, ReplacementRefusal, RetryError,
-    RetryProblem, ScanError, SearchError, SpaceError, SshStage, StagingCleanupError, StagingError,
-    StagingRecordAction, TransferPlanError, UndoError,
+    ChecksumError, ConflictError, ConnectionError, CopyVerificationError, CredentialAction,
+    CredentialError, CredentialFailure, CrossMoveError, DescendantProblem, Failure, HostKeyError,
+    KnownHostEntryError, KnownHostsError, ListingError, ListingErrorKind, LocalPathAction,
+    ManifestLineError, MetadataError, MetadataField, MetadataWarning, MoveHistoryError,
+    MutationError, PathError, PermissionError, PinError, PreviewError, ProbeAction,
+    PublicationError, RecoveryNotice, ReplacementRefusal, RetryError, RetryProblem, ScanError,
+    SearchError, SpaceError, SshStage, StagingCleanupError, StagingError, StagingRecordAction,
+    TransferPlanError, UndoError,
 };
 #[cfg(target_os = "macos")]
 use crate::file_error::{
@@ -1189,6 +1190,7 @@ fn connection_error(error: &ConnectionError) -> String {
             path = path.display(),
             error = source
         ),
+        ConnectionError::Credential(error) => credential_error(error),
         ConnectionError::InitialPathNotDirectory(location) => crate::tr_format!(
             "The initial SFTP path {path} is not a folder.",
             path = location
@@ -1202,6 +1204,40 @@ fn connection_error(error: &ConnectionError) -> String {
         ConnectionError::HostKeyTimeout => text!("Время проверки ключа сервера SSH истекло").into(),
         ConnectionError::Finalized => text!("Подключение SSH уже завершено").into(),
     }
+}
+
+pub(crate) fn credential_error(error: &CredentialError) -> String {
+    let action = match error.action {
+        CredentialAction::Read => text!("Не удалось прочитать сохранённый ключ SFTP"),
+        CredentialAction::Save => text!("Не удалось сохранить ключ SFTP"),
+        CredentialAction::Forget => text!("Не удалось удалить сохранённый ключ SFTP"),
+    };
+    let mut profile = error.profile.label();
+    if let Some(path) = &error.profile.key {
+        profile = format!("{profile} ({})", path.display());
+    }
+    let cause = match &error.cause {
+        CredentialFailure::Profile(_) => text!("Не удалось определить профиль SFTP").into(),
+        CredentialFailure::Prepare(_) => text!("Не удалось подготовить ключ к сохранению").into(),
+        CredentialFailure::Malformed(_) =>
+            text!("Сохранённый ключ повреждён; удалите его и сохраните заново").into(),
+        #[cfg(target_os = "macos")]
+        CredentialFailure::Keychain(source) => crate::tr_format!(
+            "Keychain error {code}: {error}", code = source.code(), error = source
+        ),
+        CredentialFailure::StoreUnavailable => text!("Системное хранилище секретов недоступно").into(),
+        CredentialFailure::MissingEntry => text!("Запись ключа в хранилище не найдена").into(),
+        CredentialFailure::AmbiguousEntry => text!("В хранилище найдено несколько записей для этого ключа").into(),
+        CredentialFailure::InvalidEntry => text!("Хранилище отклонило запись для этого ключа").into(),
+        CredentialFailure::AttributeTooLong { secret: true, limit } => crate::tr_format!(
+            "The key and passphrase exceed the system credential store limit ({limit} bytes). Connect using the key file or SSH agent without saving.",
+            limit = limit
+        ),
+        CredentialFailure::AttributeTooLong { secret: false, limit } => crate::tr_format!(
+            "A credential attribute exceeds the store limit ({limit} bytes).", limit = limit
+        ),
+    };
+    format!("{action} · {profile}\n{cause}")
 }
 
 fn host_key_error(error: &HostKeyError) -> String {

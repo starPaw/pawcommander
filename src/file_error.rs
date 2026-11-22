@@ -10,6 +10,7 @@ mod checksum;
 mod compatible_plan;
 mod conflict;
 mod copy_verification;
+mod credential;
 mod cross_move;
 #[cfg(target_os = "macos")]
 mod external_editor;
@@ -37,6 +38,9 @@ pub(crate) use checksum::{ChecksumError, ManifestLineError};
 pub(crate) use compatible_plan::CompatiblePlanError;
 pub(crate) use conflict::{ConflictError, ReplacementRefusal};
 pub(crate) use copy_verification::CopyVerificationError;
+pub(crate) use credential::{
+    CredentialAction, CredentialError, CredentialFailure, SecretFormatError,
+};
 pub(crate) use cross_move::CrossMoveError;
 #[cfg(target_os = "macos")]
 pub(crate) use external_editor::RemoteEditError;
@@ -278,6 +282,7 @@ pub(crate) enum ConnectionError {
         path: PathBuf,
         source: Utf8Error,
     },
+    Credential(Box<CredentialError>),
     InitialPathNotDirectory(Location),
     AuthenticationUnconfirmed {
         interactive: bool,
@@ -339,6 +344,7 @@ impl fmt::Display for ConnectionError {
                     path.display()
                 )
             }
+            Self::Credential(error) => fmt::Display::fmt(error, f),
             Self::InitialPathNotDirectory(location) => {
                 write!(f, "The initial SFTP path {location} is not a folder")
             }
@@ -364,6 +370,7 @@ impl Error for ConnectionError {
             Self::Forward { source, .. } => Some(source),
             Self::Route { cause, .. } | Self::Automatic(cause) => Some(cause),
             Self::ImportedKeyEncoding { source, .. } => Some(source),
+            Self::Credential(error) => Some(error.as_ref()),
             _ => None,
         }
     }
