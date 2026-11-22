@@ -36,7 +36,6 @@ catalog! {
     "Начальный путь не является папкой" => ("The initial path is not a folder", "Výchozí cesta není složka"),
     "Не прочитан ключ" => ("Could not read the key", "Klíč se nepodařilo načíst"),
     "Ожидалось подключение SFTP" => ("Expected an SFTP connection", "Bylo očekáváno připojení SFTP"),
-    "Пофайловый журнал переноса превысил лимит 100000 элементов" => ("The per-item transfer history exceeded 100,000 entries", "Historie přenosu po položkách překročila 100 000 záznamů"),
     "Недопустимое назначение" => ("Invalid destination", "Neplatný cíl"),
     "Не удалось создать временную папку для копирования" => ("Could not create a temporary folder for copying", "Dočasnou složku pro kopírování se nepodařilo vytvořit"),
     "Не удалось удалить временную папку" => ("Could not remove the temporary folder", "Dočasnou složku se nepodařilo odstranit"),

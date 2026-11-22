@@ -1349,10 +1349,21 @@ fn scan_error(error: &ScanError) -> String {
                 path = location,
             )
         }
-        ScanError::MoveEntryLimit(location) => (
-            text!("Пофайловый журнал переноса превысил лимит 100000 элементов"),
-            location,
-        ),
+        ScanError::MoveEntryLimit { location, limit } => {
+            return crate::tr_format!(
+                "The per-item move journal exceeds {limit} entries at {path}.",
+                limit = limit,
+                path = location
+            );
+        }
+        #[cfg(target_os = "macos")]
+        ScanError::FolderFingerprint { location, source } => {
+            return crate::tr_format!(
+                "Could not encode folder fingerprint metadata for {path}. {error}",
+                path = location,
+                error = source
+            );
+        }
         ScanError::TransferSizeOverflow(location) => {
             (text!("Слишком большой размер копируемого дерева"), location)
         }

@@ -1,7 +1,7 @@
 use super::*;
 use crate::conflict::{Answer, Decision};
 use crate::file_error::{
-    Failure, LocalPathAction, MutationError, PublicationError, RecoveryRecordSection,
+    Failure, LocalPathAction, MutationError, PublicationError, RecoveryRecordSection, ScanError,
 };
 use crate::fs_ops::TransferKind;
 use crate::vfs::transfer_with_conflicts;
@@ -1540,6 +1540,93 @@ fn checked_folder(recovery: &Path, stage: &Path, source: &Path, target: &Path, b
         "Reused {reused} staged bytes, wrote only {} remaining folder bytes",
         view.snapshot().total_written
     );
+}
+
+#[test]
+fn recovery_move_budget_counts_ancestors_and_preserves_the_nested_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let source: Location = temp.path().canonicalize().unwrap().into();
+    let nested = source.join("nested");
+    let child = nested.join("child");
+    fs::create_dir(nested.path()).unwrap();
+    fs::write(source.join("a").path(), b"first").unwrap();
+    fs::write(child.path(), b"nested").unwrap();
+    let cancel = Cancellation::default();
+    let error = TransferSourceManifest::capture_recovery_tree(&source, &cancel, true, Some(3))
+        .err()
+        .expect("the root and its nested directory also consume journal entries");
+    assert!(matches!(
+        &error,
+        TransferError::Failed(Failure::Scan(error))
+            if matches!(error.as_ref(), ScanError::MoveEntryLimit { location, limit: 3 }
+                if *location == child)
+    ));
+    assert!(crate::i18n::file_error(&error).contains(&child.display()));
+    for limit in [Some(4), None] {
+        let manifest =
+            TransferSourceManifest::capture_recovery_tree(&source, &cancel, true, limit).unwrap();
+        assert_eq!(manifest.entries.len(), 4);
+        assert_eq!(manifest.bytes, 11);
+    }
+    cancel.request();
+    assert!(matches!(
+        TransferSourceManifest::capture_recovery_tree(&source, &cancel, true, Some(3)),
+        Err(TransferError::Cancelled)
+    ));
+}
+
+#[test]
+fn changed_published_folder_reports_the_destination_without_a_retained_draft() {
+    for moving in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let recovery = root.join("recovery");
+        let source: Location = root.join("source").into();
+        let target: Location = root.join("target").into();
+        fs::create_dir(source.path()).unwrap();
+        fs::write(source.join("data").path(), b"original").unwrap();
+        let item = TransferItem::new(source.clone(), source.clone(), target.clone());
+        let offer = if moving {
+            interrupt_move(&item, &recovery, Phase::Copied)
+        } else {
+            let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                copy_folder(&item, &recovery, &mut Progress::default(), || {
+                    panic!("interrupted just after publication")
+                })
+                .unwrap();
+            }));
+            assert_eq!(
+                stopped.unwrap_err().downcast_ref::<&str>(),
+                Some(&"interrupted just after publication")
+            );
+            let (mut offers, errors) = scan(&recovery);
+            assert_eq!(offers.len(), 1, "{errors:?}");
+            offers.pop().unwrap()
+        };
+        let record = receipts(&recovery).join(&offer.id);
+        let ticket = Ticket::open(record.clone()).unwrap().unwrap();
+        let stage = ticket.paths().unwrap().stage;
+        assert!(!stage.join("payload").path().exists());
+        drop(ticket);
+        fs::write(target.join("data").path(), b"new destination data").unwrap();
+        let (mut progress, mut view) = Progress::tracked_transfer();
+        let error = resume(&recovery, &offer.id, &mut progress).unwrap_err();
+        assert_resume_check(
+            &error,
+            ResumeRole::Destination,
+            target.path(),
+            ResumeCheckProblem::ContentsMismatch,
+        );
+        assert!(!progress.partial_copy_retained);
+        assert_eq!(view.snapshot().total_written, 0);
+        assert_eq!(progress.results.items[0].outcome, Outcome::Failed);
+        assert!(record.exists() && stage.path().exists());
+        assert_eq!(fs::read(source.join("data").path()).unwrap(), b"original");
+        assert_eq!(
+            fs::read(target.join("data").path()).unwrap(),
+            b"new destination data"
+        );
+    }
 }
 
 #[test]

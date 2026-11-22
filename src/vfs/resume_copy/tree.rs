@@ -10,7 +10,7 @@ use super::{
 };
 use crate::file_error::{
     AccessAction, AccessError, PublicationError, RecoveryNotice, RecoveryRecordProblem,
-    ResumeCheckProblem, ResumeRole,
+    ResumeCheckProblem, ResumeRole, ScanError,
 };
 use crate::fs_ops::local_copy_write_error;
 use crate::operations::AccessStream;
@@ -61,12 +61,15 @@ impl Snapshot {
     fn capture(
         root: &Location,
         role: ResumeRole,
+        intent: Intent,
         local_names: bool,
         progress: &mut Progress,
     ) -> Result<Self, TransferError> {
         let cancel = progress.cancellation().pausable_scan();
-        let listing = TransferSourceManifest::capture_copy_tree(root, &cancel, local_names)
-            .map_err(|error| manifest_error(role, error))?;
+        let move_limit = (intent == Intent::Move).then_some(MAX_MOVE_JOURNAL_ENTRIES);
+        let listing =
+            TransferSourceManifest::capture_recovery_tree(root, &cancel, local_names, move_limit)
+                .map_err(|error| manifest_error(role, error))?;
         if !listing
             .entries
             .get(root)
@@ -99,7 +102,10 @@ impl Snapshot {
                 return Err(role.error(&source, ResumeCheckProblem::WrongType));
             };
             feed_field(&mut manifest, relative.as_os_str().as_encoded_bytes());
-            feed_field(&mut manifest, &metadata_bytes(&entry.metadata, false)?);
+            feed_field(
+                &mut manifest,
+                &metadata_bytes(&entry.metadata, false, || source.clone())?,
+            );
             feed_field(&mut contents, relative.as_os_str().as_encoded_bytes());
             match &content {
                 Content::Directory => contents.update([0]),
@@ -147,8 +153,9 @@ impl Snapshot {
         Ok(())
     }
 
-    fn renamed_identity(&self) -> Result<RenamedIdentity, TransferError> {
+    fn renamed_identity(&self, root: &Location) -> Result<RenamedIdentity, TransferError> {
         publication_seal(
+            root,
             self.entries
                 .iter()
                 .map(|(path, node)| (path, &node.entry.metadata)),
@@ -413,14 +420,8 @@ pub(super) fn start(
 ) -> Result<(), TransferError> {
     let local_names = !source.remote() && !target.remote();
     verify_target(None, &target, false, progress)?;
-    let snapshot = Snapshot::capture(&source, ResumeRole::Source, local_names, progress)?;
+    let snapshot = Snapshot::capture(&source, ResumeRole::Source, intent, local_names, progress)?;
     let original_access_times = if intent == Intent::Move {
-        if snapshot.entries.len() > MAX_MOVE_JOURNAL_ENTRIES {
-            return Err(crate::i18n::text!(
-                "Пофайловый журнал переноса превысил лимит 100000 элементов"
-            )
-            .into());
-        }
         Some(
             snapshot
                 .entries
@@ -492,7 +493,8 @@ fn finish(
     let local_names = !paths.source.remote() && !paths.target.remote();
     let result = (|| {
         if snapshot.is_none() && entry_metadata(&payload)?.is_none() {
-            verify_published(paths, proof, None, progress)?;
+            progress.partial_copy_retained = false;
+            verify_published(paths, proof, receipt.intent, None, progress)?;
             committed = true;
             published();
             return Ok(Completion::AlreadyPresent);
@@ -502,8 +504,13 @@ fn finish(
         verify_target(None, &paths.target, false, progress)?;
         let resuming = snapshot.is_none();
         if resuming {
-            let current =
-                Snapshot::capture(&paths.source, ResumeRole::Source, local_names, progress)?;
+            let current = Snapshot::capture(
+                &paths.source,
+                ResumeRole::Source,
+                receipt.intent,
+                local_names,
+                progress,
+            )?;
             if current.proof != proof {
                 let problem = if current.proof.contents != proof.contents {
                     ResumeCheckProblem::ContentsMismatch
@@ -546,7 +553,7 @@ fn finish(
         snapshot.verify(&paths.source, ResumeRole::Source, &cancel)?;
         if receipt.intent == Intent::Move {
             let complete = snapshot.inventory(&payload, true, &cancel)?;
-            ticket.seal(publication_seal(&complete)?)?;
+            ticket.seal(publication_seal(&payload, &complete)?)?;
         }
         cancel.check()?;
         rename_for_publication(&payload, &paths.target)?;
@@ -583,8 +590,10 @@ fn finish(
             discard_empty_stage(&paths.stage, receipt.stage_identity, owner)
         })();
         finish_cancelled_cleanup(ticket, paths, cleanup)
-    } else {
+    } else if progress.partial_copy_retained {
         result.map_err(|error| retained_error(&paths.stage, error))
+    } else {
+        result
     }
 }
 
@@ -599,10 +608,11 @@ pub(super) fn verify_move_source(
     let snapshot = Snapshot::capture(
         source,
         role,
+        Intent::Move,
         !source.remote() && !destination.remote(),
         progress,
     )?;
-    let identity = snapshot.renamed_identity()?;
+    let identity = snapshot.renamed_identity(source)?;
     let matches = match renamed {
         Some(expected) => identity == expected,
         None => snapshot.proof.manifest == proof.manifest,
@@ -619,17 +629,18 @@ pub(super) fn verify_move_source(
 pub(super) fn verify_published(
     paths: &Paths,
     proof: Proof,
+    intent: Intent,
     seal: Option<RenamedIdentity>,
     progress: &mut Progress,
 ) -> Result<(), TransferError> {
     let local_names = !paths.source.remote() && !paths.target.remote();
     let role = ResumeRole::Destination;
-    let snapshot = Snapshot::capture(&paths.target, role, local_names, progress)?;
+    let snapshot = Snapshot::capture(&paths.target, role, intent, local_names, progress)?;
     if snapshot.proof.contents != proof.contents {
         return Err(role.error(&paths.target, ResumeCheckProblem::ContentsMismatch));
     }
     if let Some(expected) = seal
-        && snapshot.renamed_identity()? != expected
+        && snapshot.renamed_identity(&paths.target)? != expected
     {
         return Err(role.error(&paths.target, ResumeCheckProblem::Changed));
     }
@@ -712,6 +723,7 @@ fn feed_field(digest: &mut Sha256, bytes: &[u8]) {
 }
 
 fn publication_seal<'a>(
+    root: &Location,
     entries: impl IntoIterator<Item = (&'a PathBuf, &'a EntryMetadata)>,
 ) -> Result<RenamedIdentity, TransferError> {
     let mut digest = Sha256::new();
@@ -719,13 +731,17 @@ fn publication_seal<'a>(
         feed_field(&mut digest, path.as_os_str().as_encoded_bytes());
         feed_field(
             &mut digest,
-            &metadata_bytes(metadata, path.as_os_str().is_empty())?,
+            &metadata_bytes(metadata, path.as_os_str().is_empty(), || at(root, path))?,
         );
     }
     Ok(RenamedIdentity::Folder(digest.finalize().into()))
 }
 
-fn metadata_bytes(metadata: &EntryMetadata, renamed_root: bool) -> Result<Vec<u8>, TransferError> {
+fn metadata_bytes(
+    metadata: &EntryMetadata,
+    renamed_root: bool,
+    location: impl FnOnce() -> Location,
+) -> Result<Vec<u8>, TransferError> {
     match metadata {
         EntryMetadata::Local(meta) => serde_json::to_vec(&(
             meta.dev(),
@@ -741,5 +757,11 @@ fn metadata_bytes(metadata: &EntryMetadata, renamed_root: bool) -> Result<Vec<u8
             serde_json::to_vec(&(stat.perm, stat.size, stat.mtime, stat.uid, stat.gid))
         }
     }
-    .map_err(|error| error.to_string().into())
+    .map_err(|source| {
+        ScanError::FolderFingerprint {
+            location: location(),
+            source,
+        }
+        .into()
+    })
 }

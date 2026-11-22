@@ -630,7 +630,13 @@ fn verify_published_move(
             }
         }
         Original::Folder(proof) => {
-            tree::verify_published(paths, *proof, check_seal.then_some(seal), progress)?;
+            tree::verify_published(
+                paths,
+                *proof,
+                Intent::Move,
+                check_seal.then_some(seal),
+                progress,
+            )?;
         }
     }
     Ok(())
@@ -1006,6 +1012,7 @@ pub(crate) fn resume(
         let completion = if moving
             && (ticket.holding.is_some() || entry_metadata(&paths.stage.join("payload"))?.is_none())
         {
+            progress.partial_copy_retained = false;
             Completion::AlreadyPresent
         } else {
             match ticket.receipt.original {
