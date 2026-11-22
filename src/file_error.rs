@@ -336,13 +336,13 @@ pub(crate) enum AccessAction {
     ReadMetadata,
     OpenFile,
     CreateFile,
+    CreateDirectory,
     CreateStagingDirectory,
     RemoveStagingDirectory,
     ReadOpenMetadata,
     ReadChildren,
     ReadFile,
     ReadLink,
-    #[cfg(target_os = "macos")]
     CreateLink,
     WriteFile,
     FlushFile,
@@ -350,6 +350,7 @@ pub(crate) enum AccessAction {
     CloseFile,
     SeekFile,
     WriteMetadata,
+    WritePermissions,
     #[cfg(target_os = "macos")]
     CheckSmbVolume,
     #[cfg(target_os = "macos")]

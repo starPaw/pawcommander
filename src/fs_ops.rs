@@ -766,21 +766,28 @@ pub(crate) fn local_copy_error(
             io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded
         )
     {
-        let error = match error.downcast::<AccessError>() {
-            Ok(AccessError {
-                action:
-                    AccessAction::CreateFile
-                    | AccessAction::CreateStagingDirectory
-                    | AccessAction::WriteFile
-                    | AccessAction::FlushFile
-                    | AccessAction::SyncFile
-                    | AccessAction::WriteMetadata,
-                cause: AccessCause::Local(source),
-                ..
-            }) => source,
-            Ok(error) => return error.into(),
-            Err(error) => error,
-        };
+        if let Some(access) = error
+            .get_ref()
+            .and_then(|cause| cause.downcast_ref::<AccessError>())
+            && !matches!(
+                access,
+                AccessError {
+                    action: AccessAction::CreateFile
+                        | AccessAction::CreateDirectory
+                        | AccessAction::CreateStagingDirectory
+                        | AccessAction::CreateLink
+                        | AccessAction::WriteFile
+                        | AccessAction::FlushFile
+                        | AccessAction::SyncFile
+                        | AccessAction::WriteMetadata
+                        | AccessAction::WritePermissions,
+                    cause: AccessCause::Local(_),
+                    ..
+                }
+            )
+        {
+            return error.into();
+        }
         SpaceError::LocalWrite {
             directory: parent.to_owned(),
             source: error,
@@ -789,6 +796,18 @@ pub(crate) fn local_copy_error(
     } else {
         TransferError::io(error, context)
     }
+}
+
+pub(crate) fn local_copy_write_error(
+    target: &Location,
+    action: AccessAction,
+    error: io::Error,
+) -> TransferError {
+    local_copy_error(
+        target.local().and_then(Path::parent),
+        access_io(target, action, error),
+        ToString::to_string,
+    )
 }
 
 pub(crate) fn ensure_copy_space(
@@ -1053,10 +1072,14 @@ fn copy_tree_entry(
         .ok_or_else(|| source_changed(source))?;
     entry.verify(source, &cancel)?;
     let metadata = &entry.metadata;
+    let output_path = Location::Local(target.to_owned());
+    let output_error = |action, error| access_io(&output_path, action, error);
     if let Some(link) = &entry.link {
-        copy_symlink(link, staged, metadata)?;
+        copy_symlink(link, staged, metadata)
+            .map_err(|error| output_error(AccessAction::CreateLink, error))?;
     } else if metadata.is_dir() {
-        fs::create_dir(staged)?;
+        fs::create_dir(staged)
+            .map_err(|error| output_error(AccessAction::CreateDirectory, error))?;
         for name in entry.children.as_ref().expect("directory manifest") {
             copy_tree(
                 &source.join(name),
@@ -1068,12 +1091,11 @@ fn copy_tree_entry(
             )?;
         }
         cancel.check()?;
-        fs::set_permissions(staged, metadata.permissions())?;
+        fs::set_permissions(staged, metadata.permissions())
+            .map_err(|error| output_error(AccessAction::WritePermissions, error))?;
     } else if metadata.is_file() {
         let input_path = Location::Local(source.to_owned());
-        let output_path = Location::Local(target.to_owned());
         let input_error = |action, error| access_io(&input_path, action, error);
-        let output_error = |action, error| access_io(&output_path, action, error);
         let mut input = open_regular_source(source)?;
         let current = input
             .metadata()
@@ -1143,7 +1165,7 @@ fn copy_tree_entry(
         }
         output
             .set_permissions(metadata.permissions())
-            .map_err(|error| output_error(AccessAction::WriteMetadata, error))?;
+            .map_err(|error| output_error(AccessAction::WritePermissions, error))?;
         return Ok(());
     } else {
         return Err(unsupported_copy_source(source));
@@ -1996,6 +2018,87 @@ mod tests {
         };
         assert_eq!(error.location, source);
         assert_eq!(error.action, AccessAction::ReadFile);
+
+        let destination = Location::Local(folder.join("nested-folder"));
+        for action in [
+            AccessAction::CreateDirectory,
+            AccessAction::CreateLink,
+            AccessAction::WritePermissions,
+        ] {
+            let error = local_copy_write_error(
+                &destination,
+                action,
+                io::Error::from_raw_os_error(libc::ENOSPC),
+            );
+            let TransferError::Failed(Failure::Space(reason)) = error else {
+                panic!("expected a typed local capacity error");
+            };
+            let SpaceError::LocalWrite { directory, source } = reason.as_ref() else {
+                panic!("expected a local write error");
+            };
+            let access = source
+                .get_ref()
+                .unwrap()
+                .downcast_ref::<AccessError>()
+                .unwrap();
+            assert_eq!(directory, folder);
+            assert_eq!(access.location, destination);
+            assert_eq!(access.action, action);
+            assert!(
+                matches!(&access.cause, AccessCause::Local(error) if error.raw_os_error() == Some(libc::ENOSPC))
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_staged_link_creation_reports_the_final_child_and_preserves_existing_data() {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path();
+        let source = root.join("source");
+        let target = root.join("target");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("a-file"), b"incoming").unwrap();
+        std::os::unix::fs::symlink("a-file", source.join("z-link")).unwrap();
+        fs::write(&target, b"previous destination").unwrap();
+
+        let error = copy_atomically_cancellable(
+            &source,
+            &target,
+            &mut Progress::default(),
+            |_, _| panic!("copy with a failed link must not publish"),
+            &mut |path| {
+                if path == source.join("a-file") {
+                    let stage = fs::read_dir(root)?
+                        .map(Result::unwrap)
+                        .find(|entry| {
+                            entry
+                                .file_name()
+                                .to_string_lossy()
+                                .starts_with(".pawcommander-copy-")
+                        })
+                        .unwrap();
+                    fs::write(stage.path().join("payload/z-link"), b"occupied")?;
+                }
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        let TransferError::Failed(Failure::Access(error)) = error else {
+            panic!("expected the original destination failure, got {error:?}");
+        };
+        assert_eq!(error.location.path(), target.join("z-link"));
+        assert_eq!(error.action, AccessAction::CreateLink);
+        assert!(
+            matches!(error.cause, AccessCause::Local(error) if error.raw_os_error() == Some(libc::EEXIST))
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"previous destination");
+        assert_eq!(
+            fs::read_link(source.join("z-link")).unwrap(),
+            Path::new("a-file")
+        );
+        assert_eq!(fs::read(source.join("a-file")).unwrap(), b"incoming");
+        assert_eq!(fs::read_dir(root).unwrap().count(), 2);
     }
 
     use tempfile::tempdir;

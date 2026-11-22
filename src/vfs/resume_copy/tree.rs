@@ -10,6 +10,7 @@ use super::{
 use crate::file_error::{
     AccessAction, AccessError, RecoveryRecordProblem, ResumeCheckProblem, ResumeRole,
 };
+use crate::fs_ops::local_copy_write_error;
 use crate::operations::AccessStream;
 use crate::vfs::{
     sftp::remote,
@@ -285,6 +286,7 @@ impl Snapshot {
             progress.checkpoint()?;
             let source = at(&paths.source, relative);
             let copy = at(payload, relative);
+            let target = at(&paths.target, relative);
             let existing = inventory.contains_key(relative);
             if let Some(parent) = relative.parent() {
                 let directory = at(payload, parent);
@@ -296,7 +298,7 @@ impl Snapshot {
                 )?;
             }
             let result = match &node.content {
-                Content::Directory if !existing => mkdir(&copy).and_then(|()| {
+                Content::Directory if !existing => mkdir(&copy, &target).and_then(|()| {
                     let metadata = required_metadata(&copy, role)?;
                     if !metadata.is_directory() {
                         return Err(role.error(&copy, ResumeCheckProblem::WrongType));
@@ -304,9 +306,9 @@ impl Snapshot {
                     inventory.insert(relative.clone(), metadata);
                     Ok(())
                 }),
-                Content::Link(target) if !existing => {
-                    std::os::unix::fs::symlink(target, copy.path()).map_err(|error| {
-                        AccessError::new(&copy, AccessAction::CreateLink, error).into()
+                Content::Link(destination) if !existing => {
+                    std::os::unix::fs::symlink(destination, copy.path()).map_err(|error| {
+                        local_copy_write_error(&target, AccessAction::CreateLink, error)
                     })
                 }
                 Content::File(original) => {
@@ -316,7 +318,6 @@ impl Snapshot {
                     if partial.is_some_and(|(file, _)| file.stamp.size() == original.stamp.size()) {
                         Ok(())
                     } else {
-                        let target = at(&paths.target, relative);
                         copy_suffix(&source, &copy, &target, original, partial, progress)
                     }
                 }
@@ -346,6 +347,7 @@ impl Snapshot {
             if !matches!(node.content, Content::Link(_)) {
                 let source = at(&paths.source, relative);
                 let copy = at(payload, relative);
+                let target = at(&paths.target, relative);
                 let metadata = &node.entry.metadata;
                 let accessed = if mode == copy_metadata::Mode::KeepReadableForMove {
                     original_access_times.and_then(|times| times[index])
@@ -353,7 +355,7 @@ impl Snapshot {
                     copy_metadata::access_time(metadata)
                 };
                 copy_metadata::stage_resumed_entry(
-                    &source, &copy, metadata, accessed, mode, progress,
+                    &source, &copy, &target, metadata, accessed, mode, progress,
                 )?;
             }
         }
@@ -441,7 +443,7 @@ pub(super) fn start(
     with_preserved_staging(&target, &cancel, |stage, preserve| {
         *preserve = false;
         check_copy_space(snapshot.bytes, &target, stage)?;
-        mkdir(&stage.join("payload"))?;
+        mkdir(&stage.join("payload"), &target)?;
         let record = Receipt {
             intent,
             source: (&source).into(),
@@ -641,18 +643,18 @@ fn at(root: &Location, relative: &Path) -> Location {
     }
 }
 
-fn mkdir(location: &Location) -> Result<(), TransferError> {
-    let action = AccessAction::CreateStagingDirectory;
+fn mkdir(location: &Location, report_at: &Location) -> Result<(), TransferError> {
+    let action = AccessAction::CreateDirectory;
     if let Some(path) = location.local() {
         fs::DirBuilder::new()
             .mode(0o700)
             .create(path)
-            .map_err(|error| AccessError::new(location, action, error))?;
+            .map_err(|error| local_copy_write_error(report_at, action, error))?;
     } else {
         remote(location)
-            .map_err(|error| AccessError::new(location, action, error))?
+            .map_err(|error| AccessError::new(report_at, action, error))?
             .mkdir(location.path(), 0o700)
-            .map_err(|error| AccessError::new(location, action, error))?;
+            .map_err(|error| AccessError::new(report_at, action, error))?;
     }
     Ok(())
 }
