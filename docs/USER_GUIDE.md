@@ -297,7 +297,7 @@ Each group starts with one file marked **Keep**. Select a different one if desir
 
 Open a local folder and choose **Analyze disk usage** from Settings or the command palette. **Size tree** shows each folder's total and lets you expand its children. **Largest files** ranks regular files by allocated space and shows exact allocated bytes and file length in the tooltip. **Disk map** uses area to show relative sizes. Select a folder tile to inspect that branch, or use **Parent folder** to return. The map groups smaller entries under **Other entries**.
 
-The scan counts allocated blocks reported by macOS for files and folders, skips symbolic-link targets and counts hard links once, under the first path in name order. APFS clones can share blocks, so the values are estimates of space attributed to the scanned entries. **Stop** keeps the sizes already counted. Missing folders, read errors and the scan limit are shown with partial results. The scan supports 100,000 entries, 32 MiB of paths and 128 folder levels.
+The scan counts allocated blocks reported by macOS for files and folders, skips symbolic-link targets and counts hard links once, under the first path in name order. APFS clones can share blocks, so the values are estimates of space attributed to the scanned entries. **Stop** keeps the sizes already counted. Incomplete folder sizes are marked as partial, and folders the scan could not measure show **No data**. Expand **Items with scan errors** for the full paths and causes of up to four affected items. When the scan stops at a limit, it displays the limit and the path where it stopped. The scan supports 100,000 entries, 32 MiB of paths and 128 folder levels.
 
 ## Tags and collections on macOS
 

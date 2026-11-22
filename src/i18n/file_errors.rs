@@ -12,9 +12,9 @@ use crate::file_error::{
 };
 #[cfg(target_os = "macos")]
 use crate::file_error::{
-    CompatiblePlanError, DuplicateError, DuplicateLimit, DuplicateRole, FilePromiseError,
-    FileTemplateError, RemoteEditError, ResumeCheckError, ResumeCheckProblem, ResumeRecordEvent,
-    ResumeRole, SyncError,
+    CompatiblePlanError, DuplicateError, DuplicateRole, FilePromiseError, FileTemplateError,
+    RemoteEditError, ResumeCheckError, ResumeCheckProblem, ResumeRecordEvent, ResumeRole,
+    ScanLimit, ScanLimitKind, SyncError,
 };
 use crate::file_error::{
     RecoveryRecordAction, RecoveryRecordError, RecoveryRecordProblem, RecoveryRecordSection,
@@ -128,16 +128,16 @@ fn duplicate_error(error: &DuplicateError) -> String {
         DuplicateError::SearchInStaging(location) => format!(
             "{} · {location}", text!("Выберите папку вне временных папок PawCommander")
         ),
-        DuplicateError::SearchLimit { location, kind, maximum } => match kind {
-            DuplicateLimit::Entries => crate::tr_format!(
+        DuplicateError::SearchLimit(ScanLimit { location, kind, maximum }) => match kind {
+            ScanLimitKind::Entries => crate::tr_format!(
                 "Duplicate search stopped at {location} after exceeding the limit of {maximum} entries.",
                 location = location, maximum = maximum
             ),
-            DuplicateLimit::PathBytes => crate::tr_format!(
+            ScanLimitKind::PathBytes => crate::tr_format!(
                 "Duplicate search stopped at {location} after exceeding the path budget of {maximum} bytes.",
                 location = location, maximum = maximum
             ),
-            DuplicateLimit::Depth => crate::tr_format!(
+            ScanLimitKind::Depth => crate::tr_format!(
                 "Duplicate search stopped at {location} after exceeding the depth limit of {maximum} levels.",
                 location = location, maximum = maximum
             ),
@@ -1708,13 +1708,36 @@ fn scan_error(error: &ScanError) -> String {
             );
         }
         #[cfg(target_os = "macos")]
-        ScanError::DiskUsageRequiresLocalFolder => {
-            return text!("Анализ места доступен в локальных папках").into();
+        ScanError::DiskUsageRequiresLocalFolder(location) => {
+            (text!("Анализ места доступен в локальных папках"), location)
         }
         #[cfg(target_os = "macos")]
-        ScanError::DiskUsageLimit => return text!("Достигнут предел анализа места").into(),
+        ScanError::DiskUsageLimit(limit) => return disk_usage_limit(limit),
     };
     format!("{message} · {location}")
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn disk_usage_limit(limit: &ScanLimit) -> String {
+    let location = limit.location.display().escape_debug().to_string();
+    let maximum = limit.maximum;
+    match limit.kind {
+        ScanLimitKind::Entries => crate::tr_format!(
+            "Analysis stopped after exceeding the limit of {maximum} entries.\n{location}",
+            location = location,
+            maximum = maximum
+        ),
+        ScanLimitKind::PathBytes => crate::tr_format!(
+            "Analysis stopped after exceeding the path budget of {maximum} bytes.\n{location}",
+            location = location,
+            maximum = maximum
+        ),
+        ScanLimitKind::Depth => crate::tr_format!(
+            "Analysis stopped after exceeding the depth limit of {maximum} levels.\n{location}",
+            location = location,
+            maximum = maximum
+        ),
+    }
 }
 
 fn checksum_error(error: &ChecksumError) -> String {
