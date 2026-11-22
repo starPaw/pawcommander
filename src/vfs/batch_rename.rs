@@ -5,12 +5,13 @@ use super::transfer::{
 };
 use super::undo::{Capture, Parent, MAX_UNDO_ENTRIES};
 use super::Location;
-use crate::i18n::text;
+use crate::file_error::{BatchRenameError, Failure, MutationError};
 use crate::operations::{Cancellation, Progress, TransferError};
 use crate::result_history::Outcome;
 use icu_normalizer::ComposingNormalizerBorrowed;
 use regex::RegexBuilder;
 use std::collections::{HashMap, HashSet};
+use std::io;
 use std::path::Path;
 
 const MAX_RULE_BYTES: usize = 4096;
@@ -44,9 +45,7 @@ enum Part<'a> {
     Counter,
 }
 
-fn parse_template(input: &str) -> Result<Vec<Part<'_>>, String> {
-    let invalid =
-        || text!("В шаблоне допустимы {stem}, {ext} и {n}. Скобки можно удвоить.").to_owned();
+fn parse_template(input: &str) -> Result<Vec<Part<'_>>, TransferError> {
     let mut parts = Vec::new();
     let mut rest = input;
     while let Some(index) = rest.find(['{', '}']) {
@@ -59,12 +58,12 @@ fn parse_template(input: &str) -> Result<Vec<Part<'_>>, String> {
             let (name, tail) = token
                 .strip_prefix('{')
                 .and_then(|token| token.split_once('}'))
-                .ok_or_else(invalid)?;
+                .ok_or(BatchRenameError::InvalidTemplate)?;
             parts.push(match name {
                 "stem" => Part::Stem,
                 "ext" => Part::Extension,
                 "n" => Part::Counter,
-                _ => return Err(invalid()),
+                _ => return Err(BatchRenameError::InvalidTemplate.into()),
             });
             rest = tail;
         }
@@ -88,7 +87,7 @@ fn name_parts<'a>(name: &'a str, metadata: &EntryMetadata) -> (&'a str, &'a str)
 pub(crate) struct BatchRenameRow {
     pub source: Location,
     pub name: Option<String>,
-    pub problem: Option<String>,
+    pub problem: Option<TransferError>,
     expected: Option<EntryMetadata>,
 }
 
@@ -119,6 +118,12 @@ pub(crate) struct BatchRenamePreview {
     parent: Parent,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum BatchRenameOutcome {
+    Renamed(usize),
+    Stopped { completed: usize, remaining: usize },
+}
+
 impl BatchRenamePreview {
     pub fn build(
         sources: &[Location],
@@ -126,27 +131,25 @@ impl BatchRenamePreview {
         cancel: &Cancellation,
     ) -> Result<Self, TransferError> {
         if !(2..=MAX_UNDO_ENTRIES).contains(&sources.len()) {
-            return Err(text!("Выберите от 2 до 100 000 элементов.").into());
+            return Err(BatchRenameError::SelectionCount.into());
         }
         if [&rules.template, &rules.search, &rules.replacement]
             .iter()
             .any(|input| input.len() > MAX_RULE_BYTES)
         {
-            return Err(text!("Шаблон или регулярное выражение слишком длинные.").into());
+            return Err(BatchRenameError::RuleLength.into());
         }
         cancel.check()?;
-        let directory = sources[0].parent().ok_or_else(|| {
-            text!("Для массового переименования выберите элементы в одной папке.")
-        })?;
+        let directory = sources[0]
+            .parent()
+            .ok_or(BatchRenameError::SelectionFolder)?;
         let mut unique = HashSet::new();
         if directory.is_archive()
             || sources.iter().any(|source| {
                 source.parent().as_ref() != Some(&directory) || !unique.insert(source)
             })
         {
-            return Err(
-                text!("Для массового переименования выберите элементы в одной папке.").into(),
-            );
+            return Err(BatchRenameError::SelectionFolder.into());
         }
         let template = parse_template(&rules.template)?;
         let regex = (!rules.search.is_empty())
@@ -156,9 +159,7 @@ impl BatchRenamePreview {
                     .build()
             })
             .transpose()
-            .map_err(|error| {
-                crate::tr_format!("Invalid regular expression: {error}", error = error)
-            })?;
+            .map_err(BatchRenameError::InvalidRegex)?;
         let parent = Parent::capture(&directory)?;
         let mut rows = Vec::with_capacity(sources.len());
         for (index, source) in sources.iter().enumerate() {
@@ -174,10 +175,10 @@ impl BatchRenamePreview {
                     .path()
                     .file_name()
                     .and_then(|name| name.to_str())
-                    .ok_or_else(|| text!("Массовое переименование требует имена в UTF-8."))?;
+                    .ok_or(BatchRenameError::NameEncoding)?;
                 let actual_source = parent.location.join(old);
                 let metadata = entry_metadata(&actual_source)?
-                    .ok_or_else(|| changed_since_preview(&row.source))?;
+                    .ok_or_else(|| BatchRenameError::Changed(row.source.clone()))?;
                 let (stem, extension) = name_parts(old, &metadata);
                 let renamed_stem = regex
                     .as_ref()
@@ -195,14 +196,12 @@ impl BatchRenamePreview {
                         Part::Counter => &counter,
                     });
                     if name.len() > MAX_RULE_BYTES {
-                        return Err(text!("Новое имя слишком длинное.").into());
+                        return Err(BatchRenameError::NameLength.into());
                     }
                 }
                 row.name = Some(name);
                 let name = row.name.as_deref().unwrap();
-                validate_name(name).map_err(|_| {
-                    text!("Новое имя должно быть допустимым именем файла или папки.")
-                })?;
+                validate_name(name).map_err(BatchRenameError::InvalidName)?;
                 if name != old {
                     let target = parent.location.join(name);
                     ensure_vacant(&target)?;
@@ -210,13 +209,13 @@ impl BatchRenamePreview {
                 }
                 Ok::<_, TransferError>(())
             })();
-            if let Err(error) = result {
-                row.problem = Some(crate::i18n::file_error(&error));
-            }
+            row.problem = result.err();
             rows.push(row);
         }
         mark_duplicate_targets(&mut rows, case_sensitive(&parent.location));
-        parent.verify()?;
+        if !parent.matches()? {
+            return Err(BatchRenameError::Changed(directory).into());
+        }
         cancel.check()?;
         let changes = rows.iter().filter(|row| row.changes_name()).count();
         let conflicts = rows.iter().filter(|row| row.problem.is_some()).count();
@@ -237,7 +236,7 @@ impl BatchRenamePreview {
         &self.directory
     }
 
-    pub fn apply(self, progress: &mut Progress) -> Result<String, String> {
+    pub fn apply(self, progress: &mut Progress) -> Result<BatchRenameOutcome, TransferError> {
         self.apply_using(progress, rename_for_publication)
     }
 
@@ -245,9 +244,9 @@ impl BatchRenamePreview {
         self,
         progress: &mut Progress,
         mut rename: impl FnMut(&Location, &Location) -> Result<(), TransferError>,
-    ) -> Result<String, String> {
+    ) -> Result<BatchRenameOutcome, TransferError> {
         if !self.can_apply() {
-            return Err(text!("Сначала проверьте новые имена.").into());
+            return Err(BatchRenameError::PreviewRequired.into());
         }
         let changes: Vec<_> = self.rows.iter().filter(|row| row.changes_name()).collect();
         progress.results.plan(
@@ -274,17 +273,19 @@ impl BatchRenamePreview {
                     &mut |_, _| {},
                 )?;
                 if !progress.undo.can_fit(manifest.entries.len()) {
-                    return Err(text!(
-                        "Слишком много файлов для безопасной отмены переименования."
-                    )
-                    .into());
+                    return Err(BatchRenameError::UndoLimit(source).into());
                 }
                 manifest.verify(&cancel, |_, _| {})?;
                 self.check_row(row, &cancel)?;
-                rename(&source, &target)?;
-                let receipt = capture
-                    .finish(&source, &manifest)
-                    .map_err(TransferError::with_unconfirmed_publication)?;
+                rename(&source, &target).map_err(|error| occupied_rename(error, &target))?;
+                let receipt = capture.finish(&source, &manifest).map_err(|cause| {
+                    TransferError::from(BatchRenameError::Unverified {
+                        from: source.clone(),
+                        to: target,
+                        cause,
+                    })
+                    .with_unconfirmed_publication()
+                })?;
                 progress.results.descendants(
                     &source,
                     &row.target(),
@@ -300,8 +301,7 @@ impl BatchRenamePreview {
                 .results
                 .record(&row.source, None, Outcome::Completed, None);
         }
-        let count = changes.len();
-        Ok(crate::tr_format!("Items renamed: {count}", count = count))
+        Ok(BatchRenameOutcome::Renamed(changes.len()))
     }
 
     fn check_row(
@@ -310,11 +310,11 @@ impl BatchRenamePreview {
         cancel: &Cancellation,
     ) -> Result<(Location, Location), TransferError> {
         cancel.check()?;
-        self.parent.verify()?;
-        if self.directory.path() != self.parent.location.path()
-            && canonical(&self.directory)? != self.parent.location.path()
+        if !self.parent.matches()?
+            || (self.directory.path() != self.parent.location.path()
+                && canonical(&self.directory)? != self.parent.location.path())
         {
-            return Err(changed_since_preview(&self.directory).into());
+            return Err(BatchRenameError::Changed(self.directory.clone()).into());
         }
         let source = self
             .parent
@@ -322,7 +322,8 @@ impl BatchRenamePreview {
             .join(row.source.path().file_name().unwrap());
         let target = self.parent.location.join(row.name.as_ref().unwrap());
         let expected = row.expected.as_ref().expect("eligible rename");
-        let actual = entry_metadata(&source)?.ok_or_else(|| changed_since_preview(&row.source))?;
+        let actual = entry_metadata(&source)?
+            .ok_or_else(|| BatchRenameError::Changed(row.source.clone()))?;
         let matches = match (expected, &actual) {
             (EntryMetadata::Local(before), EntryMetadata::Local(after)) => {
                 expected.matches_local_move(&actual)
@@ -336,7 +337,7 @@ impl BatchRenamePreview {
             _ => false,
         };
         if !matches {
-            return Err(changed_since_preview(&row.source).into());
+            return Err(BatchRenameError::Changed(row.source.clone()).into());
         }
         ensure_vacant(&target)?;
         cancel.check()?;
@@ -344,18 +345,33 @@ impl BatchRenamePreview {
     }
 }
 
-fn changed_since_preview(source: &Location) -> String {
-    crate::tr_format!(
-        "An item changed or disappeared after selection: {source}",
-        source = source
-    )
-}
-
 fn ensure_vacant(target: &Location) -> Result<(), TransferError> {
     if entry_metadata(target)?.is_some() {
-        return Err(crate::tr_format!("Name already exists: {target}", target = target).into());
+        return Err(BatchRenameError::Occupied {
+            target: target.clone(),
+            source: None,
+        }
+        .into());
     }
     Ok(())
+}
+
+fn occupied_rename(error: TransferError, target: &Location) -> TransferError {
+    match error {
+        TransferError::Failed(Failure::Mutation(error)) => match *error {
+            MutationError::RenameLocal { source, .. }
+                if source.kind() == io::ErrorKind::AlreadyExists =>
+            {
+                BatchRenameError::Occupied {
+                    target: target.clone(),
+                    source: Some(source),
+                }
+                .into()
+            }
+            error => error.into(),
+        },
+        error => error,
+    }
 }
 
 fn case_sensitive(parent: &Location) -> bool {
@@ -386,11 +402,10 @@ fn mark_duplicate_targets(rows: &mut [BatchRenameRow], case_sensitive: bool) {
             crate::name_match::normalize(name).into_owned()
         };
         if let Some(previous) = seen.insert(key, index) {
-            let duplicate = text!("Несколько элементов получают совпадающее имя.");
             for duplicate_index in [previous, index] {
                 rows[duplicate_index]
                     .problem
-                    .get_or_insert_with(|| duplicate.into());
+                    .get_or_insert_with(|| BatchRenameError::DuplicateName.into());
             }
         }
     }
@@ -402,34 +417,32 @@ fn finish_failure(
     error: TransferError,
     completed: usize,
     total: usize,
-) -> Result<String, String> {
+) -> Result<BatchRenameOutcome, TransferError> {
     let outcome = match &error {
         TransferError::Cancelled => Outcome::Cancelled,
         TransferError::Failed(_) => Outcome::Failed,
         TransferError::PublicationUnconfirmed(_) => Outcome::PublicationUnconfirmed,
     };
-    let remaining = total - completed;
-    progress.results.record(
-        &row.source,
-        None,
-        outcome,
-        Some(crate::i18n::file_error(&error)),
-    );
+    progress
+        .results
+        .record_with_error(&row.source, outcome, Some(&error));
     if outcome == Outcome::Cancelled {
         progress.results.cancelled = true;
-        Ok(crate::tr_format!(
-            "Rename stopped. Renamed: {completed}. Remaining: {remaining}.",
-            completed = completed,
-            remaining = remaining
-        ))
-    } else {
-        Err(crate::tr_format!(
-            "Renamed: {completed} of {total}. {error}",
-            completed = completed,
-            error = error,
-            total = total
-        ))
+        return Ok(BatchRenameOutcome::Stopped {
+            completed,
+            remaining: total - completed,
+        });
     }
+    let failure = TransferError::from(BatchRenameError::Incomplete {
+        completed,
+        total,
+        cause: error,
+    });
+    Err(if outcome == Outcome::PublicationUnconfirmed {
+        failure.with_unconfirmed_publication()
+    } else {
+        failure
+    })
 }
 
 #[cfg(test)]
@@ -458,6 +471,14 @@ mod tests {
             &Cancellation::default(),
         )
         .unwrap()
+    }
+
+    fn batch_error(error: &TransferError) -> &BatchRenameError {
+        match error {
+            TransferError::Failed(Failure::BatchRename(error))
+            | TransferError::PublicationUnconfirmed(Failure::BatchRename(error)) => error,
+            other => panic!("Expected a typed batch rename error, got {other:?}"),
+        }
     }
 
     #[test]
@@ -495,7 +516,10 @@ mod tests {
         );
         assert!(names.iter().all(|name| !root.join(name).exists()));
         let mut progress = Progress::default();
-        preview.apply(&mut progress).unwrap();
+        assert_eq!(
+            preview.apply(&mut progress).unwrap(),
+            BatchRenameOutcome::Renamed(3)
+        );
         assert_eq!(progress.results.items.len(), 4);
         assert!(progress.results.items[..3]
             .iter()
@@ -534,11 +558,26 @@ mod tests {
         let duplicate =
             BatchRenamePreview::build(&sources, &rules, &Cancellation::default()).unwrap();
         assert_eq!(duplicate.conflicts, 2);
-        assert!(duplicate.apply(&mut Progress::default()).is_err());
+        for row in &duplicate.rows {
+            assert!(matches!(
+                batch_error(row.problem.as_ref().unwrap()),
+                BatchRenameError::DuplicateName
+            ));
+        }
+        let error = duplicate.apply(&mut Progress::default()).unwrap_err();
+        assert!(matches!(
+            batch_error(&error),
+            BatchRenameError::PreviewRequired
+        ));
         assert!(!root.join("same.txt").exists());
         fs::write(root.join("2-two.txt"), b"existing file").unwrap();
         let occupied = numbered(&sources);
         assert_eq!(occupied.conflicts, 1);
+        assert!(matches!(
+            batch_error(occupied.rows[1].problem.as_ref().unwrap()),
+            BatchRenameError::Occupied { target, source: None }
+                if target.path() == root.canonicalize().unwrap().join("2-two.txt")
+        ));
         assert!(occupied.apply(&mut Progress::default()).is_err());
         assert_eq!(fs::read(root.join("2-two.txt")).unwrap(), b"existing file");
         assert!(!root.join("1-one.txt").exists());
@@ -553,7 +592,18 @@ mod tests {
         let preview = numbered(&sources);
         fs::write(sources[1].path(), b"new content from another app").unwrap();
         let mut progress = Progress::default();
-        assert!(preview.apply(&mut progress).is_err());
+        let error = preview.apply(&mut progress).unwrap_err();
+        let BatchRenameError::Incomplete {
+            completed: 0,
+            total: 2,
+            cause,
+        } = batch_error(&error)
+        else {
+            panic!("Expected a preflight error before any rename, got {error:?}");
+        };
+        assert!(
+            matches!(batch_error(cause), BatchRenameError::Changed(path) if path == &sources[1])
+        );
         assert_eq!(progress.undo.len(), 0);
         assert_eq!(fs::read(sources[0].path()).unwrap(), b"one.txt");
         assert_eq!(
@@ -582,7 +632,29 @@ mod tests {
                 }
                 Ok(())
             });
-            assert_eq!(result.is_ok(), stop);
+            if stop {
+                assert_eq!(
+                    result.unwrap(),
+                    BatchRenameOutcome::Stopped {
+                        completed: 1,
+                        remaining: 2
+                    }
+                );
+            } else {
+                let error = result.unwrap_err();
+                let BatchRenameError::Incomplete {
+                    completed: 1,
+                    total: 3,
+                    cause,
+                } = batch_error(&error)
+                else {
+                    panic!("Expected a failure after one confirmed rename, got {error:?}");
+                };
+                assert!(matches!(batch_error(cause),
+                    BatchRenameError::Occupied { target, source: None }
+                        if target.path() == root.canonicalize().unwrap().join("2-two.txt")
+                ));
+            }
             assert_eq!(progress.results.cancelled, stop);
             assert_eq!(progress.undo.len(), 1);
             let rows = progress
@@ -610,5 +682,89 @@ mod tests {
                 assert_eq!(fs::read(&late).unwrap(), b"late arrival");
             }
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn batch_rename_keeps_the_original_error_when_the_publish_name_is_taken() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let sources = fixture(&root, &["one.txt", "two.txt"]);
+        let mut progress = Progress::default();
+        let error = numbered(&sources)
+            .apply_using(&mut progress, |source, target| {
+                if source == &sources[1] {
+                    fs::write(target.path(), b"late arrival").unwrap();
+                }
+                rename_for_publication(source, target)
+            })
+            .unwrap_err();
+
+        let BatchRenameError::Incomplete {
+            completed: 1,
+            total: 2,
+            cause,
+        } = batch_error(&error)
+        else {
+            panic!("Expected a collision after one confirmed rename, got {error:?}");
+        };
+        assert!(matches!(
+            batch_error(cause),
+            BatchRenameError::Occupied { target, source: Some(error) }
+                if target.path() == root.join("2-two.txt") && error.raw_os_error() == Some(libc::EEXIST)
+        ));
+        assert_eq!(fs::read(root.join("1-one.txt")).unwrap(), b"one.txt");
+        assert_eq!(fs::read(sources[1].path()).unwrap(), b"two.txt");
+        assert_eq!(fs::read(root.join("2-two.txt")).unwrap(), b"late arrival");
+        assert_eq!(progress.undo.len(), 1);
+    }
+
+    #[test]
+    fn batch_rename_excludes_an_unverified_rename_from_count_and_undo() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let sources = fixture(&root, &["one.txt", "two.txt", "three.txt"]);
+        let mut progress = Progress::default();
+        let error = numbered(&sources)
+            .apply_using(&mut progress, |source, target| {
+                rename_for_publication(source, target)?;
+                if source == &sources[1] {
+                    fs::write(source.path(), b"new source after rename").unwrap();
+                }
+                Ok(())
+            })
+            .unwrap_err();
+
+        assert!(matches!(&error, TransferError::PublicationUnconfirmed(_)));
+        let BatchRenameError::Incomplete {
+            completed: 1,
+            total: 3,
+            cause,
+        } = batch_error(&error)
+        else {
+            panic!("Expected an unverified result after one confirmed rename, got {error:?}");
+        };
+        assert!(
+            matches!(batch_error(cause), BatchRenameError::Unverified { from, to, .. }
+                if from == &sources[1] && to.path() == root.join("2-two.txt")
+            )
+        );
+        let outcomes = progress
+            .results
+            .root_outcomes()
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(outcomes[&sources[0]], Outcome::Completed);
+        assert_eq!(outcomes[&sources[1]], Outcome::PublicationUnconfirmed);
+        assert_eq!(outcomes[&sources[2]], Outcome::NotStarted);
+        assert_eq!(progress.undo.len(), 1);
+        assert_eq!(progress.undo.restore(&mut Progress::default()).unwrap(), 1);
+        assert_eq!(fs::read(sources[0].path()).unwrap(), b"one.txt");
+        assert_eq!(
+            fs::read(sources[1].path()).unwrap(),
+            b"new source after rename"
+        );
+        assert_eq!(fs::read(root.join("2-two.txt")).unwrap(), b"two.txt");
+        assert_eq!(fs::read(sources[2].path()).unwrap(), b"three.txt");
     }
 }

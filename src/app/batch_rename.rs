@@ -1,7 +1,7 @@
 use crate::i18n::text;
-use crate::operations::Cancellation;
+use crate::operations::{Cancellation, TransferError};
 use crate::theme::Palette;
-use crate::vfs::{BatchRenamePreview, BatchRenameRules, Location};
+use crate::vfs::{BatchRenameOutcome, BatchRenamePreview, BatchRenameRules, Location};
 use eframe::egui;
 use std::sync::{mpsc, Arc};
 
@@ -9,12 +9,12 @@ pub(super) struct BatchRenameDialog {
     sources: Arc<[Location]>,
     rules: BatchRenameRules,
     work: Option<PreviewWork>,
-    preview: Option<Result<BatchRenamePreview, String>>,
+    preview: Option<Result<BatchRenamePreview, TransferError>>,
 }
 
 struct PreviewWork {
     cancel: Cancellation,
-    result: mpsc::Receiver<Result<BatchRenamePreview, String>>,
+    result: mpsc::Receiver<Result<BatchRenamePreview, TransferError>>,
 }
 
 impl Drop for PreviewWork {
@@ -96,7 +96,10 @@ impl BatchRenameDialog {
         match &self.preview {
             Some(Ok(preview)) => show_preview(ui, preview),
             Some(Err(error)) => {
-                ui.colored_label(Palette::from_ctx(ui.ctx()).error, error);
+                ui.colored_label(
+                    Palette::from_ctx(ui.ctx()).error,
+                    crate::i18n::file_error(error),
+                );
             }
             None => {}
         }
@@ -121,13 +124,12 @@ impl BatchRenameDialog {
         match std::thread::Builder::new()
             .name("pawcommander-rename-preview".into())
             .spawn(move || {
-                let result = BatchRenamePreview::build(&sources, &rules, &worker_cancel)
-                    .map_err(|error| crate::i18n::file_error(&error));
+                let result = BatchRenamePreview::build(&sources, &rules, &worker_cancel);
                 let _ = sender.send(result);
                 ctx.request_repaint();
             }) {
             Ok(_) => self.work = Some(PreviewWork { cancel, result }),
-            Err(error) => self.preview = Some(Err(error.to_string())),
+            Err(error) => self.preview = Some(Err(error.into())),
         }
     }
 
@@ -185,9 +187,11 @@ fn show_preview(ui: &mut egui::Ui, preview: &BatchRenamePreview) {
                         .on_hover_text(source);
                     let name = row.name.as_deref().unwrap_or("—");
                     let content = match &row.problem {
-                        Some(error) => {
-                            egui::RichText::new(format!("{name} · {error}")).color(error_color)
-                        }
+                        Some(error) => egui::RichText::new(format!(
+                            "{name} · {}",
+                            crate::i18n::file_error(error)
+                        ))
+                        .color(error_color),
                         None => egui::RichText::new(name),
                     };
                     let help = content.text().to_string();
@@ -196,4 +200,20 @@ fn show_preview(ui: &mut egui::Ui, preview: &BatchRenamePreview) {
                 });
             }
         });
+}
+
+pub(super) fn rename_finished(outcome: BatchRenameOutcome) -> String {
+    match outcome {
+        BatchRenameOutcome::Renamed(count) => {
+            crate::tr_format!("Items renamed: {count}", count = count)
+        }
+        BatchRenameOutcome::Stopped {
+            completed,
+            remaining,
+        } => crate::tr_format!(
+            "Rename stopped. Renamed: {completed}. Remaining: {remaining}.",
+            completed = completed,
+            remaining = remaining
+        ),
+    }
 }

@@ -97,6 +97,8 @@ formats! {
     "Name already exists: {target}" => ("Имя уже занято: {target}", "Název už existuje: {target}"),
     "Rename stopped. Renamed: {completed}. Remaining: {remaining}." => ("Переименование остановлено. Переименовано: {completed}. Осталось: {remaining}.", "Přejmenování bylo zastaveno. Přejmenováno: {completed}. Zbývá: {remaining}."),
     "Renamed: {completed} of {total}. {error}" => ("Переименовано: {completed} из {total}. {error}", "Přejmenováno: {completed} z {total}. {error}"),
+    "The rename of {source} exceeds the safe undo limit. Select fewer items." => ("При переименовании «{source}» превышен предел безопасного восстановления имён. Выберите меньше элементов.", "Přejmenování položky {source} překračuje limit pro bezpečné vrácení změn. Vyberte méně položek."),
+    "Could not verify the rename from {source} to {target}. {error}" => ("Не удалось подтвердить переименование «{source}» в «{target}». {error}", "Nepodařilo se ověřit přejmenování z {source} na {target}. {error}"),
     "Move stopped: item {path} changed or is inaccessible" => ("Перенос остановлен: объект {path} изменился или недоступен", "Přesun byl zastaven: položka {path} se změnila nebo není dostupná"),
     "Safe cross-volume move is unavailable for this object type: {path}" => ("Безопасный перенос этого типа объекта между дисками недоступен: {path}", "Bezpečný přesun mezi svazky není pro tento typ položky dostupný: {path}"),
     "{error}. Inspect source {} and retained folder {held}" => ("{error}. Проверьте источник {} и сохранённую папку {held}", "{error}. Zkontrolujte zdroj {} a ponechanou složku {held}"),

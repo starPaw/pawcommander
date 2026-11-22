@@ -1220,7 +1220,6 @@ catalog! {
     "Новое имя слишком длинное." => ("The new name is too long.", "Nový název je příliš dlouhý."),
     "Новое имя должно быть допустимым именем файла или папки." => ("The new name must be a valid file or folder name.", "Nový název musí být platný název souboru nebo složky."),
     "Сначала проверьте новые имена." => ("Preview the new names first.", "Nejdříve zobrazte náhled nových názvů."),
-    "Слишком много файлов для безопасной отмены переименования." => ("There are too many files to safely undo the rename.", "Souborů je příliš mnoho pro bezpečné vrácení přejmenování."),
     "Несколько элементов получают совпадающее имя." => ("More than one item gets a conflicting name.", "Více položek získá kolidující název."),
     "Удалить с сервера навсегда?" => ("Permanently delete from server?", "Trvale smazat ze serveru?"),
     "Отправить в корзину?" => ("Move to trash?", "Přesunout do koše?"),

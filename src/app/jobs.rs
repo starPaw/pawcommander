@@ -194,9 +194,29 @@ impl PawCommander {
         let label = crate::i18n::text!("Массовое переименование");
         let folder = plan.directory().display();
         let description = format!("{label} ({}) · {folder}", plan.changes);
-        self.start_stoppable_job(ctx, label, description, move |progress| {
-            plan.apply(progress)
-        });
+        let (_, events) = mpsc::channel();
+        self.submit_job(
+            ctx,
+            PendingJob {
+                label: label.into(),
+                description,
+                work: Box::new(move |progress| {
+                    plan.apply(progress)
+                        .map(super::batch_rename::rename_finished)
+                }),
+                transfer: Some(TransferInteraction {
+                    events,
+                    cut_generation: None,
+                    conflict: None,
+                    can_pause: false,
+                }),
+                cut: None,
+                retry_origin: None,
+                undo_origin: None,
+                #[cfg(target_os = "macos")]
+                native_completion: None,
+            },
+        );
     }
 
     #[cfg(target_os = "macos")]
