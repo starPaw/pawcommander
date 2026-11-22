@@ -1,13 +1,15 @@
 use super::err;
 use super::location::{Endpoint, Location};
-use crate::file_error::{AccessAction, AccessError, ConnectionError, MutationError, SshStage};
+use crate::file_error::{
+    AccessAction, AccessError, ConnectionError, MutationError, ScanError, SshStage,
+};
 use crate::operations::TransferError;
 use libssh2_sys::{
     LIBSSH2_ERROR_CHANNEL_CLOSED, LIBSSH2_ERROR_CHANNEL_FAILURE, LIBSSH2_ERROR_SOCKET_DISCONNECT,
     LIBSSH2_ERROR_SOCKET_RECV, LIBSSH2_ERROR_SOCKET_SEND, LIBSSH2_ERROR_SOCKET_TIMEOUT,
     LIBSSH2_ERROR_TIMEOUT, LIBSSH2_FX_CONNECTION_LOST, LIBSSH2_FX_NO_CONNECTION,
 };
-use ssh2::{ErrorCode, Session, Sftp};
+use ssh2::{ErrorCode, FileType, Session, Sftp};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
@@ -29,6 +31,7 @@ pub(crate) use interactive::{
 };
 
 const IO_TIMEOUT_MS: u32 = 20_000;
+const MAX_IMPORTED_KEY_BYTES: usize = 64 * 1024;
 
 pub(crate) struct ConnectRequest {
     pub endpoint: Endpoint,
@@ -363,6 +366,55 @@ pub(super) fn connect_location_at(
     result
 }
 
+fn read_key_to_save(
+    endpoint: &Endpoint,
+    password: &str,
+) -> Result<Zeroizing<String>, TransferError> {
+    if !password.is_empty() {
+        return Err(ConnectionError::KeyPasswordConflict.into());
+    }
+    let path = endpoint
+        .key
+        .as_ref()
+        .ok_or(ConnectionError::KeyFileRequired)?;
+    let location = Location::Local(path.clone());
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let input = options
+        .open(path)
+        .map_err(|source| AccessError::new(&location, AccessAction::OpenFile, source))?;
+    let metadata = input
+        .metadata()
+        .map_err(|source| AccessError::new(&location, AccessAction::ReadOpenMetadata, source))?;
+    if !metadata.is_file() {
+        return Err(ConnectionError::ImportedKeyNotFile(path.clone()).into());
+    }
+    let mut bytes = Zeroizing::new(Vec::with_capacity(MAX_IMPORTED_KEY_BYTES + 1));
+    input
+        .take((MAX_IMPORTED_KEY_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|source| AccessError::new(&location, AccessAction::ReadFile, source))?;
+    if bytes.len() > MAX_IMPORTED_KEY_BYTES {
+        return Err(ConnectionError::ImportedKeyTooLarge {
+            path: path.clone(),
+            limit: MAX_IMPORTED_KEY_BYTES,
+        }
+        .into());
+    }
+    // Utf8Error retains the byte offset without retaining key material.
+    let text =
+        std::str::from_utf8(&bytes).map_err(|source| ConnectionError::ImportedKeyEncoding {
+            path: path.clone(),
+            source,
+        })?;
+    Ok(Zeroizing::new(text.to_owned()))
+}
+
 fn connect_reviewed(
     request: ConnectRequest,
     auth: &mut InteractiveAuth,
@@ -380,6 +432,16 @@ fn connect_reviewed(
         save_key,
     } = request;
     control.check()?;
+    validate_endpoint(&endpoint).map_err(|error| at_target(&endpoint, error))?;
+    let imported = if save_key {
+        Some(
+            read_key_to_save(&endpoint, &password)
+                .map_err(|error| route_error(endpoint.label(), false, error))?,
+        )
+    } else {
+        None
+    };
+    control.check()?;
     let session = open_connection(
         &endpoint,
         trust,
@@ -396,34 +458,9 @@ fn connect_reviewed(
     } else {
         None
     };
-    let imported = if save_key {
-        if !password.is_empty() {
-            return Err(crate::i18n::text!("Для сохранения ключа очистите пароль аккаунта").into());
-        }
-        let key_path = endpoint
-            .key
-            .as_ref()
-            .ok_or(crate::i18n::text!("Укажите файл приватного ключа"))?;
-        let local_key = Location::Local(key_path.clone());
-        let mut bytes = Vec::new();
-        fs::File::open(key_path)
-            .map_err(|source| AccessError::new(&local_key, AccessAction::OpenFile, source))?
-            .take(64 * 1024 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(err)?;
-        if bytes.len() > 64 * 1024 {
-            return Err(crate::i18n::text!("Ключ больше 64 КиБ").into());
-        }
-        Some(
-            String::from_utf8(bytes).map_err(|_| {
-                crate::i18n::text!("Ключ должен быть в текстовом формате OpenSSH/PEM")
-            })?,
-        )
-    } else {
-        None
-    };
     let key_data = imported
-        .as_deref()
+        .as_ref()
+        .map(|key| key.as_str())
         .or_else(|| saved.as_ref().map(|s| s.private_key.as_str()));
     let phrase = if !passphrase.is_empty() {
         passphrase.as_str()
@@ -452,37 +489,33 @@ fn connect_reviewed(
     let path = sftp
         .realpath(requested.path())
         .map_err(|source| AccessError::new(&requested, AccessAction::ResolvePath, source))?;
-    if !sftp
-        .stat(&path)
-        .map_err(|source| {
-            AccessError::new(
-                &requested.with_path(path.clone()),
-                AccessAction::ReadMetadata,
-                source,
-            )
-        })?
-        .is_dir()
-    {
-        return Err(crate::i18n::text!("Начальный путь не является папкой").into());
+    let location = requested.with_path(path);
+    let metadata = sftp
+        .stat(location.path())
+        .map_err(|source| AccessError::new(&location, AccessAction::ReadMetadata, source))?;
+    match metadata.file_type() {
+        FileType::Directory => {}
+        FileType::Other(0) => return Err(ScanError::MissingSftpFileType(location).into()),
+        _ => return Err(ConnectionError::InitialPathNotDirectory(location).into()),
     }
     control.finalize()?;
-    let saved_profile = save_key && used_key;
-    if saved_profile {
-        crate::credentials::save(
-            &endpoint,
-            &crate::credentials::SavedKey {
-                private_key: imported.ok_or(crate::i18n::text!("Не прочитан ключ"))?,
-                passphrase: phrase.into(),
-            },
-        )?;
-    }
+    let saved_profile = if let Some(mut key) = imported.filter(|_| used_key) {
+        let secret = Zeroizing::new(crate::credentials::SavedKey {
+            private_key: std::mem::take(&mut *key),
+            passphrase: phrase.into(),
+        });
+        crate::credentials::save(&endpoint, &secret)?;
+        true
+    } else {
+        false
+    };
     let replaced = sessions()
         .lock()
         .map_err(err)?
         .insert(endpoint.clone(), Arc::new(session));
     drop(replaced);
     Ok(ConnectedLocation {
-        location: Location::Sftp { endpoint, path },
+        location,
         saved_profile,
     })
 }
