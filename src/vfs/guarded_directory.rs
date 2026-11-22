@@ -10,7 +10,13 @@ use crate::file_error::{
     AccessAction, AccessError, LocalPathAction, MutationError, PublicationError, RecoveryNotice,
 };
 use crate::operations::{Cancellation, TransferError};
-use std::{ffi::OsStr, fs, io, os::fd::OwnedFd, path::Path};
+use crate::smb::MutationMount;
+use std::{
+    ffi::OsStr,
+    fs, io,
+    os::fd::{AsFd, AsRawFd, OwnedFd},
+    path::Path,
+};
 
 pub(super) struct Directory {
     pub(super) location: Location,
@@ -280,6 +286,26 @@ pub(super) fn open_staging(location: &Location) -> Result<ReadScope, TransferErr
     if scope.parent.location != *location {
         return Err(stale(location));
     }
+    Ok(scope)
+}
+
+pub(super) fn open_bound_staging(
+    location: &Location,
+    mount: &MutationMount,
+    handle: &(impl AsFd + AsRawFd),
+) -> Result<ReadScope, TransferError> {
+    mount.verify_directory(handle, location.path(), location.path())?;
+    mount.recheck()?;
+    let mut scope = ReadScope::open_with_smb(location, &mut mount.clone())?;
+    let owned = rustix::io::dup(handle)
+        .map(fs::File::from)
+        .map_err(|error| {
+            AccessError::new(location, AccessAction::OpenFile, io::Error::from(error))
+        })?;
+    if scope.parent.location != *location || !scope.parent.matches_handle(&owned)? {
+        return Err(stale(location));
+    }
+    scope.descriptor = Some(owned.into());
     Ok(scope)
 }
 

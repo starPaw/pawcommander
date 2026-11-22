@@ -5,8 +5,6 @@ use super::mutations::remove_remote_tree;
 use super::sftp::remote;
 use super::{TransferFailure, TransferSummary, MAX_TREE_DEPTH};
 use crate::conflict::{Answer, Conflict, Decision, EntryDetails};
-#[cfg(target_os = "macos")]
-use crate::file_error::SmbTransferRole;
 use crate::file_error::{
     AccessAction, AccessCause, AccessError, ConflictError, CopyVerificationError,
     DescendantProblem, Failure, MoveHistoryError, MutationError, ProbeAction, PublicationError,
@@ -18,6 +16,8 @@ use crate::fs_ops::TransferKind;
 use crate::operations::{
     access_io, AccessStream, Cancellation, CopyReader, Progress, TransferError,
 };
+#[cfg(target_os = "macos")]
+use crate::{file_error::SmbTransferRole, smb::MutationMount};
 use ssh2::{ErrorCode, FileStat, FileType, OpenFlags, OpenType, RenameFlags};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
@@ -2150,7 +2150,8 @@ pub(super) fn with_preserved_staging(
 pub(super) fn with_preserved_empty_staging(
     target: &Location,
     cancel: &Cancellation,
-    work: impl FnOnce(&Location, &mut bool) -> Result<(), TransferError>,
+    parent: Option<(&OwnedFd, &MutationMount)>,
+    work: impl FnOnce(&Location, Option<&fs::File>, &mut bool) -> Result<(), TransferError>,
 ) -> Result<(), TransferError> {
     staging_typed(
         target,
@@ -2158,8 +2159,20 @@ pub(super) fn with_preserved_empty_staging(
         true,
         None,
         LocalStagingCleanup::Empty,
-        None,
-        |location, _, preserve| work(location, preserve),
+        parent.map(|(handle, _)| handle),
+        |staging, descriptor, preserve| {
+            let result = work(staging, descriptor, preserve);
+            if !*preserve && let (Some((_, mount)), Some(opened)) = (parent, descriptor) {
+                let cleanup = mount
+                    .recheck()
+                    .and_then(|()| mount.verify_directory(opened, staging.path(), target.path()));
+                if cleanup.is_err() {
+                    *preserve = true;
+                    return StagingCleanupError::combine(result, cleanup, staging, target);
+                }
+            }
+            result
+        },
     )
 }
 

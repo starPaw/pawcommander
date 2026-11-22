@@ -297,6 +297,8 @@ Open a local folder and choose **Find duplicates** from Settings or the command 
 
 Each group starts with one file marked **Keep**. Select a different one if desired. Manually mark the other files you want to move to Trash, choose **Review selected**, then confirm. PawCommander checks the versions and contents again before moving a marked file to the system Trash. If anything changed, inspect the reported path and run a fresh search. To restore a file from Trash, drag it back to its original folder shown in Result history.
 
+In an SMB share connected through PawCommander, a disconnected or replaced volume stops the search. If the volume changes after the search, reconnect and run a fresh search before sending copies to Trash.
+
 ## Analyze disk usage on macOS
 
 Open a local folder and choose **Analyze disk usage** from Settings or the command palette. **Size tree** shows each folder's total and lets you expand its children. **Largest files** ranks regular files by allocated space and shows exact allocated bytes and file length in the tooltip. **Disk map** uses area to show relative sizes. Select a folder tile to inspect that branch, or use **Parent folder** to return. The map groups smaller entries under **Other entries**.

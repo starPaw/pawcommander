@@ -1,13 +1,18 @@
-use super::{changed_since_search, checked, same_contents, ComparisonFailure, Member};
+use super::{
+    changed_since_search, checked, folder_error, same_contents, ComparisonFailure, Member,
+};
 use crate::{
     file_error::{
         AccessAction, AccessError, DuplicateError, DuplicateRole, Failure, MacTrashError,
-        MutationError,
+        MutationError, SmbMutationAction,
     },
     operations::{Cancellation, Progress, TransferError},
     result_history::Outcome,
+    smb::MutationMount,
     vfs::{
-        guarded_directory::{open_staging, Directory},
+        guarded_directory::{
+            open_bound_staging, open_staging, retained, stale, uncertain_directory, Directory,
+        },
         read_scope::ReadScope,
         transfer::{entry_metadata, with_preserved_empty_staging, EntryMetadata},
         undo::Parent,
@@ -16,10 +21,11 @@ use crate::{
 };
 use objc2::rc::autoreleasepool;
 use objc2_foundation::{NSFileManager, NSURL};
-use std::{ffi::CString, io, os::unix::ffi::OsStrExt, path::Path, ptr::NonNull};
+use std::{ffi::CString, fs::File, io, os::unix::ffi::OsStrExt, path::Path, ptr::NonNull};
 
 pub(crate) struct TrashPlan {
     pub(super) root: Parent,
+    pub(super) mount: Option<MutationMount>,
     pub(super) groups: Vec<SelectedGroup>,
 }
 
@@ -48,6 +54,24 @@ impl TrashPlan {
         self.apply_with(progress, system_trash)
     }
 
+    fn open_scope(&self) -> Result<ReadScope, TransferError> {
+        let location = &self.root.location;
+        let mut mount = self
+            .mount
+            .clone()
+            .unwrap_or_else(|| MutationMount::new(SmbMutationAction::Trash));
+        mount.recheck()?;
+        mount.check(location.path())?;
+        self.root.verify()?;
+        let scope = ReadScope::open_with_smb(location, &mut mount)?;
+        if self.mount.is_none() && mount.is_owned() {
+            return Err(mount.changed(location.path()));
+        }
+        self.root.verify()?;
+        Directory::from_scope(&scope)?;
+        Ok(scope)
+    }
+
     fn apply_with(
         self,
         progress: &mut Progress,
@@ -62,13 +86,9 @@ impl TrashPlan {
         let cancel = progress.cancellation();
         let mut report = TrashReport::default();
         let result = (|| {
-            let root_error = |cause| {
-                DuplicateError::verification(&self.root.location, DuplicateRole::Folder, cause)
-            };
-            self.root.verify().map_err(root_error)?;
-            let scope = ReadScope::open(&self.root.location).map_err(root_error)?;
-            self.root.verify().map_err(root_error)?;
-            Directory::from_scope(&scope).map_err(root_error)?;
+            let root_error = |cause| folder_error(&self.root.location, cause);
+            cancel.check()?;
+            let scope = self.open_scope().map_err(root_error)?;
             let files = self
                 .groups
                 .iter()
@@ -78,10 +98,11 @@ impl TrashPlan {
                 let location = scope.parent.location.join(&copy.path);
                 progress.results.begin(&location);
                 progress.item(location.path());
-                let result =
-                    self.root.verify().map_err(root_error).and_then(|()| {
-                        trash_one(&scope, keeper, copy, &cancel, &mut move_to_trash)
-                    });
+                let result = scope
+                    .verify_mount()
+                    .and_then(|()| self.root.verify())
+                    .map_err(root_error)
+                    .and_then(|()| trash_one(&scope, keeper, copy, &cancel, &mut move_to_trash));
                 match result {
                     Ok(warning) => {
                         let outcome = if warning.is_some() {
@@ -210,11 +231,38 @@ fn trash_one(
         |cause| DuplicateError::verification(&protected, DuplicateRole::Protected, cause);
     let copy_error =
         |cause| DuplicateError::verification(&location, DuplicateRole::Selected, cause);
+    let mount = scope.owned_smb_mount();
+    let bound_parent = mount
+        .map(|mount| {
+            let handle = parent
+                .descriptor
+                .as_ref()
+                .ok_or_else(|| stale(&parent_path))?;
+            Ok::<_, TransferError>((handle, mount))
+        })
+        .transpose()?;
+    parent.verify()?;
     let mut committed = false;
-    let result = with_preserved_empty_staging(&location, cancel, |staging, preserve| {
+    let work = |staging: &Location, opened: Option<&File>, preserve: &mut bool| {
+        *preserve = mount.is_some();
+        let (backup_scope, backup) = (|| {
+            let scope = if let Some(mount) = mount {
+                let handle = opened.ok_or_else(|| stale(staging))?;
+                open_bound_staging(staging, mount, handle)?
+            } else {
+                open_staging(staging)?
+            };
+            let directory = Directory::from_scope(&scope)?;
+            Ok((scope, directory))
+        })()
+        .map_err(|cause| {
+            if mount.is_some() {
+                uncertain_directory(staging, cause)
+            } else {
+                cause
+            }
+        })?;
         *preserve = false;
-        let backup_scope = open_staging(staging)?;
-        let backup = Directory::from_scope(&backup_scope)?;
         // Prevent a stale selection from even moving a different file. The
         // descriptor check on the held entry below closes the rename race.
         checked(scope, keeper, cancel)
@@ -227,9 +275,15 @@ fn trash_one(
         backup.verify()?;
         cancel.check()?;
         *preserve = true;
-        if let Err(error) = parent.rename(name, &backup, name) {
-            *preserve = false;
-            return Err(error);
+        match parent.rename(name, &backup, name) {
+            Ok(()) => {}
+            Err(error @ TransferError::PublicationUnconfirmed(_)) => {
+                return Err(retained(error, staging));
+            }
+            Err(error) => {
+                *preserve = false;
+                return Err(error);
+            }
         }
 
         let held = backup.location.join(name);
@@ -261,7 +315,7 @@ fn trash_one(
                 }
                 .into());
             }
-            scope.parent.verify()?;
+            scope.verify_root()?;
             parent.verify_absent(name)?;
             backup.verify()?;
             source.verify(cancel).map_err(keeper_error)?;
@@ -306,7 +360,8 @@ fn trash_one(
         committed = true;
         *preserve = false;
         Ok(())
-    });
+    };
+    let result = with_preserved_empty_staging(&location, cancel, bound_parent, work);
     match result {
         Ok(()) => Ok(None),
         Err(TransferError::Failed(Failure::StagingCleanup(error))) if committed => {

@@ -1278,6 +1278,7 @@ pub(crate) enum SmbMutationAction {
     CompareFolders,
     CompareFiles,
     CheckSyncFolder,
+    FindDuplicates,
 }
 
 #[derive(Debug)]
