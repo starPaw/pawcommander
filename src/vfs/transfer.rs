@@ -1751,7 +1751,7 @@ struct BoundFileStaging {
 }
 
 #[cfg(target_os = "macos")]
-pub(super) const FILE_STAGING_PAYLOAD: &str = "payload";
+pub(crate) const FILE_STAGING_PAYLOAD: &str = "payload";
 
 impl LocalStaging {
     fn create(
@@ -1989,25 +1989,29 @@ pub(super) fn with_staging_typed(
         LocalStagingCleanup::Recursive,
         #[cfg(target_os = "macos")]
         None,
-        work,
+        |location, _, preserve| work(location, preserve),
     )
 }
 
 #[cfg(target_os = "macos")]
-pub(super) fn with_smb_file_staging(
-    target: &Location,
-    cancel: &Cancellation,
+pub(crate) fn with_open_file_staging(
+    target: &Path,
+    cancel: Option<&Cancellation>,
     parent: &OwnedFd,
-    work: impl FnOnce(&Location, &mut bool) -> Result<(), TransferError>,
+    work: impl FnOnce(&Location, &fs::File, &mut bool) -> Result<(), TransferError>,
 ) -> Result<(), TransferError> {
     staging_typed(
-        target,
-        Some(cancel),
+        &Location::Local(target.to_owned()),
+        cancel,
         false,
         None,
         LocalStagingCleanup::Recursive,
         Some(parent),
-        work,
+        |location, descriptor, preserve| {
+            let descriptor =
+                descriptor.ok_or_else(|| StagingError::IdentityUnavailable(location.clone()))?;
+            work(location, descriptor, preserve)
+        },
     )
 }
 
@@ -2025,7 +2029,7 @@ pub(super) fn with_preserved_staging(
         LocalStagingCleanup::Recursive,
         #[cfg(target_os = "macos")]
         None,
-        work,
+        |location, _, preserve| work(location, preserve),
     )
 }
 
@@ -2043,7 +2047,7 @@ pub(super) fn with_preserved_empty_staging(
         None,
         LocalStagingCleanup::Empty,
         None,
-        work,
+        |location, _, preserve| work(location, preserve),
     )
 }
 
@@ -2065,7 +2069,7 @@ pub(super) fn with_tracked_staging(
         Some(notice),
         LocalStagingCleanup::Recursive,
         None,
-        work,
+        |location, _, preserve| work(location, preserve),
     )
 }
 
@@ -2082,7 +2086,7 @@ fn staging_typed(
     mut notice: Option<&mut StagingNotice<'_>>,
     cleanup: LocalStagingCleanup,
     #[cfg(target_os = "macos")] parent_handle: Option<&OwnedFd>,
-    work: impl FnOnce(&Location, &mut bool) -> Result<(), TransferError>,
+    work: impl FnOnce(&Location, Option<&fs::File>, &mut bool) -> Result<(), TransferError>,
 ) -> Result<(), TransferError> {
     if let Some(cancel) = cancel {
         cancel.check()?;
@@ -2131,7 +2135,11 @@ fn staging_typed(
         if preserve {
             staging.keep();
         }
-        let result = work(&location, &mut preserve);
+        #[cfg(target_os = "macos")]
+        let descriptor = staging.bound.as_ref().map(|bound| &bound.directory);
+        #[cfg(not(target_os = "macos"))]
+        let descriptor = None;
+        let result = work(&location, descriptor, &mut preserve);
         if preserve {
             staging.keep();
             return result;
@@ -2169,7 +2177,7 @@ fn staging_typed(
         let cleanup = remove_remote_tree(&sftp, &staging, MAX_TREE_DEPTH + 1);
         return StagingCleanupError::combine(Err(error), cleanup, &staging, target);
     }
-    let result = work(&staging, &mut preserve);
+    let result = work(&staging, None, &mut preserve);
     if preserve {
         return result;
     }

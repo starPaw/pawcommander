@@ -1,11 +1,19 @@
-use super::{
-    at, create_staging_directory, directory_path, remove_staging, rename_no_replace, validate_name,
+use super::{at, directory_path, validate_name};
+use crate::file_error::{LinkCreateError, LinkIoAction, SmbMutationAction};
+use crate::i18n::text;
+use crate::operations::{Progress, TransferError};
+use crate::smb::MutationMount;
+use crate::vfs::{with_open_file_staging, FILE_STAGING_PAYLOAD};
+use rustix::fs::{
+    fstat, linkat, lstat, renameat_with, statat, symlinkat, AtFlags, FileType, RenameFlags, Stat,
 };
-use crate::{i18n::text, operations::Progress, vfs::Location};
-use std::fs::{self, Metadata};
+use std::fs::{self, Metadata, OpenOptions};
 use std::io;
-use std::os::unix::fs::{symlink, MetadataExt};
-use std::path::Path;
+use std::os::{
+    fd::OwnedFd,
+    unix::fs::{symlink, OpenOptionsExt},
+};
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Kind {
@@ -68,129 +76,159 @@ pub(crate) fn describe_target(path: &Path) -> String {
     }
 }
 
+pub(crate) struct CreatedLink {
+    pub(crate) destination: PathBuf,
+    pub(crate) cleanup_warning: Option<TransferError>,
+}
+
 pub(crate) fn create(
     directory: &Path,
     name: &str,
     target: &Path,
     kind: Kind,
     progress: &mut Progress,
-) -> Result<String, String> {
-    validate_name(name)
-        .map_err(|_| text!("Введите один компонент имени ссылки без / и \\").to_owned())?;
+) -> Result<CreatedLink, TransferError> {
+    validate_name(name).map_err(LinkCreateError::InvalidName)?;
     if target.as_os_str().is_empty() {
-        return Err(text!("Введите путь к цели ссылки").into());
+        return Err(LinkCreateError::MissingTarget.into());
     }
-    let directory = directory_path(directory).map_err(|error| crate::i18n::file_error(&error))?;
+    let mut mount = MutationMount::new(SmbMutationAction::CreateLink);
+    mount.check(&directory.join(name))?;
+    let directory = directory_path(directory)?;
     let destination = directory.join(name);
-    progress.checkpoint().map_err(|error| error.to_string())?;
+    mount.check(&destination)?;
+    progress.checkpoint()?;
     let cleanup_warning = match kind {
         Kind::Symbolic => {
-            symlink(target, &destination).map_err(|error| create_error(&destination, error))?;
+            let result = if let Some(parent) = mount.open_parent(&destination)? {
+                symlinkat(target, &parent, name).map_err(io::Error::from)
+            } else {
+                symlink(target, &destination)
+            };
+            result
+                .map_err(|error| LinkCreateError::io(&destination, LinkIoAction::Create, error))?;
             None
         }
-        Kind::Hard => {
-            create_hard_link(&directory, &directory.join(target), &destination, progress)?
-        }
+        Kind::Hard => create_hard_link(&directory, target, &destination, &mount, progress)?,
     };
-    let created = crate::tr_format!("Link created: {}", destination.display());
-    Ok(match cleanup_warning {
-        None => created,
-        Some(warning) => format!("{created}. {warning}"),
+    Ok(CreatedLink {
+        destination,
+        cleanup_warning,
     })
 }
 
 fn create_hard_link(
     directory: &Path,
-    source: &Path,
+    target: &Path,
     destination: &Path,
+    mount: &MutationMount,
     progress: &mut Progress,
-) -> Result<Option<String>, String> {
-    let parent = fs::symlink_metadata(directory).map_err(|error| {
-        at(
-            text!("Не удалось проверить папку назначения"),
-            directory,
-            error,
-        )
-    })?;
-    let expected = fs::symlink_metadata(source)
-        .map_err(|error| at(text!("Не удалось проверить цель ссылки"), source, error))?;
-    if !expected.is_file() {
-        return Err(text!("Для жёсткой ссылки выберите обычный файл").into());
+) -> Result<Option<TransferError>, TransferError> {
+    let inspect_directory =
+        |error| LinkCreateError::io(directory, LinkIoAction::InspectDirectory, error);
+    let parent = match mount.open_parent(destination)? {
+        Some(parent) => parent,
+        None => OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_SEARCH | libc::O_NOFOLLOW)
+            .open(directory)
+            .map_err(inspect_directory)?,
+    };
+    let parent = OwnedFd::from(parent);
+    let expected_parent = fstat(&parent).map_err(|error| inspect_directory(error.into()))?;
+
+    let source = directory.join(target);
+    let mut source_mount = MutationMount::new(SmbMutationAction::InspectLinkTarget);
+    // A hard-link target may use "..". Check the named share before resolving
+    // those components, then check the actual parent without following the file.
+    let initial_path: PathBuf = source
+        .components()
+        .take_while(|component| *component != Component::ParentDir)
+        .collect();
+    source_mount.check(&initial_path)?;
+    let Some((source_parent, source_name)) = source.parent().zip(source.file_name()) else {
+        return Err(LinkCreateError::ExpectedFile(source).into());
+    };
+    let inspect_target = |error| LinkCreateError::io(&source, LinkIoAction::InspectTarget, error);
+    let resolved_source = fs::canonicalize(source_parent)
+        .map_err(inspect_target)?
+        .join(source_name);
+    if resolved_source != initial_path {
+        source_mount.check(&resolved_source)?;
     }
-    if expected.dev() != parent.dev() {
-        return Err(text!("Жёсткие ссылки требуют целевой файл на том же томе").into());
+    let expected = lstat(&source).map_err(|error| inspect_target(error.into()))?;
+    if FileType::from_raw_mode(expected.st_mode) != FileType::RegularFile {
+        return Err(LinkCreateError::ExpectedFile(source).into());
     }
-    match fs::symlink_metadata(destination) {
-        Ok(_) => {
-            return Err(create_error(
-                destination,
-                io::ErrorKind::AlreadyExists.into(),
-            ))
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(create_error(destination, error)),
+    if expected.st_dev != expected_parent.st_dev {
+        return Err(LinkCreateError::DifferentVolume(source).into());
+    }
+    let destination_name = destination.file_name().expect("validated link name");
+    let create_error = |error| LinkCreateError::io(destination, LinkIoAction::Create, error);
+    match statat(&parent, destination_name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(_) => return Err(create_error(io::Error::from_raw_os_error(libc::EEXIST)).into()),
+        Err(rustix::io::Errno::NOENT) => {}
+        Err(error) => return Err(create_error(error.into()).into()),
     }
 
-    progress.checkpoint().map_err(|error| error.to_string())?;
-    let staging =
-        create_staging_directory(directory).map_err(|error| crate::i18n::file_error(&error))?;
-    let payload = staging.path.join("link");
-    let result = (|| {
-        let location = Location::Local(staging.path.clone());
-        crate::recovery::register_staging(&location)
-            .map_err(|error| crate::i18n::file_error(&error))?;
-        staging.ensure_owned().map_err(|error| error.to_string())?;
-        // Validate the hard link that the OS actually made in private staging.
-        // The source path may have changed since the initial lstat.
-        fs::hard_link(source, &payload).map_err(|error| create_error(destination, error))?;
-        let made =
-            fs::symlink_metadata(&payload).map_err(|error| create_error(destination, error))?;
-        if !made.is_file() || !same_file(&made, &expected) {
-            return Err(text!("Цель изменилась до создания жёсткой ссылки").into());
-        }
-        if !fs::symlink_metadata(directory)
-            .is_ok_and(|current| current.is_dir() && same_file(&current, &parent))
+    progress.checkpoint()?;
+    mount.recheck()?;
+    source_mount.recheck()?;
+    let mut published = false;
+    let result = with_open_file_staging(destination, None, &parent, |stage, handle, _| {
+        mount.verify_directory(handle, stage.path(), destination)?;
+        linkat(
+            &parent,
+            target,
+            handle,
+            FILE_STAGING_PAYLOAD,
+            AtFlags::empty(),
+        )
+        .map_err(|error| create_error(error.into()))?;
+        // Validate the link the OS actually made before it can become visible.
+        let made = statat(handle, FILE_STAGING_PAYLOAD, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|error| create_error(error.into()))?;
+        if FileType::from_raw_mode(made.st_mode) != FileType::RegularFile
+            || !same_file(&made, &expected)
         {
-            return Err(text!("Папка назначения изменилась до создания ссылки").into());
+            return Err(LinkCreateError::TargetChanged(source).into());
         }
-        staging.ensure_owned().map_err(|error| error.to_string())?;
-        progress.checkpoint().map_err(|error| error.to_string())?;
-        rename_no_replace(&payload, destination).map_err(|error| create_error(destination, error))
-    })();
-    let warning = remove_staging(&staging).err().map(|error| {
-        crate::tr_format!(
-            "Could not clean up the temporary folder “{}”: {error}",
-            staging.path.display(),
-            error = error
+
+        progress.checkpoint()?;
+        mount.recheck()?;
+        source_mount.recheck()?;
+        let latest_parent = lstat(directory).map_err(|error| inspect_directory(error.into()))?;
+        if FileType::from_raw_mode(latest_parent.st_mode) != FileType::Directory
+            || !same_file(&latest_parent, &expected_parent)
+        {
+            return Err(LinkCreateError::DirectoryChanged(directory.to_owned()).into());
+        }
+        renameat_with(
+            handle,
+            FILE_STAGING_PAYLOAD,
+            &parent,
+            destination_name,
+            RenameFlags::NOREPLACE,
         )
+        .map_err(|error| create_error(error.into()))?;
+        published = true;
+        Ok(())
     });
-    match (result, warning) {
-        (Ok(()), warning) => Ok(warning),
-        (Err(error), Some(warning)) => Err(format!("{error}. {warning}")),
-        (Err(error), None) => Err(error),
+    match result {
+        Ok(()) => Ok(None),
+        Err(error) if published => Ok(Some(error)),
+        Err(error) => Err(error),
     }
 }
 
-fn create_error(destination: &Path, error: io::Error) -> String {
-    match error.kind() {
-        io::ErrorKind::AlreadyExists => crate::tr_format!(
-            "“{}” already exists. Choose another name.",
-            destination.display()
-        ),
-        io::ErrorKind::CrossesDevices => {
-            text!("Жёсткие ссылки требуют целевой файл на том же томе").into()
-        }
-        _ => at(text!("Не удалось создать ссылку"), destination, error),
-    }
-}
-
-fn same_file(a: &Metadata, b: &Metadata) -> bool {
-    (a.dev(), a.ino()) == (b.dev(), b.ino())
+fn same_file(a: &Stat, b: &Stat) -> bool {
+    (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::MetadataExt;
 
     #[test]
     fn symbolic_links_keep_relative_targets_and_classify_missing_and_looping_targets() {
@@ -249,7 +287,7 @@ mod tests {
         .unwrap();
         let original = fs::symlink_metadata(&source).unwrap();
         let alias = fs::symlink_metadata(folder.join("alias")).unwrap();
-        assert!(same_file(&original, &alias));
+        assert_eq!((original.dev(), original.ino()), (alias.dev(), alias.ino()));
         assert_eq!(alias.nlink(), 2);
         assert!(create(
             folder,
@@ -311,10 +349,52 @@ mod tests {
             check += 1;
             check == 3
         });
-        assert!(create(folder, "cancelled", &source, Kind::Hard, &mut progress).is_err());
+        let result = create(folder, "cancelled", &source, Kind::Hard, &mut progress);
+        assert!(matches!(result, Err(TransferError::Cancelled)));
         assert_eq!(fs::read_dir(folder).unwrap().count(), 2);
         assert_eq!(fs::symlink_metadata(&source).unwrap().nlink(), 1);
         assert_eq!(fs::read(&source).unwrap(), b"replacement");
         assert_eq!(fs::read(&saved).unwrap(), b"original");
+    }
+
+    #[test]
+    fn hard_link_rejects_a_replaced_destination_and_cleans_its_own_stage() {
+        use crate::file_error::Failure;
+
+        let temp = tempfile::tempdir().unwrap();
+        let folder = temp.path().canonicalize().unwrap().join("directory");
+        let held = folder.with_file_name("held");
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("original"), b"source").unwrap();
+        let mut progress = Progress::default();
+        let mut check = 0;
+        let requested = folder.clone();
+        let moved = held.clone();
+        progress.cancellation().set_checkpoint(move || {
+            check += 1;
+            if check == 2 {
+                fs::rename(&requested, &moved).unwrap();
+                fs::create_dir(&requested).unwrap();
+                fs::write(requested.join("original"), b"replacement").unwrap();
+            }
+            false
+        });
+
+        let result = create(
+            &folder,
+            "alias",
+            Path::new("original"),
+            Kind::Hard,
+            &mut progress,
+        );
+        assert!(
+            matches!(result, Err(TransferError::Failed(Failure::LinkCreate(error)))
+            if matches!(error.as_ref(), LinkCreateError::DirectoryChanged(path) if path == &folder))
+        );
+        assert_eq!(fs::read_dir(&folder).unwrap().count(), 1);
+        assert_eq!(fs::read(folder.join("original")).unwrap(), b"replacement");
+        assert_eq!(fs::read_dir(&held).unwrap().count(), 1);
+        assert_eq!(fs::read(held.join("original")).unwrap(), b"source");
+        assert_eq!(fs::metadata(held.join("original")).unwrap().nlink(), 1);
     }
 }

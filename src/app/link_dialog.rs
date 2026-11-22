@@ -1,6 +1,10 @@
 use super::PawCommander;
 use crate::fs_ops::{links, validate_name};
-use crate::{i18n::text, vfs::Location};
+use crate::{
+    i18n::{file_error, text},
+    result_history::Outcome,
+    vfs::Location,
+};
 use eframe::egui;
 use std::path::{Path, PathBuf};
 
@@ -59,18 +63,28 @@ impl LinkDialog {
         let target = self.directory.join(&self.name);
         let label = text!("Создание ссылки");
         let description = format!("{label} · {} → {}", target.display(), self.target);
-        app.start_described_job(ctx, label, description, move |progress| {
+        app.start_typed_stoppable_job(ctx, label, description, move |progress| {
             let path = Location::Local(target);
             progress.results.plan([(path.clone(), None)]);
             progress.results.begin(&path);
             progress.item(path.path());
-            links::create(
+            let created = links::create(
                 &self.directory,
                 &self.name,
                 Path::new(&self.target),
                 self.kind,
                 progress,
-            )
+            )?;
+            let message = crate::tr_format!("Link created: {}", created.destination.display());
+            if let Some(warning) = created.cleanup_warning {
+                progress.results.record_with_error(
+                    &path,
+                    Outcome::CompletedWithWarning,
+                    Some(&warning),
+                );
+                return Ok(format!("{message}. {}", file_error(&warning)));
+            }
+            Ok(message)
         });
     }
 }

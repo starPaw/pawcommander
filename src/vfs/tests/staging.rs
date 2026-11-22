@@ -3,7 +3,7 @@ use super::*;
 #[cfg(target_os = "macos")]
 #[test]
 fn smb_file_staging_cleans_through_the_open_parent() {
-    use super::super::transfer::{with_smb_file_staging, FILE_STAGING_PAYLOAD};
+    use super::super::transfer::{with_open_file_staging, FILE_STAGING_PAYLOAD};
     use rustix::fs::{open, Mode, OFlags};
 
     let fixture = tempfile::tempdir().unwrap();
@@ -14,7 +14,7 @@ fn smb_file_staging_cleans_through_the_open_parent() {
     let handle = open(&parent, OFlags::RDONLY | OFlags::DIRECTORY, Mode::empty()).unwrap();
     let cancel = Cancellation::default();
 
-    let result = with_smb_file_staging(&target, &cancel, &handle, |stage, _| {
+    let result = with_open_file_staging(target.path(), Some(&cancel), &handle, |stage, _, _| {
         fs::write(stage.path().join(FILE_STAGING_PAYLOAD), b"ours").unwrap();
         fs::rename(&parent, &held).unwrap();
         fs::create_dir_all(stage.path()).unwrap();

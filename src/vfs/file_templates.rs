@@ -4,7 +4,7 @@ use super::{
     location::validate_name,
     read_scope::ReadScope,
     staged_file::StagedFile,
-    transfer::{with_smb_file_staging, with_staging_typed, FILE_STAGING_PAYLOAD},
+    transfer::{with_open_file_staging, with_staging_typed, FILE_STAGING_PAYLOAD},
     Location,
 };
 use crate::{
@@ -288,7 +288,7 @@ impl NewFile {
         cancel.check()?;
         mount.recheck()?;
         progress.item(target.path());
-        let write_and_publish = |stage: &Location, preserve: &mut bool| {
+        let mut write_and_publish = |stage: &Location, preserve: &mut bool| {
             let stage = Directory::from_scope(&open_staging(stage)?)?;
             let payload = OsStr::new(FILE_STAGING_PAYLOAD);
             let mut output = if mount.is_owned() {
@@ -322,7 +322,12 @@ impl NewFile {
             }
         };
         if let Some(parent) = smb_parent {
-            with_smb_file_staging(&target, &cancel, parent, write_and_publish)
+            with_open_file_staging(
+                target.path(),
+                Some(&cancel),
+                parent,
+                |stage, _, preserve| write_and_publish(stage, preserve),
+            )
         } else {
             with_staging_typed(&target, Some(&cancel), write_and_publish)
         }
