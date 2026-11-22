@@ -12,9 +12,9 @@ use crate::file_error::{
 };
 #[cfg(target_os = "macos")]
 use crate::file_error::{
-    CompatiblePlanError, DuplicateError, DuplicateRole, FilePromiseError, FileTemplateError,
-    RemoteEditError, ResumeCheckError, ResumeCheckProblem, ResumeRecordEvent, ResumeRole,
-    SyncError,
+    CompatiblePlanError, DuplicateError, DuplicateLimit, DuplicateRole, FilePromiseError,
+    FileTemplateError, RemoteEditError, ResumeCheckError, ResumeCheckProblem, ResumeRecordEvent,
+    ResumeRole, SyncError,
 };
 use crate::file_error::{
     RecoveryRecordAction, RecoveryRecordError, RecoveryRecordProblem, RecoveryRecordSection,
@@ -86,6 +86,18 @@ fn file_failure(reason: &Failure, unconfirmed: bool) -> String {
 }
 
 #[cfg(target_os = "macos")]
+pub(crate) fn duplicate_search_skip(location: &Location, error: &TransferError) -> String {
+    let message = file_error(error);
+    match error {
+        TransferError::Failed(Failure::Access(cause)) if &cause.location == location => message,
+        TransferError::Failed(Failure::Duplicate(cause)) if matches!(cause.as_ref(), DuplicateError::Changed { location: item, .. } if item == location) => {
+            message
+        }
+        _ => format!("{}\n{message}", location.display().escape_debug()),
+    }
+}
+
+#[cfg(target_os = "macos")]
 pub(crate) fn duplicate_trash_summary(
     completed: usize,
     cleanup_warnings: usize,
@@ -110,6 +122,26 @@ pub(crate) fn duplicate_trash_summary(
 #[cfg(target_os = "macos")]
 fn duplicate_error(error: &DuplicateError) -> String {
     match error {
+        DuplicateError::SearchRequiresLocal(location) => format!(
+            "{} · {location}", text!("Поиск дубликатов доступен в локальных папках")
+        ),
+        DuplicateError::SearchInStaging(location) => format!(
+            "{} · {location}", text!("Выберите папку вне временных папок PawCommander")
+        ),
+        DuplicateError::SearchLimit { location, kind, maximum } => match kind {
+            DuplicateLimit::Entries => crate::tr_format!(
+                "Duplicate search stopped at {location} after exceeding the limit of {maximum} entries.",
+                location = location, maximum = maximum
+            ),
+            DuplicateLimit::PathBytes => crate::tr_format!(
+                "Duplicate search stopped at {location} after exceeding the path budget of {maximum} bytes.",
+                location = location, maximum = maximum
+            ),
+            DuplicateLimit::Depth => crate::tr_format!(
+                "Duplicate search stopped at {location} after exceeding the depth limit of {maximum} levels.",
+                location = location, maximum = maximum
+            ),
+        },
         DuplicateError::Changed { location, cause } => {
             let message = crate::tr_format!(
                 "An item changed after the search or is unavailable: {location}. Run a fresh search.",

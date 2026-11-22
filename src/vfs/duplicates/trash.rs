@@ -1,4 +1,4 @@
-use super::{changed_since_search, checked, same_contents, Member};
+use super::{changed_since_search, checked, same_contents, ComparisonFailure, Member};
 use crate::{
     file_error::{
         AccessAction, AccessError, DuplicateError, DuplicateRole, Failure, MacTrashError,
@@ -252,7 +252,9 @@ fn trash_one(
             if !valid {
                 return Err(copy_error(changed_since_search(&location)));
             }
-            if !same_contents(&mut source, &mut duplicate, cancel)? {
+            if !same_contents(&mut source, &mut duplicate, cancel)
+                .map_err(ComparisonFailure::cause)?
+            {
                 return Err(DuplicateError::DifferentContents {
                     selected: location.clone(),
                     protected: protected.clone(),

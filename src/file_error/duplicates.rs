@@ -9,6 +9,13 @@ pub(crate) enum DuplicateRole {
     Selected,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DuplicateLimit {
+    Entries,
+    PathBytes,
+    Depth,
+}
+
 #[derive(Debug)]
 pub(crate) struct MacTrashError {
     pub domain: String,
@@ -26,6 +33,13 @@ impl Error for MacTrashError {}
 
 #[derive(Debug)]
 pub(crate) enum DuplicateError {
+    SearchRequiresLocal(Location),
+    SearchInStaging(Location),
+    SearchLimit {
+        location: Location,
+        kind: DuplicateLimit,
+        maximum: usize,
+    },
     Changed {
         location: Location,
         cause: Option<TransferError>,
@@ -101,6 +115,25 @@ impl From<DuplicateError> for TransferError {
 impl fmt::Display for DuplicateError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::SearchRequiresLocal(location) => {
+                write!(f, "Duplicate search requires a local folder at {location}")
+            }
+            Self::SearchInStaging(location) => {
+                write!(
+                    f,
+                    "Duplicate search cannot scan the temporary folder at {location}"
+                )
+            }
+            Self::SearchLimit {
+                location,
+                kind,
+                maximum,
+            } => {
+                write!(
+                    f,
+                    "Duplicate search exceeded the {kind:?} limit of {maximum} at {location}"
+                )
+            }
             Self::Changed { location, cause } => {
                 write!(f, "Item changed after duplicate search at {location}")?;
                 if let Some(cause) = cause {
@@ -176,7 +209,10 @@ impl Error for DuplicateError {
             Self::Restore { cause, .. } => Some(cause),
             Self::CleanupAfterTrash(error) => Some(&error.cleanup),
             Self::Trash { source, .. } => Some(source),
-            Self::DifferentContents { .. } => None,
+            Self::SearchRequiresLocal(_)
+            | Self::SearchInStaging(_)
+            | Self::SearchLimit { .. }
+            | Self::DifferentContents { .. } => None,
         }
     }
 }

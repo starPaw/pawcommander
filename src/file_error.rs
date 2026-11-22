@@ -45,7 +45,7 @@ pub(crate) use credential::{
 };
 pub(crate) use cross_move::CrossMoveError;
 #[cfg(target_os = "macos")]
-pub(crate) use duplicates::{DuplicateError, DuplicateRole, MacTrashError};
+pub(crate) use duplicates::{DuplicateError, DuplicateLimit, DuplicateRole, MacTrashError};
 #[cfg(target_os = "macos")]
 pub(crate) use external_editor::RemoteEditError;
 #[cfg(target_os = "macos")]

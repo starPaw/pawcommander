@@ -3,7 +3,7 @@ mod trash;
 
 use super::{
     compare::{scan, MAX_ENTRIES, MAX_PATH_BYTES},
-    file_compare::stream_difference,
+    file_compare::{stream_difference, StreamDifferenceError},
     guarded_directory::Directory,
     read_scope::{CheckedFile, ReadScope},
     transfer::{EntryMetadata, TransferSourceEntry},
@@ -11,12 +11,11 @@ use super::{
     Location, MAX_TREE_DEPTH,
 };
 use crate::{
-    file_error::{DuplicateError, ScanError},
-    i18n::text,
+    file_error::{AccessError, DuplicateError, DuplicateLimit, DuplicateRole, Failure, ScanError},
     operations::{Cancellation, Progress, TransferError},
 };
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
     ffi::OsStr,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
@@ -40,14 +39,14 @@ pub(crate) struct SearchResult {
     root: Parent,
     pub(crate) groups: Vec<Group>,
     pub(crate) skipped: usize,
-    pub(crate) examples: Vec<(PathBuf, TransferError)>,
+    pub(crate) examples: Vec<(Location, TransferError)>,
 }
 
 impl SearchResult {
     fn skip(&mut self, path: &Path, error: TransferError) {
         self.skipped += 1;
         if self.examples.len() < 4 {
-            self.examples.push((path.to_owned(), error));
+            self.examples.push((self.root.location.join(path), error));
         }
     }
 
@@ -86,26 +85,24 @@ pub(crate) fn find(
     progress: &mut Progress,
 ) -> Result<SearchResult, TransferError> {
     if folder.local().is_none() {
-        return Err(text!("Поиск дубликатов доступен в локальных папках").into());
+        return Err(DuplicateError::SearchRequiresLocal(folder.clone()).into());
     }
-    let scope = ReadScope::open(folder)?;
-    if scope
-        .parent
-        .location
-        .path()
-        .iter()
-        .any(is_staging_directory)
-    {
-        return Err(text!("Выберите папку вне временных папок PawCommander").into());
+    let cancel = progress.cancellation();
+    cancel.check()?;
+    let scope = ReadScope::open(folder)
+        .map_err(|cause| DuplicateError::verification(folder, DuplicateRole::Folder, cause))?;
+    let root = &scope.parent.location;
+    if root.path().iter().any(is_staging_directory) {
+        return Err(DuplicateError::SearchInStaging(root.clone()).into());
     }
-    Directory::from_scope(&scope)?;
+    let root_error = |cause| DuplicateError::verification(root, DuplicateRole::Folder, cause);
+    Directory::from_scope(&scope).map_err(root_error)?;
     let mut result = SearchResult {
         root: scope.parent.clone(),
         groups: Vec::new(),
         skipped: 0,
         examples: Vec::new(),
     };
-    let cancel = progress.cancellation();
     let sizes = collect_sizes(&scope, &mut result, progress, &cancel)?;
     let mut seen = HashSet::new();
     for (size, mut paths) in sizes.into_iter().filter(|(_, paths)| paths.len() > 1) {
@@ -129,7 +126,7 @@ pub(crate) fn find(
         }
     }
     cancel.check()?;
-    scope.parent.verify()?;
+    scope.parent.verify().map_err(root_error)?;
     result.groups.sort_unstable_by(|left, right| {
         right
             .size
@@ -151,18 +148,11 @@ fn collect_sizes(
     let mut path_bytes = 0;
     while let Some(folder) = folders.pop() {
         progress.item(&scope.parent.location.path().join(&folder));
-        let mut limited = false;
         let visited = scan::visit(scope, &folder, cancel, &mut |name, entry| {
             let path = folder.join(name);
             count += 1;
             path_bytes += path.as_os_str().len();
-            if count > MAX_ENTRIES
-                || path_bytes > MAX_PATH_BYTES
-                || path.components().count() > MAX_TREE_DEPTH
-            {
-                limited = true;
-                return Err(text!("Достигнут предел поиска дубликатов: 100 000 объектов, 32 МиБ путей или 128 уровней папок").into());
-            }
+            check_search_limits(&scope.parent.location, &path, count, path_bytes)?;
             match entry {
                 scan::Entry::Directory if !path.file_name().is_some_and(is_staging_directory) => {
                     folders.push(path)
@@ -179,17 +169,48 @@ fn collect_sizes(
         });
         match visited {
             Ok(()) => {}
-            Err(error)
-                if limited
-                    || folder.as_os_str().is_empty()
-                    || matches!(error, TransferError::Cancelled) =>
-            {
-                return Err(error)
+            Err(error) if matches!(error, TransferError::Cancelled) || is_search_limit(&error) => {
+                return Err(error);
+            }
+            Err(cause) if folder.as_os_str().is_empty() => {
+                return Err(DuplicateError::verification(
+                    &scope.parent.location,
+                    DuplicateRole::Folder,
+                    cause,
+                ));
             }
             Err(error) => result.skip(&folder, error),
         }
     }
     Ok(sizes)
+}
+
+fn check_search_limits(
+    root: &Location,
+    path: &Path,
+    entries: usize,
+    path_bytes: usize,
+) -> Result<(), TransferError> {
+    let (kind, maximum) = if entries > MAX_ENTRIES {
+        (DuplicateLimit::Entries, MAX_ENTRIES)
+    } else if path_bytes > MAX_PATH_BYTES {
+        (DuplicateLimit::PathBytes, MAX_PATH_BYTES)
+    } else if path.components().count() > MAX_TREE_DEPTH {
+        (DuplicateLimit::Depth, MAX_TREE_DEPTH)
+    } else {
+        return Ok(());
+    };
+    Err(DuplicateError::SearchLimit {
+        location: root.join(path),
+        kind,
+        maximum,
+    }
+    .into())
+}
+
+fn is_search_limit(error: &TransferError) -> bool {
+    matches!(error, TransferError::Failed(Failure::Duplicate(error))
+        if matches!(error.as_ref(), DuplicateError::SearchLimit { .. }))
 }
 
 fn is_staging_directory(name: &OsStr) -> bool {
@@ -237,7 +258,8 @@ fn hash_candidate(
     }
     let (location, size, input) = file.stream();
     let digest = progress
-        .hash_file(location.path(), size, input)?
+        .hash_file(location.path(), size, input)
+        .map_err(|source| AccessError::read(location, source))?
         .ok_or_else(|| changed_since_search(location))?;
     file.verify(cancel)?;
     seen.insert(identity);
@@ -251,35 +273,52 @@ fn group_identical(
     result: &mut SearchResult,
     cancel: &Cancellation,
 ) -> Result<(), TransferError> {
-    let mut equal_groups: Vec<Vec<Member>> = Vec::new();
+    let mut equal_groups: Vec<VecDeque<Member>> = Vec::new();
     'candidate: for candidate in members {
         cancel.check()?;
         for group in &mut equal_groups {
-            let equal = (|| {
-                let mut source = checked(scope, &group[0], cancel)?;
-                let mut copy = checked(scope, &candidate, cancel)?;
-                same_contents(&mut source, &mut copy, cancel)
-            })();
-            match equal {
-                Ok(true) => {
-                    group.push(candidate);
-                    continue 'candidate;
-                }
-                Ok(false) => {}
-                Err(TransferError::Cancelled) => return Err(TransferError::Cancelled),
-                Err(error) => {
-                    result.skip(&candidate.path, error);
-                    continue 'candidate;
+            while let Some(representative) = group.front() {
+                let equal = (|| {
+                    let mut source =
+                        checked(scope, representative, cancel).map_err(ComparisonFailure::Left)?;
+                    let mut copy =
+                        checked(scope, &candidate, cancel).map_err(ComparisonFailure::Right)?;
+                    same_contents(&mut source, &mut copy, cancel)
+                })();
+                match equal {
+                    Ok(true) => {
+                        group.push_back(candidate);
+                        continue 'candidate;
+                    }
+                    Ok(false) => break,
+                    Err(
+                        ComparisonFailure::Left(TransferError::Cancelled)
+                        | ComparisonFailure::Right(TransferError::Cancelled),
+                    ) => {
+                        return Err(TransferError::Cancelled);
+                    }
+                    Err(ComparisonFailure::Right(error)) => {
+                        result.skip(&candidate.path, error);
+                        continue 'candidate;
+                    }
+                    Err(ComparisonFailure::Left(error)) => {
+                        let skipped = group.pop_front().expect("current representative");
+                        result.skip(&skipped.path, error);
+                    }
                 }
             }
         }
-        equal_groups.push(vec![candidate]);
+        equal_groups.retain(|group| !group.is_empty());
+        equal_groups.push(VecDeque::from([candidate]));
     }
     result.groups.extend(
         equal_groups
             .into_iter()
             .filter(|members| members.len() > 1)
-            .map(|members| Group { size, members }),
+            .map(|members| Group {
+                size,
+                members: members.into(),
+            }),
     );
     Ok(())
 }
@@ -303,19 +342,45 @@ fn checked<'a>(
     Ok(file)
 }
 
+enum ComparisonFailure {
+    Left(TransferError),
+    Right(TransferError),
+}
+
+impl ComparisonFailure {
+    fn cause(self) -> TransferError {
+        match self {
+            Self::Left(cause) | Self::Right(cause) => cause,
+        }
+    }
+}
+
 fn same_contents(
     left: &mut CheckedFile<'_>,
     right: &mut CheckedFile<'_>,
     cancel: &Cancellation,
-) -> Result<bool, TransferError> {
-    let (_, left_size, left_input) = left.stream();
-    let (_, right_size, right_input) = right.stream();
+) -> Result<bool, ComparisonFailure> {
+    let (left_path, left_size, left_input) = left.stream();
+    let (right_path, right_size, right_input) = right.stream();
     let equal = left_size == right_size
-        && stream_difference([left_input, right_input], [left_size, right_size], cancel)?
+        && stream_difference([left_input, right_input], [left_size, right_size], cancel)
+            .map_err(|error| match error {
+                StreamDifferenceError::Cancelled => {
+                    ComparisonFailure::Left(TransferError::Cancelled)
+                }
+                StreamDifferenceError::Read {
+                    right: false,
+                    source,
+                } => ComparisonFailure::Left(AccessError::read(left_path, source).into()),
+                StreamDifferenceError::Read {
+                    right: true,
+                    source,
+                } => ComparisonFailure::Right(AccessError::read(right_path, source).into()),
+            })?
             .0
             .is_none();
-    left.verify(cancel)?;
-    right.verify(cancel)?;
+    left.verify(cancel).map_err(ComparisonFailure::Left)?;
+    right.verify(cancel).map_err(ComparisonFailure::Right)?;
     Ok(equal)
 }
 
@@ -347,7 +412,13 @@ mod tests {
         let staging = folder.join(".pawcommander-transfer-7-81-0");
         fs::create_dir(&staging).unwrap();
         fs::write(staging.join("preserved.bin"), b"match").unwrap();
-        assert!(find(&Location::Local(staging), &mut Progress::default()).is_err());
+        assert!(
+            matches!(find(&Location::Local(staging.clone()), &mut Progress::default()),
+                Err(TransferError::Failed(Failure::Duplicate(error)))
+                    if matches!(error.as_ref(), DuplicateError::SearchInStaging(location)
+                        if location.path() == fs::canonicalize(&staging).unwrap())
+            )
+        );
 
         let location = Location::Local(folder);
         let result = find(&location, &mut Progress::default()).unwrap();
@@ -387,5 +458,118 @@ mod tests {
         assert_eq!(synthetic.groups.len(), 1);
         assert_eq!(synthetic.groups[0].members.len(), 2);
         assert_eq!(synthetic.groups[0].members[1].path, Path::new("b.bin"));
+    }
+
+    #[test]
+    fn reports_all_three_search_limits_with_the_triggering_path() {
+        let root = Location::Local("/duplicate-fixture".into());
+        let ordinary = Path::new("entries/copy.bin");
+        let limit_depth: PathBuf = std::iter::repeat_n("part", MAX_TREE_DEPTH).collect();
+        let too_deep = limit_depth.join("last");
+        check_search_limits(&root, &limit_depth, MAX_ENTRIES, MAX_PATH_BYTES).unwrap();
+        for (path, entries, bytes, expected, maximum) in [
+            (
+                ordinary,
+                MAX_ENTRIES + 1,
+                1,
+                DuplicateLimit::Entries,
+                MAX_ENTRIES,
+            ),
+            (
+                ordinary,
+                1,
+                MAX_PATH_BYTES + 1,
+                DuplicateLimit::PathBytes,
+                MAX_PATH_BYTES,
+            ),
+            (
+                too_deep.as_path(),
+                1,
+                1,
+                DuplicateLimit::Depth,
+                MAX_TREE_DEPTH,
+            ),
+        ] {
+            let error = check_search_limits(&root, path, entries, bytes).unwrap_err();
+            assert!(is_search_limit(&error));
+            assert!(
+                matches!(error, TransferError::Failed(Failure::Duplicate(error))
+                    if matches!(error.as_ref(), DuplicateError::SearchLimit { location, kind, maximum: limit }
+                        if location == &root.join(path) && *kind == expected && *limit == maximum)
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_nonlocal_and_missing_roots_and_preserves_stop() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = Location::Archive {
+            archive: std::sync::Arc::new(temp.path().join("fixture.zip")),
+            path: "/within".into(),
+        };
+        assert!(matches!(find(&archive, &mut Progress::default()),
+            Err(TransferError::Failed(Failure::Duplicate(error)))
+                if matches!(error.as_ref(), DuplicateError::SearchRequiresLocal(location)
+                    if location == &archive)
+        ));
+        let missing = Location::Local(temp.path().join("missing"));
+        assert!(matches!(find(&missing, &mut Progress::default()),
+            Err(TransferError::Failed(Failure::Duplicate(error)))
+                if matches!(error.as_ref(), DuplicateError::Verify { location, role: DuplicateRole::Folder, .. }
+                    if location == &missing)
+        ));
+        let mut progress = Progress::default();
+        progress.cancellation().request();
+        assert!(matches!(
+            find(&Location::Local(temp.path().into()), &mut progress),
+            Err(TransferError::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn stale_representative_does_not_hide_other_proven_duplicates() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        let scope = ReadScope::open(&Location::Local(root.clone())).unwrap();
+        let cancel = Cancellation::default();
+        let original = ["a-stale", "b-good", "c-stale", "d-good"];
+        let mut bucket = Vec::new();
+        for name in original {
+            fs::write(root.join(name), b"same bytes").unwrap();
+            let path = PathBuf::from(name);
+            let version = scope
+                .open_file(&path, &cancel)
+                .unwrap()
+                .unwrap()
+                .stamp()
+                .clone();
+            bucket.push(Member { path, version });
+        }
+        for name in ["a-stale", "c-stale"] {
+            fs::write(root.join(name), b"different bytes").unwrap();
+        }
+        let mut result = SearchResult {
+            root: scope.parent.clone(),
+            groups: Vec::new(),
+            skipped: 0,
+            examples: Vec::new(),
+        };
+        group_identical(&scope, bucket, 10, &mut result, &cancel).unwrap();
+        assert_eq!(result.skipped, 2);
+        let skipped: Vec<_> = result
+            .examples
+            .iter()
+            .map(|(location, _)| location.path())
+            .collect();
+        assert_eq!(skipped, [root.join("a-stale"), root.join("c-stale")]);
+        assert_eq!(result.groups.len(), 1);
+        let confirmed: Vec<_> = result.groups[0]
+            .members
+            .iter()
+            .map(|member| member.path.as_path())
+            .collect();
+        assert_eq!(confirmed, [Path::new("b-good"), Path::new("d-good")]);
+        assert_eq!(fs::read(root.join("a-stale")).unwrap(), b"different bytes");
     }
 }
