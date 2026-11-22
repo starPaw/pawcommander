@@ -73,10 +73,23 @@ impl Directory {
     }
 
     pub(super) fn verify_absent(&self, name: &OsStr) -> Result<(), TransferError> {
+        self.check_absent(name, |path| stale(&path))
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn require_absent(&self, name: &OsStr) -> Result<(), TransferError> {
+        self.check_absent(name, |path| MutationError::DestinationExists(path).into())
+    }
+
+    fn check_absent(
+        &self,
+        name: &OsStr,
+        occupied: impl FnOnce(Location) -> TransferError,
+    ) -> Result<(), TransferError> {
         self.verify()?;
         let path = self.location.join(name);
         if entry_metadata(&path)?.is_some() {
-            return Err(stale(&path));
+            return Err(occupied(path));
         }
         Ok(())
     }

@@ -7,6 +7,8 @@ mod archive;
 mod batch_rename;
 mod checksum;
 #[cfg(target_os = "macos")]
+mod collection;
+#[cfg(target_os = "macos")]
 mod compatible_plan;
 mod conflict;
 mod copy_verification;
@@ -36,6 +38,8 @@ mod undo;
 pub(crate) use archive::ArchiveError;
 pub(crate) use batch_rename::BatchRenameError;
 pub(crate) use checksum::{ChecksumError, ManifestLineError};
+#[cfg(target_os = "macos")]
+pub(crate) use collection::{CollectionAction, CollectionError, CollectionUnavailable};
 #[cfg(target_os = "macos")]
 pub(crate) use compatible_plan::CompatiblePlanError;
 pub(crate) use conflict::{ConflictError, ReplacementRefusal};
@@ -114,6 +118,8 @@ pub(crate) enum Failure {
     #[cfg(target_os = "macos")]
     FileTemplate(Box<FileTemplateError>),
     #[cfg(target_os = "macos")]
+    Collection(Box<CollectionError>),
+    #[cfg(target_os = "macos")]
     CompatiblePlan(Box<CompatiblePlanError>),
     Mutation(Box<MutationError>),
     Publication(Box<PublicationError>),
@@ -179,6 +185,8 @@ impl Error for Failure {
             #[cfg(target_os = "macos")]
             Self::FileTemplate(error) => Some(error.as_ref()),
             #[cfg(target_os = "macos")]
+            Self::Collection(error) => Some(error.as_ref()),
+            #[cfg(target_os = "macos")]
             Self::CompatiblePlan(error) => Some(error.as_ref()),
             Self::Mutation(error) => Some(error.as_ref()),
             Self::Publication(error) => Some(error.as_ref()),
@@ -230,6 +238,8 @@ impl fmt::Display for Failure {
             Self::FilePromise(error) => fmt::Display::fmt(error, f),
             #[cfg(target_os = "macos")]
             Self::FileTemplate(error) => fmt::Display::fmt(error, f),
+            #[cfg(target_os = "macos")]
+            Self::Collection(error) => fmt::Display::fmt(error, f),
             #[cfg(target_os = "macos")]
             Self::CompatiblePlan(error) => fmt::Display::fmt(error, f),
             Self::Mutation(error) => fmt::Display::fmt(error, f),

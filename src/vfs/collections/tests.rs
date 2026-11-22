@@ -1,5 +1,27 @@
 use super::*;
+use crate::file_error::{AccessAction, AccessCause, Failure, MutationError};
 use std::{fs, os::unix::fs::symlink};
+
+fn document_cause(
+    error: TransferError,
+    action: CollectionAction,
+    file: &Location,
+) -> TransferError {
+    let TransferError::Failed(Failure::Collection(error)) = error else {
+        panic!("expected a collection error, got {error:?}");
+    };
+    let CollectionError::Document {
+        action: actual,
+        file: document,
+        cause,
+    } = *error
+    else {
+        panic!("expected the portable document context, got {error:?}");
+    };
+    assert_eq!(actual, action);
+    assert_eq!(&document, file);
+    *cause
+}
 
 #[test]
 fn references_follow_external_renames_and_reject_replaced_or_deleted_items() {
@@ -43,19 +65,19 @@ fn references_follow_external_renames_and_reject_replaced_or_deleted_items() {
     fs::rename(old_moved_file, &moved_file).unwrap();
     fs::create_dir(&original).unwrap();
     fs::write(&file, b"replacement at old name").unwrap();
-    assert_eq!(
-        group.refresh(&mut Progress::default()).unwrap(),
+    assert!(matches!(
+        group.refresh(&mut Progress::default()).unwrap().as_slice(),
         [None, None]
-    );
+    ));
     assert_eq!(group.members[0].last_path().unwrap(), moved_file);
     assert_eq!(group.members[1].last_path().unwrap(), moved);
     assert_eq!(group.members[0].tags, ["Open", "Отчёт"]);
     fs::remove_file(&moved_file).unwrap();
     fs::write(&moved_file, b"different item at current name").unwrap();
-    assert_eq!(
-        group.refresh(&mut Progress::default()).unwrap(),
+    assert!(matches!(
+        group.refresh(&mut Progress::default()).unwrap().as_slice(),
         [Some(Unavailable::Missing), None]
-    );
+    ));
     assert_eq!(group.members[0].last_path().unwrap(), moved_file);
     assert_eq!(fs::read(&file).unwrap(), b"replacement at old name");
 
@@ -97,7 +119,12 @@ fn portable_collection_round_trips_below_a_different_root_without_overwriting() 
     assert!(!contents.contains(old_root.to_str().unwrap()));
     assert!(!contents.contains("bookmark"));
     assert!(contents.contains("reports/Итог.txt"));
-    assert!(export(&old, name, group, &mut progress).is_err());
+    let collision = export(&old, name, group, &mut progress).unwrap_err();
+    assert!(
+        matches!(document_cause(collision, CollectionAction::Export, &output),
+        TransferError::Failed(Failure::Mutation(problem))
+            if matches!(problem.as_ref(), MutationError::DestinationExists(path) if path == &output))
+    );
     assert_eq!(fs::read_to_string(output.path()).unwrap(), contents);
     fs::copy(output.path(), new_root.join(name)).unwrap();
     let imported = import(&new, &new.join(name), &mut progress).unwrap();
@@ -135,12 +162,15 @@ fn import_rejects_escapes_and_incomplete_copies_before_creating_a_collection() {
     symlink(&elsewhere, root.join("link")).unwrap();
     let base = Location::Local(root.clone());
     let manifest = base.join("import.pawcollection.json");
-    for suspect in [
+    for (case, suspect) in [
         PathBuf::from("../outside/outside.txt"),
         outside.clone(),
         PathBuf::from("link/outside.txt"),
         PathBuf::from("missing.txt"),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let item = |path: &Path| PortableMember {
             path: path.into(),
             folder: false,
@@ -152,11 +182,146 @@ fn import_rejects_escapes_and_incomplete_copies_before_creating_a_collection() {
             members: vec![item(Path::new("good.txt")), item(&suspect)],
         };
         fs::write(manifest.path(), serde_json::to_vec(&document).unwrap()).unwrap();
-        assert!(
-            import(&base, &manifest, &mut Progress::default()).is_err(),
-            "{suspect:?}"
+        let cause = document_cause(
+            import(&base, &manifest, &mut Progress::default())
+                .err()
+                .unwrap(),
+            CollectionAction::Import,
+            &manifest,
         );
+        let TransferError::Failed(Failure::Collection(entry)) = cause else {
+            panic!("missing entry context for {suspect:?}");
+        };
+        let CollectionError::Entry {
+            row: 2,
+            path: Some(path),
+            cause,
+        } = *entry
+        else {
+            panic!("expected the failing entry for {suspect:?}");
+        };
+        match case {
+            0 | 1 => {
+                assert_eq!(path, suspect);
+                assert!(
+                    matches!(*cause, TransferError::Failed(Failure::Collection(problem))
+                    if matches!(*problem, CollectionError::InvalidPath))
+                );
+            }
+            2 => {
+                assert_eq!(path, root.join(suspect));
+                assert!(
+                    matches!(*cause, TransferError::Failed(Failure::Collection(problem))
+                    if matches!(problem.as_ref(), CollectionError::OutsideFolder { resolved, folder }
+                        if resolved == &outside && folder == &root))
+                );
+            }
+            3 => {
+                assert_eq!(path, root.join(suspect));
+                assert!(
+                    matches!(*cause, TransferError::Failed(Failure::Access(problem))
+                    if problem.location.path() == path && problem.action == AccessAction::ReadMetadata
+                        && matches!(&problem.cause, AccessCause::Local(io)
+                            if io.raw_os_error() == Some(libc::ENOENT)))
+                );
+            }
+            _ => unreachable!(),
+        }
     }
     assert_eq!(fs::read(root.join("good.txt")).unwrap(), b"inside");
     assert_eq!(fs::read(outside).unwrap(), b"outside");
+}
+
+#[test]
+fn portable_document_errors_retain_the_selected_path_and_original_cause() {
+    let temp = tempfile::tempdir_in("/private/tmp").unwrap();
+    let root = Location::Local(temp.path().to_owned());
+    let file = root.join("import.pawcollection.json");
+    let mut progress = Progress::default();
+    let read = |progress: &mut Progress| {
+        document_cause(
+            import(&root, &file, progress).err().unwrap(),
+            CollectionAction::Import,
+            &file,
+        )
+    };
+    assert!(
+        matches!(read(&mut progress), TransferError::Failed(Failure::Access(problem))
+        if problem.location == file && matches!(&problem.cause, AccessCause::Local(io)
+            if io.raw_os_error() == Some(libc::ENOENT)))
+    );
+
+    let damaged = b"{\n  \"version\": ";
+    fs::write(file.path(), damaged).unwrap();
+    assert!(
+        matches!(read(&mut progress), TransferError::Failed(Failure::Collection(problem))
+        if matches!(problem.as_ref(), CollectionError::Json(cause) if cause.is_eof() && cause.line() == 2))
+    );
+    assert_eq!(fs::read(file.path()).unwrap(), damaged);
+
+    fs::write(
+        file.path(),
+        br#"{"version":19,"name":"Future","members":[]}"#,
+    )
+    .unwrap();
+    assert!(
+        matches!(read(&mut progress), TransferError::Failed(Failure::Collection(problem))
+        if matches!(*problem, CollectionError::Version(19)))
+    );
+
+    fs::File::create(file.path())
+        .unwrap()
+        .set_len(MAX_PORTABLE_BYTES as u64 + 1)
+        .unwrap();
+    assert!(
+        matches!(read(&mut progress), TransferError::Failed(Failure::Collection(problem))
+        if matches!(*problem, CollectionError::ByteLimit(MAX_PORTABLE_BYTES)))
+    );
+}
+
+#[test]
+fn export_reports_a_missing_entry_without_publishing_and_preserves_stop() {
+    let temp = tempfile::tempdir_in("/private/tmp").unwrap();
+    let root = Location::Local(temp.path().to_owned());
+    let input = root.join("gone.txt");
+    fs::write(input.path(), b"fixture").unwrap();
+    let mut group = Collection {
+        name: "Fixture".into(),
+        members: vec![Member::capture(input.path(), Vec::new()).unwrap()],
+    };
+    fs::remove_file(input.path()).unwrap();
+    let name = "output.pawcollection.json";
+    let target = root.join(name);
+    let mut progress = Progress::default();
+    let cause = document_cause(
+        export(&root, name, &mut group, &mut progress).unwrap_err(),
+        CollectionAction::Export,
+        &target,
+    );
+    let TransferError::Failed(Failure::Collection(entry)) = cause else {
+        panic!("expected an entry error");
+    };
+    let CollectionError::Entry {
+        row: 1,
+        path: Some(path),
+        cause,
+    } = *entry
+    else {
+        panic!("expected the original member at entry 1");
+    };
+    assert_eq!(path, input.path());
+    assert!(
+        matches!(*cause, TransferError::Failed(Failure::Collection(problem))
+        if matches!(problem.as_ref(), CollectionError::Unavailable(Unavailable::Access(access))
+            if access.location == input && matches!(&access.cause, AccessCause::Local(io)
+                if io.raw_os_error() == Some(libc::ENOENT))))
+    );
+    assert!(!target.path().exists());
+    assert_eq!(group.members[0].last_path().as_deref(), Some(input.path()));
+    progress.cancellation().request();
+    assert!(matches!(
+        export(&root, name, &mut group, &mut progress),
+        Err(TransferError::Cancelled)
+    ));
+    assert!(temp.path().read_dir().unwrap().next().is_none());
 }

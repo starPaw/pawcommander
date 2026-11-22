@@ -12,10 +12,11 @@ use crate::file_error::{
 };
 #[cfg(target_os = "macos")]
 use crate::file_error::{
-    CompatiblePlanError, DuplicateError, DuplicateRole, FilePromiseError, FileTemplateError,
-    RemoteEditError, ResumeCheckError, ResumeCheckProblem, ResumeRecordEvent, ResumeRole,
-    ScanLimit, ScanLimitKind, SyncDifference, SyncError, SyncExclusionProblem, SyncFolderRole,
-    SyncStateAction, SyncStateKind, SyncStateProblem, SyncVerification,
+    CollectionAction, CollectionError, CollectionUnavailable, CompatiblePlanError, DuplicateError,
+    DuplicateRole, FilePromiseError, FileTemplateError, RemoteEditError, ResumeCheckError,
+    ResumeCheckProblem, ResumeRecordEvent, ResumeRole, ScanLimit, ScanLimitKind, SyncDifference,
+    SyncError, SyncExclusionProblem, SyncFolderRole, SyncStateAction, SyncStateKind,
+    SyncStateProblem, SyncVerification,
 };
 use crate::file_error::{
     RecoveryRecordAction, RecoveryRecordError, RecoveryRecordProblem, RecoveryRecordSection,
@@ -72,6 +73,8 @@ fn file_failure(reason: &Failure, unconfirmed: bool) -> String {
         #[cfg(target_os = "macos")]
         Failure::FileTemplate(error) => file_template_error(error),
         #[cfg(target_os = "macos")]
+        Failure::Collection(error) => collection_error(error),
+        #[cfg(target_os = "macos")]
         Failure::CompatiblePlan(error) => compatible_plan_error(error),
         Failure::Mutation(reason) => mutation_error(reason, unconfirmed),
         Failure::Publication(reason) => publication_error(reason),
@@ -83,6 +86,107 @@ fn file_failure(reason: &Failure, unconfirmed: bool) -> String {
         Failure::RecoveryRecord(error) => recovery_record_error(error),
         Failure::StagingCleanup(error) => staging_cleanup_error(error),
         _ => reason.to_string(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn collection_error(error: &CollectionError) -> String {
+    use CollectionError::*;
+    match error {
+        Document {
+            action,
+            file,
+            cause,
+        } => {
+            let heading = match action {
+                CollectionAction::Import => text!("Импорт коллекции"),
+                CollectionAction::Export => text!("Экспорт коллекции"),
+            };
+            format!(
+                "{heading} · {}\n{}",
+                file.display().escape_debug(),
+                file_error(cause)
+            )
+        }
+        Entry { row, path, cause } => {
+            let heading = crate::tr_format!("Collection entry {row}", row = row);
+            let reason = file_error(cause);
+            if let Some(path) = path {
+                format!(
+                    "{heading} · {}\n{reason}",
+                    path.to_string_lossy().escape_debug()
+                )
+            } else {
+                format!("{heading}\n{reason}")
+            }
+        }
+        Json(error) => crate::tr_format!("Collection JSON error. {error}", error = error),
+        ByteLimit(limit) => crate::tr_format!(
+            "The collection file exceeds {limit} bytes.",
+            limit = super::display::integer(*limit)
+        ),
+        EntryLimit(limit) => crate::tr_format!(
+            "The collection file contains more than {limit} entries.",
+            limit = super::display::integer(*limit)
+        ),
+        Version(version) => crate::tr_format!(
+            "Collection file version {version} is unsupported.",
+            version = version
+        ),
+        ExportSuffix => text!("Имя файла должно оканчиваться на .pawcollection.json").into(),
+        ImportSelection => text!("Выберите файл .pawcollection.json в активной папке").into(),
+        InvalidPath => text!("Недопустимый путь в файле коллекции").into(),
+        OutsideFolder { resolved, folder } => crate::tr_format!(
+            "The resolved item {resolved} must be inside the selected folder {folder}.",
+            resolved = resolved.to_string_lossy().escape_debug(),
+            folder = folder.to_string_lossy().escape_debug()
+        ),
+        WrongKind { folder: true } => text!("В этой записи ожидается папка.").into(),
+        WrongKind { folder: false } => text!("В этой записи ожидается обычный файл.").into(),
+        DuplicateEntry => text!("В файле коллекции повторяется объект").into(),
+        LocalOnly(path) | RegularItem(path) | Trashed(path) | Changed(path) => {
+            let reason = match error {
+                LocalOnly(_) => text!("Выберите локальные файлы или папку"),
+                RegularItem(_) => text!("Выберите обычные файлы или папки"),
+                Trashed(_) => text!("Объект в Корзине"),
+                Changed(_) => text!("Файл или папка изменились"),
+                _ => unreachable!(),
+            };
+            format!("{reason} · {}", path.display().escape_debug())
+        }
+        Unavailable(CollectionUnavailable::Access(error)) => access_error(error),
+        Unavailable(error) => collection_unavailable(error),
+        AvailableAgain => text!("Объект снова доступен. Обновите коллекцию.").into(),
+        InvalidName => text!("Введите название коллекции до 80 символов").into(),
+        NameInUse => text!("Коллекция с таким названием уже есть").into(),
+        CollectionLimit(limit) => crate::tr_format!(
+            "The catalog supports up to {limit} collections.",
+            limit = super::display::integer(*limit)
+        ),
+        CatalogItemLimit(limit) => crate::tr_format!(
+            "The catalog supports up to {limit} items in total.",
+            limit = super::display::integer(*limit)
+        ),
+        InvalidTag => text!("Тег должен содержать до 48 символов без запятых").into(),
+        TagLimit => text!("Для объекта доступно до 16 тегов").into(),
+        RelinkKind => text!("Выберите объект того же типа").into(),
+        AlreadyMember => text!("Этот объект уже есть в коллекции").into(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn collection_unavailable(state: &CollectionUnavailable) -> String {
+    let missing = text!("Объект отсутствует или том недоступен");
+    match state {
+        CollectionUnavailable::Missing => missing.into(),
+        CollectionUnavailable::InTrash => text!("Объект в Корзине").into(),
+        CollectionUnavailable::Access(error)
+            if matches!(&error.cause, AccessCause::Local(cause)
+                if matches!(cause.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory)) =>
+        {
+            missing.into()
+        }
+        CollectionUnavailable::Access(error) => access_error(error),
     }
 }
 

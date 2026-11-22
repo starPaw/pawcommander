@@ -5,7 +5,8 @@ use super::{
     PawCommander,
 };
 use crate::{
-    i18n::text,
+    file_error::{CollectionAction, CollectionError},
+    i18n::{collection_error, collection_unavailable, text},
     operations::{Progress, TransferError},
     shortcuts::Command,
     vfs::{
@@ -22,7 +23,7 @@ struct Update {
 
 enum ResultView {
     Updated(Update, Option<crate::i18n::MessageKey>),
-    Imported(Update),
+    Imported { update: Update, source: Location },
     Exported(Location),
     Reveal(Location),
 }
@@ -193,7 +194,7 @@ impl CollectionsDialog {
                     };
                     match result {
                         Ok(index) => self.choose_group(index, catalog, ui.ctx()),
-                        Err(error) => self.notice = Some((error, true)),
+                        Err(error) => self.notice = Some((collection_error(&error), true)),
                     }
                 }
                 if ui.button(text!("Отмена")).clicked() {
@@ -257,7 +258,7 @@ impl CollectionsDialog {
                                 )
                             });
                         }
-                        Err(error) => self.notice = Some((error, true)),
+                        Err(error) => self.notice = Some((collection_error(&error), true)),
                     }
                 }
             }
@@ -325,13 +326,13 @@ impl CollectionsDialog {
                         .states
                         .get(row)
                         .and_then(Option::as_ref)
-                        .map(Unavailable::message);
+                        .map(collection_unavailable);
                     let line = if tags.is_empty() {
                         name
                     } else {
                         format!("{name}  ·  {tags}")
                     };
-                    let line = match problem {
+                    let line = match problem.as_deref() {
                         None => RichText::new(line),
                         Some(message) => {
                             RichText::new(format!("{line}  ·  {}", message.escape_debug()))
@@ -362,7 +363,7 @@ impl CollectionsDialog {
             .on_hover_text(&path);
         let unavailable = self.states.get(row).and_then(Option::as_ref);
         if let Some(state) = unavailable {
-            ui.colored_label(ui.visuals().warn_fg_color, state.message());
+            ui.colored_label(ui.visuals().warn_fg_color, collection_unavailable(state));
         }
         let can_relink = unavailable.is_some();
         let can_open = self.states.get(row).is_some_and(Option::is_none);
@@ -381,7 +382,7 @@ impl CollectionsDialog {
                         group.members[row].tags = tags;
                         self.notice = None;
                     }
-                    Err(error) => self.notice = Some((error, true)),
+                    Err(error) => self.notice = Some((collection_error(&error), true)),
                 }
             }
             if ui
@@ -390,9 +391,7 @@ impl CollectionsDialog {
             {
                 let mut member = group.members[row].clone();
                 self.start(ui.ctx(), move |_| {
-                    let path = member
-                        .resolve()
-                        .map_err(|state| state.message().to_owned())?;
+                    let path = member.resolve().map_err(CollectionError::Unavailable)?;
                     Ok(ResultView::Reveal(Location::Local(path)))
                 });
             }
@@ -404,7 +403,7 @@ impl CollectionsDialog {
                 let mut group = group.clone();
                 self.start(ui.ctx(), move |progress| {
                     if group.members[row].resolve().is_ok() {
-                        return Err(text!("Объект снова доступен. Обновите коллекцию.").into());
+                        return Err(CollectionError::AvailableAgain.into());
                     }
                     group.relink(row, &path)?;
                     update(group, Some(crate::i18n::key!("Связь обновлена")), progress)
@@ -447,7 +446,10 @@ impl CollectionsDialog {
                     let group = collections::import(&root, &source, progress)?;
                     let mut group = group;
                     let states = group.refresh(progress)?;
-                    Ok(ResultView::Imported(Update { group, states }))
+                    Ok(ResultView::Imported {
+                        update: Update { group, states },
+                        source,
+                    })
                 });
             }
             if let Some(index) = self.active {
@@ -516,7 +518,7 @@ impl CollectionsDialog {
                     self.notice = notice.map(|message| (text(message).into(), false));
                 }
             }
-            Phase::Finished(ResultView::Imported(update)) => {
+            Phase::Finished(ResultView::Imported { update, source }) => {
                 match catalog.insert_imported(update.group) {
                     Ok(index) => {
                         self.active = Some(index);
@@ -527,7 +529,14 @@ impl CollectionsDialog {
                         self.remove_group = false;
                         self.notice = Some((text!("Коллекция импортирована").into(), false));
                     }
-                    Err(error) => self.notice = Some((error, true)),
+                    Err(error) => {
+                        let reason = CollectionError::document(
+                            CollectionAction::Import,
+                            &source,
+                            error.into(),
+                        );
+                        self.notice = Some((crate::i18n::file_error(&reason), true));
+                    }
                 }
             }
             Phase::Finished(ResultView::Exported(path)) => {

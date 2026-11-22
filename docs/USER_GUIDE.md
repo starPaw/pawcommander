@@ -307,6 +307,8 @@ Opening a collection or clicking **Refresh** checks its references. PawCommander
 
 To transfer a collection, open its common parent folder first. Under **Import and export collections**, enter a filename ending in `.pawcollection.json` and choose **Export to this folder**. The export includes paths relative to that folder and the assigned tags. Copy the exported file together with the referenced directory structure. In the destination folder, select the JSON file, open **Tags and collections** and choose **Import selected file**. All paths must resolve within that folder and have the expected file or folder type. An existing collection with the same name keeps its entries, and the imported collection receives a numbered name.
 
+An import or export error names the collection file. If a particular entry caused the error, the message also shows its position and path. Export preserves files already using the chosen name.
+
 ## Create files from templates on macOS
 
 Open a local or SFTP folder and choose **New file** from Settings or the command palette. Choose blank text, Markdown, JSON, CSV or a saved template and enter the file name. Built-in templates let you edit their contents and select UTF-8, UTF-8 with BOM, UTF-16 LE or BE with BOM, Windows-1251 or Windows-1252. If the text contains characters that the chosen encoding cannot represent, the dialog asks you to change the encoding.
