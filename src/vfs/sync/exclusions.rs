@@ -1,12 +1,11 @@
 use crate::{
-    i18n::text,
+    file_error::{SyncError, SyncExclusionProblem},
     name_match::{normalize, Mask},
     operations::TransferError,
 };
 use std::{collections::BTreeSet, path::Path};
 
 const MAX_PATTERNS: usize = 64;
-const MAX_TEXT_BYTES: usize = 8 * 1024;
 
 #[derive(Default)]
 pub(crate) struct Exclusions {
@@ -16,10 +15,11 @@ pub(crate) struct Exclusions {
 }
 
 impl Exclusions {
+    pub(crate) const MAX_TEXT_BYTES: usize = 8 * 1024;
+
     pub(crate) fn parse(input: &str) -> Result<Self, TransferError> {
-        let too_many = || text!("Используйте до 64 исключений общим размером до 8 КиБ.").into();
-        if input.len() > MAX_TEXT_BYTES {
-            return Err(too_many());
+        if input.len() > Self::MAX_TEXT_BYTES {
+            return Err(SyncError::ExclusionsTextLimit(Self::MAX_TEXT_BYTES).into());
         }
         let mut result = Self::default();
         let mut patterns = BTreeSet::new();
@@ -27,19 +27,9 @@ impl Exclusions {
             if pattern.trim().is_empty() {
                 continue;
             }
-            let relative = pattern.strip_prefix("./").unwrap_or(pattern);
-            if relative.contains('\0')
-                || relative
-                    .split('/')
-                    .any(|part| matches!(part, "" | "." | ".."))
-            {
-                let line = index + 1;
-                return Err(crate::tr_format!(
-                    "The exclusion on line {line} must be a relative name or path.",
-                    line = line
-                )
-                .into());
-            }
+            let line = index + 1;
+            let relative = relative_pattern(pattern)
+                .map_err(|problem| SyncError::InvalidExclusion { line, problem })?;
             let relative = normalize(relative);
             if pattern.contains('/') {
                 let key = format!("./{relative}");
@@ -52,7 +42,11 @@ impl Exclusions {
                 result.names.push(Mask::new(&relative));
             }
             if patterns.len() > MAX_PATTERNS {
-                return Err(too_many());
+                return Err(SyncError::ExclusionsCountLimit {
+                    limit: MAX_PATTERNS,
+                    line,
+                }
+                .into());
             }
         }
         result.patterns = patterns.into_iter().collect();
@@ -86,5 +80,92 @@ impl Exclusions {
                     .zip(path.iter())
                     .all(|(mask, component)| mask.matches(&normalize(&component.to_string_lossy())))
         })
+    }
+}
+
+fn relative_pattern(pattern: &str) -> Result<&str, SyncExclusionProblem> {
+    if pattern.starts_with('/') {
+        return Err(SyncExclusionProblem::AbsolutePath);
+    }
+    let relative = pattern.strip_prefix("./").unwrap_or(pattern);
+    if relative.is_empty() {
+        return Err(SyncExclusionProblem::MissingName);
+    }
+    if relative.contains('\0') {
+        return Err(SyncExclusionProblem::NulCharacter);
+    }
+    for component in relative.split('/') {
+        match component {
+            "" => return Err(SyncExclusionProblem::EmptyComponent),
+            "." | ".." => return Err(SyncExclusionProblem::DotComponent),
+            _ => {}
+        }
+    }
+    Ok(relative)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::file_error::Failure;
+
+    fn parse_error(input: &str) -> SyncError {
+        let error = Exclusions::parse(input)
+            .err()
+            .expect("expected exclusion validation to fail");
+        let TransferError::Failed(Failure::Sync(error)) = error else {
+            panic!("expected a typed sync error, got {error:?}");
+        };
+        *error
+    }
+
+    #[test]
+    fn invalid_exclusions_keep_the_original_line_and_reason() {
+        use SyncExclusionProblem::*;
+        for (pattern, expected) in [
+            ("/cache", AbsolutePath),
+            ("./", MissingName),
+            (".//cache", EmptyComponent),
+            ("cache/", EmptyComponent),
+            ("cache/.", DotComponent),
+            ("../cache", DotComponent),
+            ("ca\0che", NulCharacter),
+        ] {
+            let input = format!("cache-ok\r\n\r\n{pattern}");
+            assert!(
+                matches!(
+                    parse_error(&input),
+                    SyncError::InvalidExclusion { line: 3, problem } if problem == expected
+                ),
+                "unexpected result for {pattern:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn exclusion_limits_count_utf8_bytes_and_distinct_normalized_rules() {
+        let byte_limit = Exclusions::MAX_TEXT_BYTES;
+        let mut text = "ř".repeat(byte_limit / 2);
+        assert_eq!(text.len(), byte_limit);
+        assert!(Exclusions::parse(&text).is_ok());
+        text.push('x');
+        assert!(matches!(
+            parse_error(&text),
+            SyncError::ExclusionsTextLimit(limit) if limit == byte_limit
+        ));
+
+        let mut lines: Vec<_> = (0..MAX_PATTERNS).map(|n| format!("item-{n}")).collect();
+        lines.push(String::new());
+        lines.push("ITEM-0".into());
+        let input = lines.join("\n");
+        assert_eq!(
+            Exclusions::parse(&input).unwrap().patterns().len(),
+            MAX_PATTERNS
+        );
+        lines.push("one-more".into());
+        assert!(matches!(
+            parse_error(&lines.join("\n")),
+            SyncError::ExclusionsCountLimit { limit: MAX_PATTERNS, line } if line == lines.len()
+        ));
     }
 }
