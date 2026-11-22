@@ -103,7 +103,7 @@ impl MutationMount {
             .map_err(|cause| MutationError::smb_mount(path, self.action, cause).into())
     }
 
-    fn changed(&self, path: &Path) -> TransferError {
+    pub(crate) fn changed(&self, path: &Path) -> TransferError {
         MutationError::smb_mount(path, self.action, SmbError::MountChanged(path.to_owned())).into()
     }
 }

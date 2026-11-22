@@ -5,7 +5,7 @@ mod tests;
 #[cfg(all(test, target_os = "macos"))]
 pub(super) use tests::{comparison_round_trip, comparison_sftp_denials};
 
-use super::{read_scope::ReadScope, transfer::canonical, Location, MAX_TREE_DEPTH};
+use super::{read_scope::ReadScope, Location, MAX_TREE_DEPTH};
 use crate::{
     file_error::{Failure, ScanError},
     operations::{Cancellation, Progress, TransferError},
@@ -114,8 +114,15 @@ pub(crate) fn compare_folders(
     let cancel = progress.cancellation();
     let mut open = |side: usize| {
         cancel.check()?;
-        progress.item(folders[side].path());
-        ReadScope::open(&folders[side]).map_err(|error| side_error(side, error))
+        let folder = &folders[side];
+        progress.item(folder.path());
+        #[cfg(target_os = "macos")]
+        let scope =
+            super::smb_output::guard(folder, crate::file_error::SmbMutationAction::CompareFolders)
+                .and_then(|mut mount| ReadScope::open_with_smb(folder, &mut mount));
+        #[cfg(not(target_os = "macos"))]
+        let scope = ReadScope::open(folder);
+        scope.map_err(|error| side_error(side, error))
     };
     let scopes = [open(0)?, open(1)?];
     let mut scan = Compare {
@@ -130,16 +137,8 @@ pub(crate) fn compare_folders(
     for (side, (scope, folder)) in scopes.iter().zip(folders).enumerate() {
         scan.cancel.check()?;
         scope
-            .verify_root()
+            .verify_selected_root(folder)
             .map_err(|error| side_error(side, error))?;
-        if canonical(folder).map_err(|error| side_error(side, error))?
-            != scope.parent.location.path()
-        {
-            return Err(side_error(
-                side,
-                ScanError::FolderUnavailable(folder.clone()).into(),
-            ));
-        }
     }
     Ok(scan.result)
 }
@@ -214,6 +213,13 @@ impl Compare<'_> {
                 ends[side] = Some(entry);
                 Ok(())
             });
+            #[cfg(target_os = "macos")]
+            if !matches!(&result, Err(TransferError::Cancelled)) {
+                self.cancel.check()?;
+                scope
+                    .verify_mount()
+                    .map_err(|error| side_error(side, error))?;
+            }
             if let Err(error) = result {
                 if matches!(error, TransferError::Cancelled)
                     || matches!(&error, TransferError::Failed(Failure::Scan(reason))
@@ -265,7 +271,16 @@ impl Compare<'_> {
                     Ok(true) => Same,
                     Ok(false) => Changed,
                     Err(TransferError::Cancelled) => return Err(TransferError::Cancelled),
-                    Err(error) => Unreadable(Box::new(error)),
+                    Err(error) => {
+                        #[cfg(target_os = "macos")]
+                        for (side, scope) in self.scopes.iter().enumerate() {
+                            self.cancel.check()?;
+                            scope
+                                .verify_mount()
+                                .map_err(|error| side_error(side, error))?;
+                        }
+                        Unreadable(Box::new(error))
+                    }
                 }
             }
             [Some(Entry::Link(left)), Some(Entry::Link(right))] => {
