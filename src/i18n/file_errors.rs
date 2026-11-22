@@ -14,7 +14,7 @@ use crate::file_error::{
 use crate::file_error::{
     CompatiblePlanError, DuplicateError, DuplicateRole, FilePromiseError, FileTemplateError,
     RemoteEditError, ResumeCheckError, ResumeCheckProblem, ResumeRecordEvent, ResumeRole,
-    ScanLimit, ScanLimitKind, SyncError, SyncFolderRole,
+    ScanLimit, ScanLimitKind, SyncDifference, SyncError, SyncFolderRole, SyncVerification,
 };
 use crate::file_error::{
     RecoveryRecordAction, RecoveryRecordError, RecoveryRecordProblem, RecoveryRecordSection,
@@ -1049,6 +1049,37 @@ fn metadata_error(error: &MetadataError) -> String {
 #[cfg(target_os = "macos")]
 fn sync_error(error: &SyncError) -> String {
     match error {
+        SyncError::Apply { completed, cause } => {
+            let error = file_error(cause);
+            if matches!(cause.as_ref(), TransferError::PublicationUnconfirmed(_)) {
+                crate::tr_format!(
+                    "Synchronization publication unconfirmed. Confirmed changes: {completed}.\n{error}",
+                    completed = completed, error = error
+                )
+            } else {
+                crate::tr_format!(
+                    "{error}\nCompleted: {completed}.",
+                    completed = completed, error = error
+                )
+            }
+        }
+        SyncError::VerificationMismatch { check, difference, original, inspected } => {
+            let label = match check {
+                SyncVerification::StagedCopy => text!("Временная копия не прошла проверку"),
+                SyncVerification::HeldOriginal => text!("Не удалось проверить отложенный оригинал"),
+            };
+            let detail = match difference {
+                SyncDifference::Missing => text!("Ожидаемый объект отсутствует"),
+                SyncDifference::Unexpected => text!("Найден лишний объект"),
+                SyncDifference::Changed => text!("Тип, содержимое или атрибуты объекта отличаются"),
+            };
+            crate::tr_format!(
+                "{label}. {detail}.\nOriginal · {original}\nTemporary path · {inspected}",
+                label = label, detail = detail,
+                original = original.display().escape_debug(),
+                inspected = inspected.display().escape_debug()
+            )
+        }
         SyncError::Folder { role, folder, cause } => {
             let role = match role {
                 SyncFolderRole::Source => text!("Исходная папка"),

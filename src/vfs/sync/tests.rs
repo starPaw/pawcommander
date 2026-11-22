@@ -353,6 +353,65 @@ fn snapshot_reports_disappearance_type_changes_and_retargeted_links() {
 }
 
 #[test]
+fn apply_reports_a_missing_source_after_a_confirmed_copy() {
+    use crate::result_history::Outcome;
+
+    let (_temporary, pair) = folders();
+    let [source, destination] = &pair;
+    let names = ["a-copy", "b-missing", "z-pending"];
+    for name in names {
+        fs::write(source.join(name).path(), name).unwrap();
+    }
+    let plan = SyncPlan::build(
+        pair.clone(),
+        false,
+        Exclusions::default(),
+        &mut Progress::default(),
+    )
+    .unwrap();
+    let holding = tempfile::tempdir().unwrap();
+    let held = holding.path().join("preserved");
+    let missing = source.join("b-missing");
+    let committed = destination.join("a-copy");
+    let old_path = missing.path().to_owned();
+    let held_path = held.clone();
+    let mut moved = false;
+    let cancel = Cancellation::at_checkpoint(move || {
+        if !moved && committed.path().is_file() {
+            fs::rename(&old_path, &held_path).unwrap();
+            moved = true;
+        }
+        false
+    });
+    let mut progress = Progress::with_cancellation(cancel);
+    let report = plan.apply(&mut progress);
+    assert_eq!(report.completed, 1);
+    let Err(TransferError::Failed(Failure::Access(error))) = report.result else {
+        panic!("expected the missing source's original access failure");
+    };
+    let source_root = fs::canonicalize(source.path()).unwrap();
+    assert_eq!(error.location.path(), source_root.join("b-missing"));
+    assert_eq!(error.action, AccessAction::ReadMetadata);
+    assert!(matches!(&error.cause, AccessCause::Local(cause)
+        if cause.raw_os_error() == Some(libc::ENOENT)
+    ));
+    let rows = &progress.results.items;
+    assert_eq!(
+        rows.iter().map(|row| row.outcome).collect::<Vec<_>>(),
+        [Outcome::Completed, Outcome::Failed, Outcome::NotStarted]
+    );
+    let reason = rows[1].reason.as_deref().unwrap();
+    assert!(reason.contains(&error.location.display()) && reason.contains("(os error 2)"));
+    assert_eq!(fs::read(held).unwrap(), b"b-missing");
+    assert_eq!(
+        fs::read(destination.join("a-copy").path()).unwrap(),
+        b"a-copy"
+    );
+    assert!(!destination.join("b-missing").path().exists());
+    assert!(!destination.join("z-pending").path().exists());
+}
+
+#[test]
 fn failed_replacement_and_restore_keep_both_causes_and_versions() {
     use crate::result_history::Outcome;
 
@@ -395,8 +454,18 @@ fn failed_replacement_and_restore_keep_both_causes_and_versions() {
     let mut progress = Progress::with_cancellation(cancel);
     let report = plan.apply(&mut progress);
     assert_eq!(report.completed, 1);
-    let Err(TransferError::PublicationUnconfirmed(Failure::Publication(error))) = report.result
+    let summary = SyncError::applying(report.completed, report.result.unwrap_err());
+    let TransferError::PublicationUnconfirmed(Failure::Sync(summary)) = summary else {
+        panic!("the job summary must preserve unconfirmed publication");
+    };
+    let SyncError::Apply {
+        completed: 1,
+        cause,
+    } = *summary
     else {
+        panic!("expected the number of confirmed changes");
+    };
+    let TransferError::PublicationUnconfirmed(Failure::Publication(error)) = *cause else {
         panic!("expected an unconfirmed publication");
     };
     let PublicationError::Retained {

@@ -164,6 +164,8 @@ formats! {
     "Synchronization complete. Completed: {completed}." => ("Синхронизация завершена. Выполнено: {completed}.", "Synchronizace byla dokončena. Hotovo: {completed}."),
     "Synchronization stopped. Completed: {completed}." => ("Синхронизация остановлена. Выполнено: {completed}.", "Synchronizace byla zastavena. Hotovo: {completed}."),
     "{error}\nCompleted: {completed}." => ("{error}\nВыполнено: {completed}.", "{error}\nHotovo: {completed}."),
+    "Synchronization publication unconfirmed. Confirmed changes: {completed}.\n{error}" => ("Публикация при синхронизации не подтверждена. Подтверждено операций: {completed}.\n{error}", "Zápis do cíle při synchronizaci není potvrzen. Potvrzené změny: {completed}.\n{error}"),
+    "{label}. {detail}.\nOriginal · {original}\nTemporary path · {inspected}" => ("{label}. {detail}.\nИсходный объект · {original}\nВременный путь · {inspected}", "{label}. {detail}.\nPůvodní položka · {original}\nDočasná cesta · {inspected}"),
     "Invalid SHA-256 manifest line {row}" => ("Некорректная строка манифеста SHA-256 №{row}", "Neplatný řádek {row} manifestu SHA-256"),
     "Duplicate path in manifest line {row}" => ("Повторяющийся путь в строке манифеста №{row}", "Duplicitní cesta na řádku {row} manifestu"),
     "Filename cannot be used in the manifest: {}" => ("Имя файла не подходит для манифеста: {}", "Název souboru nelze použít v manifestu: {}"),
