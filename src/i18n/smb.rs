@@ -41,7 +41,10 @@ pub(crate) fn smb_error(error: &SmbError) -> String {
                 PathAction::ProtectMount => text!("Не удалось защитить локальную папку под подключением SMB"),
                 PathAction::ReadShare => text!("Не удалось прочитать содержимое папки SMB"),
                 PathAction::ReadRecord => text!("Не удалось прочитать запись подключения SMB"),
+                PathAction::PrepareRecord => text!("Не удалось создать временную запись подключения SMB"),
                 PathAction::WriteRecord => text!("Не удалось записать сведения о подключении SMB"),
+                PathAction::SyncRecord => text!("Не удалось синхронизировать временную запись подключения SMB"),
+                PathAction::PublishRecord => text!("Не удалось сохранить запись подключения SMB"),
                 PathAction::Unmount => text!("Не удалось отключить папку SMB"),
                 PathAction::Cleanup => text!("Не удалось удалить локальный объект подключения SMB"),
             };
