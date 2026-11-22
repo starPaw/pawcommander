@@ -396,25 +396,30 @@ impl Results {
     }
 
     /// A successful private write remains unconfirmed until the root publishes.
-    pub fn staged(&mut self, source: &Location, error: Option<String>, cancelled: bool) {
+    pub(crate) fn staged(&mut self, source: &Location, error: Option<&TransferError>) {
         if let Some(&index) = self.nested_index.get(source) {
-            self.items[index].outcome = if cancelled {
-                Outcome::Cancelled
-            } else if error.is_some() {
-                Outcome::Failed
-            } else {
-                Outcome::PublicationUnconfirmed
+            self.items[index].outcome = match error {
+                Some(TransferError::Cancelled) => Outcome::Cancelled,
+                Some(TransferError::Failed(_)) => Outcome::Failed,
+                None | Some(TransferError::PublicationUnconfirmed(_)) => {
+                    Outcome::PublicationUnconfirmed
+                }
             };
-            self.reason(index, error.as_deref());
+            let reason = error.map(crate::i18n::file_error);
+            self.reason(index, reason.as_deref());
         }
     }
 
-    pub(crate) fn staged_with_error(&mut self, source: &Location, error: &TransferError) {
-        self.staged(
-            source,
-            Some(crate::i18n::file_error(error)),
-            matches!(error, TransferError::Cancelled),
-        );
+    pub(crate) fn staged_io(&mut self, source: &Location, error: Option<&io::Error>) {
+        if let Some(&index) = self.nested_index.get(source) {
+            self.items[index].outcome = match error {
+                Some(error) if TransferError::is_cancelled_io(error) => Outcome::Cancelled,
+                Some(_) => Outcome::Failed,
+                None => Outcome::PublicationUnconfirmed,
+            };
+            let reason = error.map(crate::i18n::access_io_message);
+            self.reason(index, reason.as_deref());
+        }
     }
 
     /// A root rename does not itself establish each descendant's identity.
@@ -2023,7 +2028,7 @@ mod tests {
             results.items[1].source,
             selected.join("file-000000").display()
         );
-        results.staged(&physical.join("file-000000"), None, false);
+        results.staged(&physical.join("file-000000"), None);
         results.record(&selected, None, Outcome::Completed, None);
         let record = results
             .finish("copy".into(), 0, &Ok("Copied".into()))
@@ -2051,7 +2056,7 @@ mod tests {
         results.plan([(root.clone(), Some("/target".into()))]);
         results.begin(&root);
         results.descendants(&root, &local("/target"), [child.clone()].into_iter());
-        results.staged(&child, None, false);
+        results.staged(&child, None);
         assert_eq!(results.items[1].outcome, Outcome::PublicationUnconfirmed);
         results.record(
             &root,

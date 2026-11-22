@@ -24,7 +24,6 @@ use crate::file_error::{
     RecoveryNotice, RecoveryRecordError, RecoveryRecordProblem, ResumeCheckProblem, ResumeRole,
     StagingCleanupError, StagingError,
 };
-use crate::i18n::text;
 use crate::operations::{AccessStream, Cancellation, HashRead, Progress, TransferError};
 use crate::result_history::Outcome;
 use journal::{Event, Ticket};
@@ -1042,10 +1041,7 @@ pub(crate) fn resume(
         }
         Ok(completion)
     })();
-    let mut reason = result.as_ref().err().map(crate::i18n::file_error);
     let metadata_warning = progress.results.active_metadata_warning();
-    let partial_metadata =
-        text!("Даты или права доступа сохранены частично. Подробности указаны в строках журнала.");
     let outcome = match (&result, committed) {
         (_, true) if moving && !removed => Outcome::CopiedSourceRemaining,
         (_, true) if result.is_err() || metadata_warning => Outcome::CompletedWithWarning,
@@ -1058,12 +1054,13 @@ pub(crate) fn resume(
         (_, false) if progress.partial_copy_retained => Outcome::PartialCopyRetained,
         _ => Outcome::Failed,
     };
-    if outcome == Outcome::CompletedWithWarning && reason.is_none() {
-        reason = Some(partial_metadata.into());
-    }
-    progress
-        .results
-        .record(&paths.source, None, outcome, reason);
+    progress.results.record_transfer_item(
+        &paths.source,
+        outcome,
+        result.as_ref().err(),
+        None,
+        committed && metadata_warning,
+    );
     result.map(|kind| ResumeCompletion {
         kind,
         moving,
