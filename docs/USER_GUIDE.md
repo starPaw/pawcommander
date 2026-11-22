@@ -231,6 +231,8 @@ Select **Save password in Keychain** to keep the password after a successful con
 
 Use **Copy** to download files and folders from an SMB share. For uploads, select regular files and choose **Keep both** when an existing name matches. If a connection drops, wait for the operation to report its outcome and check the destination before retrying. An interrupted upload can leave an incomplete file with the chosen name. PawCommander preserves the source and existing destination files.
 
+**Create archive** can save a new ZIP or TAR at an unused name on SMB. **Extract** can save individual files on SMB and offers **Keep both** for matching names. Use a local or SFTP destination for archive folders and a local folder for editing an existing archive.
+
 ## Custom actions on macOS
 
 Choose **Settings → Tools → Custom actions…** to add a named action with an absolute path to its executable. Enter one argument per row. Use `{file}` in an argument for exactly one selected item, `{files}` on its own for one argument per selected item, or `{folder}` for the current folder. Use `{{` and `}}` to enter literal braces.

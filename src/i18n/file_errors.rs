@@ -1521,6 +1521,23 @@ fn archive_error(error: &ArchiveError) -> String {
             "{} · {destination}",
             text!("Замена доступна только для двух разных обычных файлов.")
         ),
+        #[cfg(target_os = "macos")]
+        ArchiveError::SmbEditingUnavailable(archive) => crate::tr_format!(
+            "Safe archive replacement is unavailable on SMB at {archive}.",
+            archive = archive
+        ),
+        #[cfg(target_os = "macos")]
+        ArchiveError::SmbExtractionFolder { entry, destination } => crate::tr_format!(
+            "Cannot extract folder {entry} to SMB destination {destination}.",
+            entry = entry,
+            destination = destination
+        ),
+        #[cfg(target_os = "macos")]
+        ArchiveError::StageOutput { target, source } => crate::tr_format!(
+            "Could not prepare temporary data for {target} ({error}).",
+            target = target,
+            error = source
+        ),
         ArchiveError::EntryPath { entry, source } => {
             let reason = match source {
                 ArchiveMemberError::InvalidPath => text!("Недопустимый путь внутри архива"),
@@ -2409,6 +2426,10 @@ fn mutation_error(error: &MutationError, unconfirmed: bool) -> String {
                 SmbMutationAction::CreateLink => text!("Не удалось создать ссылку"),
                 SmbMutationAction::InspectLinkTarget => text!("Не удалось проверить цель ссылки"),
                 SmbMutationAction::Undo => text!("Не удалось отменить изменение"),
+                SmbMutationAction::ReadArchive => text!("Не удалось прочитать данные для архива"),
+                SmbMutationAction::CreateArchive => text!("Не удалось создать архив"),
+                SmbMutationAction::ExtractArchive => text!("Не удалось распаковать архив"),
+                SmbMutationAction::EditArchive => text!("Не удалось изменить архив"),
             };
             crate::tr_format!(
                 "{action} at {path} ({error})",

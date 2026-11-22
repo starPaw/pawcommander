@@ -4,6 +4,8 @@
 mod archive_create;
 mod archive_edit;
 mod archive_extract;
+#[cfg(target_os = "macos")]
+mod archive_smb;
 mod batch_rename;
 mod checksum;
 #[cfg(target_os = "macos")]

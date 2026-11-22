@@ -21,6 +21,18 @@ pub(crate) enum ArchiveError {
     ExtractionLimit(Location),
     ExtractionDestinationChanged(Location),
     ExtractionReplaceUnavailable(Location),
+    #[cfg(target_os = "macos")]
+    SmbEditingUnavailable(Location),
+    #[cfg(target_os = "macos")]
+    SmbExtractionFolder {
+        entry: Location,
+        destination: Location,
+    },
+    #[cfg(target_os = "macos")]
+    StageOutput {
+        target: Location,
+        source: io::Error,
+    },
     EntryPath {
         entry: Location,
         source: ArchiveMemberError,
@@ -54,6 +66,8 @@ pub(crate) enum ArchiveError {
 impl ArchiveError {
     pub(crate) fn io_cause(&self) -> Option<&io::Error> {
         match self {
+            #[cfg(target_os = "macos")]
+            Self::StageOutput { source, .. } => Some(source),
             Self::AddEntry { source, .. }
             | Self::Read { source, .. }
             | Self::ExtractEntry { source, .. }
@@ -101,6 +115,24 @@ impl fmt::Display for ArchiveError {
             }
             Self::ExtractionReplaceUnavailable(location) => {
                 write!(f, "Cannot replace {location} during extraction")
+            }
+            #[cfg(target_os = "macos")]
+            Self::SmbEditingUnavailable(location) => {
+                write!(
+                    f,
+                    "Safe archive replacement is unavailable on SMB at {location}"
+                )
+            }
+            #[cfg(target_os = "macos")]
+            Self::SmbExtractionFolder { entry, destination } => {
+                write!(
+                    f,
+                    "Cannot extract folder {entry} to SMB destination {destination}"
+                )
+            }
+            #[cfg(target_os = "macos")]
+            Self::StageOutput { target, source } => {
+                write!(f, "Could not prepare temporary data for {target}: {source}")
             }
             Self::EntryPath { entry, source } => write!(f, "{entry}: {source}"),
             Self::AddEntry {

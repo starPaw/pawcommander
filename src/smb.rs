@@ -479,6 +479,14 @@ pub(crate) fn open_upload(
     target: &Location,
     expected_mount: Option<[i32; 2]>,
 ) -> Result<File, TransferError> {
+    let parent = open_upload_parent(target, expected_mount)?;
+    create_upload_at(target, &parent)
+}
+
+pub(crate) fn open_upload_parent(
+    target: &Location,
+    expected_mount: Option<[i32; 2]>,
+) -> Result<File, TransferError> {
     let invalid = || {
         AccessError::new(
             target,
@@ -494,7 +502,6 @@ pub(crate) fn open_upload(
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
         .open(parent_path)
         .map_err(|error| AccessError::new(&directory, AccessAction::OpenFile, error))?;
-    let parent_fd = parent.as_raw_fd();
     let check_volume = |error| AccessError::new(&directory, AccessAction::CheckSmbVolume, error);
     // Check the opened directory and create relative to that handle so an
     // unmount or parent rename cannot redirect the upload to local storage.
@@ -510,6 +517,19 @@ pub(crate) fn open_upload(
     if mount.is_none() {
         return Err(check_volume(io::Error::from(io::ErrorKind::Unsupported)).into());
     }
+    Ok(parent)
+}
+
+/// The caller supplies the open, verified SMB parent.
+pub(crate) fn create_upload_at(target: &Location, parent: &File) -> Result<File, TransferError> {
+    let invalid = || {
+        AccessError::new(
+            target,
+            AccessAction::CreateFile,
+            io::Error::from(io::ErrorKind::InvalidInput),
+        )
+    };
+    let path = target.local().ok_or_else(invalid)?;
     let name = CString::new(path.file_name().ok_or_else(invalid)?.as_bytes()).map_err(|error| {
         AccessError::new(
             target,
@@ -519,7 +539,7 @@ pub(crate) fn open_upload(
     })?;
     let fd = unsafe {
         libc::openat(
-            parent_fd,
+            parent.as_raw_fd(),
             name.as_ptr(),
             libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC,
             0o600 as c_int,

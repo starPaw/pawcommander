@@ -26,6 +26,8 @@ pub(crate) struct Extraction<'a> {
     stamp: Metadata,
     protected: ProtectedZip,
     password: Option<&'a str>,
+    #[cfg(target_os = "macos")]
+    mount: crate::smb::MutationMount,
 }
 
 pub(crate) struct SelectedTree {
@@ -49,6 +51,24 @@ impl SelectedEntry {
 
 impl<'a> Extraction<'a> {
     pub(super) fn open(path: &Path, password: Option<&'a str>) -> Result<Self, TransferError> {
+        #[cfg(target_os = "macos")]
+        let mount = {
+            use crate::{file_error::SmbMutationAction, smb::MutationMount};
+
+            let mut mount = MutationMount::new(SmbMutationAction::ReadArchive);
+            mount.check(path)?;
+            let resolved = path.canonicalize().ok().or_else(|| {
+                path.parent()
+                    .zip(path.file_name())
+                    .and_then(|(parent, name)| {
+                        parent.canonicalize().ok().map(|parent| parent.join(name))
+                    })
+            });
+            if let Some(resolved) = resolved.filter(|resolved| resolved != path) {
+                mount.check(&resolved)?;
+            }
+            mount
+        };
         let (file, stamp) = open_regular(path).map_err(|source| {
             AccessError::new(
                 &Location::Local(path.to_owned()),
@@ -56,12 +76,16 @@ impl<'a> Extraction<'a> {
                 source,
             )
         })?;
+        #[cfg(target_os = "macos")]
+        mount.verify_file(&file, path)?;
         Ok(Self {
             path: path.into(),
             file,
             stamp,
             protected: ProtectedZip::default(),
             password: password.filter(|password| !password.is_empty()),
+            #[cfg(target_os = "macos")]
+            mount,
         })
     }
 
@@ -182,6 +206,8 @@ impl<'a> Extraction<'a> {
     }
 
     pub(crate) fn verify_source(&self) -> Result<(), TransferError> {
+        #[cfg(target_os = "macos")]
+        self.mount.recheck()?;
         if self.source_matches().map_err(|source| {
             AccessError::new(&self.location(), AccessAction::ReadMetadata, source)
         })? {

@@ -9,7 +9,7 @@ use super::{
     Location,
 };
 use crate::{
-    archive::{Extraction, SelectedTree},
+    archive::{Extraction, SelectedEntry, SelectedTree},
     conflict::{Answer, Conflict, Decision, EntryDetails},
     file_error::{ArchiveError, LocalPathAction, MutationError, ReplacementRefusal},
     fs_ops,
@@ -17,6 +17,8 @@ use crate::{
     result_history::Outcome,
 };
 use std::{collections::HashSet, fs};
+#[cfg(target_os = "macos")]
+use {super::archive_smb, crate::file_error::SmbMutationAction};
 
 #[cfg(test)]
 mod tests;
@@ -84,12 +86,19 @@ fn extract(
         )
     }));
     let cancel = progress.cancellation();
+    #[cfg(target_os = "macos")]
+    let mut mount = {
+        cancel.check()?;
+        archive_smb::guard(directory, SmbMutationAction::ExtractArchive)?
+    };
     if let Some(path) = sources.first().and_then(Location::archive_source) {
         progress.item(path);
     }
     let (mut archive, trees) = Extraction::prepare(sources, password, &cancel)?;
     totals.selected = trees.len();
     let parent = Parent::capture(directory)?;
+    #[cfg(target_os = "macos")]
+    let smb_destination = archive_smb::is_destination(&mut mount, &parent.location)?;
     let targets = trees
         .iter()
         .map(|tree| {
@@ -102,14 +111,22 @@ fn extract(
     let mut count = 0;
     for target in &targets {
         cancel.check()?;
+        #[cfg(target_os = "macos")]
+        if !mount.is_owned() {
+            archive_smb::check(&mut mount, target)?;
+        }
         count += usize::from(entry_metadata(target)?.is_some());
     }
+    #[cfg(target_os = "macos")]
+    let smb_destination = smb_destination || mount.is_owned();
     let mut index = 0;
     let mut group = None;
     for (tree, mut target) in trees.into_iter().zip(targets) {
         cancel.check()?;
         progress.item(tree.source.path());
         progress.results.begin(&tree.source);
+        #[cfg(target_os = "macos")]
+        mount.recheck()?;
         verify_destination(&parent, directory)?;
         archive.verify_source()?;
         let mut replace = None;
@@ -128,6 +145,12 @@ fn extract(
                     EntryMetadata::Remote(_) => tree.source.archive_source() == Some(target.path()),
                 };
                 would_overwrite_archive.then_some(ReplacementRefusal::WouldOverwriteArchive)
+            };
+            #[cfg(target_os = "macos")]
+            let replacement_refusal = if smb_destination {
+                Some(ReplacementRefusal::Smb)
+            } else {
+                replacement_refusal
             };
             let decision = if let Some(saved) =
                 group.filter(|&saved| saved != Decision::Replace || replacement_refusal.is_none())
@@ -167,6 +190,11 @@ fn extract(
                 }
                 Decision::Cancel => return Err(TransferError::Cancelled),
                 Decision::KeepBoth => {
+                    #[cfg(target_os = "macos")]
+                    {
+                        mount.recheck()?;
+                        archive.verify_source()?;
+                    }
                     target = keep_both_name(&target, &reserved, &cancel)?;
                     reserved.insert(target.clone());
                 }
@@ -177,26 +205,49 @@ fn extract(
             }
         }
         progress.results.target(&tree.source, target.display());
-        if let Some(path) = parent.location.local() {
-            fs_ops::check_local_copy_space(tree.bytes, path)?;
-        }
         let mut published = false;
-        let result = with_staging_typed(&target, Some(&cancel), |staging, _| {
-            let payload = staging.join("payload");
-            unpack_tree(&mut archive, &tree, &payload, &target, progress)?;
-            progress.item(target.path());
-            archive.verify_source()?;
-            verify_destination(&parent, directory)?;
-            cancel.check()?;
-            publish_item_typed(
-                &payload,
-                &target,
-                replace.as_ref(),
-                |_| {},
-                || Ok(()),
-                || published = true,
-            )
-        });
+        let result = (|| {
+            #[cfg(target_os = "macos")]
+            if smb_destination {
+                mount.recheck()?;
+                archive.verify_source()?;
+                let entry = &tree.entries[0];
+                if entry.is_dir() {
+                    return Err(ArchiveError::SmbExtractionFolder {
+                        entry: tree.source.clone(),
+                        destination: target.clone(),
+                    }
+                    .into());
+                }
+                let staged = archive_smb::spool(&target, &cancel, |output| {
+                    unpack_file(&mut archive, entry, &tree.source, &target, output, progress)
+                })?;
+                archive.verify_source()?;
+                verify_destination(&parent, directory)?;
+                archive_smb::publish(staged, &tree.source, &target, &parent, &mount, progress)?;
+                published = true;
+                return Ok(());
+            }
+            if let Some(path) = parent.location.local() {
+                fs_ops::check_local_copy_space(tree.bytes, path)?;
+            }
+            with_staging_typed(&target, Some(&cancel), |staging, _| {
+                let payload = staging.join("payload");
+                unpack_tree(&mut archive, &tree, &payload, &target, progress)?;
+                progress.item(target.path());
+                archive.verify_source()?;
+                verify_destination(&parent, directory)?;
+                cancel.check()?;
+                publish_item_typed(
+                    &payload,
+                    &target,
+                    replace.as_ref(),
+                    |_| {},
+                    || Ok(()),
+                    || published = true,
+                )
+            })
+        })();
         let outcome = match &result {
             Ok(()) => Outcome::Completed,
             Err(_) if published => Outcome::CompletedWithWarning,
@@ -256,16 +307,27 @@ fn unpack_tree(
                 })?;
             }
         } else {
-            let mut file = StagedFile::open(&path, cancel.clone())?;
-            archive
-                .copy_entry(entry, member.path(), &mut file, progress)
-                .map_err(|source| ArchiveError::ExtractEntry {
-                    entry: member,
-                    destination: descend(target),
-                    source,
-                })?;
-            file.close()?;
+            let file = StagedFile::open(&path, cancel.clone())?;
+            unpack_file(archive, entry, &member, &descend(target), file, progress)?;
         }
     }
     Ok(())
+}
+
+fn unpack_file(
+    archive: &mut Extraction<'_>,
+    entry: &SelectedEntry,
+    member: &Location,
+    destination: &Location,
+    mut file: StagedFile,
+    progress: &mut Progress,
+) -> Result<(), TransferError> {
+    archive
+        .copy_entry(entry, member.path(), &mut file, progress)
+        .map_err(|source| ArchiveError::ExtractEntry {
+            entry: member.clone(),
+            destination: destination.clone(),
+            source,
+        })?;
+    file.close()
 }

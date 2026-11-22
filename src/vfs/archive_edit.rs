@@ -15,6 +15,8 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
+#[cfg(target_os = "macos")]
+use {super::archive_smb, crate::file_error::SmbMutationAction};
 
 pub(crate) enum ArchiveEdit {
     Add {
@@ -75,10 +77,16 @@ fn rebuild(
         .ok_or_else(|| ArchiveError::UnsupportedFormat(source.clone()))?;
     let changed = || ArchiveError::SourceChanged(source.clone());
     let directory = source.parent().ok_or_else(changed)?;
+    #[cfg(target_os = "macos")]
+    let mut mount = archive_smb::guard(source, SmbMutationAction::EditArchive)?;
     let parent = Parent::capture(&directory)?;
     let target = parent
         .location
         .join(source.path().file_name().ok_or_else(changed)?);
+    #[cfg(target_os = "macos")]
+    if archive_smb::is_destination(&mut mount, &target)? {
+        return Err(ArchiveError::SmbEditingUnavailable(target).into());
+    }
     let expected = entry_metadata(&target)?
         .filter(EntryMetadata::is_file)
         .ok_or_else(changed)?;
@@ -119,6 +127,8 @@ fn rebuild(
                         .all(|source| source.parent().as_ref() == Some(origin))
             })
             .ok_or(ArchiveError::SelectOtherPane)?;
+        #[cfg(target_os = "macos")]
+        additions.check_source(&origin)?;
         let origin_parent = Parent::capture(&origin)?;
         additions.capture_sources(sources, &origin_parent.location, folder, progress, &cancel)?;
         if additions.contains_file(&expected) {

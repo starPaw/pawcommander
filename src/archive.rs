@@ -6,7 +6,7 @@ mod protected_zip;
 mod writer;
 
 pub(crate) use edit::{EditableArchive, MemberEdit};
-pub(crate) use extraction::{Extraction, SelectedTree};
+pub(crate) use extraction::{Extraction, SelectedEntry, SelectedTree};
 pub(crate) use integrity::{verify_archive, ArchiveVerification};
 pub(crate) use writer::{ArchiveWriter, Attributes, CreationLimits};
 
