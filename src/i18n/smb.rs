@@ -1,6 +1,6 @@
 use super::text;
 use crate::file_error::CredentialFailure;
-use crate::smb::{MountFailure, PasswordAction, PathAction, SmbError};
+use crate::smb::{MountFailure, PasswordAction, PathAction, RecordProblem, SmbError};
 
 pub(crate) fn smb_error(error: &SmbError) -> String {
     let invalid = || text!("Введите SMB-адрес вида smb://сервер/папка без учётных данных.");
@@ -33,12 +33,14 @@ pub(crate) fn smb_error(error: &SmbError) -> String {
             let action = match action {
                 PathAction::CreateStorage => text!("Не удалось создать папку данных SMB"),
                 PathAction::ResolveStorage => text!("Не удалось определить путь к папке данных SMB"),
+                PathAction::ReadStorage => text!("Не удалось прочитать папку подключений SMB"),
                 PathAction::AllocateMount => text!("Не удалось выделить папку подключения SMB"),
                 PathAction::PrepareMount => text!("Не удалось подготовить точку монтирования SMB"),
                 PathAction::OpenMount => text!("Не удалось открыть локальную точку монтирования SMB"),
                 PathAction::InspectMount => text!("Не удалось проверить точку монтирования SMB"),
                 PathAction::ProtectMount => text!("Не удалось защитить локальную папку под подключением SMB"),
                 PathAction::ReadShare => text!("Не удалось прочитать содержимое папки SMB"),
+                PathAction::ReadRecord => text!("Не удалось прочитать запись подключения SMB"),
                 PathAction::WriteRecord => text!("Не удалось записать сведения о подключении SMB"),
                 PathAction::Unmount => text!("Не удалось отключить папку SMB"),
                 PathAction::Cleanup => text!("Не удалось удалить локальный объект подключения SMB"),
@@ -49,6 +51,22 @@ pub(crate) fn smb_error(error: &SmbError) -> String {
             "{action} at {path} ({error})",
             action = text!("Не удалось подготовить сведения о подключении SMB"), path = path.display(), error = source
         ),
+        SmbError::InvalidRecord { path, problem } => {
+            let error = match problem {
+                RecordProblem::NotRegular => text!("Ожидался обычный файл.").into(),
+                RecordProblem::TooLarge { limit } => crate::tr_format!(
+                    "The connection record exceeds {limit} bytes.", limit = limit
+                ),
+                RecordProblem::Json(source) => source.to_string(),
+                RecordProblem::Endpoint(source) => smb_error(source),
+                RecordProblem::EndpointMismatch => text!("Данные ресурса не совпадают с его нормализованным адресом.").into(),
+            };
+            crate::tr_format!("Invalid SMB connection record at {path}. {error}", path = path.display(), error = error)
+        }
+        SmbError::UnrecordedMount { mount, record } => crate::tr_format!(
+            "SMB is mounted at {mount}. The connection record {record} is missing.", mount = mount.display(), record = record.display()
+        ),
+        SmbError::DiscoveryWorkerStart(source) => crate::tr_format!("Could not start SMB discovery ({error})", error = source),
         SmbError::Password { action, address, cause } => {
             let label = match action {
                 PasswordAction::Read => text!("Не удалось прочитать пароль SMB из Связки ключей"),

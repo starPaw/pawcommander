@@ -5,7 +5,7 @@ use crate::vfs::Location;
 use serde::{Deserialize, Serialize};
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::fs::{self, File, OpenOptions, Permissions};
-use std::io::{self, Read};
+use std::io;
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::{
@@ -15,8 +15,10 @@ use std::os::unix::{
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
+mod discovery;
 mod error;
-pub(crate) use error::{MountFailure, PasswordAction, PathAction, SmbError};
+pub(crate) use discovery::{Discovery, DiscoveryWarnings};
+pub(crate) use error::{MountFailure, PasswordAction, PathAction, RecordProblem, SmbError};
 
 const SERVICE: &str = "dev.pawcommander.smb.v1";
 const RECORD: &str = "connection.json";
@@ -163,6 +165,7 @@ fn connect_in(
     remember: bool,
 ) -> Result<Connected, SmbError> {
     if let Some(share) = discover_in(root)
+        .shares
         .into_iter()
         .find(|share| share.endpoint() == &endpoint)
     {
@@ -268,50 +271,19 @@ fn mount_new(
     })
 }
 
-pub(crate) fn discover() -> Vec<MountedShare> {
-    root().map_or_else(|_| Vec::new(), |root| discover_in(&root))
+pub(crate) fn discover() -> Discovery {
+    match root() {
+        Ok(root) => discover_in(&root),
+        Err(error) => {
+            let mut result = Discovery::default();
+            result.warnings.push(error);
+            result
+        }
+    }
 }
 
-fn discover_in(root: &Path) -> Vec<MountedShare> {
-    let Ok(root) = root.canonicalize() else {
-        return Vec::new();
-    };
-    let Ok(entries) = fs::read_dir(root) else {
-        return Vec::new();
-    };
-    entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            if !entry.file_name().as_bytes().starts_with(b"connection-")
-                || !entry.file_type().ok()?.is_dir()
-            {
-                return None;
-            }
-            let dir = entry.path();
-            let mut data = Vec::new();
-            File::open(dir.join(RECORD))
-                .ok()?
-                .take(16 * 1024)
-                .read_to_end(&mut data)
-                .ok()?;
-            let record: Record = serde_json::from_slice(&data).ok()?;
-            let endpoint = Endpoint::parse(
-                &record.endpoint.address,
-                record.endpoint.user.as_deref().unwrap_or(""),
-                record.endpoint.user.is_none(),
-            )
-            .ok()?;
-            let path = endpoint.mountpoint(&dir);
-            if endpoint != record.endpoint || mount_id(&path, true).ok().flatten()? != record.id {
-                return None;
-            }
-            Some(MountedShare {
-                path,
-                base: dir,
-                record,
-            })
-        })
-        .collect()
+fn discover_in(root: &Path) -> Discovery {
+    discovery::scan(root, |path| mount_id(path, true))
 }
 
 fn cleanup_failed_mount(base: &Path, path: &Path) -> Result<(), SmbError> {

@@ -76,7 +76,8 @@ enum Change {
 
 pub(super) struct Connections {
     pub(super) shares: Vec<smb::MountedShare>,
-    discovery: Option<Receiver<Vec<smb::MountedShare>>>,
+    discovery: Option<Receiver<smb::Discovery>>,
+    discovery_warnings: smb::DiscoveryWarnings,
     pending: Option<Receiver<Result<Change, smb::SmbError>>>,
     last: Address,
 }
@@ -84,14 +85,22 @@ pub(super) struct Connections {
 impl Connections {
     pub(super) fn load(ctx: &egui::Context) -> Self {
         // Unit tests use isolated application state. The native fixture covers discovery.
+        let mut discovery_warnings = smb::DiscoveryWarnings::default();
         let discovery = if cfg!(test) {
             None
         } else {
-            spawn(ctx, smb::discover).ok()
+            match spawn(ctx, smb::discover) {
+                Ok(receiver) => Some(receiver),
+                Err(error) => {
+                    discovery_warnings.push(smb::SmbError::DiscoveryWorkerStart(error));
+                    None
+                }
+            }
         };
         Self {
             shares: Vec::new(),
             discovery,
+            discovery_warnings,
             pending: None,
             last: Address::default(),
         }
@@ -177,6 +186,39 @@ impl PawCommander {
                 }
             });
         }
+        let warnings = &self.smb.discovery_warnings;
+        if !warnings.entries.is_empty() {
+            let title = crate::tr_format!(
+                "SMB warnings ({count})",
+                count = warnings.entries.len().saturating_add(warnings.omitted)
+            );
+            let width =
+                (ui.available_width() - ui.spacing().indent - ui.spacing().button_padding.x)
+                    .max(0.0);
+            let label = egui::WidgetText::from(title).into_galley(
+                ui,
+                Some(egui::TextWrapMode::Wrap),
+                width,
+                egui::TextStyle::Button,
+            );
+            egui::CollapsingHeader::new(label)
+                .id_salt("smb_discovery_warnings")
+                .show(ui, |ui| {
+                    for error in &warnings.entries {
+                        ui.add(
+                            egui::Label::new(crate::i18n::smb_error(error))
+                                .selectable(true)
+                                .wrap(),
+                        );
+                    }
+                    if warnings.omitted > 0 {
+                        ui.label(crate::tr_format!(
+                            "{count} additional warnings omitted",
+                            count = warnings.omitted
+                        ));
+                    }
+                });
+        }
     }
 
     pub(super) fn connect_smb(&mut self, form: Form, ctx: &egui::Context) {
@@ -248,13 +290,19 @@ impl PawCommander {
     pub(super) fn poll_smb(&mut self, ctx: &egui::Context) {
         if let Some(discovery) = &self.smb.discovery {
             match discovery.try_recv() {
-                Ok(shares) => {
+                Ok(report) => {
                     self.smb.discovery = None;
-                    for share in shares {
+                    self.smb.discovery_warnings = report.warnings;
+                    for share in report.shares {
                         self.smb.add(share);
                     }
                 }
-                Err(TryRecvError::Disconnected) => self.smb.discovery = None,
+                Err(TryRecvError::Disconnected) => {
+                    self.smb.discovery = None;
+                    self.smb
+                        .discovery_warnings
+                        .push(smb::SmbError::WorkerDisconnected);
+                }
                 Err(TryRecvError::Empty) => {}
             }
         }
