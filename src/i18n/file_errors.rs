@@ -1,12 +1,12 @@
 use super::text;
 use crate::file_error::{
-    AccessAction, AccessCause, AccessError, ArchiveError, ArchiveMemberError, ChecksumError,
-    ConflictError, ConnectionError, Failure, HostKeyError, KnownHostEntryError, KnownHostsError,
-    ListingError, ListingErrorKind, LocalPathAction, ManifestLineError, MetadataError,
-    MetadataField, MetadataWarning, MutationError, PathError, PermissionError, PinError,
-    PreviewError, ProbeAction, PublicationError, RecoveryNotice, ReplacementRefusal, RetryError,
-    RetryProblem, ScanError, SearchError, SpaceError, SshStage, StagingCleanupError, StagingError,
-    StagingRecordAction, TransferPlanError,
+    AccessAction, AccessCause, AccessError, ArchiveError, ArchiveMemberError, BatchRenameError,
+    ChecksumError, ConflictError, ConnectionError, Failure, HostKeyError, KnownHostEntryError,
+    KnownHostsError, ListingError, ListingErrorKind, LocalPathAction, ManifestLineError,
+    MetadataError, MetadataField, MetadataWarning, MutationError, PathError, PermissionError,
+    PinError, PreviewError, ProbeAction, PublicationError, RecoveryNotice, ReplacementRefusal,
+    RetryError, RetryProblem, ScanError, SearchError, SpaceError, SshStage, StagingCleanupError,
+    StagingError, StagingRecordAction, TransferPlanError,
 };
 #[cfg(target_os = "macos")]
 use crate::file_error::{
@@ -51,6 +51,7 @@ pub(crate) fn file_error(error: &TransferError) -> String {
                 Failure::Listing(error) => listing_error(error),
                 Failure::ConflictClosed => text!("Диалог конфликта закрыт").into(),
                 Failure::Conflict(error) => conflict_error(error),
+                Failure::BatchRename(error) => batch_rename_error(error),
                 #[cfg(target_os = "macos")]
                 Failure::FilePromise(error) => file_promise_error(error),
                 #[cfg(target_os = "macos")]
@@ -73,6 +74,60 @@ pub(crate) fn file_error(error: &TransferError) -> String {
             }
         }
         TransferError::Cancelled => crate::tr_format!("Operation cancelled"),
+    }
+}
+
+fn batch_rename_error(error: &BatchRenameError) -> String {
+    use BatchRenameError::*;
+
+    match error {
+        SelectionCount => text!("Выберите от 2 до 100 000 элементов.").into(),
+        SelectionFolder => {
+            text!("Для массового переименования выберите элементы в одной папке.").into()
+        }
+        RuleLength => text!("Шаблон или регулярное выражение слишком длинные.").into(),
+        InvalidTemplate => {
+            text!("В шаблоне допустимы {stem}, {ext} и {n}. Скобки можно удвоить.").into()
+        }
+        InvalidRegex(error) => {
+            crate::tr_format!("Invalid regular expression: {error}", error = error)
+        }
+        NameEncoding => text!("Массовое переименование требует имена в UTF-8.").into(),
+        NameLength => text!("Новое имя слишком длинное.").into(),
+        InvalidName(_) => text!("Новое имя должно быть допустимым именем файла или папки.").into(),
+        DuplicateName => text!("Несколько элементов получают совпадающее имя.").into(),
+        PreviewRequired => text!("Сначала проверьте новые имена.").into(),
+        Changed(path) => crate::tr_format!(
+            "An item changed or disappeared after selection: {source}",
+            source = path
+        ),
+        Occupied { target, source } => {
+            let message = crate::tr_format!("Name already exists: {target}", target = target);
+            match source {
+                Some(source) => format!("{message} ({source})"),
+                None => message,
+            }
+        }
+        UndoLimit(path) => crate::tr_format!(
+            "The rename of {source} exceeds the safe undo limit. Select fewer items.",
+            source = path
+        ),
+        Unverified { from, to, cause } => crate::tr_format!(
+            "Could not verify the rename from {source} to {target}. {error}",
+            source = from,
+            target = to,
+            error = file_error(cause)
+        ),
+        Incomplete {
+            completed,
+            total,
+            cause,
+        } => crate::tr_format!(
+            "Renamed: {completed} of {total}. {error}",
+            completed = completed,
+            total = total,
+            error = file_error(cause)
+        ),
     }
 }
 

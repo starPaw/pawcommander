@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::{error::Error, fmt, io, path::PathBuf, str::Utf8Error};
 
 mod archive;
+mod batch_rename;
 mod checksum;
 #[cfg(target_os = "macos")]
 mod compatible_plan;
@@ -24,6 +25,7 @@ mod staging;
 mod sync;
 mod transfer_plan;
 pub(crate) use archive::ArchiveError;
+pub(crate) use batch_rename::BatchRenameError;
 pub(crate) use checksum::{ChecksumError, ManifestLineError};
 #[cfg(target_os = "macos")]
 pub(crate) use compatible_plan::CompatiblePlanError;
@@ -75,6 +77,7 @@ pub(crate) enum Failure {
     Listing(Box<ListingError>),
     ConflictClosed,
     Conflict(Box<ConflictError>),
+    BatchRename(Box<BatchRenameError>),
     #[cfg(target_os = "macos")]
     FilePromise(Box<FilePromiseError>),
     #[cfg(target_os = "macos")]
@@ -125,6 +128,7 @@ impl Failure {
             Self::ComparisonPane { cause, .. } => Some(cause.as_ref()),
             Self::Listing(error) => Some(error.as_ref()),
             Self::Conflict(error) => Some(error.as_ref()),
+            Self::BatchRename(error) => Some(error.as_ref()),
             #[cfg(target_os = "macos")]
             Self::FilePromise(error) => Some(error.as_ref()),
             #[cfg(target_os = "macos")]
@@ -168,6 +172,7 @@ impl fmt::Display for Failure {
             Self::Listing(error) => fmt::Display::fmt(error, f),
             Self::ConflictClosed => f.write_str("Conflict dialog closed"),
             Self::Conflict(error) => fmt::Display::fmt(error, f),
+            Self::BatchRename(error) => fmt::Display::fmt(error, f),
             #[cfg(target_os = "macos")]
             Self::FilePromise(error) => fmt::Display::fmt(error, f),
             #[cfg(target_os = "macos")]

@@ -86,8 +86,11 @@ impl Capture {
                 .file_name()
                 .ok_or_else(|| unavailable(target))?,
         );
-        if original == current || entry_metadata(&current)?.is_some() {
+        if original == current {
             return Err(unavailable(&current).into());
+        }
+        if entry_metadata(&current)?.is_some() {
+            return Err(MutationError::DestinationExists(current).into());
         }
         Ok(Self {
             original,
