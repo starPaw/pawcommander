@@ -678,7 +678,7 @@ fn finish_move(
                 renamed,
                 progress,
             )?;
-            let source = source.with_original_access_times(original_access_times)?;
+            let source = source.with_original_access_times(&paths.source, original_access_times)?;
             discard_source_stage(ticket, paths)?;
             Ok((source, source_identity))
         })();

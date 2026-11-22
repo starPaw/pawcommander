@@ -9,6 +9,7 @@ mod checksum;
 #[cfg(target_os = "macos")]
 mod compatible_plan;
 mod conflict;
+mod cross_move;
 #[cfg(target_os = "macos")]
 mod file_promise;
 #[cfg(target_os = "macos")]
@@ -31,6 +32,7 @@ pub(crate) use checksum::{ChecksumError, ManifestLineError};
 #[cfg(target_os = "macos")]
 pub(crate) use compatible_plan::CompatiblePlanError;
 pub(crate) use conflict::{ConflictError, ReplacementRefusal};
+pub(crate) use cross_move::CrossMoveError;
 #[cfg(target_os = "macos")]
 pub(crate) use file_promise::FilePromiseError;
 #[cfg(target_os = "macos")]
@@ -80,6 +82,7 @@ pub(crate) enum Failure {
     ConflictClosed,
     Conflict(Box<ConflictError>),
     BatchRename(Box<BatchRenameError>),
+    CrossMove(Box<CrossMoveError>),
     Undo(Box<UndoError>),
     #[cfg(target_os = "macos")]
     FilePromise(Box<FilePromiseError>),
@@ -132,6 +135,7 @@ impl Failure {
             Self::Listing(error) => Some(error.as_ref()),
             Self::Conflict(error) => Some(error.as_ref()),
             Self::BatchRename(error) => Some(error.as_ref()),
+            Self::CrossMove(error) => Some(error.as_ref()),
             Self::Undo(error) => Some(error.as_ref()),
             #[cfg(target_os = "macos")]
             Self::FilePromise(error) => Some(error.as_ref()),
@@ -177,6 +181,7 @@ impl fmt::Display for Failure {
             Self::ConflictClosed => f.write_str("Conflict dialog closed"),
             Self::Conflict(error) => fmt::Display::fmt(error, f),
             Self::BatchRename(error) => fmt::Display::fmt(error, f),
+            Self::CrossMove(error) => fmt::Display::fmt(error, f),
             Self::Undo(error) => fmt::Display::fmt(error, f),
             #[cfg(target_os = "macos")]
             Self::FilePromise(error) => fmt::Display::fmt(error, f),
@@ -941,6 +946,8 @@ pub(crate) enum LocalPathAction {
     ReadMetadata,
     CheckDestination,
     CreateDirectory,
+    RemoveFile,
+    RemoveDirectory,
 }
 
 #[derive(Debug)]
