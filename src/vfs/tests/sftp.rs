@@ -750,8 +750,10 @@ fn check_sftp_source_change_cleanup_at_depth_limit(local_root: &Location, remote
                 if copied {
                     error.contains("changed during copying")
                 } else {
-                    error.contains(crate::i18n::text!(
-                        "Слишком большая глубина папок (более 128)"
+                    error.contains(&crate::tr_format!(
+                        "Folders are nested more than {limit} levels at {path}.",
+                        limit = crate::vfs::MAX_TREE_DEPTH,
+                        path = leaf
                     ))
                 },
                 "{direction}/{depth}: {error}"

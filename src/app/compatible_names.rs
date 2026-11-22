@@ -9,7 +9,7 @@ use crate::{
     i18n::text,
     shortcuts::Command,
     vfs::{
-        compatible_names::{self, Plan},
+        compatible_names::{self, Plan, Reason},
         Location,
     },
 };
@@ -178,7 +178,7 @@ fn show_plan(ui: &mut egui::Ui, plan: &Plan) {
                     let reasons = change
                         .reasons
                         .iter()
-                        .map(|reason| reason.label())
+                        .map(reason_label)
                         .collect::<Vec<_>>()
                         .join(" · ");
                     ui.add(
@@ -188,6 +188,19 @@ fn show_plan(ui: &mut egui::Ui, plan: &Plan) {
                 });
             }
         });
+}
+
+fn reason_label(reason: &Reason) -> &'static str {
+    match reason {
+        Reason::Encoding => text!("Некорректный UTF-8"),
+        Reason::Characters => text!("Недопустимые символы"),
+        Reason::Trailing => text!("Точки или пробелы в конце"),
+        Reason::Reserved => text!("Зарезервированное имя"),
+        Reason::Unicode => text!("Нормализация Unicode (NFC)"),
+        Reason::Length => text!("Ограничение длины"),
+        Reason::Collision => text!("Совпадение имён или регистра"),
+        Reason::MetadataName => text!("Имя зарезервировано для метаданных macOS"),
+    }
 }
 
 impl PawCommander {

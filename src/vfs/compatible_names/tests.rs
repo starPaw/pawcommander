@@ -1,34 +1,44 @@
 use super::*;
 use crate::{
-    file_error::{Failure, MutationError, PublicationError},
+    file_error::{
+        AccessCause, Failure, MutationError, PublicationError, ScanError, TransferPlanError,
+    },
     result_history::Outcome,
 };
 use std::ffi::OsStr;
 
 #[test]
 fn repairs_reserved_names_length_and_unicode_without_extending_over_limits() {
-    let proposed = Name::suggest(OsStr::new("cafe\u{301}:plan?.txt. "), 255, false).unwrap();
+    let destination = Location::Local("/destination".into());
+    let proposed = Name::suggest(
+        OsStr::new("cafe\u{301}:plan?.txt. "),
+        255,
+        false,
+        &destination,
+    )
+    .unwrap();
     assert_eq!(proposed.value, "café_plan_.txt");
     assert!(proposed.reasons.contains(&Reason::Characters));
     assert!(proposed.reasons.contains(&Reason::Trailing));
     assert!(proposed.reasons.contains(&Reason::Unicode));
-    let device = Name::suggest(OsStr::new("COM¹.tar.gz"), 255, false).unwrap();
+    let device = Name::suggest(OsStr::new("COM¹.tar.gz"), 255, false, &destination).unwrap();
     assert_eq!(device.value, "_COM¹.tar.gz");
     assert_eq!(device.reasons, [Reason::Reserved]);
-    let native = Name::suggest(OsStr::from_bytes(b"raw\xff.txt"), 255, false).unwrap();
+    let native =
+        Name::suggest(OsStr::from_bytes(b"raw\xff.txt"), 255, false, &destination).unwrap();
     assert_eq!(native.value, "raw\u{fffd}.txt");
     assert_eq!(native.reasons, [Reason::Encoding]);
 
     let long = format!("{}.md", "🙂".repeat(128));
-    let first = Name::suggest(OsStr::new(&long), 34, false).unwrap();
+    let first = Name::suggest(OsStr::new(&long), 34, false, &destination).unwrap();
     let mut occupied = HashSet::from([portable_key(OsStr::new(&first.value))]);
     let second = first
-        .reserve(34, false, &mut occupied, |_| Ok(false))
+        .reserve(34, false, &destination, &mut occupied, |_| Ok(false))
         .unwrap();
     assert!(second.value.len() <= 34);
     assert!(second.value.ends_with(" (2).md"));
     assert_eq!(second.reasons, [Reason::Length, Reason::Collision]);
-    let utf16 = Name::suggest(OsStr::new(&long), 1024, false).unwrap();
+    let utf16 = Name::suggest(OsStr::new(&long), 1024, false, &destination).unwrap();
     assert!(utf16.value.encode_utf16().count() <= 255);
     assert!(utf16.value.ends_with(".md"));
     assert_eq!(
@@ -43,22 +53,55 @@ fn repairs_reserved_names_length_and_unicode_without_extending_over_limits() {
 
 #[test]
 fn fat_names_protect_existing_metadata_paths_and_fit_in_decomposed_form() {
+    let destination = Location::Local("/destination".into());
     let mut occupied = HashSet::from([portable_key(OsStr::new("._CAFÉ.TXT"))]);
-    let suggestion = Name::suggest(OsStr::new("café.txt"), 24, true)
+    let suggestion = Name::suggest(OsStr::new("café.txt"), 24, true, &destination)
         .unwrap()
-        .reserve(24, true, &mut occupied, |_| Ok(false))
+        .reserve(24, true, &destination, &mut occupied, |_| Ok(false))
         .unwrap();
     assert_eq!(suggestion.value, "café (2).txt");
     assert_eq!(suggestion.reasons, [Reason::Collision]);
     assert!(occupied.contains(&portable_key(OsStr::new("._café (2).txt"))));
 
-    let explicit = Name::suggest(OsStr::new("._notes"), 24, true).unwrap();
+    let explicit = Name::suggest(OsStr::new("._notes"), 24, true, &destination).unwrap();
     assert_eq!(explicit.value, "__notes");
     assert_eq!(explicit.reasons, [Reason::MetadataName]);
 
-    let long = Name::suggest(OsStr::new("ééé.txt"), 11, true).unwrap();
+    let long = Name::suggest(OsStr::new("ééé.txt"), 11, true, &destination).unwrap();
     assert_eq!(long.value, "éé.txt");
     assert_eq!(long.reasons, [Reason::Length]);
+}
+
+#[test]
+fn name_allocation_distinguishes_exhaustion_from_insufficient_room() {
+    let destination = Location::Local("/destination/nested".into());
+    let proposed = OsStr::new("data");
+    let target = destination.join(proposed);
+    let reserve = |bytes| {
+        Name::suggest(proposed, bytes, false, &destination)
+            .unwrap()
+            .reserve(bytes, false, &destination, &mut HashSet::new(), |_| {
+                Ok(true)
+            })
+            .err()
+            .expect("no candidate was available")
+    };
+    assert!(
+        matches!(reserve(4), TransferError::Failed(Failure::CompatiblePlan(reason))
+        if matches!(reason.as_ref(), CompatiblePlanError::NameLimit { target: path, available: 4 } if path == &target))
+    );
+    assert!(
+        matches!(reserve(255), TransferError::Failed(Failure::TransferPlan(reason))
+        if matches!(reason.as_ref(), TransferPlanError::NoUnusedName(path) if path == &target))
+    );
+    assert!(matches!(
+        Name::suggest(proposed, 255, false, &destination)
+            .unwrap()
+            .reserve(255, false, &destination, &mut HashSet::new(), |_| Err(
+                TransferError::Cancelled
+            )),
+        Err(TransferError::Cancelled)
+    ));
 }
 
 fn folders() -> (tempfile::TempDir, Location, Location) {
@@ -68,6 +111,62 @@ fn folders() -> (tempfile::TempDir, Location, Location) {
     fs::create_dir(source.path()).unwrap();
     fs::create_dir(target.path()).unwrap();
     (root, source, target)
+}
+
+#[test]
+fn preview_failures_keep_the_exact_child_and_the_volume_probe_cause() {
+    let (_root, source, target) = folders();
+    let folder = source.join("reports");
+    let link = folder.join("alias.txt");
+    fs::create_dir(folder.path()).unwrap();
+    std::os::unix::fs::symlink("missing.txt", link.path()).unwrap();
+    let result = build(
+        &[folder],
+        &target,
+        TransferKind::Copy,
+        &mut Progress::default(),
+    );
+    assert!(
+        matches!(result, Err(TransferError::Failed(Failure::CompatiblePlan(reason)))
+        if matches!(reason.as_ref(), CompatiblePlanError::UnsupportedItem(path) if path == &link))
+    );
+    assert_eq!(
+        fs::read_link(link.path()).unwrap(),
+        Path::new("missing.txt")
+    );
+    assert!(fs::read_dir(target.path()).unwrap().next().is_none());
+
+    let missing = target.join("missing-folder");
+    let result = Limits::read(&missing);
+    assert!(
+        matches!(result, Err(TransferError::Failed(Failure::Access(reason)))
+        if reason.location == missing && reason.action == AccessAction::ReadVolumeLimits
+        && matches!(&reason.cause, AccessCause::Local(error) if error.raw_os_error() == Some(libc::ENOENT)))
+    );
+}
+
+#[test]
+fn the_depth_limit_identifies_the_first_unscannable_folder() {
+    let (_root, source, target) = folders();
+    let folder = source.join("reports");
+    fs::create_dir(folder.path()).unwrap();
+    let mut deepest = folder.clone();
+    for _ in 0..=crate::vfs::MAX_TREE_DEPTH {
+        deepest = deepest.join("d");
+        fs::create_dir(deepest.path()).unwrap();
+    }
+    let result = build(
+        &[folder],
+        &target,
+        TransferKind::Copy,
+        &mut Progress::default(),
+    );
+    assert!(
+        matches!(result, Err(TransferError::Failed(Failure::Scan(reason)))
+        if matches!(reason.as_ref(), ScanError::TransferDepthLimit { location, limit }
+            if location == &deepest && *limit == crate::vfs::MAX_TREE_DEPTH))
+    );
+    assert!(fs::read_dir(target.path()).unwrap().next().is_none());
 }
 
 #[test]

@@ -10,8 +10,8 @@ use crate::file_error::{
 };
 #[cfg(target_os = "macos")]
 use crate::file_error::{
-    FilePromiseError, FileTemplateError, ResumeCheckError, ResumeCheckProblem, ResumeRecordEvent,
-    ResumeRole, SyncError,
+    CompatiblePlanError, FilePromiseError, FileTemplateError, ResumeCheckError, ResumeCheckProblem,
+    ResumeRecordEvent, ResumeRole, SyncError,
 };
 use crate::file_error::{
     RecoveryRecordAction, RecoveryRecordError, RecoveryRecordProblem, RecoveryRecordSection,
@@ -55,6 +55,8 @@ pub(crate) fn file_error(error: &TransferError) -> String {
                 Failure::FilePromise(error) => file_promise_error(error),
                 #[cfg(target_os = "macos")]
                 Failure::FileTemplate(error) => file_template_error(error),
+                #[cfg(target_os = "macos")]
+                Failure::CompatiblePlan(error) => compatible_plan_error(error),
                 Failure::Mutation(reason) => mutation_error(
                     reason,
                     matches!(error, TransferError::PublicationUnconfirmed(_)),
@@ -71,6 +73,48 @@ pub(crate) fn file_error(error: &TransferError) -> String {
             }
         }
         TransferError::Cancelled => crate::tr_format!("Operation cancelled"),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn compatible_plan_error(error: &CompatiblePlanError) -> String {
+    use CompatiblePlanError::*;
+
+    match error {
+        EmptySelection => text!("Для совместимого переноса выберите объекты в двух локальных папках").into(),
+        NonLocal(path) => crate::tr_format!(
+            "Compatible transfer requires local files and folders. Check {path}.", path = path
+        ),
+        SmbVolume(path) => crate::tr_format!("Compatible transfer is unavailable on the SMB volume at {path}.", path = path),
+        ReadOnlyDestination(path) => crate::tr_format!("The destination volume at {path} is read-only.", path = path),
+        ReadOnlySource(path) => crate::tr_format!(
+            "The source volume at {path} is read-only. Choose Copy with compatible names.", path = path
+        ),
+        FatSource(path) => crate::tr_format!(
+            "For the FAT or exFAT source at {path}, choose Copy with compatible names.", path = path
+        ),
+        NestedVolume(path) => crate::tr_format!(
+            "Compatible transfer cannot cross the volume mounted at {path} inside the selection.", path = path
+        ),
+        UnsupportedItem(source) => crate::tr_format!(
+            "Compatible transfer supports regular files and folders. Check {source}.", source = source
+        ),
+        StagingPathLimit { destination, limit } => crate::tr_format!(
+            "A temporary copy in {destination} would exceed the {limit}-byte path limit. Choose a folder closer to the root.",
+            destination = destination, limit = super::display::integer(*limit)
+        ),
+        NameLimit { target, available } => crate::tr_format!(
+            "No compatible name fits at {target}. Only {available} bytes are available for its name.",
+            target = target, available = super::display::integer(*available)
+        ),
+        EntryLimit { source, limit } => crate::tr_format!(
+            "The compatible-name plan exceeded {limit} entries while checking {source}. Select fewer items.",
+            limit = super::display::integer(*limit), source = source
+        ),
+        PathBudget { source, limit } => crate::tr_format!(
+            "The compatible-name plan exceeded {limit} bytes of paths while checking {source}. Select fewer items.",
+            limit = super::display::integer(*limit), source = source
+        ),
     }
 }
 
@@ -920,6 +964,8 @@ fn access_error(error: &AccessError) -> String {
         AccessAction::WriteMetadata => text!("Не удалось сохранить сведения о файле"),
         #[cfg(target_os = "macos")]
         AccessAction::CheckSmbVolume => text!("Не удалось проверить SMB-том назначения"),
+        #[cfg(target_os = "macos")]
+        AccessAction::ReadVolumeLimits => text!("Не удалось определить ограничения тома"),
         AccessAction::CheckSearchResult => {
             return crate::tr_format!(
                 "Could not check search result {path}: {error}",
@@ -979,6 +1025,20 @@ fn scan_error(error: &ScanError) -> String {
             );
         }
         ScanError::DepthLimit(location) => (text!("Достигнут предел вложенности папок"), location),
+        ScanError::TransferDepthLimit { location, limit } => {
+            return crate::tr_format!(
+                "Folders are nested more than {limit} levels at {path}.",
+                limit = limit,
+                path = location,
+            )
+        }
+        ScanError::MoveEntryLimit(location) => (
+            text!("Пофайловый журнал переноса превысил лимит 100000 элементов"),
+            location,
+        ),
+        ScanError::TransferSizeOverflow(location) => {
+            (text!("Слишком большой размер копируемого дерева"), location)
+        }
         ScanError::FolderUnavailable(location) => {
             (text!("Папка изменилась или недоступна"), location)
         }

@@ -1,4 +1,8 @@
-use crate::{i18n::text, operations::TransferError};
+use crate::{
+    file_error::{CompatiblePlanError, TransferPlanError},
+    operations::TransferError,
+    vfs::Location,
+};
 use icu_normalizer::{ComposingNormalizerBorrowed, DecomposingNormalizerBorrowed};
 use std::{
     collections::HashSet,
@@ -19,21 +23,6 @@ pub(crate) enum Reason {
     MetadataName,
 }
 
-impl Reason {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Encoding => text!("Некорректный UTF-8"),
-            Self::Characters => text!("Недопустимые символы"),
-            Self::Trailing => text!("Точки или пробелы в конце"),
-            Self::Reserved => text!("Зарезервированное имя"),
-            Self::Unicode => text!("Нормализация Unicode (NFC)"),
-            Self::Length => text!("Ограничение длины"),
-            Self::Collision => text!("Совпадение имён или регистра"),
-            Self::MetadataName => text!("Имя зарезервировано для метаданных macOS"),
-        }
-    }
-}
-
 pub(super) struct Name {
     pub(super) value: String,
     pub(super) reasons: Vec<Reason>,
@@ -44,6 +33,7 @@ impl Name {
         original: &OsStr,
         bytes: usize,
         apple_double: bool,
+        destination: &Location,
     ) -> Result<Self, TransferError> {
         let mut reasons = Vec::new();
         let raw = original.to_string_lossy();
@@ -88,7 +78,12 @@ impl Name {
         if destination_bytes(&value, apple_double) > bytes
             || value.encode_utf16().count() > MAX_UTF16_UNITS
         {
-            value = fit(&value, "", bytes, apple_double)?;
+            value = fit(&value, "", bytes, apple_double).ok_or_else(|| {
+                CompatiblePlanError::NameLimit {
+                    target: destination.join(&value),
+                    available: bytes,
+                }
+            })?;
             reasons.push(Reason::Length);
         }
         Ok(Self { value, reasons })
@@ -98,6 +93,7 @@ impl Name {
         mut self,
         bytes: usize,
         apple_double: bool,
+        destination: &Location,
         used: &mut HashSet<String>,
         mut exists: impl FnMut(&OsStr) -> Result<bool, TransferError>,
     ) -> Result<Self, TransferError> {
@@ -106,14 +102,19 @@ impl Name {
         }
         for index in 2..=100_001 {
             let suffix = format!(" ({index})");
-            let name = fit(&self.value, &suffix, bytes, apple_double)?;
+            let name = fit(&self.value, &suffix, bytes, apple_double).ok_or_else(|| {
+                CompatiblePlanError::NameLimit {
+                    target: destination.join(&self.value),
+                    available: bytes,
+                }
+            })?;
             if reserve(&name, apple_double, used, &mut exists)? {
                 self.value = name;
                 self.reasons.push(Reason::Collision);
                 return Ok(self);
             }
         }
-        Err(text!("Не удалось подобрать совместимое свободное имя").into())
+        Err(TransferPlanError::NoUnusedName(destination.join(&self.value)).into())
     }
 }
 
@@ -193,16 +194,11 @@ fn reserved(name: &str) -> bool {
         })
 }
 
-fn fit(
-    name: &str,
-    suffix: &str,
-    bytes: usize,
-    apple_double: bool,
-) -> Result<String, TransferError> {
+fn fit(name: &str, suffix: &str, bytes: usize, apple_double: bool) -> Option<String> {
     let bytes = bytes.min(MAX_UTF16_UNITS * 4);
     let units = MAX_UTF16_UNITS;
     if bytes <= suffix.len() || units <= suffix.len() {
-        return Err(path_limit());
+        return None;
     }
     let (stem, extension) = match name.rfind('.') {
         Some(dot) if dot > 0 => name.split_at(dot),
@@ -224,7 +220,7 @@ fn fit(
         let rest = prefix(&result, bytes - 1, units - 1, apple_double).trim_end_matches([' ', '.']);
         result = format!("_{rest}");
     }
-    Ok(result)
+    Some(result)
 }
 
 fn prefix(value: &str, bytes: usize, units: usize, apple_double: bool) -> &str {
@@ -237,8 +233,4 @@ fn prefix(value: &str, bytes: usize, units: usize, apple_double: bool) -> &str {
         }
     }
     value
-}
-
-pub(super) fn path_limit() -> TransferError {
-    text!("Путь назначения слишком длинный. Выберите папку ближе к корню.").into()
 }

@@ -6,7 +6,7 @@ use super::{err, TransferFailure, TransferSummary, MAX_TREE_DEPTH};
 use crate::conflict::{Answer, Conflict, Decision, EntryDetails};
 use crate::file_error::{
     AccessAction, AccessCause, AccessError, ConflictError, Failure, MutationError, ProbeAction,
-    PublicationError, RecoveryNotice, ReplacementRefusal, SftpSpaceFailure, SpaceError,
+    PublicationError, RecoveryNotice, ReplacementRefusal, ScanError, SftpSpaceFailure, SpaceError,
     StagingCleanupError, StagingError, TransferPlanError,
 };
 use crate::fs_ops;
@@ -1990,10 +1990,12 @@ pub(super) fn source_children(
     cancel.check()?;
     names.sort();
     cancel.check()?;
-    if names.windows(2).any(|pair| pair[0] == pair[1]) {
-        return Err(
-            crate::tr_format!("Duplicate names in source {source}", source = source).into(),
-        );
+    if let Some(pair) = names.windows(2).find(|pair| pair[0] == pair[1]) {
+        return Err(ScanError::DuplicateEntry {
+            directory: source.clone(),
+            name: pair[0].clone(),
+        }
+        .into());
     }
     Ok(names)
 }
@@ -2104,13 +2106,14 @@ impl TransferSourceManifest {
     ) -> Result<(), TransferError> {
         cancel.check()?;
         if self.mode == ManifestMode::Move && self.entries.len() >= MAX_MOVE_JOURNAL_ENTRIES {
-            return Err(crate::i18n::text!(
-                "Пофайловый журнал переноса превысил лимит 100000 элементов"
-            )
-            .into());
+            return Err(ScanError::MoveEntryLimit(source.clone()).into());
         }
         if depth > MAX_TREE_DEPTH {
-            return Err(crate::i18n::text!("Слишком большая глубина папок (более 128)").into());
+            return Err(ScanError::TransferDepthLimit {
+                location: source.clone(),
+                limit: MAX_TREE_DEPTH,
+            }
+            .into());
         }
         let metadata = entry_metadata(source)?;
         #[cfg(target_os = "macos")]
@@ -2153,9 +2156,7 @@ impl TransferSourceManifest {
             self.bytes = self
                 .bytes
                 .checked_add(entry.size())
-                .ok_or(crate::i18n::text!(
-                    "Слишком большой размер копируемого дерева"
-                ))?;
+                .ok_or_else(|| ScanError::TransferSizeOverflow(source.clone()))?;
         }
         if let Some(children) = &entry.children {
             for name in children {
