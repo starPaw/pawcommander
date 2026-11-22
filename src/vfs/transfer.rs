@@ -1834,15 +1834,20 @@ impl LocalStaging {
                     let bound = if let Some(parent) = parent_handle {
                         use rustix::fs::{openat, Mode, OFlags};
 
-                        let parent =
-                            rustix::io::dup(parent).map_err(|error| inspect(error.into()))?;
+                        let uncertain = |error: rustix::io::Errno| {
+                            super::guarded_directory::uncertain_directory(
+                                &location,
+                                inspect(error.into()).into(),
+                            )
+                        };
+                        let parent = rustix::io::dup(parent).map_err(uncertain)?;
                         let directory = openat(
                             &parent,
                             name.as_str(),
                             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                             Mode::empty(),
                         )
-                        .map_err(|error| inspect(error.into()))?;
+                        .map_err(uncertain)?;
                         Some(BoundFileStaging {
                             parent,
                             directory: fs::File::from(directory),
@@ -1852,7 +1857,12 @@ impl LocalStaging {
                     };
                     #[cfg(target_os = "macos")]
                     let original = match &bound {
-                        Some(stage) => stage.directory.metadata().map_err(inspect)?,
+                        Some(stage) => stage.directory.metadata().map_err(|error| {
+                            super::guarded_directory::uncertain_directory(
+                                &location,
+                                inspect(error).into(),
+                            )
+                        })?,
                         None => fs::symlink_metadata(&path).map_err(inspect)?,
                     };
                     #[cfg(not(target_os = "macos"))]
@@ -1879,11 +1889,21 @@ impl LocalStaging {
                     crate::recovery::abandon_staging(&location)?;
                 }
                 Err(error) => {
-                    return Err(fs_ops::local_copy_error(
+                    #[cfg(target_os = "macos")]
+                    let unconfirmed =
+                        parent_handle.is_some() && !crate::smb::namespace_change_refused(&error);
+                    let cause = fs_ops::local_copy_error(
                         Some(parent),
                         access_io(&location, AccessAction::CreateStagingDirectory, error),
                         ToString::to_string,
-                    ));
+                    );
+                    #[cfg(target_os = "macos")]
+                    if unconfirmed {
+                        return Err(super::guarded_directory::uncertain_directory(
+                            &location, cause,
+                        ));
+                    }
+                    return Err(cause);
                 }
             }
         }
@@ -1945,31 +1965,39 @@ impl LocalStaging {
         crate::recovery::register_staging(location)
     }
 
-    fn remove(&self, recursive: bool) -> io::Result<()> {
+    fn remove(&self, cleanup: LocalStagingCleanup) -> io::Result<()> {
         #[cfg(target_os = "macos")]
         if let Some(bound) = &self.bound {
             use rustix::fs::{unlinkat, AtFlags};
             use rustix::io::Errno;
 
-            // A bound stage contains at most one payload. Leave unexpected
-            // entries for inspection if the stage cannot be removed empty.
-            if recursive {
-                match unlinkat(&bound.directory, FILE_STAGING_PAYLOAD, AtFlags::empty()) {
-                    Ok(()) | Err(Errno::NOENT) => {}
-                    Err(error) => return Err(error.into()),
+            match cleanup {
+                // File creation owns only its one payload.
+                LocalStagingCleanup::Recursive => {
+                    match unlinkat(&bound.directory, FILE_STAGING_PAYLOAD, AtFlags::empty()) {
+                        Ok(()) | Err(Errno::NOENT) => {}
+                        Err(error) => return Err(error.into()),
+                    }
                 }
+                LocalStagingCleanup::BoundTree => {
+                    remove_open_tree(&bound.directory, MAX_TREE_DEPTH + 2, true)?;
+                }
+                LocalStagingCleanup::Empty => {}
+            }
+            if !self.same_owned()? {
+                return Err(Errno::STALE.into());
             }
             return unlinkat(&bound.parent, self.name()?, AtFlags::REMOVEDIR)
                 .map_err(io::Error::from);
         }
-        if recursive {
+        if matches!(cleanup, LocalStagingCleanup::Recursive) {
             fs::remove_dir_all(&self.path)
         } else {
             fs::remove_dir(&self.path)
         }
     }
 
-    fn close(mut self, recursive: bool) -> Result<(), TransferError> {
+    fn close(mut self, cleanup: LocalStagingCleanup) -> Result<(), TransferError> {
         self.remove_on_drop = false;
         let staging = Location::Local(self.path.clone());
         if !self
@@ -1978,7 +2006,7 @@ impl LocalStaging {
         {
             return Err(StagingError::IdentityChanged(staging).into());
         }
-        self.remove(recursive).map_err(|error| {
+        self.remove(cleanup).map_err(|error| {
             AccessError::new(&staging, AccessAction::RemoveStagingDirectory, error).into()
         })
     }
@@ -1987,9 +2015,61 @@ impl LocalStaging {
 impl Drop for LocalStaging {
     fn drop(&mut self) {
         if self.remove_on_drop && self.same_owned().unwrap_or(false) {
-            let _ = self.remove(true);
+            let _ = self.remove(LocalStagingCleanup::Recursive);
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn remove_open_tree(
+    directory: &impl std::os::fd::AsFd,
+    depth: usize,
+    staging_root: bool,
+) -> io::Result<()> {
+    use rustix::fs::{fstat, openat, statat, unlinkat, AtFlags, Dir, FileType, Mode, OFlags, Stat};
+    use rustix::io::Errno;
+
+    if depth == 0 {
+        return Err(Errno::LOOP.into());
+    }
+    let device = fstat(directory)?.st_dev;
+    for entry in Dir::read_from(directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if matches!(name.to_bytes(), b"." | b"..") {
+            continue;
+        }
+        if staging_root && !matches!(name.to_bytes(), b"incoming" | b"previous") {
+            return Err(Errno::NOTEMPTY.into());
+        }
+        let flags = AtFlags::SYMLINK_NOFOLLOW;
+        let observed = statat(directory, name, flags)?;
+        if observed.st_dev != device {
+            return Err(Errno::XDEV.into());
+        }
+        let remove = if FileType::from_raw_mode(observed.st_mode) == FileType::Directory {
+            let child = openat(
+                directory,
+                name,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )?;
+            let same =
+                |actual: Stat| actual.st_dev == observed.st_dev && actual.st_ino == observed.st_ino;
+            if !same(fstat(&child)?) {
+                return Err(Errno::STALE.into());
+            }
+            remove_open_tree(&child, depth - 1, false)?;
+            if !same(statat(directory, name, flags)?) {
+                return Err(Errno::STALE.into());
+            }
+            AtFlags::REMOVEDIR
+        } else {
+            AtFlags::empty()
+        };
+        unlinkat(directory, name, remove)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2105,10 +2185,35 @@ pub(super) fn with_tracked_staging(
     )
 }
 
+#[cfg(target_os = "macos")]
+pub(super) fn with_open_sync_staging(
+    target: &Location,
+    cancel: &Cancellation,
+    parent: &OwnedFd,
+    notice: Option<&mut StagingNotice<'_>>,
+    work: impl FnOnce(&Location, &fs::File, &mut bool) -> Result<(), TransferError>,
+) -> Result<(), TransferError> {
+    staging_typed(
+        target,
+        Some(cancel),
+        true,
+        notice,
+        LocalStagingCleanup::BoundTree,
+        Some(parent),
+        |location, descriptor, preserve| {
+            let descriptor =
+                descriptor.ok_or_else(|| StagingError::IdentityUnavailable(location.clone()))?;
+            work(location, descriptor, preserve)
+        },
+    )
+}
+
 enum LocalStagingCleanup {
     Recursive,
     #[cfg(target_os = "macos")]
     Empty,
+    #[cfg(target_os = "macos")]
+    BoundTree,
 }
 
 fn staging_typed(
@@ -2156,10 +2261,17 @@ fn staging_typed(
         if use_operation_marker && let Err(error) = staging.register(&location) {
             // A preserved stage has no payload yet. An independent entry can
             // make rmdir fail without being removed along with the directory.
-            let recursive = !cfg!(target_os = "macos") || !preserve;
+            #[cfg(target_os = "macos")]
+            let cleanup = if preserve {
+                LocalStagingCleanup::Empty
+            } else {
+                LocalStagingCleanup::Recursive
+            };
+            #[cfg(not(target_os = "macos"))]
+            let cleanup = LocalStagingCleanup::Recursive;
             return StagingCleanupError::combine(
                 Err(error),
-                staging.close(recursive),
+                staging.close(cleanup),
                 &location,
                 target,
             );
@@ -2176,8 +2288,7 @@ fn staging_typed(
             staging.keep();
             return result;
         }
-        let recursive = matches!(cleanup, LocalStagingCleanup::Recursive);
-        return StagingCleanupError::combine(result, staging.close(recursive), &location, target);
+        return StagingCleanupError::combine(result, staging.close(cleanup), &location, target);
     }
 
     let sftp = remote(target)?;

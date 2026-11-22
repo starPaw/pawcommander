@@ -1,30 +1,41 @@
 use super::{
-    folder_error, is_link, read_link, read_metadata, stale, Budget, Exclusions, Kind, Observed,
-    Snapshot, SyncChange, SyncPlan, SyncReport, SyncRow, ONE_WAY_ROLES,
+    folder_error, is_link, open_sync_folder, read_link, read_metadata, stale, Budget, Exclusions,
+    Kind, Observed, Snapshot, SyncChange, SyncPlan, SyncReport, SyncRow, ONE_WAY_ROLES,
 };
 use crate::{
     file_error::{
         AccessAction, AccessError, CopyVerificationError, LocalPathAction, MetadataWarning,
-        MutationError, PublicationError, SyncDifference, SyncError, SyncFolderRole,
-        SyncVerification,
+        MutationError, PublicationError, StagingCleanupError, SyncDifference, SyncError,
+        SyncFolderRole, SyncVerification,
     },
     operations::{AccessStream, Cancellation, Progress, TransferError},
     result_history::Outcome,
+    smb::MutationMount,
     vfs::{
         compare::scan,
         copy_metadata,
-        guarded_directory::{open_staging, retained, Directory},
+        guarded_directory::{open_staging, retained, uncertain_directory, Directory},
         read_scope::ReadScope,
         sftp::remote,
         staged_file::StagedFile,
         transfer::{
-            canonical, with_preserved_staging, with_tracked_staging, EntryMetadata, SourceReader,
-            StagingNotice, TransferSourceEntry,
+            canonical, with_open_sync_staging, with_preserved_staging, with_tracked_staging,
+            EntryMetadata, SourceReader, StagingNotice, TransferSourceEntry,
         },
         Location,
     },
 };
-use std::{cmp::Ordering, fs, io::Read, os::unix::fs::DirBuilderExt, path::Path};
+use std::{
+    cmp::Ordering,
+    ffi::OsStr,
+    fs,
+    io::{self, Read},
+    os::{
+        fd::{AsFd, AsRawFd},
+        unix::fs::DirBuilderExt,
+    },
+    path::Path,
+};
 
 struct GroupWarnings {
     metadata: Option<MetadataWarning>,
@@ -89,6 +100,18 @@ impl Execution<'_> {
                 Some(destination.display()),
             )
         }
+    }
+
+    fn verify_smb_scopes(&self, scopes: &[ReadScope; 2]) -> Result<(), TransferError> {
+        for (side, scope) in scopes.iter().enumerate() {
+            if scope.owned_smb_mount().is_some() {
+                let folder = &self.folders[side];
+                scope
+                    .verify_selected_root(folder)
+                    .map_err(|cause| folder_error(self.roles[side], folder, cause))?;
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn apply_groups(
@@ -168,6 +191,7 @@ impl Execution<'_> {
     ) -> Result<GroupWarnings, TransferError> {
         let source_scope = &scopes[1 - row.destination];
         let destination_scope = &scopes[row.destination];
+        let destination_mount = destination_scope.owned_smb_mount();
         let source = &self.observed[1 - row.destination];
         let destination = &self.observed[row.destination];
         let relative = row.path.as_path();
@@ -207,15 +231,20 @@ impl Execution<'_> {
         // Only a source subtree is filtered. A temporary copy and every
         // subtree being replaced or removed must match in full.
         let unfiltered = Exclusions::default();
-        let work = |staging: &Location, preserve: &mut bool| {
+        let mut work = |staging: &Location, opened: Option<&fs::File>, preserve: &mut bool| {
             *preserve = false;
             parent.verify()?;
-            let stage_scope = open_staging(staging)?;
+            let stage_scope = if let Some(mount) = destination_mount {
+                let handle = opened.ok_or_else(|| stale(staging))?;
+                open_bound_stage(staging, mount, handle)
+                    .map_err(|cause| uncertain_directory(staging, cause))?
+            } else {
+                open_staging(staging)?
+            };
             let stage = Directory::from_scope(&stage_scope)?;
             let incoming = Path::new("incoming");
-            let payload = staging.join(incoming);
             if row.change != SyncChange::Delete {
-                stage_source(source, relative, source_scope, &payload, progress)?;
+                stage_source(source, relative, source_scope, &stage_scope, progress)?;
                 let staged = required_tree(&stage_scope, incoming, &unfiltered, progress)?;
                 check_tree(
                     source,
@@ -234,11 +263,18 @@ impl Execution<'_> {
                     Check::Original,
                     &cancel,
                 )?;
-                metadata_warning =
-                    preserve_attributes(source, relative, &staged, incoming, progress)?;
+                metadata_warning = preserve_attributes(
+                    source,
+                    relative,
+                    &staged,
+                    incoming,
+                    &stage_scope,
+                    progress,
+                )?;
             }
 
             if row.change == SyncChange::Copy {
+                self.verify_smb_scopes(scopes)?;
                 parent.verify()?;
                 stage.verify()?;
                 cancel.check()?;
@@ -264,9 +300,19 @@ impl Execution<'_> {
                     source.verify_absent(name)?;
                 }
                 let backup_folder = staging.join("previous");
-                make_directory(&backup_folder)?;
-                let backup_scope = open_staging(&backup_folder)?;
+                let backup_scope = if let Some(mount) = destination_mount {
+                    let backup = stage.exclusive_directory(OsStr::new("previous"))?;
+                    let handle = backup
+                        .descriptor
+                        .as_ref()
+                        .ok_or_else(|| stale(&backup_folder))?;
+                    open_bound_stage(&backup_folder, mount, handle)?
+                } else {
+                    make_directory(&backup_folder)?;
+                    open_staging(&backup_folder)?
+                };
                 let backup = Directory::from_scope(&backup_scope)?;
+                self.verify_smb_scopes(scopes)?;
                 parent.verify()?;
                 backup.verify()?;
                 cancel.check()?;
@@ -290,6 +336,7 @@ impl Execution<'_> {
                         Check::Held,
                         &cancel,
                     )?;
+                    self.verify_smb_scopes(scopes)?;
                     parent.verify()?;
                     backup.verify()?;
                     cancel.check()?;
@@ -299,6 +346,9 @@ impl Execution<'_> {
                     } else if let Some(source) = &deletion_source {
                         source.verify_absent(name)?;
                         parent.verify_absent(name)?;
+                        if destination_mount.is_some() {
+                            verify_held_entry(destination, relative, &backup, name)?;
+                        }
                         if let Some(path) = backup.location.local() {
                             let path = path.join(name);
                             trash::delete(&path)
@@ -314,6 +364,12 @@ impl Execution<'_> {
                     let restore = backup
                         .verify()
                         .and_then(|()| parent.verify())
+                        .and_then(|()| {
+                            if destination_mount.is_some() {
+                                verify_held_entry(destination, relative, &backup, name)?;
+                            }
+                            Ok(())
+                        })
                         .and_then(|()| backup.rename(name, &parent, name));
                     if let Err(restore) = restore {
                         let failure = PublicationError::Rollback {
@@ -333,9 +389,37 @@ impl Execution<'_> {
             *preserve = false;
             Ok(())
         };
-        let result = match notice {
-            Some(notice) => with_tracked_staging(&target, &cancel, notice, work),
-            None => with_preserved_staging(&target, &cancel, work),
+        let result = if let Some(mount) = destination_mount {
+            parent.verify()?;
+            let handle = parent
+                .descriptor
+                .as_ref()
+                .ok_or_else(|| stale(&target_parent))?;
+            with_open_sync_staging(
+                &target,
+                &cancel,
+                handle,
+                notice,
+                |staging, opened, preserve| {
+                    let result = work(staging, Some(opened), preserve);
+                    if !*preserve {
+                        let cleanup = mount.recheck().and_then(|()| {
+                            mount.verify_directory(opened, staging.path(), target.path())
+                        });
+                        if cleanup.is_err() {
+                            *preserve = true;
+                            return StagingCleanupError::combine(result, cleanup, staging, &target);
+                        }
+                    }
+                    result
+                },
+            )
+        } else {
+            let work = |staging: &Location, preserve: &mut bool| work(staging, None, preserve);
+            match notice {
+                Some(notice) => with_tracked_staging(&target, &cancel, notice, work),
+                None => with_preserved_staging(&target, &cancel, work),
+            }
         };
         let cleanup = match result {
             Ok(()) => None,
@@ -347,6 +431,43 @@ impl Execution<'_> {
             cleanup,
         })
     }
+}
+
+fn open_bound_stage(
+    location: &Location,
+    mount: &MutationMount,
+    handle: &(impl AsFd + AsRawFd),
+) -> Result<ReadScope, TransferError> {
+    mount.verify_directory(handle, location.path(), location.path())?;
+    let mut scope = open_sync_folder(location, Some(mount))?;
+    let owned = rustix::io::dup(handle)
+        .map(fs::File::from)
+        .map_err(|error| {
+            AccessError::new(location, AccessAction::OpenFile, io::Error::from(error))
+        })?;
+    if scope.parent.location != *location || !scope.parent.matches_handle(&owned)? {
+        return Err(stale(location));
+    }
+    scope.descriptor = Some(owned.into());
+    Ok(scope)
+}
+
+fn verify_held_entry(
+    destination: &Snapshot,
+    relative: &Path,
+    backup: &Directory,
+    name: &OsStr,
+) -> Result<(), TransferError> {
+    backup.verify()?;
+    let location = backup.location.join(name);
+    let actual = read_metadata(&location)?;
+    if !destination.entries[relative]
+        .version
+        .matches_moved_target(&actual)
+    {
+        return Err(stale(&location));
+    }
+    Ok(())
 }
 
 fn groups(mut rows: &[SyncRow]) -> Vec<&[SyncRow]> {
@@ -384,10 +505,12 @@ fn stage_source(
     source: &Snapshot,
     relative: &Path,
     scope: &ReadScope,
-    payload: &Location,
+    stage_scope: &ReadScope,
     progress: &mut Progress,
 ) -> Result<(), TransferError> {
     let cancel = progress.cancellation();
+    let payload = stage_scope.parent.location.join("incoming");
+    let bound = stage_scope.owned_smb_mount().is_some();
     for (path, expected) in source.subtree(relative) {
         progress.checkpoint()?;
         let suffix = path
@@ -398,15 +521,29 @@ fn stage_source(
         } else {
             payload.join(suffix)
         };
+        let parent = bound
+            .then(|| staged_parent(stage_scope, &target, &cancel))
+            .transpose()?;
+        let name = target.path().file_name().ok_or_else(|| stale(&target))?;
         match &expected.kind {
-            Kind::Directory => make_directory(&target)?,
+            Kind::Directory => match parent {
+                Some(parent) => {
+                    parent.exclusive_directory(name)?;
+                }
+                None => make_directory(&target)?,
+            },
             Kind::File(_) => {
                 let mut file = scope.require_file(path, &cancel)?;
                 let (source, size, input) = file.stream();
                 expected
                     .version
                     .verify_metadata(source, &input.metadata(source)?)?;
-                let mut output = StagedFile::open(&target, cancel.clone())?;
+                let mut output = if let Some(parent) = parent {
+                    let handle = parent.exclusive_file(name)?;
+                    StagedFile::from_local(handle, &target, cancel.clone())
+                } else {
+                    StagedFile::open(&target, cancel.clone())?
+                };
                 let copied = progress.copy(
                     source.path(),
                     Some(size),
@@ -421,11 +558,17 @@ fn stage_source(
                     }
                     .into());
                 }
-                output.close()?;
+                if bound {
+                    output.close_smb()?;
+                } else {
+                    output.close()?;
+                }
                 file.verify(&cancel)?;
             }
             Kind::Link(link) => {
-                if let Some(path) = target.local() {
+                if let Some(parent) = parent {
+                    parent.exclusive_link(name, Path::new(link))?;
+                } else if let Some(path) = target.local() {
                     std::os::unix::fs::symlink(Path::new(link), path).map_err(|error| {
                         AccessError::new(&target, AccessAction::CreateLink, error)
                     })?;
@@ -442,14 +585,31 @@ fn stage_source(
     Ok(())
 }
 
+fn staged_parent(
+    scope: &ReadScope,
+    target: &Location,
+    cancel: &Cancellation,
+) -> Result<Directory, TransferError> {
+    let path = target
+        .path()
+        .strip_prefix(scope.parent.location.path())
+        .ok()
+        .and_then(Path::parent)
+        .ok_or_else(|| stale(target))?;
+    let location = scope.parent.location.join(path);
+    Directory::at(scope, path, &read_metadata(&location)?, cancel)
+}
+
 fn preserve_attributes(
     source: &Snapshot,
     relative: &Path,
     staged: &Snapshot,
     incoming: &Path,
+    scope: &ReadScope,
     progress: &mut Progress,
 ) -> Result<Option<MetadataWarning>, TransferError> {
     let mut warning = None;
+    let cancel = progress.cancellation();
     // Apply directory permissions after their descendants have been prepared.
     for (path, target_entry) in staged.entries.iter().rev() {
         progress.checkpoint()?;
@@ -468,8 +628,25 @@ fn preserve_attributes(
                 })?;
         let attributes = copy_metadata::Attributes::from_entry(&source_entry.version.metadata);
         let issue = match source_entry.kind {
+            Kind::Directory if scope.owned_smb_mount().is_some() => {
+                let directory =
+                    Directory::at(scope, path, &target_entry.version.metadata, &cancel)?;
+                target_entry
+                    .version
+                    .verify_metadata(&target, &directory.current_metadata()?)?;
+                let handle = directory.descriptor.ok_or_else(|| stale(&target))?;
+                copy_metadata::finish_local_file(&target, &attributes, &handle.into())?
+            }
             Kind::Directory => {
                 copy_metadata::finish_directory(&target, &attributes, &target_entry.version)?
+            }
+            Kind::File(_) if scope.owned_smb_mount().is_some() => {
+                let mut file = scope.require_file(path, &cancel)?;
+                let (_, _, input) = file.stream();
+                target_entry
+                    .version
+                    .verify_metadata(&target, &input.metadata(&target)?)?;
+                copy_metadata::finish_file(&target, &attributes, input)?
             }
             Kind::File(_) => {
                 let mut file = SourceReader::open(&target)?;
@@ -502,6 +679,11 @@ fn required_tree(
     }
     let mut snapshot = Snapshot::empty(scope);
     let metadata = read_metadata(&location)?;
+    if let Some(mount) = scope.owned_smb_mount()
+        && scope.parent.same_local_volume(&metadata) != Some(true)
+    {
+        return Err(mount.changed(location.path()));
+    }
     if metadata.is_directory() {
         snapshot.observe(
             scope,

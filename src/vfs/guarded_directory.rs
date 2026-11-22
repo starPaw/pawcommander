@@ -16,6 +16,7 @@ pub(super) struct Directory {
     pub(super) location: Location,
     pub(super) descriptor: Option<OwnedFd>,
     metadata: EntryMetadata,
+    mount: Option<crate::smb::MutationMount>,
 }
 
 impl Directory {
@@ -31,6 +32,7 @@ impl Directory {
         expected: &EntryMetadata,
         cancel: &Cancellation,
     ) -> Result<Self, TransferError> {
+        scope.verify_mount()?;
         scope.parent.verify()?;
         let location = scope
             .checked_directory(relative, cancel)?
@@ -48,6 +50,7 @@ impl Directory {
             location,
             descriptor,
             metadata: expected.clone(),
+            mount: scope.owned_smb_mount().cloned(),
         };
         anchor.verify()?;
         if let Some(fd) = &anchor.descriptor {
@@ -62,6 +65,15 @@ impl Directory {
     }
 
     pub(super) fn verify(&self) -> Result<(), TransferError> {
+        if let Some(mount) = &self.mount {
+            mount.recheck()?;
+            let descriptor = self
+                .descriptor
+                .as_ref()
+                .ok_or_else(|| stale(&self.location))?;
+            let path = self.location.path();
+            mount.verify_directory(descriptor, path, path)?;
+        }
         let actual = entry_metadata(&self.location)?.ok_or_else(|| stale(&self.location))?;
         if !actual.is_directory()
             || self.descriptor.is_some() && !self.metadata.same_object(&actual)
@@ -127,12 +139,20 @@ impl Directory {
             .as_ref()
             .ok_or_else(|| stale(&self.location))?;
         let location = self.location.join(name);
-        mkdirat(parent, name, Mode::from_raw_mode(0o700)).map_err(|error| {
-            MutationError::LocalIo {
+        mkdirat(parent, name, Mode::from_raw_mode(0o700)).map_err(|error| -> TransferError {
+            let source = io::Error::from(error);
+            let unconfirmed =
+                self.mount.is_some() && !crate::smb::namespace_change_refused(&source);
+            let cause = MutationError::LocalIo {
                 path: location.path().to_owned(),
                 action: LocalPathAction::CreateDirectory,
-                source: error.into(),
+                source,
             }
+            .into();
+            if unconfirmed {
+                return uncertain_directory(&location, cause);
+            }
+            cause
         })?;
         let result = (|| {
             let descriptor = openat(
@@ -152,18 +172,31 @@ impl Directory {
                 location: location.with_path(actual),
                 descriptor: Some(descriptor),
                 metadata,
+                mount: self.mount.clone(),
             };
             child.verify()?;
             Ok::<_, TransferError>(child)
         })();
-        result.map_err(|error| {
-            TransferError::PublicationUnconfirmed(
-                PublicationError::DirectoryUnverified {
-                    target: location,
-                    cause: error,
-                }
-                .into(),
+        result.map_err(|error| uncertain_directory(&location, error))
+    }
+
+    pub(super) fn exclusive_link(
+        &self,
+        name: &OsStr,
+        contents: &Path,
+    ) -> Result<(), TransferError> {
+        self.verify()?;
+        let descriptor = self
+            .descriptor
+            .as_ref()
+            .ok_or_else(|| stale(&self.location))?;
+        rustix::fs::symlinkat(contents, descriptor, name).map_err(|error| {
+            AccessError::new(
+                &self.location.join(name),
+                AccessAction::CreateLink,
+                io::Error::from(error),
             )
+            .into()
         })
     }
 
@@ -186,6 +219,7 @@ impl Directory {
     ) -> Result<(), TransferError> {
         let from = self.location.join(name);
         let to = destination.location.join(new_name);
+        let smb = self.mount.is_some() || destination.mount.is_some();
         if let (Some(old_fd), Some(new_fd)) = (&self.descriptor, &destination.descriptor) {
             rustix::fs::renameat_with(
                 old_fd,
@@ -195,12 +229,30 @@ impl Directory {
                 rustix::fs::RenameFlags::NOREPLACE,
             )
             .map_err(|error| {
-                crate::fs_ops::rename_error(from.path(), to.path(), io::Error::from(error))
+                let source = io::Error::from(error);
+                let unconfirmed = smb && !crate::smb::namespace_change_refused(&source);
+                let cause = crate::fs_ops::rename_error(from.path(), to.path(), source);
+                if unconfirmed {
+                    return cause.with_unconfirmed_publication();
+                }
+                cause
             })
+        } else if smb {
+            Err(stale(&to))
         } else {
             rename_for_publication(&from, &to)
         }
     }
+}
+
+pub(super) fn uncertain_directory(location: &Location, cause: TransferError) -> TransferError {
+    TransferError::PublicationUnconfirmed(
+        PublicationError::DirectoryUnverified {
+            target: location.clone(),
+            cause,
+        }
+        .into(),
+    )
 }
 
 fn held_metadata(descriptor: &OwnedFd) -> io::Result<EntryMetadata> {
