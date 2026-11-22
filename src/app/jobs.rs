@@ -430,6 +430,13 @@ impl PawCommander {
                 work: Box::new(move |progress| {
                     crate::vfs::resume_copy::resume(&directory, &offer.id, progress)
                         .map(crate::i18n::resume_completion)
+                        .or_else(|error| {
+                            if error.is_completed_cleanup_warning() {
+                                Ok(crate::i18n::file_error(&error))
+                            } else {
+                                Err(error)
+                            }
+                        })
                 }),
                 transfer: Some(TransferInteraction {
                     events,
@@ -983,6 +990,12 @@ impl PawCommander {
                     verify_copies,
                 })));
                 worker_ctx.request_repaint();
+            }
+            #[cfg(target_os = "macos")]
+            if let Err(failure) = &result
+                && failure.completed_with_cleanup_warning()
+            {
+                return Ok(crate::i18n::transfer_failure(failure));
             }
             let summary = result.map_err(|failure| crate::i18n::transfer_failure(&failure))?;
             let mut message = crate::i18n::transfer_finished(

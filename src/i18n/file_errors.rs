@@ -1574,13 +1574,7 @@ pub(crate) fn transfer_failure(failure: &TransferFailure) -> String {
     let (completed, skipped, remaining) =
         (summary.completed, summary.skipped, summary.remaining.len());
     #[cfg(target_os = "macos")]
-    if remaining == 0
-        && let TransferError::Failed(Failure::Publication(reason)) = error
-        && matches!(
-            reason.as_ref(),
-            PublicationError::RecoveryFinalization { .. }
-        )
-    {
+    if failure.completed_with_cleanup_warning() {
         return message;
     }
     let reason = message.strip_suffix('.').unwrap_or(&message);
@@ -1984,7 +1978,7 @@ fn staging_cleanup_error(error: &StagingCleanupError) -> String {
         );
     }
     #[cfg(target_os = "macos")]
-    if matches!(error.operation, Some(TransferError::Cancelled)) {
+    if matches!(error.operation, None | Some(TransferError::Cancelled)) {
         return crate::tr_format!(
             "{outcome}. Could not clean up the temporary folder at {staging}. {e}",
             outcome = outcome,

@@ -114,6 +114,15 @@ pub struct TransferFailure {
     pub(crate) summary: TransferSummary,
 }
 
+#[cfg(target_os = "macos")]
+impl TransferFailure {
+    pub(crate) fn completed_with_cleanup_warning(&self) -> bool {
+        self.summary.completed > 0
+            && self.summary.remaining.is_empty()
+            && self.error.is_completed_cleanup_warning()
+    }
+}
+
 impl fmt::Display for TransferFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(&self.error, f)

@@ -976,7 +976,7 @@ impl fmt::Display for StagingCleanupError {
             );
         }
         #[cfg(target_os = "macos")]
-        if matches!(self.operation, Some(TransferError::Cancelled)) {
+        if matches!(self.operation, None | Some(TransferError::Cancelled)) {
             return write!(
                 f,
                 "Could not clean up the temporary folder at {}. {}",
