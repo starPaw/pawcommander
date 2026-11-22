@@ -2434,6 +2434,7 @@ fn mutation_error(error: &MutationError, unconfirmed: bool) -> String {
                 SmbMutationAction::VerifyChecksumManifest => text!("Не удалось сверить манифест SHA-256"),
                 SmbMutationAction::ImportCollection => text!("Не удалось импортировать коллекцию"),
                 SmbMutationAction::ExportCollection => text!("Не удалось экспортировать коллекцию"),
+                SmbMutationAction::CompareFolders => text!("Не удалось сравнить папки"),
             };
             crate::tr_format!(
                 "{action} at {path} ({error})",

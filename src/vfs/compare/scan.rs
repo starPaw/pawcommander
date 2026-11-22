@@ -77,13 +77,7 @@ pub(in crate::vfs) fn visit(
     cancel.check()?;
     #[cfg(unix)]
     if let Some(root) = &scope.descriptor {
-        return visit_local(
-            &scope.parent.location.join(relative),
-            root,
-            relative,
-            cancel,
-            visitor,
-        );
+        return visit_local(scope, root, relative, cancel, visitor);
     }
     let folder = scope
         .checked_directory(relative, cancel)?
@@ -97,7 +91,7 @@ pub(in crate::vfs) fn visit(
 
 #[cfg(unix)]
 fn visit_local(
-    folder: &Location,
+    scope: &ReadScope,
     root: &std::os::fd::OwnedFd,
     relative: &Path,
     cancel: &Cancellation,
@@ -107,10 +101,35 @@ fn visit_local(
     use rustix::fs::{readlinkat, FileType};
     use std::os::unix::ffi::OsStrExt;
 
+    let folder = &scope.parent.location.join(relative);
+    #[cfg(target_os = "macos")]
+    scope.verify_mount()?;
     let nested = local_subdirectory(root, relative, cancel)
         .map_err(|error| AccessError::new(folder, AccessAction::ReadChildren, error))?;
     let descriptor = nested.as_ref().unwrap_or(root);
+    #[cfg(target_os = "macos")]
+    let mount_device = scope
+        .owned_smb_mount()
+        .map(|mount| {
+            mount.verify_directory(descriptor, folder.path(), folder.path())?;
+            let metadata = rustix::fs::fstat(descriptor).map_err(|error| {
+                AccessError::new(
+                    folder,
+                    AccessAction::ReadOpenMetadata,
+                    std::io::Error::from(error),
+                )
+            })?;
+            Ok::<_, TransferError>((mount, metadata.st_dev))
+        })
+        .transpose()?;
     visit_local_entries(folder, descriptor, cancel, |name, stat| {
+        #[cfg(target_os = "macos")]
+        if let (Some((mount, device)), Ok(stat)) = (mount_device, &stat)
+            && stat.st_dev != device
+        {
+            let error = mount.changed(folder.join(name).path());
+            return visit(name.to_owned(), Entry::Unreadable(error));
+        }
         let entry = match stat {
             Ok(stat) => match FileType::from_raw_mode(stat.st_mode) {
                 FileType::Directory => Entry::Directory,

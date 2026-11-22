@@ -289,6 +289,8 @@ Open the folders in the two panes and choose **Compare folders** from the comman
 
 **Size and modified time** compares file sizes and modification times. Comparisons involving SFTP use whole seconds. **By contents** compares the SHA-256 hashes of equal-length files. The comparison treats each symbolic link as a single entry and compares its target path. Comparing is read-only. Use **Stop** to end the scan. The scanner supports up to 100,000 entries across both folders, 32 MiB of path data and 128 directory levels.
 
+On macOS, a comparison stops if a saved SMB volume disconnects or changes. The error names the affected pane and share. An individual branch or file on another volume appears as a read error while the rest of the comparison continues.
+
 ## Find duplicates on macOS
 
 Open a local folder and choose **Find duplicates** from Settings or the command palette. Start the scan to search that folder and its subfolders. Equal file sizes select candidates for SHA-256 hashing. Equal hashes are then checked byte for byte. The search compares the data fork of regular files. It skips symbolic links and PawCommander staging folders. Hard links to one inode count as one file. The scan supports 100,000 entries, 32 MiB of path data and 128 directory levels and reports changed or unreadable entries.
