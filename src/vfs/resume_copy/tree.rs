@@ -1,10 +1,10 @@
 //! Folder recovery verifies a fresh snapshot against the recorded fingerprint.
 //! Moves retain original access times separately because reading changes them.
 use super::{
-    copy_metadata, copy_suffix, discard_stage, entry_metadata, file_scope, finish_record,
-    manifest_error, register_copy, rename_for_publication, required_metadata, retained_error,
-    stage_contents, stage_identity, verify_stamp, verify_target, Cancellation, Completion,
-    EntryMetadata, FileProof, Intent, Location, Original, Paths, Progress, Receipt,
+    checked_digest, copy_metadata, copy_suffix, discard_stage, entry_metadata, file_scope,
+    finish_record, manifest_error, register_copy, rename_for_publication, required_metadata,
+    retained_error, stage_contents, stage_identity, verify_stamp, verify_target, Cancellation,
+    Completion, EntryMetadata, FileProof, Intent, Location, Original, Paths, Progress, Receipt,
     RenamedIdentity, SavedTime, Ticket, TransferError,
 };
 use crate::file_error::{
@@ -698,7 +698,7 @@ fn check_prefix(
             let size = partial.stamp.size();
             progress.set_copy_endpoints(path, path);
             let mut input = AccessStream::new(input, path).take(size);
-            Ok(progress.hash_copy_check(path.path(), size, &mut input)? == Some(partial.digest))
+            Ok(checked_digest(progress, path, size, role, &mut input)? == partial.digest)
         })?
         .ok_or_else(|| role.error(source, ResumeCheckProblem::Missing))
 }

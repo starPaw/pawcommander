@@ -22,7 +22,7 @@ use crate::file_error::{
     RecoveryRecordError, RecoveryRecordProblem, ResumeCheckProblem, ResumeRole, StagingError,
 };
 use crate::i18n::text;
-use crate::operations::{AccessStream, Cancellation, Progress, TransferError};
+use crate::operations::{AccessStream, Cancellation, HashRead, Progress, TransferError};
 use crate::result_history::Outcome;
 use journal::{Event, Ticket};
 use serde::{Deserialize, Serialize};
@@ -148,14 +148,36 @@ impl FileProof {
         progress.set_copy_endpoints(file, file);
         let digest = scope
             .read_checked(name, &cancel, |source, size, input| {
-                progress
-                    .hash_copy_check(source.path(), size, &mut AccessStream::new(input, source))?
-                    .ok_or_else(|| role.error(source, ResumeCheckProblem::Changed))
+                checked_digest(
+                    progress,
+                    source,
+                    size,
+                    role,
+                    &mut AccessStream::new(input, source),
+                )
             })?
             .ok_or_else(|| role.error(file, ResumeCheckProblem::Missing))?;
         verify_stamp(file, stamp, role)?;
         Ok((Self { stamp, digest }, metadata))
     }
+}
+
+fn checked_digest(
+    progress: &mut Progress,
+    file: &Location,
+    size: u64,
+    role: ResumeRole,
+    input: &mut impl Read,
+) -> Result<[u8; 32], TransferError> {
+    let problem = match progress.hash_copy_check(file.path(), size, input)? {
+        HashRead::Complete(digest) => return Ok(digest),
+        HashRead::Short(actual) => ResumeCheckProblem::SizeMismatch {
+            expected: size,
+            actual,
+        },
+        HashRead::ExtraData => ResumeCheckProblem::ExtraData { expected: size },
+    };
+    Err(role.error(file, problem))
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1073,8 +1095,8 @@ fn copy_suffix(
             if let Some((proof, _)) = partial.filter(|_| offset != 0) {
                 let mut prefix = (&mut input).take(offset);
                 progress.set_copy_endpoints(source, source);
-                let actual = progress.hash_copy_check(source.path(), offset, &mut prefix)?;
-                if actual != Some(proof.digest) {
+                let actual = checked_digest(progress, source, offset, role, &mut prefix)?;
+                if actual != proof.digest {
                     return Err(
                         ResumeRole::Staged.error(payload, ResumeCheckProblem::ContentsMismatch)
                     );

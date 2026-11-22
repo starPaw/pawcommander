@@ -6,9 +6,9 @@ mod bandwidth;
 pub(crate) use access_stream::{access_io, AccessStream};
 
 use crate::file_error::{
-    AccessCause, AccessError, ArchiveError, ChecksumError, ConnectionError, Failure, HostKeyError,
-    ListingError, MetadataError, MutationError, PathError, PermissionError, PreviewError,
-    PublicationError, RecoveryNotice, ScanError, SearchError, SpaceError,
+    AccessCause, AccessError, ArchiveError, ChecksumError, ConnectionError, CopyVerificationError,
+    Failure, HostKeyError, ListingError, MetadataError, MutationError, PathError, PermissionError,
+    PreviewError, PublicationError, RecoveryNotice, ScanError, SearchError, SpaceError,
 };
 use crate::vfs::{Endpoint, Location};
 use bandwidth::Pacer;
@@ -259,7 +259,11 @@ impl TransferError {
         if Self::is_cancelled_io(&error) {
             return Self::Cancelled;
         }
-        match error.downcast::<AccessError>() {
+        let error = match error.downcast::<AccessError>() {
+            Ok(error) => return error.into(),
+            Err(error) => error,
+        };
+        match error.downcast::<CopyVerificationError>() {
             Ok(error) => error.into(),
             Err(error) => Self::Failed(Failure::Io {
                 message: context(&error),
@@ -442,6 +446,21 @@ pub(crate) struct Snapshot {
 pub(crate) struct Verification {
     pub read: u64,
     pub expected: u64,
+}
+
+pub(crate) enum HashRead {
+    Complete([u8; 32]),
+    Short(u64),
+    ExtraData,
+}
+
+impl HashRead {
+    fn digest(self) -> Option<[u8; 32]> {
+        match self {
+            Self::Complete(digest) => Some(digest),
+            Self::Short(_) | Self::ExtraData => None,
+        }
+    }
 }
 
 /// Hash the exact bounded source stream consumed by the copy. Disabled copies
@@ -813,24 +832,26 @@ impl Progress {
     pub fn verify_copy(
         &mut self,
         path: &Path,
+        target: &Location,
         expected: u64,
         source_hash: [u8; 32],
         input: &mut impl Read,
     ) -> io::Result<()> {
         let actual = self.hash_file_with(path, expected, input, true)?;
-        verify_hash(path, source_hash, actual)
+        verify_hash(target, expected, source_hash, actual)
     }
 
     /// The published target is being checked while the source is quarantined.
     pub(crate) fn verify_copy_before_source_removal(
         &mut self,
         path: &Path,
+        target: &Location,
         expected: u64,
         source_hash: [u8; 32],
         input: &mut impl Read,
     ) -> io::Result<()> {
-        let actual = self.hash_file(path, expected, input)?;
-        verify_hash(path, source_hash, actual)
+        let actual = self.hash_file_with(path, expected, input, false)?;
+        verify_hash(target, expected, source_hash, actual)
     }
 
     /// Hash a regular file at its captured length, with a one-byte growth probe.
@@ -841,6 +862,7 @@ impl Progress {
         input: &mut impl Read,
     ) -> io::Result<Option<[u8; 32]>> {
         self.hash_file_with(path, expected, input, false)
+            .map(HashRead::digest)
     }
 
     #[cfg(target_os = "macos")]
@@ -849,7 +871,7 @@ impl Progress {
         path: &Path,
         expected: u64,
         input: &mut impl Read,
-    ) -> io::Result<Option<[u8; 32]>> {
+    ) -> io::Result<HashRead> {
         self.hash_file_with(path, expected, input, true)
     }
 
@@ -859,7 +881,7 @@ impl Progress {
         expected: u64,
         input: &mut impl Read,
         staged_copy: bool,
-    ) -> io::Result<Option<[u8; 32]>> {
+    ) -> io::Result<HashRead> {
         let check = |progress: &mut Self| {
             if staged_copy {
                 progress.checkpoint()
@@ -894,7 +916,7 @@ impl Progress {
                 break;
             }
             if limit == 0 {
-                return Ok(None);
+                return Ok(HashRead::ExtraData);
             }
             if staged_copy {
                 self.pacer.spend(count as u64);
@@ -906,10 +928,10 @@ impl Progress {
         }
         check(self)?;
         if read != expected {
-            return Ok(None);
+            return Ok(HashRead::Short(read));
         }
         self.publish(Instant::now(), true);
-        Ok(Some(hash.finalize().into()))
+        Ok(HashRead::Complete(hash.finalize().into()))
     }
 
     fn copy_tracked(
@@ -971,19 +993,26 @@ impl<R: Read> Read for ProgressReader<'_, R> {
     }
 }
 
-fn copy_hash_mismatch(path: &Path) -> io::Error {
-    io::Error::other(crate::tr_format!(
-        "SHA-256 verification failed for {}. Copy was not published; source was preserved",
-        path.display()
-    ))
-}
-
-fn verify_hash(path: &Path, expected: [u8; 32], actual: Option<[u8; 32]>) -> io::Result<()> {
-    if actual == Some(expected) {
-        Ok(())
-    } else {
-        Err(copy_hash_mismatch(path))
-    }
+fn verify_hash(
+    target: &Location,
+    expected: u64,
+    source_hash: [u8; 32],
+    actual: HashRead,
+) -> io::Result<()> {
+    let error = match actual {
+        HashRead::Complete(digest) if digest == source_hash => return Ok(()),
+        HashRead::Complete(_) => CopyVerificationError::DigestMismatch(target.clone()),
+        HashRead::Short(actual) => CopyVerificationError::CopySize {
+            target: target.clone(),
+            expected,
+            actual,
+        },
+        HashRead::ExtraData => CopyVerificationError::ExtraData {
+            target: target.clone(),
+            expected,
+        },
+    };
+    Err(error.into())
 }
 
 #[cfg(test)]
@@ -1032,6 +1061,7 @@ mod tests {
             0xf2, 0x00, 0x15, 0xad,
         ];
         let path = Path::new("source");
+        let target = Location::Local("destination".into());
         let (mut progress, mut view) = Progress::tracked();
         let mut source = CopyReader::new(Cursor::new(b"abc"), true);
         let mut destination = Vec::new();
@@ -1040,19 +1070,61 @@ mod tests {
             .unwrap();
         assert_eq!(source.finish(), Some(known_abc));
         progress
-            .verify_copy(path, 3, known_abc, &mut Cursor::new(&destination))
+            .verify_copy(path, &target, 3, known_abc, &mut Cursor::new(&destination))
             .unwrap();
         let snapshot = view.snapshot();
         assert_eq!(snapshot.total_written, 3);
         assert!(snapshot.transfer.is_none());
         assert_eq!(snapshot.verification.as_ref().unwrap().read, 3);
-        for changed in [b"abd".as_slice(), b"ab", b"abcd"] {
-            assert!(progress
-                .verify_copy(path, 3, known_abc, &mut Cursor::new(changed))
-                .is_err());
+        for (changed, expected) in [
+            (
+                b"abd".as_slice(),
+                CopyVerificationError::DigestMismatch(target.clone()),
+            ),
+            (
+                b"ab",
+                CopyVerificationError::CopySize {
+                    target: target.clone(),
+                    expected: 3,
+                    actual: 2,
+                },
+            ),
+            (
+                b"abcd",
+                CopyVerificationError::ExtraData {
+                    target: target.clone(),
+                    expected: 3,
+                },
+            ),
+        ] {
+            let error = progress
+                .verify_copy(path, &target, 3, known_abc, &mut Cursor::new(changed))
+                .unwrap_err();
+            assert!(
+                matches!(TransferError::from(error), TransferError::Failed(Failure::CopyVerification(reason)) if *reason == expected)
+            );
         }
+        let after_publication = progress
+            .verify_copy_before_source_removal(
+                path,
+                &target,
+                3,
+                known_abc,
+                &mut Cursor::new(b"abd"),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(TransferError::from(after_publication), TransferError::Failed(Failure::CopyVerification(reason))
+            if *reason == CopyVerificationError::DigestMismatch(target.clone()))
+        );
         progress
-            .verify_copy(path, 0, Sha256::digest([]).into(), &mut Cursor::new([]))
+            .verify_copy(
+                path,
+                &target,
+                0,
+                Sha256::digest([]).into(),
+                &mut Cursor::new([]),
+            )
             .unwrap();
         struct FailedRead;
         impl Read for FailedRead {
@@ -1062,7 +1134,7 @@ mod tests {
         }
         assert_eq!(
             progress
-                .verify_copy(path, 3, known_abc, &mut FailedRead)
+                .verify_copy(path, &target, 3, known_abc, &mut FailedRead)
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::PermissionDenied
@@ -1083,7 +1155,13 @@ mod tests {
         let mut progress = Progress::default();
         let mut input = StopOnRead(progress.cancellation(), 0);
         let error = progress
-            .verify_copy(Path::new("source"), 1024, [0; 32], &mut input)
+            .verify_copy(
+                Path::new("source"),
+                &Location::Local("destination".into()),
+                1024,
+                [0; 32],
+                &mut input,
+            )
             .unwrap_err();
         assert!(matches!(
             TransferError::from(error),

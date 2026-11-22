@@ -18,6 +18,7 @@ pub(crate) enum ResumeCheckProblem {
     Changed,
     ContentsMismatch,
     SizeMismatch { expected: u64, actual: u64 },
+    ExtraData { expected: u64 },
     WrongType,
     IncompleteMetadata,
     InvalidPath,

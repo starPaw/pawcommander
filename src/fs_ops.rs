@@ -2,8 +2,9 @@
 //! volume before publication. This does not snapshot a changing filesystem.
 
 use crate::file_error::{
-    AccessAction, AccessCause, AccessError, ListingError, ListingErrorKind, LocalPathAction,
-    MutationError, PathError, SpaceError, StagingCleanupError, StagingError, TransferPlanError,
+    AccessAction, AccessCause, AccessError, CopyVerificationError, ListingError, ListingErrorKind,
+    LocalPathAction, MutationError, PathError, SpaceError, StagingCleanupError, StagingError,
+    TransferPlanError,
 };
 use crate::operations::{
     access_io, AccessStream, Cancellation, CopyReader, Progress, TransferError,
@@ -1082,7 +1083,12 @@ fn copy_tree_entry(
             (written, None)
         };
         if written != metadata.len() {
-            return Err(source_changed(source));
+            return Err(CopyVerificationError::SourceSize {
+                source: input_path,
+                expected: metadata.len(),
+                actual: written,
+            }
+            .into());
         }
         let current = input
             .metadata()
@@ -1100,6 +1106,7 @@ fn copy_tree_entry(
                 .map_err(|error| output_error(AccessAction::SeekFile, error))?;
             progress.verify_copy(
                 source,
+                &output_path,
                 metadata.len(),
                 source_hash,
                 &mut AccessStream::new(&mut output, &output_path),

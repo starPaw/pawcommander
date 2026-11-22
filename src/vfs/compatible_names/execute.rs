@@ -3,7 +3,9 @@ use super::{
     TransferKind,
 };
 use crate::{
-    file_error::{AccessAction, AccessError, Failure, MutationError, PublicationError},
+    file_error::{
+        AccessAction, AccessError, CopyVerificationError, Failure, MutationError, PublicationError,
+    },
     operations::{AccessStream, CopyReader},
     result_history::Outcome,
     vfs::{
@@ -299,7 +301,12 @@ impl CopyTree<'_, '_> {
             let metadata_error =
                 |error| AccessError::new(&target, AccessAction::ReadOpenMetadata, error);
             if written != size {
-                return Err(MutationError::SourceChanged(source.clone()).into());
+                return Err(CopyVerificationError::SourceSize {
+                    source: source.clone(),
+                    expected: size,
+                    actual: written,
+                }
+                .into());
             }
             if file.metadata().map_err(metadata_error)?.len() != size {
                 return Err(stale_target(&target));
@@ -309,6 +316,7 @@ impl CopyTree<'_, '_> {
                     .map_err(|error| AccessError::new(&target, AccessAction::SeekFile, error))?;
                 self.progress.verify_copy(
                     source.path(),
+                    &target,
                     size,
                     hash,
                     &mut AccessStream::new(&mut file, &target),
