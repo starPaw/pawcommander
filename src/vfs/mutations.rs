@@ -112,29 +112,41 @@ impl RemoteRemoval<'_> {
             progress.checkpoint()?;
             progress.item(path);
         }
-        let (result, action) = if stat.is_dir() {
-            (self.sftp.rmdir(path), SftpRemovalAction::RemoveDirectory)
-        } else {
-            (self.sftp.unlink(path), SftpRemovalAction::RemoveFile)
-        };
-        result.map_err(|source| {
-            // A negative server status confirms rejection. A transport error
-            // can also occur after the server has applied the request.
-            let rejected = matches!(source.code(), ErrorCode::SFTP(code) if code > 0
-                && code != libssh2_sys::LIBSSH2_FX_NO_CONNECTION
-                && code != libssh2_sys::LIBSSH2_FX_CONNECTION_LOST);
-            let error = MutationError::RemoveSftp {
-                location: location.clone(),
-                action,
-                source,
-            };
-            if rejected {
-                error.into()
-            } else {
-                TransferError::PublicationUnconfirmed(error.into())
-            }
-        })
+        remove_remote_entry(self.sftp, location, stat.is_dir())
     }
+}
+
+/// Remove only the selected entry. The caller verifies its contents separately.
+pub(super) fn remove_remote_entry(
+    sftp: &Sftp,
+    location: &Location,
+    directory: bool,
+) -> Result<(), TransferError> {
+    let (result, action) = if directory {
+        (
+            sftp.rmdir(location.path()),
+            SftpRemovalAction::RemoveDirectory,
+        )
+    } else {
+        (sftp.unlink(location.path()), SftpRemovalAction::RemoveFile)
+    };
+    result.map_err(|source| {
+        // A negative server status confirms rejection. A transport error
+        // can also occur after the server has applied the request.
+        let rejected = matches!(source.code(), ErrorCode::SFTP(code) if code > 0
+            && code != libssh2_sys::LIBSSH2_FX_NO_CONNECTION
+            && code != libssh2_sys::LIBSSH2_FX_CONNECTION_LOST);
+        let error = MutationError::RemoveSftp {
+            location: location.clone(),
+            action,
+            source,
+        };
+        if rejected {
+            error.into()
+        } else {
+            TransferError::PublicationUnconfirmed(error.into())
+        }
+    })
 }
 
 #[derive(Debug)]

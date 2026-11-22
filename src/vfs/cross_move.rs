@@ -2,14 +2,17 @@
 //! A published copy and a completed move are separate facts. Partial moves
 //! are never automatic retry or inverse-rename candidates.
 use super::copy_metadata::{self, Attributes, Mode as MetadataMode};
+use super::mutations::remove_remote_entry;
 use super::sftp::remote;
 use super::transfer::{
     copy_item_cancellable, entry_metadata, rename_for_publication, source_children,
     with_preserved_staging, EntryMetadata, SourceReader, TransferItem, TransferSourceEntry,
     TransferSourceManifest,
 };
-use super::{err, Location};
-use crate::file_error::MutationError;
+use super::Location;
+use crate::file_error::{
+    AccessAction, AccessError, CrossMoveError, LocalPathAction, MutationError, TransferPlanError,
+};
 use crate::operations::{AccessStream, Cancellation, CopyReader, Progress, TransferError};
 use std::collections::BTreeMap;
 use std::fs;
@@ -21,17 +24,21 @@ mod tests;
 
 pub(super) fn required(item: &TransferItem) -> Result<bool, TransferError> {
     #[cfg(target_os = "macos")]
-    if super::transfer::mounted_smb(&item.source) || super::transfer::mounted_smb(&item.target) {
-        return Err(
-            crate::i18n::text!("Для передачи файлов через SMB используйте копирование.").into(),
-        );
+    if let Some(path) = [&item.source, &item.target]
+        .into_iter()
+        .find(|path| super::transfer::mounted_smb(path))
+    {
+        return Err(CrossMoveError::Smb(path.clone()).into());
     }
     if !item.source.same_backend(&item.target) {
         return Ok(true);
     }
     if item.source.local().is_some() {
         let source = metadata(&item.source)?;
-        let parent = item.target.parent().ok_or("Invalid destination")?;
+        let parent = item
+            .target
+            .parent()
+            .ok_or_else(|| TransferPlanError::MissingParent(item.target.clone()))?;
         let target = metadata(&parent)?;
         // If volume identity is unavailable, retain the native rename path;
         // never guess that an arbitrary rename failure permits copy/delete.
@@ -50,15 +57,33 @@ pub(super) enum Phase {
     Removed,
 }
 
-fn changed(path: &Location) -> String {
-    crate::tr_format!(
-        "Move stopped: item {path} changed or is inaccessible",
-        path = path
-    )
+fn changed(path: &Location) -> CrossMoveError {
+    CrossMoveError::Changed(path.clone())
 }
 
 fn metadata(path: &Location) -> Result<EntryMetadata, TransferError> {
     entry_metadata(path)?.ok_or_else(|| changed(path).into())
+}
+
+fn read_link(path: &Location) -> Result<PathBuf, TransferError> {
+    fs::read_link(path.path())
+        .map_err(|error| AccessError::new(path, AccessAction::ReadLink, error).into())
+}
+
+fn remove_source_entry(source: &Location, directory: bool) -> Result<(), TransferError> {
+    if let Some(local) = source.local() {
+        let (result, action) = if directory {
+            (fs::remove_dir(local), LocalPathAction::RemoveDirectory)
+        } else {
+            (fs::remove_file(local), LocalPathAction::RemoveFile)
+        };
+        return result.map_err(|error| MutationError::local(local, action, error).into());
+    }
+    let sftp = remote(source).map_err(|reason| MutationError::OpenSftpRemoval {
+        location: source.clone(),
+        reason,
+    })?;
+    remove_remote_entry(&sftp, source, directory)
 }
 
 fn directory_matches(expected: &EntryMetadata, actual: &EntryMetadata) -> bool {
@@ -280,18 +305,14 @@ impl MoveSource {
         for (path, entry) in &manifest.entries {
             if entry.children.is_none() && !entry.metadata.is_file() {
                 // A local symbolic link has a literal target to compare.
-                if let (Some(local), Some(_), EntryMetadata::Local(meta)) =
+                if let (Some(_), Some(_), EntryMetadata::Local(meta)) =
                     (path.local(), item.target.local(), &entry.metadata)
                     && meta.is_symlink()
                     && entry.metadata.same_object(&entry.metadata)
                 {
-                    links.insert(path.clone(), fs::read_link(local).map_err(err)?);
+                    links.insert(path.clone(), read_link(path)?);
                 } else {
-                    return Err(crate::tr_format!(
-                        "Safe cross-volume move is unavailable for this object type: {path}",
-                        path = path
-                    )
-                    .into());
+                    return Err(CrossMoveError::UnsupportedType(path.clone()).into());
                 }
             }
         }
@@ -306,14 +327,18 @@ impl MoveSource {
     #[cfg(target_os = "macos")]
     pub(super) fn with_original_access_times(
         mut self,
+        source: &Location,
         times: Option<Vec<Option<std::time::SystemTime>>>,
     ) -> Result<Self, TransferError> {
         let entries = self.manifest.entries.len();
         let times = times.unwrap_or_else(|| vec![None; entries]);
         if times.len() != entries {
-            return Err(
-                crate::i18n::text!("Некорректная запись времени доступа для переноса").into(),
-            );
+            return Err(CrossMoveError::AccessTimes {
+                source: source.clone(),
+                expected: entries,
+                actual: times.len(),
+            }
+            .into());
         }
         // The saved timestamps use the same sorted relative paths as the verified manifest.
         self.original_access_times = Some(times);
@@ -370,12 +395,12 @@ pub(super) fn remove_verified_at(
     let manifest = &source_plan.manifest;
     let links = &source_plan.links;
     let cancel = progress.cancellation();
-    let target_path = |original: &Location| {
+    let target_path = |original: &Location| -> Result<Location, TransferError> {
         if let Some(paths) = target_paths {
             paths
                 .get(original)
                 .cloned()
-                .ok_or_else(|| changed(original))
+                .ok_or_else(|| changed(original).into())
         } else {
             Ok(mapped(original, &item.source, &item.target))
         }
@@ -413,15 +438,11 @@ pub(super) fn remove_verified_at(
             }
             // This directory is registered for crash recovery and retained
             // even on panic or an unacknowledged remote rename.
-            if let Err(error) = rename_for_publication(&item.source, &held) {
-                return Err(crate::tr_format!(
-                    "{error}. Inspect source {} and retained folder {held}",
-                    item.source,
-                    error = crate::i18n::file_error(&error),
-                    held = held
-                )
-                .into());
-            }
+            rename_for_publication(&item.source, &held).map_err(|cause| CrossMoveError::Hold {
+                original: item.source.clone(),
+                held: held.clone(),
+                cause,
+            })?;
             let deletion = (|| {
                 observe(&held, Phase::Quarantined)?;
                 // Check the complete tree before deleting its first entry.
@@ -473,7 +494,8 @@ pub(super) fn remove_verified_at(
                         finish_local_attributes || original.remote() || target.remote();
                     let attributes =
                         finish_attributes.then(|| source_plan.attributes(&entry.metadata, index));
-                    if entry.children.is_some() {
+                    let directory = entry.children.is_some();
+                    if directory {
                         if !directory_matches(&entry.metadata, &metadata(&source)?) {
                             return Err(changed(&source).into());
                         }
@@ -487,18 +509,11 @@ pub(super) fn remove_verified_at(
                                 return Err(changed(&source).into());
                             }
                         }
-                        if let Some(local) = source.local() {
-                            fs::remove_dir(local).map_err(err)?;
-                        } else {
-                            remote(&source)?.rmdir(source.path()).map_err(err)?;
-                        }
                     } else {
                         if let Some(link) = links.get(original) {
                             verify_entry(&source, entry, &cancel)?;
                             verify_entry(&target, copied, &cancel)?;
-                            if fs::read_link(source.path()).map_err(err)? != *link
-                                || fs::read_link(target.path()).map_err(err)? != *link
-                            {
+                            if read_link(&source)? != *link || read_link(&target)? != *link {
                                 return Err(changed(&source).into());
                             }
                         } else {
@@ -506,12 +521,15 @@ pub(super) fn remove_verified_at(
                                 &source, &target, original, entry, copied, attributes, progress,
                             )?;
                         }
-                        cancel.check()?;
-                        if let Some(local) = source.local() {
-                            fs::remove_file(local).map_err(err)?;
-                        } else {
-                            remote(&source)?.unlink(source.path()).map_err(err)?;
+                    }
+                    cancel.check()?;
+                    if let Err(error) = remove_source_entry(&source, directory) {
+                        if matches!(&error, TransferError::PublicationUnconfirmed(_)) {
+                            progress
+                                .results
+                                .moved_entry_with_error(original, Some(&error));
                         }
+                        return Err(error);
                     }
                     progress.results.moved_entry(original, true, None);
                     if original == &item.source {
@@ -533,13 +551,14 @@ pub(super) fn remove_verified_at(
                     deletion
                 }
                 Err(restore) => {
-                    let reason = deletion
-                        .err()
-                        .map_or_else(|| changed(&held), |error| crate::i18n::file_error(&error));
-                    let source = &item.source;
-                    Err(crate::tr_format!(
-                        "{reason}. Remaining source retained at {held}; restoration to {source} failed: {restore}", held = held, reason = reason, restore = crate::i18n::file_error(&restore), source = source
-                    ).into())
+                    let cause = deletion.err().unwrap_or_else(|| changed(&held).into());
+                    Err(CrossMoveError::Restore {
+                        original: item.source.clone(),
+                        held,
+                        cause,
+                        restore,
+                    }
+                    .into())
                 }
             }
         })

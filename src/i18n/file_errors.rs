@@ -1,12 +1,12 @@
 use super::text;
 use crate::file_error::{
     AccessAction, AccessCause, AccessError, ArchiveError, ArchiveMemberError, BatchRenameError,
-    ChecksumError, ConflictError, ConnectionError, Failure, HostKeyError, KnownHostEntryError,
-    KnownHostsError, ListingError, ListingErrorKind, LocalPathAction, ManifestLineError,
-    MetadataError, MetadataField, MetadataWarning, MutationError, PathError, PermissionError,
-    PinError, PreviewError, ProbeAction, PublicationError, RecoveryNotice, ReplacementRefusal,
-    RetryError, RetryProblem, ScanError, SearchError, SpaceError, SshStage, StagingCleanupError,
-    StagingError, StagingRecordAction, TransferPlanError, UndoError,
+    ChecksumError, ConflictError, ConnectionError, CrossMoveError, Failure, HostKeyError,
+    KnownHostEntryError, KnownHostsError, ListingError, ListingErrorKind, LocalPathAction,
+    ManifestLineError, MetadataError, MetadataField, MetadataWarning, MutationError, PathError,
+    PermissionError, PinError, PreviewError, ProbeAction, PublicationError, RecoveryNotice,
+    ReplacementRefusal, RetryError, RetryProblem, ScanError, SearchError, SpaceError, SshStage,
+    StagingCleanupError, StagingError, StagingRecordAction, TransferPlanError, UndoError,
 };
 #[cfg(target_os = "macos")]
 use crate::file_error::{
@@ -52,6 +52,7 @@ pub(crate) fn file_error(error: &TransferError) -> String {
                 Failure::ConflictClosed => text!("Диалог конфликта закрыт").into(),
                 Failure::Conflict(error) => conflict_error(error),
                 Failure::BatchRename(error) => batch_rename_error(error),
+                Failure::CrossMove(error) => cross_move_error(error),
                 Failure::Undo(error) => undo_error(error),
                 #[cfg(target_os = "macos")]
                 Failure::FilePromise(error) => file_promise_error(error),
@@ -75,6 +76,68 @@ pub(crate) fn file_error(error: &TransferError) -> String {
             }
         }
         TransferError::Cancelled => crate::tr_format!("Operation cancelled"),
+    }
+}
+
+fn cross_move_error(error: &CrossMoveError) -> String {
+    use CrossMoveError::*;
+
+    match error {
+        Changed(path) => crate::tr_format!(
+            "Move stopped: item {path} changed or is inaccessible",
+            path = path
+        ),
+        UnsupportedType(path) => crate::tr_format!(
+            "Safe cross-volume move is unavailable for this object type: {path}",
+            path = path
+        ),
+        #[cfg(target_os = "macos")]
+        Smb(path) => format!(
+            "{} · {path}",
+            text!("Для передачи файлов через SMB используйте копирование.")
+        ),
+        #[cfg(target_os = "macos")]
+        AccessTimes {
+            source,
+            expected,
+            actual,
+        } => crate::tr_format!(
+            "Saved access times for {source} have {actual} entries. Expected {expected}.",
+            source = source,
+            expected = expected,
+            actual = actual
+        ),
+        Hold {
+            original,
+            held,
+            cause,
+        } => crate::tr_format!(
+            "Check the original source {source} and temporary path {held}.\n{error}",
+            source = original,
+            held = held,
+            error = file_error(cause)
+        ),
+        Restore {
+            original,
+            held,
+            cause,
+            restore,
+        } => {
+            let restoration = if matches!(restore, TransferError::PublicationUnconfirmed(_)) {
+                crate::tr_format!(
+                    "Restoration from {held} to {source} is unconfirmed. Check both paths.\n{error}",
+                    held = held, source = original, error = file_error(restore)
+                )
+            } else {
+                crate::tr_format!(
+                    "Could not restore the source from {held} to {source}.\n{error}",
+                    held = held,
+                    source = original,
+                    error = file_error(restore)
+                )
+            };
+            format!("{}\n{restoration}", file_error(cause))
+        }
     }
 }
 
@@ -1435,6 +1498,8 @@ fn mutation_error(error: &MutationError, unconfirmed: bool) -> String {
                 LocalPathAction::ReadMetadata => text!("Не удалось получить сведения об элементе"),
                 LocalPathAction::CheckDestination => text!("Не удалось проверить место назначения"),
                 LocalPathAction::CreateDirectory => text!("Не удалось создать папку"),
+                LocalPathAction::RemoveFile => text!("Не удалось удалить исходный файл"),
+                LocalPathAction::RemoveDirectory => text!("Не удалось удалить исходную папку"),
             };
             format!("{action} «{}»: {source}", path.display())
         }

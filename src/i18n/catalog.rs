@@ -40,6 +40,8 @@ catalog! {
     "Недопустимое назначение" => ("Invalid destination", "Neplatný cíl"),
     "Не удалось создать временную папку для копирования" => ("Could not create a temporary folder for copying", "Dočasnou složku pro kopírování se nepodařilo vytvořit"),
     "Не удалось удалить временную папку" => ("Could not remove the temporary folder", "Dočasnou složku se nepodařilo odstranit"),
+    "Не удалось удалить исходный файл" => ("Could not remove the source file", "Zdrojový soubor se nepodařilo odstranit"),
+    "Не удалось удалить исходную папку" => ("Could not remove the source folder", "Zdrojovou složku se nepodařilo odstranit"),
     "Слишком большой размер копируемого дерева" => ("The tree is too large to copy", "Strom složek je pro kopírování příliš velký"),
     "Введите имя без /, \\, NUL, . и .." => ("Enter a name without /, \\, NUL, . or ..", "Zadejte název bez /, \\, NUL, . a .."),
     "Введите имя файла или папки без / и \\" => ("Enter a file or folder name without / or \\", "Zadejte název souboru nebo složky bez / a \\"),

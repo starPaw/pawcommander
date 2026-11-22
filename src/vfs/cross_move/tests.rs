@@ -1,4 +1,5 @@
 use super::*;
+use crate::file_error::Failure;
 use crate::result_history::Outcome;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -28,6 +29,17 @@ fn progress(item: &TransferItem) -> Progress {
         .plan([(item.source.clone(), Some(item.target.display()))]);
     progress.results.begin(&item.source);
     progress
+}
+
+fn incomplete_cause<'a>(error: &'a TransferError, destination: &Location) -> &'a TransferError {
+    let TransferError::Failed(Failure::Mutation(reason)) = error else {
+        panic!("Expected an incomplete move after the copy was published, got {error:?}");
+    };
+    let MutationError::MoveIncomplete { target, cause } = reason.as_ref() else {
+        panic!("Expected an incomplete move, got {reason:?}");
+    };
+    assert_eq!(target, destination);
+    cause
 }
 
 fn no_staging(root: &std::path::Path) {
@@ -350,7 +362,7 @@ fn new_children_and_occupied_restore_names_are_preserved() {
                 Ok(())
             },
         );
-        assert!(result.is_err());
+        let error = result.unwrap_err();
         let remaining = if occupied {
             held.unwrap()
         } else {
@@ -363,14 +375,80 @@ fn new_children_and_occupied_restore_names_are_preserved() {
         assert_eq!(fs::read(remaining.join("a").path()).unwrap(), b"a");
         if occupied {
             assert_eq!(fs::read(item.source.path()).unwrap(), b"new original name");
-            assert!(result
-                .unwrap_err()
-                .to_string()
-                .contains(&remaining.display()));
+            let TransferError::Failed(Failure::CrossMove(reason)) =
+                incomplete_cause(&error, &item.target)
+            else {
+                panic!("Expected both the original failure and failed restoration, got {error:?}");
+            };
+            let CrossMoveError::Restore {
+                original,
+                held,
+                cause,
+                restore,
+            } = reason.as_ref()
+            else {
+                panic!("Expected a restoration error, got {reason:?}");
+            };
+            assert_eq!((original, held), (&item.source, &remaining));
+            assert!(
+                matches!(cause, TransferError::Failed(Failure::CrossMove(reason))
+                if matches!(reason.as_ref(), CrossMoveError::Changed(path) if path == held))
+            );
+            assert!(
+                matches!(restore, TransferError::Failed(Failure::Mutation(reason))
+                if matches!(reason.as_ref(), MutationError::RenameLocal { from, to, source }
+                    if from == held.path() && to == original.path()
+                        && source.kind() == std::io::ErrorKind::AlreadyExists))
+            );
         } else {
             no_staging(root.path());
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn failed_source_hold_retains_the_occupied_path_and_system_error() {
+    let (_root, item) = fixture(false);
+    let mut progress = progress(&item);
+    let mut occupant = None;
+    let error = run(
+        &item,
+        None,
+        &mut progress,
+        || {},
+        || panic!("source removal after failed hold"),
+        &mut |path, phase| {
+            if phase == Phase::QuarantinePlanned {
+                fs::write(path.path(), b"keep the existing file").unwrap();
+                occupant = Some(path.clone());
+            }
+            Ok(())
+        },
+    )
+    .unwrap_err();
+    let TransferError::Failed(Failure::CrossMove(reason)) = incomplete_cause(&error, &item.target)
+    else {
+        panic!("Expected a typed source hold error, got {error:?}");
+    };
+    let CrossMoveError::Hold {
+        original,
+        held,
+        cause,
+    } = reason.as_ref()
+    else {
+        panic!("Expected the two source paths, got {reason:?}");
+    };
+    assert_eq!(original, &item.source);
+    assert_eq!(Some(held), occupant.as_ref());
+    assert!(
+        matches!(cause, TransferError::Failed(Failure::Mutation(reason))
+        if matches!(reason.as_ref(), MutationError::RenameLocal { source, .. }
+            if source.raw_os_error() == Some(libc::EEXIST)))
+    );
+    assert_eq!(fs::read(held.path()).unwrap(), b"keep the existing file");
+    assert_eq!(fs::read(item.source.path()).unwrap(), b"original payload");
+    assert_eq!(fs::read(item.target.path()).unwrap(), b"original payload");
 }
 
 #[test]
