@@ -283,7 +283,14 @@ pub(super) fn run(
         progress.results.copied_source_remaining();
         return Err(incomplete(&item.target, error, progress));
     }
-    remove_verified(item, source, None, progress, removed, observe)
+    remove_verified(
+        item,
+        source,
+        PublishedDestination::Capture,
+        progress,
+        removed,
+        observe,
+    )
 }
 
 pub(super) struct MoveSource {
@@ -374,39 +381,40 @@ impl MoveSource {
     }
 }
 
+pub(super) enum PublishedDestination {
+    Capture,
+    #[cfg(target_os = "macos")]
+    Resumable(TransferSourceManifest),
+    #[cfg(target_os = "macos")]
+    Compatible {
+        manifest: TransferSourceManifest,
+        paths: BTreeMap<Location, Location>,
+    },
+}
+
 pub(super) fn remove_verified(
     item: &TransferItem,
     source_plan: MoveSource,
-    verified_target: Option<TransferSourceManifest>,
+    destination: PublishedDestination,
     progress: &mut Progress,
     removed: impl FnOnce(),
     observe: &mut impl FnMut(&Location, Phase) -> Result<(), TransferError>,
 ) -> Result<(), TransferError> {
-    remove_verified_at(
-        item,
-        source_plan,
-        verified_target,
-        None,
-        progress,
-        removed,
-        observe,
-    )
-}
-
-pub(super) fn remove_verified_at(
-    item: &TransferItem,
-    source_plan: MoveSource,
-    verified_target: Option<TransferSourceManifest>,
-    target_paths: Option<&BTreeMap<Location, Location>>,
-    progress: &mut Progress,
-    removed: impl FnOnce(),
-    observe: &mut impl FnMut(&Location, Phase) -> Result<(), TransferError>,
-) -> Result<(), TransferError> {
+    let (verified_target, target_paths, keep_stage): (_, Option<BTreeMap<Location, Location>>, _) =
+        match destination {
+            PublishedDestination::Capture => (None, None, false),
+            #[cfg(target_os = "macos")]
+            PublishedDestination::Resumable(manifest) => (Some(manifest), None, true),
+            #[cfg(target_os = "macos")]
+            PublishedDestination::Compatible { manifest, paths } => {
+                (Some(manifest), Some(paths), false)
+            }
+        };
     let manifest = &source_plan.manifest;
     let links = &source_plan.links;
     let cancel = progress.cancellation();
     let target_path = |original: &Location| -> Result<Location, TransferError> {
-        if let Some(paths) = target_paths {
+        if let Some(paths) = &target_paths {
             paths
                 .get(original)
                 .cloned()
@@ -550,7 +558,9 @@ pub(super) fn remove_verified_at(
                 Ok(())
             })();
             if fully_removed {
-                *preserve = false;
+                // The resumable path checks the recorded ownership marker
+                // before cleaning this directory after source removal.
+                *preserve = keep_stage;
                 return deletion;
             }
             // Restore the untouched or partially removed source tree without

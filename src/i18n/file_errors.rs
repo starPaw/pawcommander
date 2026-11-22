@@ -1964,10 +1964,13 @@ fn staging_error(error: &StagingError) -> String {
 }
 
 fn staging_cleanup_error(error: &StagingCleanupError) -> String {
-    let outcome =
-        error.operation.as_ref().map(file_error).unwrap_or_else(|| {
+    let outcome = error.operation.as_ref().map(file_error).unwrap_or_else(|| {
+        if error.completed_move {
+            crate::tr_format!("Move completed at {target}", target = error.target)
+        } else {
             crate::tr_format!("Item {target} was published", target = error.target)
-        });
+        }
+    });
     let detail = file_error(&error.cleanup);
     if matches!(error.cleanup, TransferError::PublicationUnconfirmed(_)) {
         return crate::tr_format!(

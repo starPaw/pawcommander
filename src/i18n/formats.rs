@@ -358,6 +358,7 @@ formats! {
     "Could not append {event} to recovery record" => ("Не удалось добавить в запись восстановления {event}", "Nepodařilo se přidat do záznamu obnovení {event}"),
     "Could not save {event} to disk for recovery record" => ("Не удалось сохранить на диск {event} для записи восстановления", "Nepodařilo se uložit na disk {event} pro záznam obnovení"),
     "Could not restore the previous length of the recovery record ({error})." => ("Не удалось восстановить предыдущий размер записи восстановления ({error}).", "Nepodařilo se obnovit předchozí délku záznamu obnovení ({error})."),
+    "Move completed at {target}" => ("Перенос в {target} завершён", "Přesun do {target} byl dokončen"),
     "Move completed at {target}. {error}" => ("Перенос в {target} завершён. {error}", "Přesun do {target} byl dokončen. {error}"),
     "Copy completed at {target}. {error}" => ("Копирование в {target} завершено. {error}", "Kopírování do {target} bylo dokončeno. {error}"),
     "Could not read recovery folder {path}: {error}" => ("Не удалось прочитать папку восстановления {path}: {error}", "Složku obnovení {path} se nepodařilo načíst: {error}"),

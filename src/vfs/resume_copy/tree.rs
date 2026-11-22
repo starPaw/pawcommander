@@ -582,7 +582,7 @@ fn finish(
             snapshot.verify_bytes(paths, &payload, &present, false, &mut Progress::default())?;
             snapshot.discard(&payload, &present)?;
             progress.partial_copy_retained = false;
-            discard_empty_stage(ticket, paths)
+            discard_empty_stage(&paths.stage, receipt.stage_identity, owner)
         })();
         finish_cancelled_cleanup(ticket, paths, cleanup)
     } else {
