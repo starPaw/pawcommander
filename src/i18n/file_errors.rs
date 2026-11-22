@@ -1872,13 +1872,22 @@ fn publication_error(error: &PublicationError) -> String {
             backup,
             cause,
             restore,
-        } => super::replacement_rollback_failed(
-            &file_error(cause),
-            &file_error(restore),
-            target,
-            backup,
-            target.remote(),
-        ),
+        } => {
+            let unconfirmed = if cfg!(target_os = "macos")
+                && matches!(cause, TransferError::Cancelled)
+            {
+                matches!(restore, TransferError::PublicationUnconfirmed(_))
+            } else {
+                target.remote()
+            };
+            super::replacement_rollback_failed(
+                &file_error(cause),
+                &file_error(restore),
+                target,
+                backup,
+                unconfirmed,
+            )
+        }
         PublicationError::Retained {
             staging,
             notice,

@@ -1567,7 +1567,27 @@ pub(super) fn publish_checked_replacement(
     staging: &Location,
     preserve: &mut bool,
     backup_rename: impl FnOnce(&Location, &Location) -> Result<(), TransferError>,
+    check: impl FnMut(&Location) -> Result<(), TransferError>,
+) -> Result<(), TransferError> {
+    publish_checked_replacement_with_rollback(
+        payload,
+        target,
+        staging,
+        preserve,
+        backup_rename,
+        check,
+        |backup, target, _| rename_for_publication(backup, target),
+    )
+}
+
+pub(super) fn publish_checked_replacement_with_rollback(
+    payload: &Location,
+    target: &Location,
+    staging: &Location,
+    preserve: &mut bool,
+    backup_rename: impl FnOnce(&Location, &Location) -> Result<(), TransferError>,
     mut check: impl FnMut(&Location) -> Result<(), TransferError>,
+    rollback: impl FnOnce(&Location, &Location, &TransferError) -> Result<(), TransferError>,
 ) -> Result<(), TransferError> {
     check(target)?;
     let backup = staging.join("previous");
@@ -1592,7 +1612,7 @@ pub(super) fn publish_checked_replacement(
         rename_for_publication(payload, target)
     })();
     if let Err(cause) = result {
-        if let Err(restore) = rename_for_publication(&backup, target) {
+        if let Err(restore) = rollback(&backup, target, &cause) {
             let reason = PublicationError::Rollback {
                 target: target.clone(),
                 backup,
