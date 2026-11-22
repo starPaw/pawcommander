@@ -2123,7 +2123,10 @@ enum ManifestMode {
     #[cfg(target_os = "macos")]
     FilePromise(PromiseKind),
     #[cfg(target_os = "macos")]
-    NativeCopy,
+    RecoveryTree {
+        native_names: bool,
+        move_limit: Option<usize>,
+    },
     Move,
 }
 
@@ -2134,8 +2137,17 @@ impl ManifestMode {
             #[cfg(target_os = "macos")]
             Self::FilePromise(_) => false,
             #[cfg(target_os = "macos")]
-            Self::NativeCopy => true,
+            Self::RecoveryTree { native_names, .. } => native_names,
             Self::Move => true,
+        }
+    }
+
+    fn move_entry_limit(self) -> Option<usize> {
+        match self {
+            Self::Move => Some(MAX_MOVE_JOURNAL_ENTRIES),
+            #[cfg(target_os = "macos")]
+            Self::RecoveryTree { move_limit, .. } => move_limit,
+            _ => None,
         }
     }
 }
@@ -2165,15 +2177,15 @@ impl TransferSourceManifest {
     }
 
     #[cfg(target_os = "macos")]
-    pub(super) fn capture_copy_tree(
+    pub(super) fn capture_recovery_tree(
         source: &Location,
         cancel: &Cancellation,
         native_names: bool,
+        move_limit: Option<usize>,
     ) -> Result<Self, TransferError> {
-        let mode = if native_names {
-            ManifestMode::NativeCopy
-        } else {
-            ManifestMode::Copy
+        let mode = ManifestMode::RecoveryTree {
+            native_names,
+            move_limit,
         };
         Self::capture_for(source, cancel, mode, &mut |_, _| {})
     }
@@ -2216,8 +2228,20 @@ impl TransferSourceManifest {
         observe: &mut impl FnMut(&Location, Option<&TransferError>),
     ) -> Result<(), TransferError> {
         cancel.check()?;
-        if self.mode == ManifestMode::Move && self.entries.len() >= MAX_MOVE_JOURNAL_ENTRIES {
-            return Err(ScanError::MoveEntryLimit(source.clone()).into());
+        let move_limit = self.mode.move_entry_limit();
+        // macOS counts folders already entered but awaiting insertion after their children.
+        let journal_entries = self
+            .entries
+            .len()
+            .saturating_add(if cfg!(target_os = "macos") { depth } else { 0 });
+        if let Some(limit) = move_limit
+            && journal_entries >= limit
+        {
+            return Err(ScanError::MoveEntryLimit {
+                location: source.clone(),
+                limit,
+            }
+            .into());
         }
         if depth > MAX_TREE_DEPTH {
             return Err(ScanError::TransferDepthLimit {
@@ -2256,7 +2280,19 @@ impl TransferSourceManifest {
             return Err(error.into());
         }
         let children = if is_dir {
-            Some(source_children(source, cancel, native_names)?)
+            let children = source_children(source, cancel, native_names)?;
+            // The direct children alone can exceed the remaining budget.
+            #[cfg(target_os = "macos")]
+            if let Some(limit) = move_limit
+                && let Some(name) = children.get(limit - journal_entries - 1)
+            {
+                return Err(ScanError::MoveEntryLimit {
+                    location: source.join(name),
+                    limit,
+                }
+                .into());
+            }
+            Some(children)
         } else {
             None
         };

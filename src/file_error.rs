@@ -558,7 +558,15 @@ pub(crate) enum ScanError {
         location: Location,
         limit: usize,
     },
-    MoveEntryLimit(Location),
+    MoveEntryLimit {
+        location: Location,
+        limit: usize,
+    },
+    #[cfg(target_os = "macos")]
+    FolderFingerprint {
+        location: Location,
+        source: serde_json::Error,
+    },
     TransferSizeOverflow(Location),
     FolderUnavailable(Location),
     DuplicateEntry {
@@ -603,8 +611,18 @@ impl fmt::Display for ScanError {
                     "Folders are nested more than {limit} levels at {location}"
                 )
             }
-            Self::MoveEntryLimit(location) => {
-                write!(f, "Per-item transfer limit reached at {location}")
+            Self::MoveEntryLimit { location, limit } => {
+                write!(
+                    f,
+                    "The per-item move journal exceeds {limit} entries at {location}"
+                )
+            }
+            #[cfg(target_os = "macos")]
+            Self::FolderFingerprint { location, source } => {
+                write!(
+                    f,
+                    "Could not encode folder fingerprint metadata for {location}: {source}"
+                )
             }
             Self::TransferSizeOverflow(location) => {
                 write!(f, "The copy grew beyond its size limit at {location}")
@@ -668,6 +686,8 @@ impl Error for ScanError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::PropertiesStart(source) => Some(source),
+            #[cfg(target_os = "macos")]
+            Self::FolderFingerprint { source, .. } => Some(source),
             _ => None,
         }
     }
