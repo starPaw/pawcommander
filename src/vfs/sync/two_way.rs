@@ -14,7 +14,7 @@ use crate::{
     file_error::SyncError,
     i18n::text,
     operations::{Cancellation, Progress, TransferError},
-    vfs::{transfer::validate_source_child_name, Location},
+    vfs::{transfer::validate_sftp_source_path, Location},
 };
 use baseline::BaselineStore;
 use journal::Run;
@@ -384,9 +384,7 @@ fn reconcile(
                         observed[destination].protect_excluded(path)?;
                     }
                     if left.root.remote() || right.root.remote() {
-                        for name in path.iter() {
-                            validate_source_child_name(&observed[source].root, name)?;
-                        }
+                        validate_sftp_source_path(&observed[source].root, path)?;
                     }
                     rows.push(TwoWayRow {
                         path: path.clone(),

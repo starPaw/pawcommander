@@ -4,8 +4,8 @@ use super::{
     sftp::remote,
     staged_file::StagedFile,
     transfer::{
-        entry_metadata, publish_checked_replacement, rename_for_publication,
-        validate_source_child_name, with_staging_typed, EntryMetadata,
+        entry_metadata, publish_checked_replacement, rename_for_publication, sftp_transfer_name,
+        with_staging_typed, EntryMetadata,
     },
     Location,
 };
@@ -235,7 +235,7 @@ fn basename(file: &Location) -> Result<&Path, TransferError> {
         .path()
         .file_name()
         .ok_or_else(|| TransferPlanError::MissingName(file.clone()))?;
-    validate_source_child_name(file, name)?;
+    sftp_transfer_name(name, || file.clone())?;
     Ok(Path::new(name))
 }
 

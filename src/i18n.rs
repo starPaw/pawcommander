@@ -9,7 +9,7 @@ mod formats;
 pub(crate) use catalog::key;
 pub(crate) use file_errors::{
     access_io_message, connection_result_error, deletion_failure, file_error, history_error,
-    metadata_warning, path_error, recovery_record_error, replacement_refusal, transfer_failure,
+    metadata_warning, recovery_record_error, replacement_refusal, transfer_failure,
 };
 #[cfg(target_os = "macos")]
 pub(crate) use formats::czech_format;

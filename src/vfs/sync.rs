@@ -13,7 +13,7 @@ use super::{
     guarded_directory::stale,
     read_scope::{changed_during_read, ReadScope},
     transfer::{
-        entry_metadata, validate_source_child_name, EntryMetadata, TransferSourceEntry,
+        entry_metadata, validate_sftp_source_path, EntryMetadata, TransferSourceEntry,
         SYNC_STAGING_PREFIX,
     },
     Location, MAX_TREE_DEPTH,
@@ -113,9 +113,7 @@ impl SyncPlan {
                 destination.protect_excluded(path)?;
             }
             if source.root.remote() || destination.root.remote() {
-                for name in path.iter() {
-                    validate_source_child_name(&source.root, name)?;
-                }
+                validate_sftp_source_path(&source.root, path)?;
             }
             plan.rows.push(SyncRow {
                 path: path.clone(),
