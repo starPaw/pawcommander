@@ -2437,6 +2437,7 @@ fn mutation_error(error: &MutationError, unconfirmed: bool) -> String {
                 SmbMutationAction::CompareFolders => text!("Не удалось сравнить папки"),
                 SmbMutationAction::CompareFiles => text!("Не удалось сравнить файлы"),
                 SmbMutationAction::CheckSyncFolder => text!("Не удалось проверить папку для синхронизации"),
+                SmbMutationAction::FindDuplicates => text!("Не удалось найти дубликаты"),
             };
             crate::tr_format!(
                 "{action} at {path} ({error})",

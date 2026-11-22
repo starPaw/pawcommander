@@ -6,13 +6,18 @@ use super::{
     file_compare::{stream_difference, StreamDifferenceError},
     guarded_directory::Directory,
     read_scope::{CheckedFile, ReadScope},
+    smb_output,
     transfer::{EntryMetadata, TransferSourceEntry},
     undo::Parent,
     Location,
 };
 use crate::{
-    file_error::{AccessError, DuplicateError, DuplicateRole, Failure, ScanError},
+    file_error::{
+        AccessError, DuplicateError, DuplicateRole, Failure, MutationError, ScanError,
+        SmbMutationAction,
+    },
     operations::{Cancellation, Progress, TransferError},
+    smb::MutationMount,
 };
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
@@ -37,17 +42,49 @@ pub(crate) struct Group {
 
 pub(crate) struct SearchResult {
     root: Parent,
+    mount: Option<MutationMount>,
     pub(crate) groups: Vec<Group>,
     pub(crate) skipped: usize,
     pub(crate) examples: Vec<(Location, TransferError)>,
 }
 
 impl SearchResult {
+    fn new(scope: &ReadScope) -> Self {
+        Self {
+            root: scope.parent.clone(),
+            mount: scope.owned_smb_mount().cloned(),
+            groups: Vec::new(),
+            skipped: 0,
+            examples: Vec::new(),
+        }
+    }
+
     fn skip(&mut self, path: &Path, error: TransferError) {
         self.skipped += 1;
         if self.examples.len() < 4 {
             self.examples.push((self.root.location.join(path), error));
         }
+    }
+
+    fn skip_failed_read(
+        &mut self,
+        scope: &ReadScope,
+        path: &Path,
+        error: TransferError,
+        cancel: &Cancellation,
+    ) -> Result<(), TransferError> {
+        if matches!(error, TransferError::Cancelled) {
+            return Err(error);
+        }
+        verify_search_mount(scope, cancel)?;
+        if path.as_os_str().is_empty()
+            || matches!(&error, TransferError::Failed(Failure::Mutation(reason))
+                if matches!(reason.as_ref(), MutationError::SmbMount { .. }))
+        {
+            return Err(folder_error(&self.root.location, error));
+        }
+        self.skip(path, error);
+        Ok(())
     }
 
     pub(crate) fn trash_plan(
@@ -75,6 +112,10 @@ impl SearchResult {
         }
         (!removals.is_empty()).then(|| TrashPlan {
             root: self.root.clone(),
+            mount: self
+                .mount
+                .clone()
+                .map(|mount| mount.with_action(SmbMutationAction::Trash)),
             groups: removals.into_values().collect(),
         })
     }
@@ -89,20 +130,16 @@ pub(crate) fn find(
     }
     let cancel = progress.cancellation();
     cancel.check()?;
-    let scope = ReadScope::open(folder)
-        .map_err(|cause| DuplicateError::verification(folder, DuplicateRole::Folder, cause))?;
+    let mut mount = smb_output::guard(folder, SmbMutationAction::FindDuplicates)
+        .map_err(|cause| folder_error(folder, cause))?;
+    let scope = ReadScope::open_with_smb(folder, &mut mount)
+        .map_err(|cause| folder_error(folder, cause))?;
     let root = &scope.parent.location;
     if root.path().iter().any(is_staging_directory) {
         return Err(DuplicateError::SearchInStaging(root.clone()).into());
     }
-    let root_error = |cause| DuplicateError::verification(root, DuplicateRole::Folder, cause);
-    Directory::from_scope(&scope).map_err(root_error)?;
-    let mut result = SearchResult {
-        root: scope.parent.clone(),
-        groups: Vec::new(),
-        skipped: 0,
-        examples: Vec::new(),
-    };
+    Directory::from_scope(&scope).map_err(|cause| folder_error(root, cause))?;
+    let mut result = SearchResult::new(&scope);
     let sizes = collect_sizes(&scope, &mut result, progress, &cancel)?;
     let mut seen = HashSet::new();
     for (size, mut paths) in sizes.into_iter().filter(|(_, paths)| paths.len() > 1) {
@@ -117,23 +154,35 @@ pub(crate) fn find(
                     .or_default()
                     .push(Member { path, version }),
                 Ok(None) => {}
-                Err(TransferError::Cancelled) => return Err(TransferError::Cancelled),
-                Err(error) => result.skip(&path, error),
+                Err(error) => result.skip_failed_read(&scope, &path, error, &cancel)?,
             }
         }
         for members in hashes.into_values().filter(|group| group.len() > 1) {
             group_identical(&scope, members, size, &mut result, &cancel)?;
         }
     }
-    cancel.check()?;
-    scope.parent.verify().map_err(root_error)?;
     result.groups.sort_unstable_by(|left, right| {
         right
             .size
             .cmp(&left.size)
             .then_with(|| left.members[0].path.cmp(&right.members[0].path))
     });
+    cancel.check()?;
+    scope
+        .verify_selected_root(folder)
+        .map_err(|cause| folder_error(root, cause))?;
     Ok(result)
+}
+
+fn folder_error(folder: &Location, cause: TransferError) -> TransferError {
+    DuplicateError::verification(folder, DuplicateRole::Folder, cause)
+}
+
+fn verify_search_mount(scope: &ReadScope, cancel: &Cancellation) -> Result<(), TransferError> {
+    cancel.check()?;
+    scope
+        .verify_mount()
+        .map_err(|cause| folder_error(&scope.parent.location, cause))
 }
 
 fn collect_sizes(
@@ -168,18 +217,9 @@ fn collect_sizes(
             Ok(())
         });
         match visited {
-            Ok(()) => {}
-            Err(error) if matches!(error, TransferError::Cancelled) || is_search_limit(&error) => {
-                return Err(error);
-            }
-            Err(cause) if folder.as_os_str().is_empty() => {
-                return Err(DuplicateError::verification(
-                    &scope.parent.location,
-                    DuplicateRole::Folder,
-                    cause,
-                ));
-            }
-            Err(error) => result.skip(&folder, error),
+            Ok(()) => verify_search_mount(scope, cancel)?,
+            Err(error) if is_search_limit(&error) => return Err(error),
+            Err(error) => result.skip_failed_read(scope, &folder, error, cancel)?,
         }
     }
     Ok(sizes)
@@ -280,19 +320,13 @@ fn group_identical(
                         continue 'candidate;
                     }
                     Ok(false) => break,
-                    Err(
-                        ComparisonFailure::Left(TransferError::Cancelled)
-                        | ComparisonFailure::Right(TransferError::Cancelled),
-                    ) => {
-                        return Err(TransferError::Cancelled);
-                    }
                     Err(ComparisonFailure::Right(error)) => {
-                        result.skip(&candidate.path, error);
+                        result.skip_failed_read(scope, &candidate.path, error, cancel)?;
                         continue 'candidate;
                     }
                     Err(ComparisonFailure::Left(error)) => {
                         let skipped = group.pop_front().expect("current representative");
-                        result.skip(&skipped.path, error);
+                        result.skip_failed_read(scope, &skipped.path, error, cancel)?;
                     }
                 }
             }
@@ -444,12 +478,7 @@ mod tests {
                     .clone(),
             },
         );
-        let mut synthetic = SearchResult {
-            root: scope.parent.clone(),
-            groups: Vec::new(),
-            skipped: 0,
-            examples: Vec::new(),
-        };
+        let mut synthetic = SearchResult::new(&scope);
         group_identical(&scope, contenders, 5, &mut synthetic, &cancel).unwrap();
         assert_eq!(synthetic.groups.len(), 1);
         assert_eq!(synthetic.groups[0].members.len(), 2);
@@ -545,12 +574,7 @@ mod tests {
         for name in ["a-stale", "c-stale"] {
             fs::write(root.join(name), b"different bytes").unwrap();
         }
-        let mut result = SearchResult {
-            root: scope.parent.clone(),
-            groups: Vec::new(),
-            skipped: 0,
-            examples: Vec::new(),
-        };
+        let mut result = SearchResult::new(&scope);
         group_identical(&scope, bucket, 10, &mut result, &cancel).unwrap();
         assert_eq!(result.skipped, 2);
         let skipped: Vec<_> = result
@@ -567,5 +591,34 @@ mod tests {
             .collect();
         assert_eq!(confirmed, [Path::new("b-good"), Path::new("d-good")]);
         assert_eq!(fs::read(root.join("a-stale")).unwrap(), b"different bytes");
+    }
+
+    #[test]
+    fn refuses_duplicate_groups_after_a_failed_opened_mount_check() {
+        let temp = tempfile::tempdir().unwrap();
+        let location = Location::Local(temp.path().into());
+        let scope = ReadScope::open(&location).unwrap();
+        let mut result = SearchResult::new(&scope);
+        let relative = Path::new("nested/copy");
+        let target = scope.parent.location.join(relative);
+        let cause = MutationError::smb_mount(
+            target.path(),
+            SmbMutationAction::FindDuplicates,
+            crate::smb::SmbError::MountChanged(target.path().to_owned()),
+        );
+        let error = result
+            .skip_failed_read(&scope, relative, cause.into(), &Cancellation::default())
+            .unwrap_err();
+        assert!(
+            matches!(error, TransferError::Failed(Failure::Duplicate(error))
+            if matches!(error.as_ref(), DuplicateError::Verify {
+                location, role: DuplicateRole::Folder,
+                cause: TransferError::Failed(Failure::Mutation(cause)),
+            } if location == &scope.parent.location
+                && matches!(cause.as_ref(), MutationError::SmbMount {
+                    path, action: SmbMutationAction::FindDuplicates, ..
+                } if path == target.path())))
+        );
+        assert_eq!(result.skipped, 0);
     }
 }

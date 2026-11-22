@@ -1,6 +1,6 @@
 use super::{
-    folder_error, is_link, open_sync_folder, read_link, read_metadata, stale, Budget, Exclusions,
-    Kind, Observed, Snapshot, SyncChange, SyncPlan, SyncReport, SyncRow, ONE_WAY_ROLES,
+    folder_error, is_link, read_link, read_metadata, stale, Budget, Exclusions, Kind, Observed,
+    Snapshot, SyncChange, SyncPlan, SyncReport, SyncRow, ONE_WAY_ROLES,
 };
 use crate::{
     file_error::{
@@ -10,11 +10,12 @@ use crate::{
     },
     operations::{AccessStream, Cancellation, Progress, TransferError},
     result_history::Outcome,
-    smb::MutationMount,
     vfs::{
         compare::scan,
         copy_metadata,
-        guarded_directory::{open_staging, retained, uncertain_directory, Directory},
+        guarded_directory::{
+            open_bound_staging, open_staging, retained, uncertain_directory, Directory,
+        },
         read_scope::ReadScope,
         sftp::remote,
         staged_file::StagedFile,
@@ -25,17 +26,7 @@ use crate::{
         Location,
     },
 };
-use std::{
-    cmp::Ordering,
-    ffi::OsStr,
-    fs,
-    io::{self, Read},
-    os::{
-        fd::{AsFd, AsRawFd},
-        unix::fs::DirBuilderExt,
-    },
-    path::Path,
-};
+use std::{cmp::Ordering, ffi::OsStr, fs, io::Read, os::unix::fs::DirBuilderExt, path::Path};
 
 struct GroupWarnings {
     metadata: Option<MetadataWarning>,
@@ -236,7 +227,7 @@ impl Execution<'_> {
             parent.verify()?;
             let stage_scope = if let Some(mount) = destination_mount {
                 let handle = opened.ok_or_else(|| stale(staging))?;
-                open_bound_stage(staging, mount, handle)
+                open_bound_staging(staging, mount, handle)
                     .map_err(|cause| uncertain_directory(staging, cause))?
             } else {
                 open_staging(staging)?
@@ -306,7 +297,7 @@ impl Execution<'_> {
                         .descriptor
                         .as_ref()
                         .ok_or_else(|| stale(&backup_folder))?;
-                    open_bound_stage(&backup_folder, mount, handle)?
+                    open_bound_staging(&backup_folder, mount, handle)?
                 } else {
                     make_directory(&backup_folder)?;
                     open_staging(&backup_folder)?
@@ -431,25 +422,6 @@ impl Execution<'_> {
             cleanup,
         })
     }
-}
-
-fn open_bound_stage(
-    location: &Location,
-    mount: &MutationMount,
-    handle: &(impl AsFd + AsRawFd),
-) -> Result<ReadScope, TransferError> {
-    mount.verify_directory(handle, location.path(), location.path())?;
-    let mut scope = open_sync_folder(location, Some(mount))?;
-    let owned = rustix::io::dup(handle)
-        .map(fs::File::from)
-        .map_err(|error| {
-            AccessError::new(location, AccessAction::OpenFile, io::Error::from(error))
-        })?;
-    if scope.parent.location != *location || !scope.parent.matches_handle(&owned)? {
-        return Err(stale(location));
-    }
-    scope.descriptor = Some(owned.into());
-    Ok(scope)
 }
 
 fn verify_held_entry(

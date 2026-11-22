@@ -761,6 +761,7 @@ catalog! {
     "Не удалось сравнить папки" => ("Could not compare the folders", "Složky se nepodařilo porovnat"),
     "Не удалось сравнить файлы" => ("Could not compare the files", "Soubory se nepodařilo porovnat"),
     "Не удалось проверить папку для синхронизации" => ("Could not check the folder for synchronization", "Složku pro synchronizaci se nepodařilo zkontrolovat"),
+    "Не удалось найти дубликаты" => ("Could not search for duplicates", "Duplicity se nepodařilo vyhledat"),
     "Не удалось записать буфер файла" => ("Could not flush the file", "Vyrovnávací paměť souboru se nepodařilo zapsat"),
     "Не удалось сохранить данные файла" => ("Could not sync the file", "Data souboru se nepodařilo synchronizovat"),
     "Не удалось закрыть файл" => ("Could not close the file", "Soubor se nepodařilo zavřít"),
