@@ -6,7 +6,7 @@ mod tree;
 
 use super::{
     copy_metadata,
-    cross_move::{self, MoveSource, Phase},
+    cross_move::{self, MoveSource, Phase, PublishedDestination},
     mutations::remove_remote_entry,
     read_scope::ReadScope,
     sftp::remote,
@@ -235,7 +235,7 @@ enum HeldSource {
     Legacy(SavedLocation),
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 struct SourceStage {
     stage_name: String,
     stage_identity: Option<(u64, u64)>,
@@ -488,15 +488,12 @@ fn verify_move_stage(
     ticket: &Ticket,
     paths: &Paths,
     progress: &mut Progress,
-) -> Result<bool, TransferError> {
-    if ticket.removed && entry_metadata(&paths.stage)?.is_none() {
-        return Ok(false);
-    }
+) -> Result<(), TransferError> {
     let receipt = &ticket.receipt;
     let backup = paths.stage.join("previous");
     let expected = receipt.previous.as_ref();
     let has_backup = entry_metadata(&backup)?.is_some();
-    if has_backup != expected.is_some() && !(ticket.removed && !has_backup) {
+    if has_backup != expected.is_some() {
         let problem = if has_backup {
             ResumeCheckProblem::Unexpected
         } else {
@@ -509,7 +506,7 @@ fn verify_move_stage(
     if has_backup {
         verify_target(expected, &backup, true, progress)?;
     }
-    Ok(true)
+    Ok(())
 }
 
 fn verify_published_move(
@@ -636,7 +633,7 @@ fn discard_source_stage(ticket: &Ticket, paths: &Paths) -> Result<(), TransferEr
         let stage = staging_at(&paths.source, &record.stage_name)
             .ok_or_else(|| ticket.error(RecoveryRecordProblem::InvalidPaths))?;
         if entry_metadata(&stage)?.is_some() {
-            discard_stage(&stage, record.stage_identity, ticket.name(), &[])
+            discard_empty_stage(&stage, record.stage_identity, ticket.name())
                 .map_err(|error| retained_source(&stage.join("source"), error))?;
         }
     }
@@ -648,19 +645,20 @@ fn record_source_stage(
     held: &Location,
     source_identity: RenamedIdentity,
     cancel: &Cancellation,
-) -> Result<(), TransferError> {
+) -> Result<SourceStage, TransferError> {
     let stage = held
         .parent()
         .ok_or_else(|| ResumeRole::HeldOriginal.error(held, ResumeCheckProblem::InvalidPath))?;
     let identity = stage_identity(&stage)?;
     create_owner_marker(&stage, ticket.name(), cancel)?;
     stage_contents(&stage, identity, ticket.name(), &[])?;
-    ticket.record(&Event::Removing(HeldSource::Verified(SourceStage {
+    let record = SourceStage {
         stage_name: stage.name(),
         stage_identity: identity,
         source_identity,
-    })))?;
-    Ok(())
+    };
+    ticket.record(&Event::Removing(HeldSource::Verified(record.clone())))?;
+    Ok(record)
 }
 
 fn finish_move(
@@ -672,13 +670,14 @@ fn finish_move(
     removed: impl FnOnce(),
     observe: &mut impl FnMut(&Location, Phase) -> Result<(), TransferError>,
 ) -> Result<(), TransferError> {
-    let has_stage = verify_move_stage(ticket, paths, progress)?;
-    let history = ticket.removed;
-    let scan = progress.cancellation().pausable_scan();
+    let recovering = ticket.removed;
     // Bind the checked destination to the per-entry identities used by deletion.
-    let target = if history {
+    let target = if recovering {
+        progress.partial_copy_retained = false;
         None
     } else {
+        verify_move_stage(ticket, paths, progress)?;
+        let scan = progress.cancellation().pausable_scan();
         Some(
             TransferSourceManifest::capture_move_observed(&paths.target, &scan, &mut |_, _| {})
                 .map_err(|error| manifest_error(ResumeRole::Destination, error))?,
@@ -686,11 +685,8 @@ fn finish_move(
     };
     verify_published_move(ticket, paths, progress)?;
     published();
-    if history {
-        // This phase only confirms a prior removal. The source path may have been reused.
-        removed();
-        discard_source_stage(ticket, paths)?;
-    } else {
+    progress.partial_copy_retained = false;
+    let source_stage = if let Some(target) = target {
         let verified = (|| {
             let original_access_times = match &ticket.receipt.original {
                 Original::File(_) => Some(vec![ticket
@@ -719,20 +715,24 @@ fn finish_move(
             cross_move::incomplete(&paths.target, error, progress)
         })?;
         source.report(item, progress);
-        let mut held_root = None;
+        let mut held_stage = None;
         let cancel = progress.cancellation();
         cross_move::remove_verified(
             item,
             source,
-            target,
+            PublishedDestination::Resumable(target),
             progress,
             removed,
             &mut |location, phase| {
                 // Sync the location before rename and the completion after the last unlink.
                 if phase == Phase::QuarantinePlanned {
-                    record_source_stage(ticket, location, source_identity, &cancel)?;
-                    held_root = Some(location.clone());
-                } else if phase == Phase::Removed && held_root.as_ref() == Some(location) {
+                    let record = record_source_stage(ticket, location, source_identity, &cancel)?;
+                    held_stage = Some((location.clone(), record));
+                } else if phase == Phase::Removed
+                    && held_stage
+                        .as_ref()
+                        .is_some_and(|(root, _)| root == location)
+                {
                     ticket
                         .record(&Event::Removed)
                         .map_err(|error| completed_record_error(&paths.target, true, error))?;
@@ -740,25 +740,47 @@ fn finish_move(
                 observe(location, phase)
             },
         )?;
-    }
-    if has_stage {
-        let backup = paths.stage.join("previous");
-        let extra: &[&str] = if entry_metadata(&backup)?.is_some() {
-            let expected = ticket.receipt.previous.as_ref().ok_or_else(|| {
-                ResumeRole::ParkedDestination.error(&backup, ResumeCheckProblem::Unexpected)
-            })?;
-            verify_target(Some(expected), &backup, true, &mut Progress::default())?;
-            &["previous"]
-        } else {
-            &[]
-        };
-        discard_stage(
-            &paths.stage,
-            ticket.receipt.stage_identity,
+        let (_, record) = held_stage.ok_or_else(|| {
+            completed_record_error(
+                &paths.target,
+                true,
+                ticket.error(RecoveryRecordProblem::InvalidProof),
+            )
+        })?;
+        Some(record)
+    } else {
+        // The receipt already confirms removal. The original name may have been reused.
+        removed();
+        match &ticket.holding {
+            Some(HeldSource::Verified(record)) => Some(record.clone()),
+            _ => None,
+        }
+    };
+    if let Some(record) = source_stage {
+        let stage = staging_at(&paths.source, &record.stage_name).ok_or_else(|| {
+            completed_record_error(
+                &paths.target,
+                true,
+                ticket.error(RecoveryRecordProblem::InvalidPaths),
+            )
+        })?;
+        discard_completed_stage(
+            &stage,
+            record.stage_identity,
             ticket.name(),
-            extra,
-        )?;
+            None,
+            recovering,
+        )
+        .map_err(|error| StagingCleanupError::after_move(error, &stage, &paths.target))?;
     }
+    discard_completed_stage(
+        &paths.stage,
+        ticket.receipt.stage_identity,
+        ticket.name(),
+        ticket.receipt.previous.as_ref(),
+        recovering,
+    )
+    .map_err(|error| StagingCleanupError::after_move(error, &paths.stage, &paths.target))?;
     finish_record(ticket, paths, progress)
 }
 
@@ -1072,7 +1094,7 @@ fn finish_copy(
                 }
                 remove_staged_entry(&payload, false)?;
                 progress.partial_copy_retained = false;
-                discard_empty_stage(ticket, paths)
+                discard_empty_stage(&paths.stage, receipt.stage_identity, owner)
             })();
             return finish_cancelled_cleanup(ticket, paths, cleanup);
         }
@@ -1110,21 +1132,25 @@ fn finish_published_copy(
 ) -> Result<Completion, TransferError> {
     // The new copy is already at its destination, even when an old file remains in staging.
     progress.partial_copy_retained = false;
-    let cleanup =
-        discard_published_copy_stage(ticket, paths, completed == Completion::AlreadyPresent);
+    let cleanup = discard_completed_stage(
+        &paths.stage,
+        ticket.receipt.stage_identity,
+        ticket.name(),
+        ticket.receipt.previous.as_ref(),
+        completed == Completion::AlreadyPresent,
+    );
     StagingCleanupError::combine(Ok(()), cleanup, &paths.stage, &paths.target)?;
     finish_record(ticket, paths, progress)?;
     Ok(completed)
 }
 
-fn discard_published_copy_stage(
-    ticket: &Ticket,
-    paths: &Paths,
+fn discard_completed_stage(
+    stage: &Location,
+    identity: Option<(u64, u64)>,
+    owner: &str,
+    previous: Option<&FileProof>,
     recovering: bool,
 ) -> Result<(), TransferError> {
-    let stage = &paths.stage;
-    let identity = ticket.receipt.stage_identity;
-    let owner = ticket.name();
     if recovering {
         if entry_metadata(stage)?.is_none() {
             return Ok(());
@@ -1136,7 +1162,7 @@ fn discard_published_copy_stage(
             return remove_staged_entry(stage, true);
         }
     }
-    if let Some(previous) = &ticket.receipt.previous {
+    if let Some(previous) = previous {
         let backup = stage.join("previous");
         if !recovering || entry_metadata(&backup)?.is_some() {
             stage_contents(stage, identity, owner, &["previous"])?;
@@ -1144,7 +1170,7 @@ fn discard_published_copy_stage(
             remove_staged_entry(&backup, false)?;
         }
     }
-    discard_empty_stage(ticket, paths)
+    discard_empty_stage(stage, identity, owner)
 }
 
 fn restore_cancelled_replacement(
@@ -1168,11 +1194,14 @@ fn restore_cancelled_replacement(
         .map_err(TransferError::with_unconfirmed_publication)
 }
 
-fn discard_empty_stage(ticket: &Ticket, paths: &Paths) -> Result<(), TransferError> {
-    let owner = ticket.name();
-    stage_contents(&paths.stage, ticket.receipt.stage_identity, owner, &[])?;
-    remove_staged_entry(&paths.stage.join(owner), false)?;
-    remove_staged_entry(&paths.stage, true)
+fn discard_empty_stage(
+    stage: &Location,
+    identity: Option<(u64, u64)>,
+    owner: &str,
+) -> Result<(), TransferError> {
+    stage_contents(stage, identity, owner, &[])?;
+    remove_staged_entry(&stage.join(owner), false)?;
+    remove_staged_entry(stage, true)
 }
 
 fn remove_staged_entry(location: &Location, directory: bool) -> Result<(), TransferError> {
@@ -1426,34 +1455,6 @@ fn check_stage_identity(
 ) -> Result<(), TransferError> {
     if stage_identity(stage)? != identity || super::transfer::canonical(stage)? != stage.path() {
         return Err(StagingError::IdentityChanged(stage.clone()).into());
-    }
-    Ok(())
-}
-
-fn discard_stage(
-    stage: &Location,
-    identity: Option<(u64, u64)>,
-    owner: &str,
-    extra: &[&str],
-) -> Result<(), TransferError> {
-    stage_contents(stage, identity, owner, extra)?;
-    for name in extra {
-        let item = stage.join(name);
-        if !required_metadata(&item, ResumeRole::Staged)?.is_file() {
-            return Err(ResumeRole::Staged.error(&item, ResumeCheckProblem::WrongType));
-        }
-    }
-    if let Some(path) = stage.local() {
-        for name in extra.iter().copied().chain([owner]) {
-            fs::remove_file(path.join(name))?;
-        }
-        fs::remove_dir(path)?;
-    } else {
-        let sftp = remote(stage)?;
-        for name in extra.iter().copied().chain([owner]) {
-            sftp.unlink(stage.join(name).path()).map_err(super::err)?;
-        }
-        sftp.rmdir(stage.path()).map_err(super::err)?;
     }
     Ok(())
 }

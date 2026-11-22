@@ -780,6 +780,117 @@ fn move_recovery_preserves_held_source_and_recognizes_acknowledged_removal() {
 }
 
 #[test]
+fn completed_move_preserves_unexpected_staging_entries_and_resumes_only_cleanup() {
+    for source_side in [true, false] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let recovery = root.join("recovery");
+        let source: Location = root.join("left/data").into();
+        let target: Location = root.join("right/data").into();
+        fs::create_dir_all(source.parent().unwrap().path()).unwrap();
+        fs::create_dir_all(target.parent().unwrap().path()).unwrap();
+        fs::write(source.path(), b"original data").unwrap();
+        let item = TransferItem::new(source.clone(), source.clone(), target.clone());
+        let mut progress = Progress::default();
+        progress.resume_directory = Some(recovery.clone());
+        let mut published = false;
+        let mut removed = false;
+        let mut unrelated = None;
+        let error = cross_move::run(
+            &item,
+            None,
+            &mut progress,
+            || published = true,
+            || removed = true,
+            &mut |location, phase| {
+                if phase == Phase::Removed {
+                    let stage = if source_side {
+                        location.parent().unwrap()
+                    } else {
+                        let parent = target.parent().unwrap();
+                        let payload = staged_payload(parent.path()).unwrap();
+                        payload.parent().unwrap().to_owned().into()
+                    };
+                    let entry = stage.join("independent");
+                    fs::write(entry.path(), b"preserve this staging entry").unwrap();
+                    unrelated = Some(entry);
+                }
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(published && removed && !progress.partial_copy_retained);
+        assert!(!source.path().exists());
+        assert_eq!(fs::read(target.path()).unwrap(), b"original data");
+        let original_target = fs::metadata(target.path()).unwrap();
+        let unrelated = unrelated.unwrap();
+        assert!(error.is_completed_cleanup_warning());
+        let TransferError::Failed(Failure::StagingCleanup(error)) = error else {
+            panic!("expected a completed move with an exact cleanup warning");
+        };
+        assert!(error.completed_move && error.operation.is_none());
+        assert_eq!(error.target, target);
+        assert_eq!(Some(&error.staging), unrelated.parent().as_ref());
+        assert_resume_check(
+            &error.cleanup,
+            ResumeRole::Staged,
+            unrelated.path(),
+            ResumeCheckProblem::Unexpected,
+        );
+        assert_eq!(
+            fs::read(unrelated.path()).unwrap(),
+            b"preserve this staging entry"
+        );
+        let (offers, errors) = scan(&recovery);
+        assert!(errors.is_empty() && offers.len() == 1);
+        let offer = &offers[0];
+        assert!(
+            Ticket::open(receipts(&recovery).join(&offer.id))
+                .unwrap()
+                .unwrap()
+                .removed
+        );
+        fs::write(source.path(), b"new source at the old path").unwrap();
+
+        let (mut progress, mut view) = Progress::tracked_transfer();
+        let error = resume(&recovery, &offer.id, &mut progress).unwrap_err();
+        assert!(error.is_completed_cleanup_warning());
+        assert_eq!(
+            progress.results.items[0].outcome,
+            Outcome::CompletedWithWarning
+        );
+        assert_eq!(view.snapshot().total_written, 0);
+        assert_eq!(
+            fs::read(unrelated.path()).unwrap(),
+            b"preserve this staging entry"
+        );
+        assert_eq!(
+            fs::read(source.path()).unwrap(),
+            b"new source at the old path"
+        );
+
+        fs::remove_file(unrelated.path()).unwrap();
+        let (mut progress, mut view) = Progress::tracked_transfer();
+        let result = resume(&recovery, &offer.id, &mut progress).unwrap();
+        assert!(result.moving);
+        assert_eq!(result.kind, Completion::AlreadyPresent);
+        assert_eq!(progress.results.items[0].outcome, Outcome::Completed);
+        assert_eq!(view.snapshot().total_written, 0);
+        assert!(scan(&recovery).0.is_empty());
+        assert!(!unrelated.parent().unwrap().path().exists());
+        assert_eq!(
+            fs::read(source.path()).unwrap(),
+            b"new source at the old path"
+        );
+        assert_eq!(
+            fs::metadata(target.path()).unwrap().ino(),
+            original_target.ino()
+        );
+        assert_eq!(fs::read(target.path()).unwrap(), b"original data");
+    }
+}
+
+#[test]
 fn move_recovery_finishes_verified_files_and_trees_around_source_rename() {
     for (tree, phase, restored) in [
         (false, Phase::QuarantinePlanned, false),

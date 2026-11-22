@@ -230,11 +230,13 @@ fn apply_root(
             progress.results.copied_source_remaining();
             let source = MoveSource::from_manifest(&root.item, root.manifest)
                 .map_err(|error| cross_move::incomplete(target, error, progress))?;
-            cross_move::remove_verified_at(
+            cross_move::remove_verified(
                 &root.item,
                 source,
-                Some(output),
-                Some(&paths),
+                cross_move::PublishedDestination::Compatible {
+                    manifest: output,
+                    paths,
+                },
                 progress,
                 || effect.removed = true,
                 &mut |_, _| Ok(()),

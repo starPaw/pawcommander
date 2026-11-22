@@ -923,6 +923,7 @@ pub(crate) struct StagingCleanupError {
     pub(crate) staging: Location,
     pub(crate) target: Location,
     pub(crate) operation: Option<TransferError>,
+    pub(crate) completed_move: bool,
     pub(crate) cleanup: TransferError,
 }
 
@@ -949,6 +950,7 @@ impl StagingCleanupError {
         let unconfirmed = matches!(operation, Some(TransferError::PublicationUnconfirmed(_)));
         let reason = Failure::StagingCleanup(Box::new(Self {
             operation,
+            completed_move: false,
             cleanup,
             staging: staging.clone(),
             target: target.clone(),
@@ -959,12 +961,29 @@ impl StagingCleanupError {
             TransferError::Failed(reason)
         }
     }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn after_move(
+        cleanup: TransferError,
+        staging: &Location,
+        target: &Location,
+    ) -> TransferError {
+        TransferError::Failed(Failure::StagingCleanup(Box::new(Self {
+            staging: staging.clone(),
+            target: target.clone(),
+            operation: None,
+            completed_move: true,
+            cleanup,
+        })))
+    }
 }
 
 impl fmt::Display for StagingCleanupError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(error) = &self.operation {
             write!(f, "{error}. ")?;
+        } else if self.completed_move {
+            write!(f, "Move completed at {}. ", self.target)?;
         } else {
             write!(f, "Item {} was published. ", self.target)?;
         }
