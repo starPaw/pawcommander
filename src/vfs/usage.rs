@@ -3,10 +3,12 @@ use super::{
     compare::scan_limit,
     guarded_directory::Directory,
     read_scope::{local_subdirectory, visit_local_entries, ReadScope},
-    Location,
+    smb_output, Location,
 };
 use crate::{
-    file_error::{AccessAction, AccessError, Failure, MutationError, ScanError, ScanLimit},
+    file_error::{
+        AccessAction, AccessError, Failure, MutationError, ScanError, ScanLimit, SmbMutationAction,
+    },
     operations::{Cancellation, Progress, TransferError},
 };
 use rustix::fs::{fstat, FileType, Stat};
@@ -72,6 +74,7 @@ pub(crate) enum Finish {
     Complete,
     Stopped,
     Limit(ScanLimit),
+    VolumeUnverified(TransferError),
 }
 
 pub(crate) struct Analysis {
@@ -90,11 +93,23 @@ impl Analysis {
     pub(crate) fn is_partial(&self) -> bool {
         self.nodes[0].coverage != Coverage::Complete
     }
+
+    fn record_root_error(&mut self, error: TransferError) {
+        if matches!(self.finish, Finish::Complete) && is_smb_mount_error(&error) {
+            self.finish = Finish::VolumeUnverified(error);
+        } else {
+            self.root_verification = Some(error);
+        }
+        if self.nodes[0].coverage == Coverage::Complete {
+            self.nodes[0].coverage = Coverage::Partial;
+        }
+    }
 }
 
-struct Scan {
+struct Scan<'a> {
     result: Analysis,
-    root: OwnedFd,
+    scope: &'a ReadScope,
+    root: &'a OwnedFd,
     folders: Vec<(NodeId, Identity)>,
     visited_folders: HashSet<Identity>,
     files: Vec<(NodeId, Identity)>,
@@ -110,19 +125,26 @@ pub(crate) fn analyze(
     }
     let cancel = progress.cancellation();
     cancel.check()?;
-    let scope = ReadScope::open(folder).map_err(|error| folder_error(folder, error))?;
+    let mut mount = smb_output::guard(folder, SmbMutationAction::AnalyzeDiskUsage)?;
+    let scope = ReadScope::open_with_smb(folder, &mut mount)
+        .map_err(|error| folder_error(folder, mount.recheck().err().unwrap_or(error)))?;
     let location = &scope.parent.location;
-    Directory::from_scope(&scope).map_err(|error| folder_error(location, error))?;
     let root = scope
         .descriptor
+        .as_ref()
         .ok_or_else(|| ScanError::FolderUnavailable(location.clone()))?;
-    let stat = fstat(&root).map_err(|error| {
-        AccessError::new(
-            location,
-            AccessAction::ReadOpenMetadata,
-            io::Error::from(error),
-        )
-    })?;
+    let stat = (|| {
+        Directory::from_scope(&scope)?;
+        fstat(root).map_err(|error| {
+            AccessError::new(
+                location,
+                AccessAction::ReadOpenMetadata,
+                io::Error::from(error),
+            )
+            .into()
+        })
+    })()
+    .map_err(|error| folder_error(location, scope.verify_mount().err().unwrap_or(error)))?;
     let mut scan = Scan {
         result: Analysis {
             folder: location.clone(),
@@ -135,6 +157,7 @@ pub(crate) fn analyze(
             symlinks: 0,
             hard_links: 0,
         },
+        scope: &scope,
         root,
         folders: vec![(0, identity(&stat))],
         visited_folders: HashSet::new(),
@@ -165,17 +188,31 @@ pub(crate) fn analyze(
                 break;
             }
             Err(error) => {
+                if cancel.is_requested() {
+                    scan.incomplete(node, Finish::Stopped);
+                    break;
+                }
+                // A listing error can be the first symptom of losing the mount.
+                let error = scope.verify_mount().err().unwrap_or(error);
+                if is_smb_mount_error(&error) {
+                    scan.incomplete(node, Finish::VolumeUnverified(error));
+                    break;
+                }
                 scan.result.nodes[node].issue = Some(Issue::Failure(Box::new(error)));
             }
         }
     }
-    if let Err(error) = scope.parent.verify() {
-        scan.result.root_verification = Some(folder_error(location, error));
+    let mut result = scan.finish();
+    if !matches!(result.finish, Finish::VolumeUnverified(_)) {
+        let verified = scope.verify_selected_root(folder);
+        if let Err(error) = scope.verify_mount().and(verified) {
+            result.record_root_error(folder_error(location, error));
+        }
     }
-    Ok(scan.finish())
+    Ok(result)
 }
 
-impl Scan {
+impl Scan<'_> {
     fn visit_folder(
         &mut self,
         node: NodeId,
@@ -183,16 +220,18 @@ impl Scan {
         cancel: &Cancellation,
     ) -> Result<(), TransferError> {
         cancel.check()?;
+        self.scope.verify_mount()?;
         let path = self.result.nodes[node].path.clone();
         let location = self.result.folder.join(&path);
         let unavailable = || ScanError::FolderUnavailable(location.clone());
         let read_children = |error| AccessError::new(&location, AccessAction::ReadChildren, error);
-        let nested = local_subdirectory(&self.root, &path, cancel).map_err(read_children)?;
-        // Own this descriptor so the visitor can accumulate rows without borrowing self.root.
-        let descriptor = nested
-            .map_or_else(|| rustix::io::dup(&self.root).map_err(io::Error::from), Ok)
-            .map_err(read_children)?;
-        let stat = fstat(&descriptor).map_err(|error| {
+        let nested = local_subdirectory(self.root, &path, cancel).map_err(read_children)?;
+        let descriptor = nested.as_ref().unwrap_or(self.root);
+        let mount = self.scope.owned_smb_mount();
+        if let Some(mount) = mount {
+            mount.verify_directory(descriptor, location.path(), location.path())?;
+        }
+        let stat = fstat(descriptor).map_err(|error| {
             AccessError::new(
                 &location,
                 AccessAction::ReadOpenMetadata,
@@ -208,12 +247,13 @@ impl Scan {
             return Ok(());
         }
         let allocated = allocated_bytes(&stat);
+        let device = stat.st_dev;
         self.result.nodes[node].allocated = allocated;
         self.result.nodes[node].own_blocks = allocated;
         // Counting the folder itself gives a partial size until its entries have been read.
         self.result.nodes[node].coverage = Coverage::Partial;
 
-        visit_local_entries(&location, &descriptor, cancel, |name, stat| {
+        visit_local_entries(&location, descriptor, cancel, |name, stat| {
             let relative = path.join(name);
             self.path_bytes += relative.as_os_str().len();
             let id = self.result.nodes.len();
@@ -222,6 +262,21 @@ impl Scan {
                 return Err(ScanError::DiskUsageLimit(limit).into());
             }
             let mut child = Node::new(relative, Kind::Other, Some(node));
+            let stat = match stat {
+                Ok(stat) if mount.is_some() && stat.st_dev != device => {
+                    Err(ScanError::DiskUsageOtherVolume(location.join(name)).into())
+                }
+                Ok(stat) => Ok(stat),
+                Err(error) => {
+                    self.scope.verify_mount()?;
+                    Err(AccessError::new(
+                        &location.join(name),
+                        AccessAction::ReadMetadata,
+                        io::Error::from(error),
+                    )
+                    .into())
+                }
+            };
             match stat {
                 Ok(stat) => {
                     child.coverage = Coverage::Complete;
@@ -245,18 +300,15 @@ impl Scan {
                     }
                 }
                 Err(error) => {
-                    let error = AccessError::new(
-                        &location.join(name),
-                        AccessAction::ReadMetadata,
-                        io::Error::from(error),
-                    );
-                    child.issue = Some(Issue::Failure(Box::new(error.into())));
+                    child.issue = Some(Issue::Failure(Box::new(error)));
                 }
             }
             self.result.nodes[node].children.push(id);
             self.result.nodes.push(child);
             Ok(())
         })?;
+        cancel.check()?;
+        self.scope.verify_mount()?;
         self.result.nodes[node].coverage = Coverage::Complete;
         Ok(())
     }
@@ -296,9 +348,6 @@ impl Scan {
                 nodes[parent].coverage = Coverage::Partial;
             }
         }
-        if self.result.root_verification.is_some() && nodes[0].coverage == Coverage::Complete {
-            nodes[0].coverage = Coverage::Partial;
-        }
         for id in 0..nodes.len() {
             if matches!(nodes[id].issue, Some(Issue::Failure(_))) {
                 self.result.issues += 1;
@@ -315,6 +364,11 @@ impl Scan {
             .sort_unstable_by(|&left, &right| by_allocation(nodes, left, right));
         self.result
     }
+}
+
+fn is_smb_mount_error(error: &TransferError) -> bool {
+    matches!(error, TransferError::Failed(Failure::Mutation(reason))
+        if matches!(reason.as_ref(), MutationError::SmbMount { .. }))
 }
 
 fn folder_error(location: &Location, error: TransferError) -> TransferError {
@@ -568,6 +622,35 @@ mod tests {
         assert_eq!(
             fs::read_dir(temp.path().join("displaced")).unwrap().count(),
             20
+        );
+    }
+
+    #[test]
+    fn losing_the_mount_at_final_verification_retains_counted_blocks_as_partial() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("counted");
+        fs::write(&file, [0x73; 8192]).unwrap();
+        let location = Location::Local(temp.path().into());
+        let mut data = analyze(&location, &mut Progress::default()).unwrap();
+        let allocated = data.nodes[0].allocated;
+        assert!(!data.is_partial());
+
+        let path = data.folder.path();
+        let error = MutationError::smb_mount(
+            path,
+            SmbMutationAction::AnalyzeDiskUsage,
+            crate::smb::SmbError::MissingMount(path.to_owned()),
+        );
+        data.record_root_error(error.into());
+
+        assert!(data.is_partial());
+        assert_eq!(data.nodes[0].allocated, allocated);
+        assert_eq!(data.files.len(), 1);
+        assert_eq!(data.nodes[data.files[0]].coverage, Coverage::Complete);
+        assert!(data.root_verification.is_none());
+        assert!(
+            matches!(data.finish, Finish::VolumeUnverified(TransferError::Failed(Failure::Mutation(error)))
+                if matches!(error.as_ref(), MutationError::SmbMount { path, .. } if path == data.folder.path()))
         );
     }
 }

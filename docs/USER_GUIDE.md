@@ -305,6 +305,8 @@ Open a local folder and choose **Analyze disk usage** from Settings or the comma
 
 The scan counts allocated blocks reported by macOS for files and folders, skips symbolic-link targets and counts hard links once, under the first path in name order. APFS clones can share blocks, so the values are estimates of space attributed to the scanned entries. **Stop** keeps the sizes already counted. Incomplete folder sizes are marked as partial, and folders the scan could not measure show **No data**. Expand **Items with scan errors** for the full paths and causes of up to four affected items. When the scan stops at a limit, it displays the limit and the path where it stopped. The scan supports 100,000 entries, 32 MiB of paths and 128 folder levels.
 
+In an SMB share connected through PawCommander, the scan uses only the selected volume. If that volume disconnects or changes, the scan stops and reports the cause. The sizes already counted remain available as a partial result.
+
 ## Tags and collections on macOS
 
 Select local files or folders and open **Tags and collections** from Settings or the command palette. Create or choose a collection, then click **Add selection**. Enter comma-separated PawCommander tags when adding several objects. Select an existing row to edit its tags, use **Filter by tag** to find tagged items, or choose **Show in pane** to select the item at its current location. Removing an item or a collection removes its saved references. The files and folders stay where they are.

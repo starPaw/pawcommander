@@ -2072,6 +2072,10 @@ fn scan_error(error: &ScanError) -> String {
             (text!("Анализ места доступен в локальных папках"), location)
         }
         #[cfg(target_os = "macos")]
+        ScanError::DiskUsageOtherVolume(location) => {
+            (text!("Пропущен объект на другом томе"), location)
+        }
+        #[cfg(target_os = "macos")]
         ScanError::DiskUsageLimit(limit) => return disk_usage_limit(limit),
     };
     format!("{message} · {location}")
@@ -2438,6 +2442,7 @@ fn mutation_error(error: &MutationError, unconfirmed: bool) -> String {
                 SmbMutationAction::CompareFiles => text!("Не удалось сравнить файлы"),
                 SmbMutationAction::CheckSyncFolder => text!("Не удалось проверить папку для синхронизации"),
                 SmbMutationAction::FindDuplicates => text!("Не удалось найти дубликаты"),
+                SmbMutationAction::AnalyzeDiskUsage => text!("Не удалось проверить SMB-том"),
             };
             crate::tr_format!(
                 "{action} at {path} ({error})",

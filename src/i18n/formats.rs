@@ -357,6 +357,7 @@ formats! {
     "Remove profile “{name}”?" => ("Удалить профиль «{name}»?", "Odstranit profil „{name}“?"),
     "Allocated space counted: {size}" => ("Учтено на диске: {size}", "Započtené přidělené místo: {size}"),
     "Partial allocated space: {size}" => ("Учтено на диске частично: {size}", "Částečně započtené místo: {size}"),
+    "Disk usage analysis stopped. {error}" => ("Анализ места остановлен. {error}", "Analýza využití disku byla zastavena. {error}"),
     "Files counted: {} · symbolic links skipped: {} · extra hard links excluded: {}" => ("Файлов учтено: {} · символьных ссылок пропущено: {} · дополнительных жёстких ссылок пропущено: {}", "Započtené soubory: {} · Přeskočené symbolické odkazy: {} · Vynechané další pevné odkazy: {}"),
     "Items with scan errors: {count}" => ("Объектов с ошибками обхода: {count}", "Položky s chybami procházení: {count}"),
     "Showing {shown} of {count} scan errors." => ("Показано {shown} из {count} ошибок обхода.", "Zobrazeno {shown} z {count} chyb procházení."),

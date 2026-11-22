@@ -754,6 +754,8 @@ pub(crate) enum ScanError {
     #[cfg(target_os = "macos")]
     DiskUsageRequiresLocalFolder(Location),
     #[cfg(target_os = "macos")]
+    DiskUsageOtherVolume(Location),
+    #[cfg(target_os = "macos")]
     DiskUsageLimit(ScanLimit),
 }
 
@@ -850,6 +852,13 @@ impl fmt::Display for ScanError {
             #[cfg(target_os = "macos")]
             Self::DiskUsageRequiresLocalFolder(location) => {
                 write!(f, "Disk usage analysis needs a local folder at {location}")
+            }
+            #[cfg(target_os = "macos")]
+            Self::DiskUsageOtherVolume(location) => {
+                write!(
+                    f,
+                    "Disk usage analysis skipped {location} on another volume"
+                )
             }
             #[cfg(target_os = "macos")]
             Self::DiskUsageLimit(limit) => write!(f, "Disk usage analysis {limit}"),
@@ -1279,6 +1288,7 @@ pub(crate) enum SmbMutationAction {
     CompareFiles,
     CheckSyncFolder,
     FindDuplicates,
+    AnalyzeDiskUsage,
 }
 
 #[derive(Debug)]
