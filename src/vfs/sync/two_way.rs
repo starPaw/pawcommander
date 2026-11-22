@@ -11,12 +11,11 @@ use super::{
     Snapshot, SyncChange, SyncReport, SyncRow, TWO_WAY_ROLES,
 };
 use crate::{
-    file_error::SyncError,
-    i18n::text,
+    file_error::{SyncError, SyncStateKind, SyncStateProblem},
     operations::{Cancellation, Progress, TransferError},
     vfs::{transfer::validate_sftp_source_path, Location},
 };
-use baseline::BaselineStore;
+use baseline::{BaselineStore, StatePath};
 use journal::Run;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -66,8 +65,7 @@ impl TwoWayPlan {
         exclusions: Exclusions,
         progress: &mut Progress,
     ) -> Result<Self, TransferError> {
-        let data =
-            dirs::data_local_dir().ok_or_else(|| text!("Папка данных приложения недоступна"))?;
+        let data = dirs::data_local_dir().ok_or(SyncError::DataDirectoryUnavailable)?;
         Self::build_in(
             folders,
             data.join("PawCommander/sync-baselines"),
@@ -167,7 +165,7 @@ impl TwoWayPlan {
                 .iter()
                 .any(|row| row.path == path && matches!(row.outcome, Reconcile::Conflict(_)))
         {
-            return Err(text!("Конфликт изменился. Постройте план заново.").into());
+            return Err(SyncError::ConflictChanged(path).into());
         }
         let mut choices = self.choices.clone();
         choices.insert(path, side);
@@ -194,9 +192,14 @@ impl TwoWayPlan {
             progress,
         )?;
         self.store.check_roots(&self.observed)?;
-        if self.store.read(&cancel)? != self.baseline || self.store.read_run()? != self.interrupted
-        {
-            return Err(SyncError::BaselineChanged.into());
+        if self.store.read(&cancel)? != self.baseline {
+            return Err(self.store.baseline_file().error(SyncStateProblem::Changed));
+        }
+        if self.store.read_run()? != self.interrupted {
+            let path = self.store.run_path();
+            return Err(
+                StatePath::new(SyncStateKind::RunRecord, &path).error(SyncStateProblem::Changed)
+            );
         }
         if let Some(run) = &self.interrupted {
             self.store.check_stage(run, &self.observed)?;
@@ -210,10 +213,7 @@ impl TwoWayPlan {
 
     pub(crate) fn remember(&mut self, progress: &mut Progress) -> Result<(), TransferError> {
         if !self.can_remember() {
-            return Err(text!(
-                "Чтобы сохранить общее состояние, содержимое папок должно совпадать.",
-            )
-            .into());
+            return Err(SyncError::CommonStateRequiresMatchingFolders.into());
         }
         let cancel = progress.cancellation();
         let lock = self.store.lock()?;

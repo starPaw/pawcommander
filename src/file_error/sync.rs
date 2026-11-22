@@ -1,5 +1,5 @@
 use crate::{operations::TransferError, vfs::Location};
-use std::{error::Error, fmt, path::PathBuf};
+use std::{error::Error, fmt, io, path::PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SyncFolderRole {
@@ -20,6 +20,84 @@ pub(crate) enum SyncDifference {
     Missing,
     Unexpected,
     Changed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SyncStateKind {
+    Directory,
+    CommonState,
+    RunRecord,
+    PairLock,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum SyncStateAction {
+    Inspect,
+    CreateDirectory,
+    Open,
+    Lock,
+    Read,
+    CreateTemporary,
+    Write,
+    SyncFile,
+    Publish,
+    SyncSave,
+    Remove,
+    SyncRemoval,
+}
+
+#[derive(Debug)]
+pub(crate) enum SyncStateProblem {
+    Io(SyncStateAction, io::Error),
+    Json(SyncStateAction, serde_json::Error),
+    InvalidEncoding(base64::DecodeError),
+    InvalidType,
+    InvalidContents,
+    UnsupportedVersion(u32),
+    SizeLimit(u64),
+    WrongPair,
+    PairChanged,
+    Changed,
+    ReplacedLock,
+    Busy,
+    InsideFolder(PathBuf),
+}
+
+impl fmt::Display for SyncStateProblem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(action, source) => write!(f, "{action:?}: {source}"),
+            Self::Json(action, source) => write!(f, "{action:?} JSON: {source}"),
+            Self::InvalidEncoding(source) => write!(f, "Invalid encoded value: {source}"),
+            Self::InvalidType => f.write_str("Unexpected filesystem object type"),
+            Self::InvalidContents => f.write_str("Invalid record contents"),
+            Self::UnsupportedVersion(version) => write!(f, "Unsupported version {version}"),
+            Self::SizeLimit(limit) => write!(f, "Record exceeds the {limit}-byte limit"),
+            Self::WrongPair => f.write_str("Record belongs to a different folder pair"),
+            Self::PairChanged => f.write_str("The folder pair changed"),
+            Self::Changed => f.write_str("The record changed after planning"),
+            Self::ReplacedLock => f.write_str("The lock file was replaced"),
+            Self::Busy => f.write_str("Synchronization is already running for these folders"),
+            Self::InsideFolder(folder) => {
+                write!(
+                    f,
+                    "The storage is inside synchronized folder {}",
+                    folder.display()
+                )
+            }
+        }
+    }
+}
+
+impl Error for SyncStateProblem {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Io(_, source) => Some(source),
+            Self::Json(_, source) => Some(source),
+            Self::InvalidEncoding(source) => Some(source),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -54,7 +132,16 @@ pub(crate) enum SyncError {
         target: Location,
         excluded: PathBuf,
     },
-    BaselineChanged,
+    State {
+        kind: SyncStateKind,
+        path: PathBuf,
+        problem: SyncStateProblem,
+    },
+    DataDirectoryUnavailable,
+    RootIdentityUnavailable,
+    ServerIdentityUnavailable,
+    ConflictChanged(PathBuf),
+    CommonStateRequiresMatchingFolders,
     UnresolvedConflicts,
     ResultMismatch(Location),
 }
@@ -129,7 +216,26 @@ impl fmt::Display for SyncError {
                 "Replacing or deleting {target} would affect excluded path {}",
                 excluded.display()
             ),
-            Self::BaselineChanged => f.write_str("The shared synchronization state changed"),
+            Self::State {
+                kind,
+                path,
+                problem,
+            } => {
+                write!(f, "{kind:?} at {}: {problem}", path.display())
+            }
+            Self::DataDirectoryUnavailable => {
+                f.write_str("The application data folder is unavailable")
+            }
+            Self::RootIdentityUnavailable => {
+                f.write_str("Could not verify the folder identity for the common state")
+            }
+            Self::ServerIdentityUnavailable => {
+                f.write_str("Could not confirm the server for the common state")
+            }
+            Self::ConflictChanged(path) => write!(f, "The conflict changed at {}", path.display()),
+            Self::CommonStateRequiresMatchingFolders => {
+                f.write_str("Both folders must have matching contents to save the common state")
+            }
             Self::UnresolvedConflicts => {
                 f.write_str("The synchronization plan has unresolved conflicts")
             }
@@ -144,6 +250,7 @@ impl Error for SyncError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Folder { cause, .. } | Self::Apply { cause, .. } => Some(cause.as_ref()),
+            Self::State { problem, .. } => Some(problem),
             _ => None,
         }
     }
