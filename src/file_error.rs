@@ -1276,6 +1276,7 @@ pub(crate) enum SmbMutationAction {
     ImportCollection,
     ExportCollection,
     CompareFolders,
+    CompareFiles,
 }
 
 #[derive(Debug)]

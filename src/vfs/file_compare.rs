@@ -58,14 +58,37 @@ pub(crate) fn compare_files(
     let mut right = second_root
         .file(&cancel)
         .map_err(|error| side_error(1, error))?;
-    let result = compare_readers([left.stream(), right.stream()], progress, &cancel)?;
-    first_root
-        .verify(&mut left, &cancel)
-        .map_err(|error| side_error(0, error))?;
-    second_root
-        .verify(&mut right, &cancel)
-        .map_err(|error| side_error(1, error))?;
-    Ok(result)
+
+    #[cfg(target_os = "macos")]
+    let verify_mounts = || -> Result<(), TransferError> {
+        for (side, input) in [&first_root, &second_root].into_iter().enumerate() {
+            cancel.check()?;
+            input
+                .scope
+                .verify_mount()
+                .map_err(|cause| side_error(side, folder_error(input.file, cause)))?;
+        }
+        Ok(())
+    };
+    #[cfg(target_os = "macos")]
+    verify_mounts()?;
+    let compared = (|| {
+        let result = compare_readers([left.stream(), right.stream()], progress, &cancel)?;
+        first_root
+            .verify(&mut left, &cancel)
+            .map_err(|error| side_error(0, error))?;
+        second_root
+            .verify(&mut right, &cancel)
+            .map_err(|error| side_error(1, error))?;
+        Ok(result)
+    })();
+    #[cfg(target_os = "macos")]
+    if !matches!(&compared, Err(TransferError::Cancelled)) {
+        // Preserve the saved share's cause on I/O failure and recheck both sides
+        // after the second file's verification.
+        verify_mounts()?;
+    }
+    compared
 }
 
 struct FileInput<'a> {
@@ -88,6 +111,12 @@ impl<'a> FileInput<'a> {
             .map(Path::new)
             .ok_or_else(unsupported)?;
         let containing_folder = |cause| folder_error(path, cause);
+        #[cfg(target_os = "macos")]
+        let scope =
+            super::smb_output::guard(path, crate::file_error::SmbMutationAction::CompareFiles)
+                .and_then(|mut mount| ReadScope::open_with_smb(&parent, &mut mount))
+                .map_err(containing_folder)?;
+        #[cfg(not(target_os = "macos"))]
         let scope = ReadScope::open(&parent).map_err(containing_folder)?;
         #[cfg(target_os = "macos")]
         if scope.descriptor.is_some() {
