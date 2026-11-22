@@ -101,6 +101,7 @@ pub struct TransferSummary {
     pub completed: usize,
     pub skipped: usize,
     pub metadata_warnings: usize,
+    pub(crate) move_history_warning: Option<Box<crate::operations::TransferError>>,
     pub cancelled: bool,
     pub remaining: Vec<Location>,
     pub preparing: bool,

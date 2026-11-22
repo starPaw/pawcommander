@@ -1,12 +1,13 @@
 use super::text;
 use crate::file_error::{
     AccessAction, AccessCause, AccessError, ArchiveError, ArchiveMemberError, BatchRenameError,
-    ChecksumError, ConflictError, ConnectionError, CrossMoveError, Failure, HostKeyError,
-    KnownHostEntryError, KnownHostsError, ListingError, ListingErrorKind, LocalPathAction,
-    ManifestLineError, MetadataError, MetadataField, MetadataWarning, MutationError, PathError,
-    PermissionError, PinError, PreviewError, ProbeAction, PublicationError, RecoveryNotice,
-    ReplacementRefusal, RetryError, RetryProblem, ScanError, SearchError, SpaceError, SshStage,
-    StagingCleanupError, StagingError, StagingRecordAction, TransferPlanError, UndoError,
+    ChecksumError, ConflictError, ConnectionError, CrossMoveError, DescendantProblem, Failure,
+    HostKeyError, KnownHostEntryError, KnownHostsError, ListingError, ListingErrorKind,
+    LocalPathAction, ManifestLineError, MetadataError, MetadataField, MetadataWarning,
+    MoveHistoryError, MutationError, PathError, PermissionError, PinError, PreviewError,
+    ProbeAction, PublicationError, RecoveryNotice, ReplacementRefusal, RetryError, RetryProblem,
+    ScanError, SearchError, SpaceError, SshStage, StagingCleanupError, StagingError,
+    StagingRecordAction, TransferPlanError, UndoError,
 };
 #[cfg(target_os = "macos")]
 use crate::file_error::{
@@ -53,6 +54,7 @@ pub(crate) fn file_error(error: &TransferError) -> String {
                 Failure::Conflict(error) => conflict_error(error),
                 Failure::BatchRename(error) => batch_rename_error(error),
                 Failure::CrossMove(error) => cross_move_error(error),
+                Failure::MoveHistory(error) => move_history_error(error),
                 Failure::Undo(error) => undo_error(error),
                 #[cfg(target_os = "macos")]
                 Failure::FilePromise(error) => file_promise_error(error),
@@ -76,6 +78,50 @@ pub(crate) fn file_error(error: &TransferError) -> String {
             }
         }
         TransferError::Cancelled => crate::tr_format!("Operation cancelled"),
+    }
+}
+
+fn move_history_error(error: &MoveHistoryError) -> String {
+    match error {
+        MoveHistoryError::Coverage { target, cause } => crate::tr_format!(
+            "Moved to {target}, but per-item history is incomplete.\n{error}",
+            target = target,
+            error = file_error(cause)
+        ),
+        MoveHistoryError::Descendants {
+            target,
+            unconfirmed,
+            first,
+        } => crate::tr_format!(
+            "Moved to {target}. Nested items with unconfirmed moves: {count}.\n{error}",
+            target = target,
+            count = unconfirmed,
+            error = file_error(first)
+        ),
+        MoveHistoryError::Descendant {
+            source,
+            target,
+            problem,
+        } => {
+            let reason = match problem {
+                DescendantProblem::Missing => {
+                    text!("Вложенный объект отсутствует в месте назначения.").into()
+                }
+                DescendantProblem::Changed => {
+                    text!("Вложенный объект в месте назначения изменился.").into()
+                }
+                DescendantProblem::Unmapped => {
+                    text!("Не удалось сопоставить вложенный путь с папкой назначения.").into()
+                }
+                DescendantProblem::Read(cause) => file_error(cause),
+            };
+            crate::tr_format!(
+                "Could not confirm the move of {source} to {target}. {error}",
+                source = source,
+                target = target,
+                error = reason
+            )
+        }
     }
 }
 
@@ -1411,7 +1457,11 @@ pub(crate) fn deletion_failure(failure: &DeletionFailure) -> String {
 
 pub(crate) fn transfer_failure(failure: &TransferFailure) -> String {
     let TransferFailure { error, summary } = failure;
-    let message = file_error(error);
+    let mut message = file_error(error);
+    if let Some(warning) = &summary.move_history_warning {
+        message.push('\n');
+        message.push_str(&file_error(warning));
+    }
     let (completed, skipped, remaining) =
         (summary.completed, summary.skipped, summary.remaining.len());
     #[cfg(target_os = "macos")]
@@ -1439,6 +1489,18 @@ pub(crate) fn transfer_failure(failure: &TransferFailure) -> String {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join("; ");
+    if let TransferError::Failed(Failure::MoveHistory(history)) = error
+        && matches!(history.as_ref(), MoveHistoryError::Descendants { .. })
+    {
+        return crate::tr_format!(
+            "Completed: {completed}. Skipped: {skipped}. Pending: {remaining}.\n{paths}\n{error}",
+            completed = completed,
+            skipped = skipped,
+            remaining = remaining,
+            paths = paths,
+            error = message
+        );
+    }
     crate::tr_format!(
         "{error}. Completed: {completed}. Skipped: {skipped}. Remaining: {remaining}: {paths}. Refresh both folders before retrying; check any recovery instructions.", completed = completed, error = reason, paths = paths, remaining = remaining, skipped = skipped
     )

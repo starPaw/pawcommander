@@ -5,9 +5,10 @@ use super::sftp::remote;
 use super::{err, TransferFailure, TransferSummary, MAX_TREE_DEPTH};
 use crate::conflict::{Answer, Conflict, Decision, EntryDetails};
 use crate::file_error::{
-    AccessAction, AccessCause, AccessError, ConflictError, Failure, MutationError, ProbeAction,
-    PublicationError, RecoveryNotice, ReplacementRefusal, ScanError, SftpSpaceFailure, SpaceError,
-    StagingCleanupError, StagingError, TransferPlanError,
+    AccessAction, AccessCause, AccessError, ConflictError, DescendantProblem, Failure,
+    MoveHistoryError, MutationError, ProbeAction, PublicationError, RecoveryNotice,
+    ReplacementRefusal, ScanError, SftpSpaceFailure, SpaceError, StagingCleanupError, StagingError,
+    TransferPlanError,
 };
 use crate::fs_ops;
 use crate::fs_ops::TransferKind;
@@ -609,47 +610,20 @@ pub(super) fn transfer_run(
         }
         progress.checkpoint()?;
         let copy_move = kind == TransferKind::Move && super::cross_move::required(&item)?;
-        let mut history_warning = None;
+        let mut coverage_warning = None;
         let mut move_manifest = if kind == TransferKind::Move && !copy_move {
-            let scan = cancel.clone().pausable_scan();
-            let captured = TransferSourceManifest::capture_move_observed(
-                &item.source,
-                &scan,
-                &mut |source, error| {
-                    if let Some(error) = error {
-                        progress.results.staged(
-                            source,
-                            Some(crate::i18n::file_error(error)),
-                            matches!(error, TransferError::Cancelled),
-                        );
-                    } else {
-                        progress
-                            .results
-                            .capturing(&item.source, &item.target, source);
-                    }
-                },
-            );
-            match captured {
-                Ok(manifest) => {
-                    progress.results.captured();
-                    match manifest.verify(&cancel, |source, error| {
-                        progress
-                            .results
-                            .staged(source, Some(crate::i18n::file_error(error)), false)
-                    }) {
-                        Ok(()) => Some(manifest),
-                        Err(TransferError::Cancelled) => return Err(TransferError::Cancelled),
-                        Err(error) => {
-                            progress.results.abandon_group();
-                            history_warning = Some(crate::i18n::file_error(&error));
-                            None
-                        }
-                    }
-                }
+            match capture_move_history(&item, progress, &cancel) {
+                Ok(manifest) => Some(manifest),
                 Err(TransferError::Cancelled) => return Err(TransferError::Cancelled),
-                Err(error) => {
+                Err(cause) => {
                     progress.results.abandon_group();
-                    history_warning = Some(crate::i18n::file_error(&error));
+                    coverage_warning = Some(
+                        MoveHistoryError::Coverage {
+                            target: item.target.clone(),
+                            cause,
+                        }
+                        .into(),
+                    );
                     None
                 }
             }
@@ -675,7 +649,7 @@ pub(super) fn transfer_run(
         if let Some(retry) = &mut progress.retry {
             retry.begin_attempt(&item, kind == TransferKind::Copy || copy_move);
         }
-        let mut result = match kind {
+        let result = match kind {
             TransferKind::Copy => {
                 copy_item_cancellable(&item, expected, progress, MetadataMode::Final, published)
             }
@@ -705,49 +679,15 @@ pub(super) fn transfer_run(
                 retry.note_source_manifest(&item.original, move_manifest.take());
             }
         }
-        let undo_entry = if committed
-            && result.is_ok()
-            && let (Some(capture), Some(manifest)) = (undo_capture, move_manifest.as_ref())
-        {
-            capture.finish(&item.source, manifest).ok()
+        let verification_warning = if committed {
+            move_manifest
+                .as_ref()
+                .and_then(|manifest| confirm_moved_descendants(&item, manifest, progress))
         } else {
             None
         };
-        if committed && let Some(manifest) = move_manifest {
-            let mut failed = 0usize;
-            for (source, entry) in manifest.entries {
-                let Ok(relative) = source.path().strip_prefix(item.source.path()) else {
-                    continue;
-                };
-                if relative.as_os_str().is_empty() {
-                    continue;
-                }
-                let target = item.target.join(relative);
-                let check = entry_metadata(&target);
-                let verified =
-                    matches!(&check, Ok(Some(actual)) if entry.matches_moved_target(actual));
-                if !verified {
-                    failed += 1;
-                }
-                progress.results.moved_entry(
-                    &source,
-                    verified,
-                    (!verified).then(|| match check {
-                        Err(error) => crate::i18n::file_error(&error),
-                        _ => crate::tr_format!(
-                            "Could not confirm the move of {source} to {target}",
-                            source = source,
-                            target = target
-                        ),
-                    }),
-                );
-            }
-            if failed != 0 && result.is_ok() {
-                result = Err(crate::tr_format!(
-                    "The root move was published, but {failed} descendant results could not be confirmed", failed = failed
-                ).into());
-            }
-        }
+        let unconfirmed_descendants = verification_warning.is_some();
+        let history_warning = verification_warning.or(coverage_warning.filter(|_| committed));
         // A published copy never becomes automatically retryable. A move
         // counts as completed only when its source removal was confirmed.
         let outcome = match (&result, committed) {
@@ -774,44 +714,125 @@ pub(super) fn transfer_run(
         } else {
             outcome
         };
-        let mut reason = result
-            .as_ref()
-            .err()
-            .map(crate::i18n::file_error)
-            .or_else(|| {
-                history_warning.map(|error| {
-                    crate::tr_format!(
-                        "Move completed, but per-item history is incomplete: {error}",
-                        error = error
-                    )
-                })
-            });
         if metadata_warning {
-            let warning = crate::i18n::text!(
-                "Даты или права доступа сохранены частично. Подробности указаны в строках журнала.",
-            );
-            reason = Some(
-                reason.map_or_else(|| warning.into(), |reason| format!("{reason}\n{warning}")),
-            );
             summary.metadata_warnings += 1;
         }
         if outcome == crate::result_history::Outcome::Completed
-            && let Some(entry) = undo_entry
+            && let (Some(capture), Some(manifest)) = (undo_capture, move_manifest.as_ref())
+            && let Ok(entry) = capture.finish(&item.source, manifest)
         {
             progress.undo.push(entry);
         }
-        progress
-            .results
-            .record(&item.original, Some(item.target.display()), outcome, reason);
-        record_item_result(
+        progress.results.record_transfer_item(
+            &item.original,
+            outcome,
+            result.as_ref().err(),
+            history_warning.as_ref(),
+            metadata_warning,
+        );
+        let result = record_item_result(
             summary,
             &item.original,
             committed && (!copy_move || source_removed),
             result,
-        )?;
+        );
+        if let Some(warning) = history_warning {
+            // Verification can stop pending work after the root move is confirmed.
+            if unconfirmed_descendants && result.is_ok() && !summary.remaining.is_empty() {
+                return Err(warning);
+            }
+            if unconfirmed_descendants || summary.move_history_warning.is_none() {
+                summary.move_history_warning = Some(Box::new(warning));
+            }
+        }
+        result?;
     }
     // Do not observe a late request after the final successful publication.
     Ok(())
+}
+
+fn capture_move_history(
+    item: &TransferItem,
+    progress: &mut Progress,
+    cancel: &Cancellation,
+) -> Result<TransferSourceManifest, TransferError> {
+    let scan = cancel.clone().pausable_scan();
+    let manifest = TransferSourceManifest::capture_move_observed(
+        &item.source,
+        &scan,
+        &mut |source, error| {
+            if let Some(error) = error {
+                progress.results.staged_with_error(source, error);
+            } else {
+                progress
+                    .results
+                    .capturing(&item.source, &item.target, source);
+            }
+        },
+    )?;
+    progress.results.captured();
+    manifest.verify(cancel, |source, error| {
+        progress.results.staged_with_error(source, error);
+    })?;
+    Ok(manifest)
+}
+
+fn confirm_moved_descendants(
+    item: &TransferItem,
+    manifest: &TransferSourceManifest,
+    progress: &mut Progress,
+) -> Option<TransferError> {
+    let mut first = None;
+    let mut unconfirmed = 0;
+    for (source, entry) in &manifest.entries {
+        if source == &item.source {
+            continue;
+        }
+        let error = confirm_moved_descendant(item, source, entry).err();
+        progress
+            .results
+            .moved_entry_with_error(source, error.as_ref());
+        if let Some(error) = error {
+            first.get_or_insert(error);
+            unconfirmed += 1;
+        }
+    }
+    first.map(|first| {
+        MoveHistoryError::Descendants {
+            target: item.target.clone(),
+            unconfirmed,
+            first,
+        }
+        .into()
+    })
+}
+
+fn confirm_moved_descendant(
+    item: &TransferItem,
+    source: &Location,
+    entry: &TransferSourceEntry,
+) -> Result<(), TransferError> {
+    let relative = source
+        .path()
+        .strip_prefix(item.source.path())
+        .map_err(|_| MoveHistoryError::Descendant {
+            source: source.clone(),
+            target: item.target.clone(),
+            problem: DescendantProblem::Unmapped,
+        })?;
+    let target = item.target.join(relative);
+    let problem = match entry_metadata(&target) {
+        Ok(Some(actual)) if entry.matches_moved_target(&actual) => return Ok(()),
+        Ok(Some(_)) => DescendantProblem::Changed,
+        Ok(None) => DescendantProblem::Missing,
+        Err(cause) => DescendantProblem::Read(cause),
+    };
+    Err(MoveHistoryError::Descendant {
+        source: source.clone(),
+        target,
+        problem,
+    }
+    .into())
 }
 
 pub(super) fn record_item_result(

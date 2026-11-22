@@ -327,6 +327,8 @@ fn result_history_confirms_atomic_directory_move_descendants() {
     )
     .unwrap();
     assert_eq!(summary.completed, 1);
+    assert!(summary.move_history_warning.is_none());
+    assert_eq!(progress.undo.len(), 1);
     assert_eq!(progress.results.items.len(), 3);
     assert_eq!(progress.results.items[0].outcome, Outcome::Completed);
     assert!(progress.results.items[0].descendants_enumerated);
@@ -358,7 +360,110 @@ fn result_history_confirms_atomic_directory_move_descendants() {
 }
 
 #[test]
+fn confirmed_folder_move_keeps_an_unverified_child_out_of_undo_and_retry() {
+    use crate::file_error::{DescendantProblem, Failure, MoveHistoryError};
+    use crate::result_history::Outcome;
+    use crate::vfs::RetryTransfer;
+
+    for missing in [true, false] {
+        let fixture = tempfile::tempdir().unwrap();
+        let root: Location = fixture.path().canonicalize().unwrap().into();
+        let source = create_directory(&root, "tree").unwrap();
+        let bad = source.join("check");
+        fs::write(bad.path(), b"original file").unwrap();
+        fs::write(source.join("good").path(), b"untouched sibling").unwrap();
+        let destination = create_directory(&root, "destination").unwrap();
+        let target = destination.join("tree");
+        let affected = target.join("check");
+        let kept = root.join("retained");
+        let pending = root.join("later");
+        let mut sources = vec![source.clone()];
+        if !missing {
+            fs::write(pending.path(), b"pending data").unwrap();
+            sources.push(pending.clone());
+        }
+
+        let mut progress = Progress::default();
+        progress.retry = Some(RetryTransfer::new(TransferKind::Move, destination.clone()));
+        let result = transfer_with_conflicts(
+            &sources,
+            &destination,
+            TransferKind::Move,
+            &mut progress,
+            |_| panic!("no conflict"),
+            |moved, _| {
+                assert_eq!(moved, &source);
+                fs::rename(affected.path(), kept.path()).unwrap();
+                if !missing {
+                    fs::write(affected.path(), b"external replacement").unwrap();
+                }
+            },
+        );
+        let (summary, warning) = if missing {
+            let mut summary = result.unwrap();
+            let warning = *summary.move_history_warning.take().unwrap();
+            (summary, warning)
+        } else {
+            let failure = result.unwrap_err();
+            assert_eq!(fs::read(pending.path()).unwrap(), b"pending data");
+            assert!(!destination.join("later").path().exists());
+            (failure.summary, failure.error)
+        };
+        assert_eq!(summary.completed, 1);
+        assert!(!summary.cancelled);
+        assert_eq!(summary.remaining.as_slice(), &sources[1..]);
+        let TransferError::Failed(Failure::MoveHistory(warning)) = warning else {
+            panic!("Expected a typed warning after successful publication");
+        };
+        let MoveHistoryError::Descendants {
+            target: published,
+            unconfirmed: 1,
+            first: TransferError::Failed(Failure::MoveHistory(descendant)),
+        } = warning.as_ref()
+        else {
+            panic!("Expected one unknown child, got {warning:?}");
+        };
+        assert_eq!(published, &target);
+        assert!(
+            matches!(descendant.as_ref(), MoveHistoryError::Descendant { source, target, problem }
+            if source == &bad && target == &affected
+                && matches!((missing, problem), (true, DescendantProblem::Missing) | (false, DescendantProblem::Changed)))
+        );
+
+        let rows = &progress.results.items;
+        assert_eq!(rows[0].outcome, Outcome::CompletedWithWarning);
+        assert!(rows[0].descendants_enumerated);
+        let bad_row = rows.iter().find(|row| row.source == bad.display()).unwrap();
+        assert_eq!(bad_row.outcome, Outcome::PublicationUnconfirmed);
+        assert_eq!(bad_row.parent, Some(0));
+        assert!(bad_row
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains(&affected.display()));
+        let good = rows
+            .iter()
+            .find(|row| row.source == source.join("good").display())
+            .unwrap();
+        assert_eq!(good.outcome, Outcome::Completed);
+        assert_eq!(progress.undo.len(), 0);
+        let retry = progress.retry.take().unwrap().unfinished(&progress.results);
+        assert_eq!(
+            retry.map(|retry| retry.sources()).unwrap_or_default(),
+            &sources[1..]
+        );
+        assert!(!source.path().exists());
+        assert_eq!(fs::read(kept.path()).unwrap(), b"original file");
+        assert_eq!(
+            fs::read(target.join("good").path()).unwrap(),
+            b"untouched sibling"
+        );
+    }
+}
+
+#[test]
 fn move_still_completes_when_descendant_history_hits_depth_limit() {
+    use crate::file_error::{Failure, MoveHistoryError, ScanError};
     use crate::result_history::Outcome;
     let fixture = tempfile::tempdir().unwrap();
     let root: Location = fixture.path().to_path_buf().into();
@@ -381,6 +486,19 @@ fn move_still_completes_when_descendant_history_hits_depth_limit() {
     )
     .unwrap();
     assert_eq!(summary.completed, 1);
+    let Some(TransferError::Failed(Failure::MoveHistory(warning))) =
+        summary.move_history_warning.as_deref()
+    else {
+        panic!("Expected the history coverage warning on the confirmed move");
+    };
+    assert!(matches!(
+        warning.as_ref(),
+        MoveHistoryError::Coverage {
+            target,
+            cause: TransferError::Failed(Failure::Scan(cause))
+        } if target == &destination.join("tree") && matches!(cause.as_ref(),
+            ScanError::TransferDepthLimit { location, limit: 128 } if location.path().ends_with(leaf.strip_prefix(source.path()).unwrap()))
+    ));
     assert_eq!(progress.results.items.len(), 1);
     assert_eq!(
         progress.results.items[0].outcome,
