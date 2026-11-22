@@ -9,13 +9,14 @@ use super::{
     guarded_directory::{open_staging, Directory},
     location::validate_name,
     read_scope::ReadScope,
+    smb_output,
     staged_file::StagedFile,
     transfer::with_staging_typed,
     Location,
 };
 use crate::{
     app::SavedPath,
-    file_error::{AccessError, CollectionAction, CollectionError},
+    file_error::{AccessError, CollectionAction, CollectionError, SmbMutationAction},
     operations::{Progress, TransferError},
 };
 use reference::Reference;
@@ -265,15 +266,20 @@ fn export_to(
     if !name.ends_with(PORTABLE_SUFFIX) || name == PORTABLE_SUFFIX {
         return Err(CollectionError::ExportSuffix.into());
     }
-    let scope = ReadScope::open(directory)?;
+    let mut mount = smb_output::guard(directory, SmbMutationAction::ExportCollection)?;
+    let scope = ReadScope::open_with_smb(directory, &mut mount)?;
     let destination = Directory::from_scope(&scope)?;
     let target = destination.location.join(name);
+    let smb_destination = smb_output::is_destination(&mut mount, &target)?;
     let name = OsStr::new(name);
     destination.require_absent(name)?;
     let mut members = Vec::with_capacity(group.members.len());
     for (index, item) in group.members.iter_mut().enumerate() {
         cancel.check()?;
         let row = index + 1;
+        scope
+            .verify_mount()
+            .map_err(|cause| entry_error(row, item.last_path().as_deref(), cause))?;
         let path = item.resolve().map_err(|state| {
             entry_error(
                 row,
@@ -283,20 +289,11 @@ fn export_to(
         })?;
         progress.item(&path);
         let folder = destination.location.path();
-        let relative = path
-            .strip_prefix(folder)
-            .ok()
-            .filter(|path| !path.as_os_str().is_empty())
-            .ok_or_else(|| {
-                entry_error(
-                    row,
-                    Some(&path),
-                    CollectionError::OutsideFolder {
-                        resolved: path.clone(),
-                        folder: folder.to_owned(),
-                    },
-                )
-            })?;
+        let relative =
+            relative_to(&path, folder).map_err(|cause| entry_error(row, Some(&path), cause))?;
+        item.reference
+            .verify_portable_target(&scope, relative, &cancel)
+            .map_err(|cause| entry_error(row, Some(&path), cause))?;
         members.push(PortableMember {
             path: relative.into(),
             folder: item.is_folder(),
@@ -313,6 +310,19 @@ fn export_to(
         return Err(CollectionError::ByteLimit(MAX_PORTABLE_BYTES).into());
     }
     progress.item(target.path());
+    if smb_destination {
+        scope.verify_selected_root(directory)?;
+        smb_output::publish(
+            &mut bytes.as_slice(),
+            bytes.len() as u64,
+            &target,
+            &target,
+            &scope.parent,
+            &mount,
+            progress,
+        )?;
+        return Ok(target);
+    }
     with_staging_typed(&target, Some(&cancel), |staging, _| {
         let staging = Directory::from_scope(&open_staging(staging)?)?;
         let payload = staging.location.join("payload");
@@ -349,7 +359,8 @@ fn import_from(
     if source.parent().as_ref() != Some(directory) || !is_portable(local(source)?) {
         return Err(CollectionError::ImportSelection.into());
     }
-    let scope = ReadScope::open(directory)?;
+    let mut mount = smb_output::guard(directory, SmbMutationAction::ImportCollection)?;
+    let scope = ReadScope::open_with_smb(directory, &mut mount)?;
     let name = source
         .path()
         .file_name()
@@ -395,6 +406,9 @@ fn import_from(
         }
         let path = root.join(&relative);
         progress.item(&path);
+        scope
+            .verify_mount()
+            .map_err(|cause| entry_error(row, Some(&path), cause))?;
         let tags = normalize_tags(item.tags.iter().map(String::as_str))
             .map_err(|cause| entry_error(row, Some(&path), cause))?;
         let member =
@@ -402,16 +416,8 @@ fn import_from(
         let resolved = member
             .last_path()
             .ok_or_else(|| entry_error(row, Some(&path), CollectionError::InvalidPath))?;
-        if resolved == root || !resolved.starts_with(root) {
-            return Err(entry_error(
-                row,
-                Some(&path),
-                CollectionError::OutsideFolder {
-                    resolved,
-                    folder: root.to_owned(),
-                },
-            ));
-        }
+        let inside =
+            relative_to(&resolved, root).map_err(|cause| entry_error(row, Some(&path), cause))?;
         if member.is_folder() != item.folder {
             return Err(entry_error(
                 row,
@@ -421,6 +427,10 @@ fn import_from(
                 },
             ));
         }
+        member
+            .reference
+            .verify_portable_target(&scope, inside, &cancel)
+            .map_err(|cause| entry_error(row, Some(&path), cause))?;
         if members
             .iter()
             .any(|existing| existing.reference.same_item(&member.reference))
@@ -447,6 +457,16 @@ fn safe_relative(path: &Path) -> bool {
         && path
             .components()
             .all(|part| matches!(part, Component::Normal(_)))
+}
+
+fn relative_to<'a>(item: &'a Path, folder: &Path) -> Result<&'a Path, CollectionError> {
+    item.strip_prefix(folder)
+        .ok()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or_else(|| CollectionError::OutsideFolder {
+            resolved: item.to_owned(),
+            folder: folder.to_owned(),
+        })
 }
 
 fn checked_name(name: &str) -> Result<&str, CollectionError> {
@@ -481,10 +501,14 @@ fn local(location: &Location) -> Result<&Path, TransferError> {
 }
 
 fn entry_error(row: usize, path: Option<&Path>, cause: impl Into<TransferError>) -> TransferError {
+    let cause = cause.into();
+    if matches!(cause, TransferError::Cancelled) {
+        return cause;
+    }
     CollectionError::Entry {
         row,
         path: path.map(Path::to_owned),
-        cause: Box::new(cause.into()),
+        cause: Box::new(cause),
     }
     .into()
 }

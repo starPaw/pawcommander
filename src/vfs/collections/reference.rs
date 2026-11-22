@@ -1,10 +1,12 @@
+use super::super::read_scope::{local_subdirectory_with_flags, ReadScope};
 use super::Unavailable;
 use crate::{
     app::SavedPath,
     file_error::{AccessAction, AccessError, CollectionError},
-    operations::TransferError,
+    operations::{access_io, Cancellation, TransferError},
     vfs::Location,
 };
+use rustix::fs::{fstat, statat, AtFlags, FileType, OFlags, Stat};
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::{CStr, CString, OsStr},
@@ -85,6 +87,41 @@ impl Reference {
         self.identity.folder
     }
 
+    pub(super) fn verify_portable_target(
+        &self,
+        scope: &ReadScope,
+        relative: &Path,
+        cancel: &Cancellation,
+    ) -> Result<(), TransferError> {
+        let Some(mount) = scope.owned_smb_mount() else {
+            return Ok(());
+        };
+        let location = scope.parent.location.join(relative);
+        let changed = || CollectionError::Changed(location.clone());
+        let root = scope.descriptor.as_ref().ok_or_else(changed)?;
+        let parent = relative.parent().ok_or_else(changed)?;
+        let name = relative.file_name().ok_or_else(changed)?;
+        let flags = OFlags::from_bits_retain(libc::O_SEARCH as _)
+            | OFlags::DIRECTORY
+            | OFlags::NOFOLLOW
+            | OFlags::CLOEXEC;
+        let directory = local_subdirectory_with_flags(root, parent, cancel, flags)
+            .map_err(|error| access_io(&location, AccessAction::OpenFile, error))?;
+        let directory = directory.as_ref().unwrap_or(root);
+        let parent = scope.parent.location.path().join(parent);
+        mount.verify_directory(directory, &parent, location.path())?;
+        let parent_metadata = fstat(directory)
+            .map_err(|error| access(&parent, AccessAction::ReadOpenMetadata, error.into()))?;
+        cancel.check()?;
+        // Collections need metadata for an item even when its contents cannot be read.
+        let metadata = statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|error| access(location.path(), AccessAction::ReadMetadata, error.into()))?;
+        if metadata.st_dev != parent_metadata.st_dev || !self.identity.matches_stat(&metadata) {
+            return Err(changed().into());
+        }
+        Ok(())
+    }
+
     pub(super) fn resolve(&mut self) -> Result<PathBuf, Unavailable> {
         let saved = self.path.clone().into_path().ok_or(Unavailable::Missing)?;
         let previous = match self.check(&saved) {
@@ -163,6 +200,19 @@ impl Identity {
             && self.device == meta.st_dev()
             && self.inode == meta.st_ino()
             && self.birth == (meta.st_birthtime(), meta.st_birthtime_nsec())
+    }
+
+    fn matches_stat(&self, meta: &Stat) -> bool {
+        let kind = FileType::from_raw_mode(meta.st_mode);
+        let expected = if self.folder {
+            FileType::Directory
+        } else {
+            FileType::RegularFile
+        };
+        kind == expected
+            && self.device == meta.st_dev as u64
+            && self.inode == meta.st_ino
+            && self.birth == (meta.st_birthtime, meta.st_birthtime_nsec)
     }
 
     fn matches_kind(&self, meta: &fs::Metadata) -> bool {
