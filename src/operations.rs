@@ -211,6 +211,20 @@ pub(crate) enum TransferError {
 }
 
 impl TransferError {
+    #[cfg(target_os = "macos")]
+    pub(crate) fn is_completed_cleanup_warning(&self) -> bool {
+        match self {
+            Self::Failed(Failure::StagingCleanup(error)) => error.operation.is_none(),
+            Self::Failed(Failure::Publication(error)) => {
+                matches!(
+                    error.as_ref(),
+                    PublicationError::RecoveryFinalization { .. }
+                )
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn with_unconfirmed_publication(self) -> Self {
         match self {
             Self::Failed(reason) => Self::PublicationUnconfirmed(reason),

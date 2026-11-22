@@ -1071,7 +1071,8 @@ fn finish_copy(
                     return Err(staged.error(&payload, ResumeCheckProblem::WrongType));
                 }
                 remove_staged_entry(&payload, false)?;
-                discard_empty_stage(ticket, paths, progress)
+                progress.partial_copy_retained = false;
+                discard_empty_stage(ticket, paths)
             })();
             return finish_cancelled_cleanup(ticket, paths, cleanup);
         }
@@ -1098,19 +1099,52 @@ fn finish_copy(
     if receipt.intent == Intent::Move {
         return Ok(completed);
     }
-    let cleanup = if matches!(completed, Completion::AlreadyPresent)
-        && entry_metadata(&paths.stage)?.is_none()
-    {
-        Ok(())
-    } else if let Some(previous) = &receipt.previous {
-        verify_target(Some(previous), &backup, true, &mut Progress::default())?;
-        discard_stage(&paths.stage, receipt.stage_identity, owner, &["previous"])
-    } else {
-        discard_stage(&paths.stage, receipt.stage_identity, owner, &[])
-    };
-    cleanup.map_err(|error| retained_error(&paths.stage, error))?;
+    finish_published_copy(ticket, paths, progress, completed)
+}
+
+fn finish_published_copy(
+    ticket: &Ticket,
+    paths: &Paths,
+    progress: &mut Progress,
+    completed: Completion,
+) -> Result<Completion, TransferError> {
+    // The new copy is already at its destination, even when an old file remains in staging.
+    progress.partial_copy_retained = false;
+    let cleanup =
+        discard_published_copy_stage(ticket, paths, completed == Completion::AlreadyPresent);
+    StagingCleanupError::combine(Ok(()), cleanup, &paths.stage, &paths.target)?;
     finish_record(ticket, paths, progress)?;
     Ok(completed)
+}
+
+fn discard_published_copy_stage(
+    ticket: &Ticket,
+    paths: &Paths,
+    recovering: bool,
+) -> Result<(), TransferError> {
+    let stage = &paths.stage;
+    let identity = ticket.receipt.stage_identity;
+    let owner = ticket.name();
+    if recovering {
+        if entry_metadata(stage)?.is_none() {
+            return Ok(());
+        }
+        if identity.is_some() && entry_metadata(&stage.join(owner))?.is_none() {
+            // The last rmdir may have failed after marker removal. Only a matching
+            // local directory can be removed here, and rmdir requires it to be empty.
+            check_stage_identity(stage, identity)?;
+            return remove_staged_entry(stage, true);
+        }
+    }
+    if let Some(previous) = &ticket.receipt.previous {
+        let backup = stage.join("previous");
+        if !recovering || entry_metadata(&backup)?.is_some() {
+            stage_contents(stage, identity, owner, &["previous"])?;
+            verify_target(Some(previous), &backup, true, &mut Progress::default())?;
+            remove_staged_entry(&backup, false)?;
+        }
+    }
+    discard_empty_stage(ticket, paths)
 }
 
 fn restore_cancelled_replacement(
@@ -1134,13 +1168,7 @@ fn restore_cancelled_replacement(
         .map_err(TransferError::with_unconfirmed_publication)
 }
 
-fn discard_empty_stage(
-    ticket: &Ticket,
-    paths: &Paths,
-    progress: &mut Progress,
-) -> Result<(), TransferError> {
-    // An empty staging folder or an unremoved receipt holds no partial copy.
-    progress.partial_copy_retained = false;
+fn discard_empty_stage(ticket: &Ticket, paths: &Paths) -> Result<(), TransferError> {
     let owner = ticket.name();
     stage_contents(&paths.stage, ticket.receipt.stage_identity, owner, &[])?;
     remove_staged_entry(&paths.stage.join(owner), false)?;
@@ -1331,9 +1359,7 @@ fn stage_contents(
     owner: &str,
     extra: &[&str],
 ) -> Result<(), TransferError> {
-    if stage_identity(stage)? != identity || super::transfer::canonical(stage)? != stage.path() {
-        return Err(StagingError::IdentityChanged(stage.clone()).into());
-    }
+    check_stage_identity(stage, identity)?;
     let role = ResumeRole::Staged;
     let action = AccessAction::ReadChildren;
     let expected: BTreeSet<OsString> = std::iter::once(owner)
@@ -1390,6 +1416,16 @@ fn stage_contents(
                 actual,
             },
         ));
+    }
+    Ok(())
+}
+
+fn check_stage_identity(
+    stage: &Location,
+    identity: Option<(u64, u64)>,
+) -> Result<(), TransferError> {
+    if stage_identity(stage)? != identity || super::transfer::canonical(stage)? != stage.path() {
+        return Err(StagingError::IdentityChanged(stage.clone()).into());
     }
     Ok(())
 }

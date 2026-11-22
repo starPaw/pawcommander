@@ -178,6 +178,9 @@ fn retained_copy_restarts_from_checked_offset_and_never_retries_changed_data() {
         Some("backup"),
         Some("parked"),
         Some("published"),
+        Some("published-no-backup"),
+        Some("published-no-marker"),
+        Some("published-other-stage"),
     ] {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
@@ -213,7 +216,7 @@ fn retained_copy_restarts_from_checked_offset_and_never_retries_changed_data() {
             continued(&recovery, &partial, &source, &target, &bytes);
             continue;
         };
-        if matches!(change, "parked" | "published") {
+        if change == "parked" || change.starts_with("published") {
             let stage = partial.parent().unwrap();
             fs::rename(&target, stage.join("previous")).unwrap();
             if change == "parked" {
@@ -223,17 +226,53 @@ fn retained_copy_restarts_from_checked_offset_and_never_retries_changed_data() {
                 fs::rename(&partial, &target).unwrap();
                 let (offers, errors) = scan(&recovery);
                 assert!(errors.is_empty());
+                if change == "published-no-backup" || change == "published-no-marker" {
+                    fs::remove_file(stage.join("previous")).unwrap();
+                    if change == "published-no-marker" {
+                        fs::remove_file(stage.join(&offers[0].id)).unwrap();
+                    }
+                }
+                let original_stage = root.join("original-stage");
+                if change == "published-other-stage" {
+                    fs::rename(stage, &original_stage).unwrap();
+                    fs::create_dir(stage).unwrap();
+                }
+                let published = fs::metadata(&target).unwrap();
                 let (mut progress, mut view) = Progress::tracked_transfer();
-                assert_eq!(
-                    resume(&recovery, &offers[0].id, &mut progress)
-                        .unwrap()
-                        .kind,
-                    Completion::AlreadyPresent
-                );
+                let result = resume(&recovery, &offers[0].id, &mut progress);
+                if change == "published-other-stage" {
+                    let error = result.unwrap_err();
+                    assert!(error.is_completed_cleanup_warning());
+                    let TransferError::Failed(Failure::StagingCleanup(cleanup)) = error else {
+                        panic!("expected a completed copy with a staging warning");
+                    };
+                    assert_eq!(cleanup.staging.path(), stage);
+                    assert_eq!(cleanup.target.path(), target);
+                    assert!(matches!(
+                        cleanup.cleanup,
+                        TransferError::Failed(Failure::Staging(error))
+                            if matches!(error.as_ref(), StagingError::IdentityChanged(path)
+                                if path.path() == stage)
+                    ));
+                    assert_eq!(
+                        progress.results.items[0].outcome,
+                        Outcome::CompletedWithWarning
+                    );
+                    assert!(stage.is_dir());
+                    assert_eq!(
+                        fs::read(original_stage.join("previous")).unwrap(),
+                        b"previous destination"
+                    );
+                    assert_eq!(scan(&recovery).0.len(), 1);
+                } else {
+                    assert_eq!(result.unwrap().kind, Completion::AlreadyPresent);
+                    assert!(!stage.exists());
+                    assert!(scan(&recovery).0.is_empty());
+                }
+                assert!(!progress.partial_copy_retained);
                 assert_eq!(view.snapshot().total_written, 0);
+                assert_eq!(fs::metadata(&target).unwrap().ino(), published.ino());
                 assert_eq!(fs::read(&target).unwrap(), bytes);
-                assert!(!stage.exists());
-                assert!(scan(&recovery).0.is_empty());
             }
             continue;
         }

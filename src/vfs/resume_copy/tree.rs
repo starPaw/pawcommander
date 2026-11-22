@@ -1,8 +1,8 @@
 //! Folder recovery verifies a fresh snapshot against the recorded fingerprint.
 //! Moves retain original access times separately because reading changes them.
 use super::{
-    checked_digest, copy_metadata, copy_suffix, discard_empty_stage, discard_stage, entry_metadata,
-    file_scope, finish_cancelled_cleanup, finish_record, manifest_error, register_copy,
+    checked_digest, copy_metadata, copy_suffix, discard_empty_stage, entry_metadata, file_scope,
+    finish_cancelled_cleanup, finish_published_copy, manifest_error, register_copy,
     remove_staged_entry, rename_for_publication, required_metadata, retained_error, stage_contents,
     stage_identity, verify_stamp, verify_target, Cancellation, Completion, EntryMetadata,
     FileProof, Intent, Location, Original, Paths, Progress, Receipt, RenamedIdentity, SavedTime,
@@ -560,11 +560,7 @@ fn finish(
         if receipt.intent == Intent::Move {
             return result;
         }
-        if !matches!(&result, Ok(Completion::AlreadyPresent))
-            || entry_metadata(&paths.stage)?.is_some()
-        {
-            discard_stage(&paths.stage, receipt.stage_identity, owner, &[])?;
-        }
+        result.and_then(|completed| finish_published_copy(ticket, paths, progress, completed))
     } else if matches!(&result, Err(TransferError::Cancelled)) {
         progress.results.cancelled = true;
         let Some(snapshot) = snapshot.filter(|_| draft_verified) else {
@@ -585,14 +581,13 @@ fn finish(
             let present = snapshot.inventory(&payload, false, &Cancellation::default())?;
             snapshot.verify_bytes(paths, &payload, &present, false, &mut Progress::default())?;
             snapshot.discard(&payload, &present)?;
-            discard_empty_stage(ticket, paths, progress)
+            progress.partial_copy_retained = false;
+            discard_empty_stage(ticket, paths)
         })();
-        return finish_cancelled_cleanup(ticket, paths, cleanup);
+        finish_cancelled_cleanup(ticket, paths, cleanup)
     } else {
-        return result.map_err(|error| retained_error(&paths.stage, error));
+        result.map_err(|error| retained_error(&paths.stage, error))
     }
-    finish_record(ticket, paths, progress)?;
-    result
 }
 
 pub(super) fn verify_move_source(
