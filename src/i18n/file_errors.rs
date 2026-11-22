@@ -14,7 +14,8 @@ use crate::file_error::{
 use crate::file_error::{
     CompatiblePlanError, DuplicateError, DuplicateRole, FilePromiseError, FileTemplateError,
     RemoteEditError, ResumeCheckError, ResumeCheckProblem, ResumeRecordEvent, ResumeRole,
-    ScanLimit, ScanLimitKind, SyncDifference, SyncError, SyncFolderRole, SyncVerification,
+    ScanLimit, ScanLimitKind, SyncDifference, SyncError, SyncFolderRole, SyncStateAction,
+    SyncStateKind, SyncStateProblem, SyncVerification,
 };
 use crate::file_error::{
     RecoveryRecordAction, RecoveryRecordError, RecoveryRecordProblem, RecoveryRecordSection,
@@ -1123,12 +1124,95 @@ fn sync_error(error: &SyncError) -> String {
             "Replacing or deleting {location} would affect the excluded path {excluded}.",
             location = target, excluded = excluded.display()
         ),
-        SyncError::BaselineChanged => text!("Общее состояние изменилось. Постройте план заново.").into(),
+        SyncError::State { kind, path, problem } => sync_state_error(*kind, path, problem),
+        SyncError::DataDirectoryUnavailable => text!("Папка данных приложения недоступна").into(),
+        SyncError::RootIdentityUnavailable => text!("Не удалось проверить папку для общего состояния").into(),
+        SyncError::ServerIdentityUnavailable => text!("Не удалось подтвердить сервер для общего состояния").into(),
+        SyncError::ConflictChanged(path) => format!(
+            "{}\n{}", text!("Конфликт изменился. Постройте план заново."), path.to_string_lossy().escape_debug()
+        ),
+        SyncError::CommonStateRequiresMatchingFolders =>
+            text!("Чтобы сохранить общее состояние, содержимое папок должно совпадать.").into(),
         SyncError::UnresolvedConflicts => text!("Для применения нужен план без нерешённых конфликтов.").into(),
         SyncError::ResultMismatch(folder) => format!(
             "{} · {folder}",
             text!("После применения содержимое папок отличается от плана. Постройте план заново.")
         ),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn sync_state_error(
+    kind: SyncStateKind,
+    path: &std::path::Path,
+    problem: &SyncStateProblem,
+) -> String {
+    use SyncStateProblem::*;
+
+    let label = match kind {
+        SyncStateKind::Directory => text!("Папка данных синхронизации"),
+        SyncStateKind::CommonState => text!("Файл общего состояния"),
+        SyncStateKind::RunRecord => text!("Запись о запуске синхронизации"),
+        SyncStateKind::PairLock => text!("Файл блокировки пары папок"),
+    };
+    let reason = match problem {
+        Io(action, source) => format!("{} ({source})", sync_state_action(*action)),
+        Json(action, source) => {
+            let action = if matches!(action, SyncStateAction::Read) {
+                text!("Не удалось прочитать JSON записи")
+            } else {
+                text!("Не удалось записать JSON записи")
+            };
+            format!("{action} ({source})")
+        }
+        InvalidEncoding(source) => {
+            format!("{} ({source})", text!("Неверная кодировка поля записи"))
+        }
+        InvalidType if matches!(kind, SyncStateKind::Directory) => {
+            text!("Ожидалась обычная папка.").into()
+        }
+        InvalidType => text!("Ожидался обычный файл записи.").into(),
+        InvalidContents => text!("В записи есть недопустимые данные.").into(),
+        UnsupportedVersion(version) => crate::tr_format!(
+            "Record version {version} is unsupported.",
+            version = version
+        ),
+        SizeLimit(limit) => crate::tr_format!(
+            "The record exceeds the {limit}-byte limit.",
+            limit = super::display::integer(*limit)
+        ),
+        WrongPair => text!("Запись относится к другой паре папок.").into(),
+        PairChanged => text!("Пара папок изменилась. Постройте план заново.").into(),
+        Changed => text!("Запись изменилась после построения плана. Постройте план заново.").into(),
+        ReplacedLock => text!("Файл блокировки был заменён. Постройте план заново.").into(),
+        Busy => text!("Синхронизация этой пары уже выполняется.").into(),
+        InsideFolder(folder) => crate::tr_format!(
+            "The synchronization storage is inside the synchronized folder {folder}.",
+            folder = folder.to_string_lossy().escape_debug()
+        ),
+    };
+    format!(
+        "{label} · {}\n{reason}",
+        path.to_string_lossy().escape_debug()
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn sync_state_action(action: SyncStateAction) -> &'static str {
+    use SyncStateAction::*;
+    match action {
+        Inspect => text!("Не удалось проверить путь записи"),
+        CreateDirectory => text!("Не удалось создать папку данных синхронизации"),
+        Open => text!("Не удалось открыть файл состояния"),
+        Lock => text!("Не удалось заблокировать пару папок"),
+        Read => text!("Не удалось прочитать файл состояния"),
+        CreateTemporary => text!("Не удалось создать временный файл состояния"),
+        Write => text!("Не удалось записать данные состояния"),
+        SyncFile => text!("Не удалось сохранить временный файл на диск"),
+        Publish => text!("Не удалось поместить запись по указанному пути"),
+        SyncSave => text!("Файл записан. Не удалось подтвердить сохранение на диске"),
+        Remove => text!("Не удалось удалить запись о запуске"),
+        SyncRemoval => text!("Запись удалена. Не удалось подтвердить удаление на диске"),
     }
 }
 

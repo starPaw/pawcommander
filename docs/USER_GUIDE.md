@@ -341,6 +341,8 @@ Later plans use the saved state to distinguish new items from deletions. If both
 
 After a stop or interruption, build a fresh plan for the same two folders. Differences from an interrupted run require a choice before you can apply the new plan. If PawCommander reports a retained staging folder, use the displayed path to inspect the copies. An original held during replacement or deletion is under `previous` inside that folder. Restore it if its original name is free. Save any other needed versions outside both synchronized folders and move the retained staging folder out of the pair before building a new plan. If the folders match after recovery, **Save common state** completes the review.
 
+If PawCommander cannot read or save the common state or run record, the message identifies the affected file and cause. **Result history** keeps file changes that already completed. Once the storage issue is resolved, build a fresh plan to check the current state of both folders.
+
 ## Sync profiles on macOS
 
 Open the two local or SFTP folders, then open **Folder sync preview**. Choose the direction and exclusions, then use **Save profile** to name this setup. A profile keeps the two folder locations, the direction, exclusions and the one-way option to remove destination-only items. You can build a fresh preview for a saved pair while browsing elsewhere. Use **Use folders from panes** to replace a saved pair and **Update profile** to save edits or rename it.

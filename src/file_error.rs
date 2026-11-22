@@ -66,7 +66,10 @@ pub(crate) use retry::{RetryError, RetryProblem};
 pub(crate) use space::{ProbeAction, SftpSpaceFailure, SpaceError};
 pub(crate) use staging::{StagingError, StagingRecordAction};
 #[cfg(target_os = "macos")]
-pub(crate) use sync::{SyncDifference, SyncError, SyncFolderRole, SyncVerification};
+pub(crate) use sync::{
+    SyncDifference, SyncError, SyncFolderRole, SyncStateAction, SyncStateKind, SyncStateProblem,
+    SyncVerification,
+};
 pub(crate) use transfer_plan::TransferPlanError;
 pub(crate) use undo::UndoError;
 

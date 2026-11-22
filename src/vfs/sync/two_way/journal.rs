@@ -1,17 +1,18 @@
 //! Write-ahead state for a two-way run, separate from the last verified baseline.
 use super::{
     super::{is_sync_staging, retained_stage},
-    baseline::{decode_path, invalid, read_record, BaselineStore, PairLock},
+    baseline::{decode_path, read_record, BaselineStore, PairLock, StatePath},
     Snapshot,
 };
 use crate::{
+    file_error::{SyncStateAction as Action, SyncStateKind, SyncStateProblem as Problem},
     operations::{Cancellation, TransferError},
     recovery::sync_directory,
     vfs::{transfer::entry_metadata, Location},
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
-use std::{fs, os::unix::ffi::OsStrExt};
+use std::{fs, os::unix::ffi::OsStrExt, path::PathBuf};
 
 const VERSION: u32 = 1;
 const MAX_BYTES: u64 = 128 * 1024;
@@ -41,16 +42,24 @@ impl Run {
 }
 
 impl BaselineStore {
+    pub(super) fn run_path(&self) -> PathBuf {
+        self.path.with_extension("run")
+    }
+
     pub(super) fn read_run(&self) -> Result<Option<Run>, TransferError> {
         if !self.directory_exists()? {
             return Ok(None);
         }
-        let run: Option<Run> = read_record(&self.path.with_extension("run"), MAX_BYTES)?;
-        if run
-            .as_ref()
-            .is_some_and(|run| run.version != VERSION || run.id.is_empty())
-        {
-            return Err(invalid());
+        let path = self.run_path();
+        let record = StatePath::new(SyncStateKind::RunRecord, &path);
+        let run: Option<Run> = read_record(record, MAX_BYTES)?;
+        if let Some(run) = &run {
+            if run.version != VERSION {
+                return Err(record.error(Problem::UnsupportedVersion(run.version)));
+            }
+            if run.id.is_empty() {
+                return Err(record.error(Problem::InvalidContents));
+            }
         }
         Ok(run)
     }
@@ -61,8 +70,11 @@ impl BaselineStore {
         observed: &[Snapshot; 2],
     ) -> Result<(), TransferError> {
         if let Some(staging) = &run.staging {
+            let path = self.run_path();
+            let record = StatePath::new(SyncStateKind::RunRecord, &path);
+            let invalid = || record.error(Problem::InvalidContents);
             let pane = *self.panes.get(staging.side).ok_or_else(invalid)?;
-            let path = decode_path(&staging.path)?;
+            let path = decode_path(&staging.path, record)?;
             if !path.file_name().is_some_and(is_sync_staging) {
                 return Err(invalid());
             }
@@ -77,8 +89,9 @@ impl BaselineStore {
 
 impl PairLock<'_> {
     pub(super) fn save_run(&self, run: &Run, cancel: &Cancellation) -> Result<(), TransferError> {
+        let path = self.store.run_path();
         self.write(
-            &self.store.path.with_extension("run"),
+            StatePath::new(SyncStateKind::RunRecord, &path),
             run,
             MAX_BYTES,
             cancel,
@@ -106,7 +119,10 @@ impl PairLock<'_> {
                 }
                 Some((side, location.path().strip_prefix(root.path()).ok()?))
             })
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| {
+                let path = self.store.run_path();
+                StatePath::new(SyncStateKind::RunRecord, &path).error(Problem::InvalidContents)
+            })?;
         run.staging = Some(Staging {
             side,
             path: URL_SAFE_NO_PAD.encode(relative.as_os_str().as_bytes()),
@@ -115,8 +131,9 @@ impl PairLock<'_> {
     }
 
     pub(super) fn finish_run(&self) -> Result<(), TransferError> {
-        fs::remove_file(self.store.path.with_extension("run"))?;
-        sync_directory(&self.store.directory)?;
-        Ok(())
+        let path = self.store.run_path();
+        let record = StatePath::new(SyncStateKind::RunRecord, &path);
+        fs::remove_file(&path).map_err(record.io(Action::Remove))?;
+        sync_directory(&self.store.directory).map_err(record.io(Action::SyncRemoval))
     }
 }

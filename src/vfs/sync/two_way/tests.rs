@@ -1,5 +1,9 @@
 use super::*;
-use crate::vfs::{sftp, transfer::remote_source_matches};
+use crate::{
+    file_error::{Failure, SyncStateAction},
+    result_history::Outcome,
+    vfs::{sftp, transfer::remote_source_matches},
+};
 use std::{
     ffi::OsString,
     fs::{self, File, FileTimes},
@@ -75,6 +79,27 @@ fn change(destination: usize, change: SyncChange) -> Reconcile {
         destination,
         change,
     }
+}
+
+fn state_problem(
+    error: TransferError,
+    expected_kind: SyncStateKind,
+    expected_path: &Path,
+) -> SyncStateProblem {
+    let TransferError::Failed(Failure::Sync(error)) = error else {
+        panic!("expected a synchronization error, got {error:?}");
+    };
+    let SyncError::State {
+        kind,
+        path,
+        problem,
+    } = *error
+    else {
+        panic!("expected a state error, got {error:?}");
+    };
+    assert_eq!(kind, expected_kind);
+    assert_eq!(path.as_os_str(), expected_path.as_os_str());
+    problem
 }
 
 #[test]
@@ -202,21 +227,135 @@ fn common_state_round_trips_raw_names_and_fails_closed_on_damaged_records() {
     plan.store.lock().unwrap().save(&tree, &cancel).unwrap();
     assert!(plan.store.read(&cancel).unwrap().as_ref() == Some(&tree));
     fs::write(&plan.store.path, b"{").unwrap();
-    assert!(plan.store.read(&cancel).is_err());
+    let Err(error) = plan.store.read(&cancel) else {
+        panic!("expected the malformed common state to be rejected");
+    };
+    let problem = state_problem(error, SyncStateKind::CommonState, &plan.store.path);
+    assert!(
+        matches!(problem, SyncStateProblem::Json(SyncStateAction::Read, cause)
+        if cause.is_eof() && cause.line() == 1 && cause.column() == 1)
+    );
+    assert_eq!(fs::read(&plan.store.path).unwrap(), b"{");
 }
 
 #[test]
 fn refuses_a_pair_that_contains_the_state_directory() {
     let pair = Pair::new();
+    let selected = pair.folders[0].path().canonicalize().unwrap();
     let inside = pair.folders[0].path().join("PawCommander/states");
-    assert!(TwoWayPlan::build_in(
+    let result = TwoWayPlan::build_in(
         pair.folders,
         inside.clone(),
         Exclusions::default(),
-        &mut Progress::default()
-    )
-    .is_err());
+        &mut Progress::default(),
+    );
+    let problem = state_problem(result.err().unwrap(), SyncStateKind::Directory, &inside);
+    assert!(matches!(problem, SyncStateProblem::InsideFolder(path) if path == selected));
     assert!(!inside.exists());
+}
+
+#[test]
+fn invalid_run_records_identify_the_record_and_preserve_the_saved_state() {
+    let pair = Pair::new();
+    let mut progress = Progress::default();
+    let mut plan = pair.build();
+    plan.remember(&mut progress).unwrap();
+    let saved = fs::read(&plan.store.path).unwrap();
+    let path = plan.store.run_path();
+    let read = || {
+        TwoWayPlan::build_in(
+            pair.folders.clone(),
+            pair.records.clone(),
+            Exclusions::default(),
+            &mut Progress::default(),
+        )
+        .err()
+        .unwrap()
+    };
+    let unknown = br#"{"version":42,"id":"interrupted","staging":null}"#;
+    fs::write(&path, unknown).unwrap();
+    let problem = state_problem(read(), SyncStateKind::RunRecord, &path);
+    assert!(matches!(problem, SyncStateProblem::UnsupportedVersion(42)));
+    assert_eq!(fs::read(&path).unwrap(), unknown);
+
+    let unusable = br#"{"version":1,"id":"interrupted","staging":{"side":0,"path":"!!"}}"#;
+    fs::write(&path, unusable).unwrap();
+    let problem = state_problem(read(), SyncStateKind::RunRecord, &path);
+    assert!(matches!(problem, SyncStateProblem::InvalidEncoding(_)));
+    assert_eq!(fs::read(&path).unwrap(), unusable);
+    assert_eq!(fs::read(&plan.store.path).unwrap(), saved);
+}
+
+#[test]
+fn applying_a_plan_rejects_a_new_run_record_before_any_copy() {
+    let pair = Pair::new();
+    let mut progress = Progress::default();
+    pair.file(0, "input", b"left");
+    let plan = pair.build();
+    let run = Run::new();
+    plan.store
+        .lock()
+        .unwrap()
+        .save_run(&run, &progress.cancellation())
+        .unwrap();
+    let report = plan.apply(&mut progress);
+    assert_eq!(report.completed, 0);
+    let problem = state_problem(
+        report.result.unwrap_err(),
+        SyncStateKind::RunRecord,
+        &plan.store.run_path(),
+    );
+    assert!(matches!(problem, SyncStateProblem::Changed));
+    assert_eq!(plan.store.read_run().unwrap(), Some(run));
+    assert_eq!(progress.results.items[0].outcome, Outcome::NotStarted);
+    assert_eq!(
+        fs::read(pair.folders[0].path().join("input")).unwrap(),
+        b"left"
+    );
+    assert!(!pair.folders[1].path().join("input").exists());
+}
+
+#[test]
+fn common_state_publication_failure_keeps_the_completed_copy_and_interrupted_run() {
+    let pair = Pair::new();
+    let mut progress = Progress::default();
+    pair.build().remember(&mut progress).unwrap();
+    pair.file(0, "input", b"left");
+    let plan = pair.build();
+    let path = plan.store.path.clone();
+    let old_state = fs::read(&path).unwrap();
+    let held = pair._temp.path().join("held-state");
+    let source = pair.folders[0].path().join("input");
+    let target = pair.folders[1].path().join("input");
+    let mut substituted = false;
+    let (fixture_path, fixture_held, fixture_target) = (path.clone(), held.clone(), target.clone());
+    let cancel = Cancellation::at_checkpoint(move || {
+        if !substituted && fixture_target.is_file() {
+            fs::rename(&fixture_path, &fixture_held).unwrap();
+            fs::create_dir(&fixture_path).unwrap();
+            fs::write(fixture_path.join("independent"), b"independent").unwrap();
+            substituted = true;
+        }
+        false
+    });
+    let mut progress = Progress::with_cancellation(cancel);
+    let report = plan.apply(&mut progress);
+    assert_eq!(report.completed, 1);
+    let problem = state_problem(
+        report.result.unwrap_err(),
+        SyncStateKind::CommonState,
+        &path,
+    );
+    assert!(
+        matches!(problem, SyncStateProblem::Io(SyncStateAction::Publish, cause)
+        if cause.raw_os_error() == Some(libc::EISDIR))
+    );
+    assert_eq!(progress.results.items[0].outcome, Outcome::Completed);
+    assert!(plan.store.read_run().unwrap().is_some());
+    assert_eq!(fs::read(held).unwrap(), old_state);
+    assert_eq!(fs::read(path.join("independent")).unwrap(), b"independent");
+    assert_eq!(fs::read(source).unwrap(), b"left");
+    assert_eq!(fs::read(target).unwrap(), b"left");
 }
 
 #[test]
@@ -295,7 +434,12 @@ fn interrupted_pair_blocks_held_entries_then_requires_review_of_the_actual_folde
     let stage = plan.observed[1].root.join(stage_name);
     {
         let lock = plan.store.lock().unwrap();
-        assert!(plan.store.lock().is_err());
+        let busy = state_problem(
+            plan.store.lock().err().unwrap(),
+            SyncStateKind::PairLock,
+            &plan.store.path.with_extension("lock"),
+        );
+        assert!(matches!(busy, SyncStateProblem::Busy));
         lock.save_run(&run, &cancel).unwrap();
         lock.track_stage(&mut run, &stage, &plan.observed, &cancel)
             .unwrap();
