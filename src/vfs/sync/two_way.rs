@@ -295,6 +295,7 @@ impl TwoWayPlan {
             if let Some(folder) = final_state.iter().find(|side| !matches_tree(side, &target)) {
                 return Err(SyncError::ResultMismatch(folder.root.clone()).into());
             }
+            verify_snapshot_mounts(&self.observed, &self.folders, TWO_WAY_ROLES, &cancel)?;
             lock.save(&target, &cancel)?;
             lock.finish_run()
         })();

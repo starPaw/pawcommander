@@ -345,6 +345,8 @@ Choose **Apply plan** to queue the displayed changes. When the job starts, PawCo
 
 Use **Stop** to stop before the next change publishes. **Result history** shows completed paths and the active operation's outcome, path and cause. A failed check of a staged copy or held original identifies the item and the temporary path where it was checked. If publication or restoration cannot be confirmed, the result gives the temporary folder to inspect.
 
+For a saved SMB destination, synchronization stages changes in a private folder on the verified share. An unconfirmed publication stops the job and preserves the staging folder for recovery. Already confirmed changes stay in **Result history**.
+
 ## Two-way folder synchronization on macOS
 
 In **Folder sync preview**, choose **Both directions** and **Build plan**. The first comparison shows copies for items present on only one side and flags different versions of the same path. If the folders already match, choose **Save common state**. PawCommander checks both folders and saves fingerprints for that pair. The same record is used when the panes are swapped or the app is reopened.

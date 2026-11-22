@@ -569,6 +569,26 @@ fn upload_create_error(target: &Location, error: io::Error) -> TransferError {
     }
 }
 
+pub(crate) fn namespace_change_refused(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(
+            libc::EACCES
+                | libc::EEXIST
+                | libc::EINVAL
+                | libc::EISDIR
+                | libc::ENOENT
+                | libc::ENOTDIR
+                | libc::ENOTEMPTY
+                | libc::ENOTSUP
+                | libc::EOPNOTSUPP
+                | libc::EPERM
+                | libc::EROFS
+                | libc::EXDEV
+        )
+    )
+}
+
 pub(crate) fn unconfirmed_upload(target: &Location, cause: TransferError) -> TransferError {
     TransferError::PublicationUnconfirmed(
         PublicationError::SmbUpload {

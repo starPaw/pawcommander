@@ -135,6 +135,26 @@ impl StagedFile {
     }
 
     pub(super) fn close(self) -> Result<(), TransferError> {
+        self.close_with(|file, location| {
+            file.sync_all()
+                .map_err(|error| AccessError::new(location, AccessAction::SyncFile, error).into())
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn close_smb(self) -> Result<(), TransferError> {
+        self.close_with(|file, location| {
+            crate::smb::sync_upload(&file)
+                .map_err(|error| AccessError::new(location, AccessAction::SyncFile, error))?;
+            crate::smb::close_upload(file)
+                .map_err(|error| AccessError::new(location, AccessAction::CloseFile, error).into())
+        })
+    }
+
+    fn close_with(
+        self,
+        sync_local: impl FnOnce(fs::File, &Location) -> Result<(), TransferError>,
+    ) -> Result<(), TransferError> {
         self.cancel.check()?;
         let mut output = self
             .file
@@ -144,9 +164,7 @@ impl StagedFile {
             AccessError::stream(&self.report_at, AccessAction::FlushFile, error)
         })?;
         match output {
-            OutputFile::Local(file) => file.sync_all().map_err(|error| {
-                AccessError::new(&self.report_at, AccessAction::SyncFile, error)
-            })?,
+            OutputFile::Local(file) => sync_local(file, &self.report_at)?,
             OutputFile::Remote(mut file) => file.close().map_err(|error| {
                 AccessError::new(&self.report_at, AccessAction::CloseFile, error)
             })?,

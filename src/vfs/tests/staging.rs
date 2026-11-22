@@ -36,6 +36,53 @@ fn smb_file_staging_cleans_through_the_open_parent() {
     );
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn smb_sync_staging_cleans_the_bound_tree_without_following_links() {
+    use super::super::transfer::with_open_sync_staging;
+    use rustix::fs::{open, Mode, OFlags};
+    use std::os::unix::fs::symlink;
+
+    let fixture = tempfile::tempdir().unwrap();
+    let parent = fixture.path().join("parent");
+    let moved = fixture.path().join("moved");
+    let independent = fixture.path().join("independent");
+    fs::create_dir(&parent).unwrap();
+    fs::create_dir(&independent).unwrap();
+    fs::write(independent.join("preserved.txt"), b"independent").unwrap();
+    let target = Location::Local(parent.join("sync"));
+    let handle = open(&parent, OFlags::RDONLY | OFlags::DIRECTORY, Mode::empty()).unwrap();
+    let mut replacement = None;
+
+    let result = with_open_sync_staging(
+        &target,
+        &Cancellation::default(),
+        &handle,
+        None,
+        |staging, _, preserve| {
+            let tree = staging.path().join("incoming/nested");
+            fs::create_dir_all(&tree).unwrap();
+            fs::write(tree.join("private.txt"), b"ours").unwrap();
+            symlink(&independent, tree.join("outside")).unwrap();
+            fs::rename(&parent, &moved).unwrap();
+            fs::create_dir_all(staging.path()).unwrap();
+            let unrelated = staging.path().join("incoming");
+            fs::write(&unrelated, b"replacement").unwrap();
+            replacement = Some(unrelated);
+            *preserve = false;
+            Err(TransferError::Cancelled)
+        },
+    );
+
+    assert!(matches!(result, Err(TransferError::Cancelled)));
+    assert_eq!(fs::read_dir(moved).unwrap().count(), 0);
+    assert_eq!(fs::read(replacement.unwrap()).unwrap(), b"replacement");
+    assert_eq!(
+        fs::read(independent.join("preserved.txt")).unwrap(),
+        b"independent"
+    );
+}
+
 #[test]
 fn staging_cleanup_preserves_a_replacement_directory() {
     use super::super::transfer::with_staging_typed;
