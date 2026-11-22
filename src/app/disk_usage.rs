@@ -169,6 +169,10 @@ fn show_summary(ui: &mut egui::Ui, analysis: &Analysis, run: u64) {
     let status = match &analysis.finish {
         Finish::Stopped => Some(text!("Анализ места остановлен").into()),
         Finish::Limit(limit) => Some(crate::i18n::disk_usage_limit(limit)),
+        Finish::VolumeUnverified(error) => Some(crate::tr_format!(
+            "Disk usage analysis stopped. {error}",
+            error = crate::i18n::file_error(error)
+        )),
         Finish::Complete => None,
     };
     if status.is_some() || analysis.root_verification.is_some() {
