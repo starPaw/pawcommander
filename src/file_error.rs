@@ -1,6 +1,8 @@
 use crate::operations::TransferError;
 use crate::vfs::Location;
 use std::net::SocketAddr;
+#[cfg(target_os = "macos")]
+use std::path::Path;
 use std::{error::Error, fmt, io, path::PathBuf, str::Utf8Error};
 
 mod archive;
@@ -1244,6 +1246,15 @@ pub(crate) enum SftpRemovalAction {
     RemoveDirectory,
 }
 
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum SmbMutationAction {
+    CreateFile,
+    CreateFolder,
+    Rename,
+    Trash,
+}
+
 #[derive(Debug)]
 pub(crate) enum MutationError {
     LocalIo {
@@ -1276,6 +1287,12 @@ pub(crate) enum MutationError {
     PlanChanged(Location),
     #[cfg(target_os = "macos")]
     SmbSourceNotRegular(Location),
+    #[cfg(target_os = "macos")]
+    SmbMount {
+        path: PathBuf,
+        action: SmbMutationAction,
+        cause: Box<crate::smb::SmbError>,
+    },
     ReadOnlyArchive(Location),
     RenameLocal {
         from: PathBuf,
@@ -1325,6 +1342,19 @@ impl MutationError {
             source,
         }
     }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn smb_mount(
+        path: &Path,
+        action: SmbMutationAction,
+        cause: crate::smb::SmbError,
+    ) -> Self {
+        Self::SmbMount {
+            path: path.to_owned(),
+            action,
+            cause: Box::new(cause),
+        }
+    }
 }
 
 impl fmt::Display for MutationError {
@@ -1335,6 +1365,12 @@ impl fmt::Display for MutationError {
                 action,
                 source,
             } => write!(f, "{action:?} at {path:?}: {source}"),
+            #[cfg(target_os = "macos")]
+            Self::SmbMount {
+                path,
+                action,
+                cause,
+            } => write!(f, "SMB {action:?} at {}: {cause}", path.display()),
             Self::CurrentDirectory { input, source } => {
                 write!(
                     f,
@@ -1435,6 +1471,8 @@ impl Error for MutationError {
             #[cfg(target_os = "macos")]
             Self::RetainedMoveSource { cause, .. } => Some(cause),
             Self::Trash { source, .. } => Some(source),
+            #[cfg(target_os = "macos")]
+            Self::SmbMount { cause, .. } => Some(cause.as_ref()),
             _ => None,
         }
     }

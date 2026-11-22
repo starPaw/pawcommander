@@ -1,7 +1,10 @@
 use super::{
     discovery, mount_id, root, PathAction, SmbError, CONNECTION_PREFIX, MOUNT_DIR, RECORD,
 };
-use crate::file_error::{ListingError, ListingErrorKind, SmbTransferRole, TransferPlanError};
+use crate::file_error::{
+    ListingError, ListingErrorKind, MutationError, SmbMutationAction, SmbTransferRole,
+    TransferPlanError,
+};
 use crate::operations::TransferError;
 use crate::vfs::Location;
 use std::os::unix::ffi::OsStrExt;
@@ -26,6 +29,74 @@ pub(crate) fn check_transfer_mount(
     role: SmbTransferRole,
 ) -> Result<Option<[i32; 2]>, TransferError> {
     checked_mount(path).map_err(|cause| TransferPlanError::smb_mount(path, role, cause).into())
+}
+
+pub(crate) struct MutationMount {
+    action: SmbMutationAction,
+    saved: Option<(PathBuf, [i32; 2])>,
+}
+
+impl MutationMount {
+    pub(crate) fn new(action: SmbMutationAction) -> Self {
+        Self {
+            action,
+            saved: None,
+        }
+    }
+
+    pub(crate) fn check(&mut self, path: &Path) -> Result<(), TransferError> {
+        let actual = self.inspect(path)?;
+        if let Some((saved_path, expected)) = &self.saved {
+            if actual.is_some_and(|id| id != *expected) || path == saved_path && actual.is_none() {
+                return Err(self.changed(path));
+            }
+        } else if let Some(id) = actual {
+            self.saved = Some((path.to_owned(), id));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn recheck(&self) -> Result<(), TransferError> {
+        if let Some((path, expected)) = &self.saved
+            && self.inspect(path)? != Some(*expected)
+        {
+            return Err(self.changed(path));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn is_owned(&self) -> bool {
+        self.saved.is_some()
+    }
+
+    pub(crate) fn open_parent(&self, path: &Path) -> Result<Option<fs::File>, TransferError> {
+        self.recheck()?;
+        self.saved
+            .as_ref()
+            .map(|(_, id)| super::open_mutation_parent(path, self.action, *id))
+            .transpose()
+    }
+
+    pub(crate) fn verify_directory(
+        &self,
+        handle: &impl std::os::fd::AsRawFd,
+        directory: &Path,
+        target: &Path,
+    ) -> Result<(), TransferError> {
+        if let Some((_, id)) = &self.saved {
+            super::verify_mutation_directory(handle, directory, target, self.action, *id)?;
+        }
+        Ok(())
+    }
+
+    fn inspect(&self, path: &Path) -> Result<Option<[i32; 2]>, TransferError> {
+        checked_mount(path)
+            .map_err(|cause| MutationError::smb_mount(path, self.action, cause).into())
+    }
+
+    fn changed(&self, path: &Path) -> TransferError {
+        MutationError::smb_mount(path, self.action, SmbError::MountChanged(path.to_owned())).into()
+    }
 }
 
 fn checked_mount(path: &Path) -> Result<Option<[i32; 2]>, SmbError> {

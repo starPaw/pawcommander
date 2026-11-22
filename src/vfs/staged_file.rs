@@ -35,6 +35,19 @@ pub(super) struct StagedFile {
 }
 
 impl StagedFile {
+    fn buffered(file: OutputFile, report_at: &Location, cancel: Cancellation) -> Self {
+        Self {
+            report_at: report_at.clone(),
+            file: BufWriter::with_capacity(64 * 1024, file),
+            cancel,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn from_local(file: fs::File, report_at: &Location, cancel: Cancellation) -> Self {
+        Self::buffered(OutputFile::Local(file), report_at, cancel)
+    }
+
     pub(super) fn open(path: &Location, cancel: Cancellation) -> Result<Self, TransferError> {
         Self::open_for(path, path, cancel)
     }
@@ -65,11 +78,7 @@ impl StagedFile {
                     .map_err(|error| AccessError::new(report_at, action, error))?,
             )
         };
-        Ok(Self {
-            report_at: report_at.clone(),
-            file: BufWriter::with_capacity(64 * 1024, file),
-            cancel,
-        })
+        Ok(Self::buffered(file, report_at, cancel))
     }
 
     #[cfg(target_os = "macos")]
@@ -122,11 +131,7 @@ impl StagedFile {
             file.seek(SeekFrom::Start(offset)).map_err(seek_error)?;
             OutputFile::Remote(file)
         };
-        Ok(Self {
-            report_at: report_at.clone(),
-            file: BufWriter::with_capacity(64 * 1024, file),
-            cancel,
-        })
+        Ok(Self::buffered(file, report_at, cancel))
     }
 
     pub(super) fn close(self) -> Result<(), TransferError> {

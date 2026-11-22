@@ -14,7 +14,7 @@ use std::{ffi::OsStr, fs, io, os::fd::OwnedFd, path::Path};
 
 pub(super) struct Directory {
     pub(super) location: Location,
-    descriptor: Option<OwnedFd>,
+    pub(super) descriptor: Option<OwnedFd>,
     metadata: EntryMetadata,
 }
 

@@ -78,11 +78,7 @@ impl LocalIdentity {
         }
         #[cfg(unix)]
         {
-            use std::os::unix::fs::MetadataExt;
-            Ok(Self {
-                device: metadata.dev(),
-                inode: metadata.ino(),
-            })
+            Ok(Self::from_unix_metadata(&metadata))
         }
         #[cfg(windows)]
         {
@@ -97,6 +93,16 @@ impl LocalIdentity {
         #[cfg(not(any(unix, windows)))]
         {
             Ok(Self {})
+        }
+    }
+
+    #[cfg(unix)]
+    fn from_unix_metadata(metadata: &fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
         }
     }
 }
@@ -124,15 +130,35 @@ pub(crate) fn abandon_staging(location: &Location) -> Result<(), TransferError> 
 /// Confirm a directory created by the current worker before writing payload.
 pub(crate) fn register_staging(location: &Location) -> Result<(), TransferError> {
     let error = |source| staging_journal_error(location, StagingRecordAction::Register, source);
+    let identity = location
+        .local()
+        .map(LocalIdentity::of)
+        .transpose()
+        .map_err(error)?;
+    confirm_staging(location, identity)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn register_open_staging(
+    location: &Location,
+    directory: &File,
+) -> Result<(), TransferError> {
+    let metadata = directory
+        .metadata()
+        .map_err(|source| staging_journal_error(location, StagingRecordAction::Register, source))?;
+    confirm_staging(location, Some(LocalIdentity::from_unix_metadata(&metadata)))
+}
+
+fn confirm_staging(
+    location: &Location,
+    identity: Option<LocalIdentity>,
+) -> Result<(), TransferError> {
     let receipt = StagingRecord {
         location: location.display(),
-        identity: location
-            .local()
-            .map(LocalIdentity::of)
-            .transpose()
-            .map_err(error)?,
+        identity,
     };
-    append_staging_event(&StagingEvent::Created(receipt)).map_err(error)
+    append_staging_event(&StagingEvent::Created(receipt))
+        .map_err(|source| staging_journal_error(location, StagingRecordAction::Register, source))
 }
 
 fn staging_journal_error(

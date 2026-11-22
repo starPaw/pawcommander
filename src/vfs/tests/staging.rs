@@ -1,5 +1,41 @@
 use super::*;
 
+#[cfg(target_os = "macos")]
+#[test]
+fn smb_file_staging_cleans_through_the_open_parent() {
+    use super::super::transfer::{with_smb_file_staging, FILE_STAGING_PAYLOAD};
+    use rustix::fs::{open, Mode, OFlags};
+
+    let fixture = tempfile::tempdir().unwrap();
+    let parent = fixture.path().join("parent");
+    let held = fixture.path().join("held");
+    fs::create_dir(&parent).unwrap();
+    let target = Location::Local(parent.join("new.txt"));
+    let handle = open(&parent, OFlags::RDONLY | OFlags::DIRECTORY, Mode::empty()).unwrap();
+    let cancel = Cancellation::default();
+
+    let result = with_smb_file_staging(&target, &cancel, &handle, |stage, _| {
+        fs::write(stage.path().join(FILE_STAGING_PAYLOAD), b"ours").unwrap();
+        fs::rename(&parent, &held).unwrap();
+        fs::create_dir_all(stage.path()).unwrap();
+        fs::write(stage.path().join(FILE_STAGING_PAYLOAD), b"preserve").unwrap();
+        Err(TransferError::Cancelled)
+    });
+
+    assert!(matches!(result, Err(TransferError::Cancelled)));
+    assert_eq!(fs::read_dir(held).unwrap().count(), 0);
+    let replacement = fs::read_dir(parent)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert_eq!(
+        fs::read(replacement.join(FILE_STAGING_PAYLOAD)).unwrap(),
+        b"preserve"
+    );
+}
+
 #[test]
 fn staging_cleanup_preserves_a_replacement_directory() {
     use super::super::transfer::with_staging_typed;
