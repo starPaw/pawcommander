@@ -1,4 +1,4 @@
-use super::{Failure, StagingCleanupError};
+use super::{Failure, ScanLimit, StagingCleanupError};
 use crate::{operations::TransferError, vfs::Location};
 use std::{error::Error, fmt};
 
@@ -7,13 +7,6 @@ pub(crate) enum DuplicateRole {
     Folder,
     Protected,
     Selected,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DuplicateLimit {
-    Entries,
-    PathBytes,
-    Depth,
 }
 
 #[derive(Debug)]
@@ -35,11 +28,7 @@ impl Error for MacTrashError {}
 pub(crate) enum DuplicateError {
     SearchRequiresLocal(Location),
     SearchInStaging(Location),
-    SearchLimit {
-        location: Location,
-        kind: DuplicateLimit,
-        maximum: usize,
-    },
+    SearchLimit(ScanLimit),
     Changed {
         location: Location,
         cause: Option<TransferError>,
@@ -124,16 +113,7 @@ impl fmt::Display for DuplicateError {
                     "Duplicate search cannot scan the temporary folder at {location}"
                 )
             }
-            Self::SearchLimit {
-                location,
-                kind,
-                maximum,
-            } => {
-                write!(
-                    f,
-                    "Duplicate search exceeded the {kind:?} limit of {maximum} at {location}"
-                )
-            }
+            Self::SearchLimit(limit) => write!(f, "Duplicate search {limit}"),
             Self::Changed { location, cause } => {
                 write!(f, "Item changed after duplicate search at {location}")?;
                 if let Some(cause) = cause {
@@ -211,7 +191,7 @@ impl Error for DuplicateError {
             Self::Trash { source, .. } => Some(source),
             Self::SearchRequiresLocal(_)
             | Self::SearchInStaging(_)
-            | Self::SearchLimit { .. }
+            | Self::SearchLimit(_)
             | Self::DifferentContents { .. } => None,
         }
     }

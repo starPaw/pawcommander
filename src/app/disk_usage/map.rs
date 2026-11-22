@@ -1,4 +1,4 @@
-use super::{body_height, human_size, node_detail, node_name, text, Analysis, Kind, NodeId};
+use super::{human_size, node_detail, node_name, row_size, text, Analysis, Coverage, Kind, NodeId};
 use crate::theme::Palette;
 use eframe::egui::{self, Align2, FontId, Pos2, Rect, Sense, Vec2};
 
@@ -10,7 +10,13 @@ struct Tile {
     caption: String,
 }
 
-pub(super) fn show(ui: &mut egui::Ui, analysis: &Analysis, folder: NodeId, run: u64) -> NodeId {
+pub(super) fn show(
+    ui: &mut egui::Ui,
+    analysis: &Analysis,
+    folder: NodeId,
+    run: u64,
+    height: f32,
+) -> NodeId {
     let node = &analysis.nodes[folder];
     let mut selected = folder;
     ui.horizontal(|ui| {
@@ -18,6 +24,10 @@ pub(super) fn show(ui: &mut egui::Ui, analysis: &Analysis, folder: NodeId, run: 
             && ui.button(text!("В родительскую папку")).clicked()
         {
             selected = parent;
+        }
+        if node.parent.is_some() && node.coverage == Coverage::Partial {
+            ui.label(row_size(node))
+                .on_hover_text(node_detail(analysis, node));
         }
         let label = analysis
             .folder
@@ -33,7 +43,7 @@ pub(super) fn show(ui: &mut egui::Ui, analysis: &Analysis, folder: NodeId, run: 
         ui.label(text!("В этой папке пока нет учтённых блоков"));
         return selected;
     }
-    let size = Vec2::new(ui.available_width(), (body_height(ui) - 36.0).max(60.0));
+    let size = Vec2::new(ui.available_width(), (height - 36.0).max(60.0));
     let (bounds, _) = ui.allocate_exact_size(size, Sense::hover());
     let palette = Palette::from_ctx(ui.ctx());
     let accents = [
@@ -82,7 +92,10 @@ pub(super) fn show(ui: &mut egui::Ui, analysis: &Analysis, folder: NodeId, run: 
                 egui::StrokeKind::Inside,
             );
         }
-        let size = human_size(tile.bytes);
+        let size = tile.id.map_or_else(
+            || human_size(tile.bytes),
+            |id| row_size(&analysis.nodes[id]),
+        );
         if rect.width() >= 40.0 && rect.height() >= 24.0 {
             let origin = rect.left_top() + Vec2::new(8.0, 7.0);
             painter.text(

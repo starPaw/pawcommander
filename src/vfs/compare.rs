@@ -21,6 +21,31 @@ use std::{
 pub(super) const MAX_ENTRIES: usize = 100_000;
 pub(super) const MAX_PATH_BYTES: usize = 32 * 1024 * 1024;
 
+#[cfg(target_os = "macos")]
+pub(super) fn scan_limit(
+    root: &Location,
+    path: &Path,
+    entries: usize,
+    path_bytes: usize,
+) -> Option<crate::file_error::ScanLimit> {
+    use crate::file_error::{ScanLimit, ScanLimitKind};
+
+    let (kind, maximum) = if entries > MAX_ENTRIES {
+        (ScanLimitKind::Entries, MAX_ENTRIES)
+    } else if path_bytes > MAX_PATH_BYTES {
+        (ScanLimitKind::PathBytes, MAX_PATH_BYTES)
+    } else if path.components().count() > MAX_TREE_DEPTH {
+        (ScanLimitKind::Depth, MAX_TREE_DEPTH)
+    } else {
+        return None;
+    };
+    Some(ScanLimit {
+        location: root.join(path),
+        kind,
+        maximum,
+    })
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum ComparisonMode {
     #[default]

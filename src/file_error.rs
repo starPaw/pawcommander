@@ -45,7 +45,7 @@ pub(crate) use credential::{
 };
 pub(crate) use cross_move::CrossMoveError;
 #[cfg(target_os = "macos")]
-pub(crate) use duplicates::{DuplicateError, DuplicateLimit, DuplicateRole, MacTrashError};
+pub(crate) use duplicates::{DuplicateError, DuplicateRole, MacTrashError};
 #[cfg(target_os = "macos")]
 pub(crate) use external_editor::RemoteEditError;
 #[cfg(target_os = "macos")]
@@ -644,6 +644,33 @@ impl fmt::Display for SearchError {
 
 impl Error for SearchError {}
 
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScanLimitKind {
+    Entries,
+    PathBytes,
+    Depth,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+pub(crate) struct ScanLimit {
+    pub(crate) location: Location,
+    pub(crate) kind: ScanLimitKind,
+    pub(crate) maximum: usize,
+}
+
+#[cfg(target_os = "macos")]
+impl fmt::Display for ScanLimit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "exceeded the {:?} limit of {} at {}",
+            self.kind, self.maximum, self.location
+        )
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum ScanError {
     PropertiesStart(io::Error),
@@ -688,9 +715,9 @@ pub(crate) enum ScanError {
     SftpCopySpecialFile(Location),
     LocalCopySpecialFile(Location),
     #[cfg(target_os = "macos")]
-    DiskUsageRequiresLocalFolder,
+    DiskUsageRequiresLocalFolder(Location),
     #[cfg(target_os = "macos")]
-    DiskUsageLimit,
+    DiskUsageLimit(ScanLimit),
 }
 
 impl fmt::Display for ScanError {
@@ -773,11 +800,11 @@ impl fmt::Display for ScanError {
                 write!(f, "Cannot copy a special file at {location}")
             }
             #[cfg(target_os = "macos")]
-            Self::DiskUsageRequiresLocalFolder => {
-                f.write_str("Disk usage analysis needs a local folder")
+            Self::DiskUsageRequiresLocalFolder(location) => {
+                write!(f, "Disk usage analysis needs a local folder at {location}")
             }
             #[cfg(target_os = "macos")]
-            Self::DiskUsageLimit => f.write_str("Disk usage analysis reached its scan limit"),
+            Self::DiskUsageLimit(limit) => write!(f, "Disk usage analysis {limit}"),
         }
     }
 }

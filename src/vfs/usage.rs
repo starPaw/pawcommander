@@ -1,12 +1,12 @@
 //! Allocated blocks reported by macOS for entries under a local folder.
 use super::{
-    compare::{MAX_ENTRIES, MAX_PATH_BYTES},
+    compare::scan_limit,
     guarded_directory::Directory,
     read_scope::{local_subdirectory, visit_local_entries, ReadScope},
-    Location, MAX_TREE_DEPTH,
+    Location,
 };
 use crate::{
-    file_error::{AccessAction, AccessError, Failure, MutationError, ScanError},
+    file_error::{AccessAction, AccessError, Failure, MutationError, ScanError, ScanLimit},
     operations::{Cancellation, Progress, TransferError},
 };
 use rustix::fs::{fstat, FileType, Stat};
@@ -30,6 +30,13 @@ pub(crate) enum Issue {
     Pending,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Coverage {
+    Unavailable,
+    Partial,
+    Complete,
+}
+
 pub(crate) struct Node {
     pub(crate) path: PathBuf,
     pub(crate) kind: Kind,
@@ -40,6 +47,7 @@ pub(crate) struct Node {
     pub(crate) logical: u64,
     pub(crate) hard_link: bool,
     pub(crate) issue: Option<Issue>,
+    pub(crate) coverage: Coverage,
 }
 
 impl Node {
@@ -54,15 +62,16 @@ impl Node {
             logical: 0,
             hard_link: false,
             issue: None,
+            coverage: Coverage::Unavailable,
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) enum Finish {
     Complete,
     Stopped,
-    Limit,
+    Limit(ScanLimit),
 }
 
 pub(crate) struct Analysis {
@@ -71,8 +80,16 @@ pub(crate) struct Analysis {
     pub(crate) files: Vec<NodeId>,
     pub(crate) finish: Finish,
     pub(crate) issues: usize,
+    pub(crate) issue_examples: Vec<NodeId>,
+    pub(crate) root_verification: Option<TransferError>,
     pub(crate) symlinks: usize,
     pub(crate) hard_links: usize,
+}
+
+impl Analysis {
+    pub(crate) fn is_partial(&self) -> bool {
+        self.nodes[0].coverage != Coverage::Complete
+    }
 }
 
 struct Scan {
@@ -89,8 +106,10 @@ pub(crate) fn analyze(
     progress: &mut Progress,
 ) -> Result<Analysis, TransferError> {
     if folder.local().is_none() {
-        return Err(ScanError::DiskUsageRequiresLocalFolder.into());
+        return Err(ScanError::DiskUsageRequiresLocalFolder(folder.clone()).into());
     }
+    let cancel = progress.cancellation();
+    cancel.check()?;
     let scope = ReadScope::open(folder).map_err(|error| folder_error(folder, error))?;
     let location = &scope.parent.location;
     Directory::from_scope(&scope).map_err(|error| folder_error(location, error))?;
@@ -111,6 +130,8 @@ pub(crate) fn analyze(
             files: Vec::new(),
             finish: Finish::Complete,
             issues: 0,
+            issue_examples: Vec::new(),
+            root_verification: None,
             symlinks: 0,
             hard_links: 0,
         },
@@ -120,7 +141,6 @@ pub(crate) fn analyze(
         files: Vec::new(),
         path_bytes: 0,
     };
-    let cancel = progress.cancellation();
     while let Some((node, expected)) = scan.folders.pop() {
         progress.item(
             &scan
@@ -136,20 +156,21 @@ pub(crate) fn analyze(
                 break;
             }
             Err(TransferError::Failed(Failure::Scan(error)))
-                if matches!(*error, ScanError::DiskUsageLimit) =>
+                if matches!(error.as_ref(), ScanError::DiskUsageLimit(_)) =>
             {
-                scan.incomplete(node, Finish::Limit);
+                let ScanError::DiskUsageLimit(limit) = *error else {
+                    unreachable!("matched the disk usage limit");
+                };
+                scan.incomplete(node, Finish::Limit(limit));
                 break;
             }
             Err(error) => {
-                scan.result.issues += 1;
                 scan.result.nodes[node].issue = Some(Issue::Failure(Box::new(error)));
             }
         }
     }
     if let Err(error) = scope.parent.verify() {
-        scan.result.issues += 1;
-        scan.result.nodes[0].issue = Some(Issue::Failure(Box::new(folder_error(location, error))));
+        scan.result.root_verification = Some(folder_error(location, error));
     }
     Ok(scan.finish())
 }
@@ -183,43 +204,47 @@ impl Scan {
         }
         if !self.visited_folders.insert(expected) {
             self.result.nodes[node].issue = Some(Issue::AlreadyCounted);
+            self.result.nodes[node].coverage = Coverage::Complete;
             return Ok(());
         }
         let allocated = allocated_bytes(&stat);
         self.result.nodes[node].allocated = allocated;
         self.result.nodes[node].own_blocks = allocated;
+        // Counting the folder itself gives a partial size until its entries have been read.
+        self.result.nodes[node].coverage = Coverage::Partial;
 
         visit_local_entries(&location, &descriptor, cancel, |name, stat| {
             let relative = path.join(name);
             self.path_bytes += relative.as_os_str().len();
-            if self.result.nodes.len() >= MAX_ENTRIES
-                || self.path_bytes > MAX_PATH_BYTES
-                || relative.components().count() > MAX_TREE_DEPTH
+            let id = self.result.nodes.len();
+            if let Some(limit) = scan_limit(&self.result.folder, &relative, id + 1, self.path_bytes)
             {
-                return Err(ScanError::DiskUsageLimit.into());
+                return Err(ScanError::DiskUsageLimit(limit).into());
             }
             let mut child = Node::new(relative, Kind::Other, Some(node));
-            let id = self.result.nodes.len();
             match stat {
-                Ok(stat) => match FileType::from_raw_mode(stat.st_mode) {
-                    FileType::Directory => {
-                        child.kind = Kind::Folder;
-                        self.folders.push((id, identity(&stat)));
+                Ok(stat) => {
+                    child.coverage = Coverage::Complete;
+                    match FileType::from_raw_mode(stat.st_mode) {
+                        FileType::Directory => {
+                            child.kind = Kind::Folder;
+                            child.coverage = Coverage::Unavailable;
+                            self.folders.push((id, identity(&stat)));
+                        }
+                        FileType::RegularFile => {
+                            child.kind = Kind::File;
+                            child.allocated = allocated_bytes(&stat);
+                            child.logical = u64::try_from(stat.st_size).unwrap_or_default();
+                            self.files.push((id, identity(&stat)));
+                        }
+                        FileType::Symlink => {
+                            child.kind = Kind::Symlink;
+                            self.result.symlinks += 1;
+                        }
+                        _ => {}
                     }
-                    FileType::RegularFile => {
-                        child.kind = Kind::File;
-                        child.allocated = allocated_bytes(&stat);
-                        child.logical = u64::try_from(stat.st_size).unwrap_or_default();
-                        self.files.push((id, identity(&stat)));
-                    }
-                    FileType::Symlink => {
-                        child.kind = Kind::Symlink;
-                        self.result.symlinks += 1;
-                    }
-                    _ => {}
-                },
+                }
                 Err(error) => {
-                    self.result.issues += 1;
                     let error = AccessError::new(
                         &location.join(name),
                         AccessAction::ReadMetadata,
@@ -231,12 +256,19 @@ impl Scan {
             self.result.nodes[node].children.push(id);
             self.result.nodes.push(child);
             Ok(())
-        })
+        })?;
+        self.result.nodes[node].coverage = Coverage::Complete;
+        Ok(())
     }
 
     fn incomplete(&mut self, node: NodeId, finish: Finish) {
         self.result.finish = finish;
-        self.result.nodes[node].issue = Some(Issue::Partial);
+        let current = &mut self.result.nodes[node];
+        current.issue = Some(if current.coverage == Coverage::Unavailable {
+            Issue::Pending
+        } else {
+            Issue::Partial
+        });
         for (pending, _) in self.folders.drain(..) {
             self.result.nodes[pending].issue = Some(Issue::Pending);
         }
@@ -260,8 +292,20 @@ impl Scan {
         for id in (1..nodes.len()).rev() {
             let parent = nodes[id].parent.unwrap();
             nodes[parent].allocated = nodes[parent].allocated.saturating_add(nodes[id].allocated);
+            if nodes[id].coverage != Coverage::Complete {
+                nodes[parent].coverage = Coverage::Partial;
+            }
+        }
+        if self.result.root_verification.is_some() && nodes[0].coverage == Coverage::Complete {
+            nodes[0].coverage = Coverage::Partial;
         }
         for id in 0..nodes.len() {
+            if matches!(nodes[id].issue, Some(Issue::Failure(_))) {
+                self.result.issues += 1;
+                if self.result.issue_examples.len() < 4 {
+                    self.result.issue_examples.push(id);
+                }
+            }
             let mut children = std::mem::take(&mut nodes[id].children);
             children.sort_unstable_by(|&left, &right| by_allocation(nodes, left, right));
             nodes[id].children = children;
@@ -307,6 +351,7 @@ fn allocated_bytes(stat: &Stat) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{file_error::ScanLimitKind, vfs::MAX_TREE_DEPTH};
     use std::{
         fs,
         io::Write,
@@ -344,7 +389,9 @@ mod tests {
                 .find(|node| node.path == Path::new(path))
                 .unwrap()
         };
-        assert_eq!((data.finish, data.issues), (Finish::Complete, 0));
+        assert!(matches!(data.finish, Finish::Complete));
+        assert!(!data.is_partial());
+        assert_eq!(data.issues, 0);
         assert_eq!(
             (data.symlinks, data.hard_links, data.nodes.len()),
             (2, 1, 7)
@@ -383,7 +430,8 @@ mod tests {
         });
         let location = Location::Local(temp.path().into());
         let data = analyze(&location, &mut Progress::with_cancellation(cancel)).unwrap();
-        assert_eq!(data.finish, Finish::Stopped);
+        assert!(matches!(data.finish, Finish::Stopped));
+        assert!(data.is_partial());
         assert!(!data.files.is_empty() && data.files.len() < 40);
         let root = &data.nodes[0];
         assert!(matches!(root.issue, Some(Issue::Partial)));
@@ -407,9 +455,10 @@ mod tests {
             return;
         }
         let temp = tempfile::tempdir().unwrap();
-        let denied = temp.path().join("denied");
-        let visible = temp.path().join("visible");
-        fs::create_dir(&denied).unwrap();
+        let folder = temp.path().join("folder");
+        let denied = folder.join("denied");
+        let visible = folder.join("visible");
+        fs::create_dir_all(&denied).unwrap();
         fs::write(denied.join("unread"), [0x76; 4096]).unwrap();
         fs::write(&visible, [0x23; 8192]).unwrap();
         let permissions = fs::metadata(&denied).unwrap().permissions();
@@ -419,32 +468,106 @@ mod tests {
         fs::set_permissions(&denied, permissions).unwrap();
 
         let data = result.unwrap();
-        assert_eq!(
-            (data.finish, data.issues, data.files.len()),
-            (Finish::Complete, 1, 1)
-        );
+        assert!(matches!(data.finish, Finish::Complete));
+        assert_eq!((data.issues, data.files.len()), (1, 1));
+        assert!(data.is_partial());
         let visible_blocks = visible.metadata().unwrap().st_blocks() * 512;
         assert!(visible_blocks > 0);
-        assert_eq!(
-            data.nodes[0].allocated,
-            data.nodes[0].own_blocks + visible_blocks
-        );
-        let node = data
+        let folder = data
             .nodes
             .iter()
-            .find(|node| node.path == Path::new("denied"))
+            .find(|node| node.path == Path::new("folder"))
             .unwrap();
+        assert_eq!(folder.coverage, Coverage::Partial);
+        assert_eq!(folder.allocated, folder.own_blocks + visible_blocks);
+        assert_eq!(
+            data.nodes[0].allocated,
+            data.nodes[0].own_blocks + folder.allocated
+        );
+        let [sample] = data.issue_examples.as_slice() else {
+            panic!("expected one scan error example");
+        };
+        let node = &data.nodes[*sample];
+        assert_eq!(node.path, Path::new("folder/denied"));
         assert_eq!(node.allocated, 0);
+        assert_eq!(node.coverage, Coverage::Unavailable);
         let Some(Issue::Failure(error)) = &node.issue else {
             panic!("expected a read error for the denied folder");
         };
         assert!(matches!(
             error.as_ref(),
             TransferError::Failed(Failure::Access(error))
-                if error.location == data.folder.join("denied") && error.action == AccessAction::ReadChildren
+                if error.location == data.folder.join("folder/denied") && error.action == AccessAction::ReadChildren
                     && matches!(&error.cause, crate::file_error::AccessCause::Local(cause)
                         if cause.raw_os_error() == Some(libc::EACCES))
         ));
         assert_eq!(fs::read(denied.join("unread")).unwrap(), [0x76; 4096]);
+    }
+
+    #[test]
+    fn depth_limit_preserves_counted_files_and_reports_the_exact_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let relative: PathBuf = std::iter::repeat_n("d", MAX_TREE_DEPTH + 1).collect();
+        fs::create_dir_all(temp.path().join(&relative)).unwrap();
+        let counted = temp.path().join("counted");
+        fs::write(&counted, [0x32; 4096]).unwrap();
+
+        let location = Location::Local(temp.path().into());
+        let data = analyze(&location, &mut Progress::default()).unwrap();
+        assert!(matches!(&data.finish, Finish::Limit(limit)
+            if limit.location == data.folder.join(&relative)
+                && limit.kind == ScanLimitKind::Depth
+                && limit.maximum == MAX_TREE_DEPTH
+        ));
+        assert!(data.is_partial());
+        assert_eq!(data.issues, 0);
+        assert_eq!(data.files.len(), 1);
+        assert_eq!(
+            data.nodes[data.files[0]].allocated,
+            counted.metadata().unwrap().st_blocks() * 512
+        );
+        assert!(data.nodes.iter().all(|node| node.path != relative));
+        assert!(data
+            .nodes
+            .iter()
+            .any(|node| node.path == relative.parent().unwrap()
+                && matches!(node.issue, Some(Issue::Partial))));
+    }
+
+    #[test]
+    fn root_verification_does_not_overwrite_the_stop_outcome() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let displaced = temp.path().join("displaced");
+        fs::create_dir(&root).unwrap();
+        for index in 0..20 {
+            fs::write(root.join(index.to_string()), [0x42; 4096]).unwrap();
+        }
+        let location = Location::Local(root.clone());
+        let mut checks = 0;
+        let cancel = Cancellation::at_checkpoint(move || {
+            checks += 1;
+            if checks != 12 {
+                return false;
+            }
+            fs::rename(&root, &displaced).unwrap();
+            fs::create_dir(&root).unwrap();
+            true
+        });
+        let data = analyze(&location, &mut Progress::with_cancellation(cancel)).unwrap();
+
+        assert!(matches!(data.finish, Finish::Stopped));
+        assert!(matches!(data.nodes[0].issue, Some(Issue::Partial)));
+        assert!(data.is_partial() && !data.files.is_empty());
+        assert_eq!(data.issues, 0);
+        assert!(
+            matches!(data.root_verification, Some(TransferError::Failed(Failure::Scan(error)))
+                if matches!(error.as_ref(), ScanError::FolderUnavailable(path) if path == &data.folder)
+            )
+        );
+        assert_eq!(
+            fs::read_dir(temp.path().join("displaced")).unwrap().count(),
+            20
+        );
     }
 }

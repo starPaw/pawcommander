@@ -2,16 +2,16 @@
 mod trash;
 
 use super::{
-    compare::{scan, MAX_ENTRIES, MAX_PATH_BYTES},
+    compare::{scan, scan_limit},
     file_compare::{stream_difference, StreamDifferenceError},
     guarded_directory::Directory,
     read_scope::{CheckedFile, ReadScope},
     transfer::{EntryMetadata, TransferSourceEntry},
     undo::Parent,
-    Location, MAX_TREE_DEPTH,
+    Location,
 };
 use crate::{
-    file_error::{AccessError, DuplicateError, DuplicateLimit, DuplicateRole, Failure, ScanError},
+    file_error::{AccessError, DuplicateError, DuplicateRole, Failure, ScanError},
     operations::{Cancellation, Progress, TransferError},
 };
 use std::{
@@ -191,26 +191,15 @@ fn check_search_limits(
     entries: usize,
     path_bytes: usize,
 ) -> Result<(), TransferError> {
-    let (kind, maximum) = if entries > MAX_ENTRIES {
-        (DuplicateLimit::Entries, MAX_ENTRIES)
-    } else if path_bytes > MAX_PATH_BYTES {
-        (DuplicateLimit::PathBytes, MAX_PATH_BYTES)
-    } else if path.components().count() > MAX_TREE_DEPTH {
-        (DuplicateLimit::Depth, MAX_TREE_DEPTH)
-    } else {
-        return Ok(());
-    };
-    Err(DuplicateError::SearchLimit {
-        location: root.join(path),
-        kind,
-        maximum,
+    match scan_limit(root, path, entries, path_bytes) {
+        Some(limit) => Err(DuplicateError::SearchLimit(limit).into()),
+        None => Ok(()),
     }
-    .into())
 }
 
 fn is_search_limit(error: &TransferError) -> bool {
     matches!(error, TransferError::Failed(Failure::Duplicate(error))
-        if matches!(error.as_ref(), DuplicateError::SearchLimit { .. }))
+        if matches!(error.as_ref(), DuplicateError::SearchLimit(_)))
 }
 
 fn is_staging_directory(name: &OsStr) -> bool {
@@ -395,6 +384,13 @@ fn changed_since_search(location: &Location) -> TransferError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        file_error::ScanLimitKind,
+        vfs::{
+            compare::{MAX_ENTRIES, MAX_PATH_BYTES},
+            MAX_TREE_DEPTH,
+        },
+    };
     use std::{fs, os::unix::fs::symlink};
 
     #[test]
@@ -472,21 +468,21 @@ mod tests {
                 ordinary,
                 MAX_ENTRIES + 1,
                 1,
-                DuplicateLimit::Entries,
+                ScanLimitKind::Entries,
                 MAX_ENTRIES,
             ),
             (
                 ordinary,
                 1,
                 MAX_PATH_BYTES + 1,
-                DuplicateLimit::PathBytes,
+                ScanLimitKind::PathBytes,
                 MAX_PATH_BYTES,
             ),
             (
                 too_deep.as_path(),
                 1,
                 1,
-                DuplicateLimit::Depth,
+                ScanLimitKind::Depth,
                 MAX_TREE_DEPTH,
             ),
         ] {
@@ -494,8 +490,8 @@ mod tests {
             assert!(is_search_limit(&error));
             assert!(
                 matches!(error, TransferError::Failed(Failure::Duplicate(error))
-                    if matches!(error.as_ref(), DuplicateError::SearchLimit { location, kind, maximum: limit }
-                        if location == &root.join(path) && *kind == expected && *limit == maximum)
+                    if matches!(error.as_ref(), DuplicateError::SearchLimit(limit)
+                        if limit.location == root.join(path) && limit.kind == expected && limit.maximum == maximum)
                 )
             );
         }
