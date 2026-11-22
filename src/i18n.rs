@@ -271,9 +271,9 @@ pub(crate) fn replacement_rollback_failed(
     rollback: &str,
     target: impl std::fmt::Display,
     backup: impl std::fmt::Display,
-    remote: bool,
+    unconfirmed: bool,
 ) -> String {
-    format_replacement_rollback_failed(language(), error, rollback, target, backup, remote)
+    format_replacement_rollback_failed(language(), error, rollback, target, backup, unconfirmed)
 }
 
 fn format_replacement_rollback_failed(
@@ -282,9 +282,9 @@ fn format_replacement_rollback_failed(
     rollback: &str,
     target: impl std::fmt::Display,
     backup: impl std::fmt::Display,
-    remote: bool,
+    unconfirmed: bool,
 ) -> String {
-    match (language, remote) {
+    match (language, unconfirmed) {
         #[cfg(target_os = "macos")]
         (Language::Czech, false) => format!("{error}. Předchozí položku se nepodařilo obnovit: {rollback}. Před opakováním zkontrolujte uloženou verzi v {backup}"),
         #[cfg(target_os = "macos")]

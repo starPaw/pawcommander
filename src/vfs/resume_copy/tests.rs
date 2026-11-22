@@ -452,15 +452,107 @@ fn stopping_a_resumed_copy_reports_receipt_failure_after_draft_cleanup() {
     let error = resume(&recovery, &offers[0].id, &mut progress).unwrap_err();
     assert!(matches!(
         error,
-        TransferError::Failed(Failure::RecoveryRecord(error))
-            if error.path == record && matches!(error.problem, RecoveryRecordProblem::IdentityChanged)
+        TransferError::Failed(Failure::Staging(error))
+            if matches!(error.as_ref(), StagingError::ResumeReceiptCleanup {
+                cause: TransferError::Cancelled, source,
+            } if source.path == record && matches!(source.problem, RecoveryRecordProblem::IdentityChanged))
     ));
+    assert!(progress.results.cancelled);
     assert_eq!(progress.results.items[0].outcome, Outcome::Failed);
     assert!(!progress.partial_copy_retained && staged_payload(&output).is_none());
     assert!(!output.join("source").exists());
     assert_eq!(fs::read(original).unwrap(), bytes);
     assert_eq!(fs::read(saved).unwrap(), valid);
     assert_eq!(fs::read(record).unwrap(), b"preserve the replacement");
+}
+
+#[test]
+fn stopping_after_parking_refuses_to_restore_a_different_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let recovery = root.join("recovery");
+    let source: Location = root.join("transfer.bin").into();
+    let output: Location = root.join("destination").into();
+    let target = output.join("transfer.bin");
+    let original = root.join("old-version");
+    let old_bytes = b"previous version";
+    fs::create_dir(output.path()).unwrap();
+    fs::write(source.path(), b"replacement bytes").unwrap();
+    fs::write(target.path(), old_bytes).unwrap();
+    let mut progress = Progress::tracked_transfer().0;
+    progress.resume_directory = Some(recovery.clone());
+    let observed = output.clone();
+    let saved = original.clone();
+    progress.cancellation().set_checkpoint(move || {
+        let Some(payload) = staged_payload(observed.path()) else {
+            return false;
+        };
+        let backup = payload.with_file_name("previous");
+        if !backup.exists() {
+            return false;
+        }
+        fs::rename(&backup, &saved).unwrap();
+        fs::write(&backup, old_bytes).unwrap();
+        true
+    });
+    let failure = transfer_with_conflicts(
+        std::slice::from_ref(&source),
+        &output,
+        TransferKind::Copy,
+        &mut progress,
+        |_| {
+            Ok(Answer {
+                decision: Decision::Replace,
+                apply_to_group: false,
+            })
+        },
+        |_, _| panic!("a copy must preserve the source"),
+    )
+    .unwrap_err();
+    assert!(failure.summary.cancelled && progress.results.cancelled);
+    assert_eq!(failure.summary.completed, 0);
+    assert_eq!(
+        progress.results.items[0].outcome,
+        Outcome::PartialCopyRetained
+    );
+    let draft = staged_payload(output.path()).unwrap();
+    let stage = draft.parent().unwrap();
+    let backup = draft.with_file_name("previous");
+    let TransferError::Failed(Failure::Publication(reason)) = failure.error else {
+        panic!("expected a failed restoration with its retained staging");
+    };
+    let PublicationError::Retained {
+        staging,
+        cause: TransferError::Failed(Failure::Publication(reason)),
+        ..
+    } = *reason
+    else {
+        panic!("expected a retained recovery record");
+    };
+    assert_eq!(staging.path(), stage);
+    let PublicationError::Rollback {
+        target: attempted_target,
+        backup: attempted_backup,
+        cause: TransferError::Cancelled,
+        restore,
+    } = *reason
+    else {
+        panic!("expected a typed restoration error after Stop");
+    };
+    assert_eq!(attempted_target, target);
+    assert_eq!(attempted_backup.path(), backup);
+    assert_resume_check(
+        &restore,
+        ResumeRole::ParkedDestination,
+        &backup,
+        ResumeCheckProblem::Changed,
+    );
+    assert!(!target.path().exists());
+    assert_eq!(fs::read(source.path()).unwrap(), b"replacement bytes");
+    assert_eq!(fs::read(original).unwrap(), old_bytes);
+    assert_eq!(fs::read(backup).unwrap(), old_bytes);
+    assert_eq!(fs::read(draft).unwrap(), b"replacement bytes");
+    assert_eq!(scan(&recovery).0.len(), 1);
 }
 
 #[test]

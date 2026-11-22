@@ -7,19 +7,22 @@ mod tree;
 use super::{
     copy_metadata,
     cross_move::{self, MoveSource, Phase},
+    mutations::remove_remote_entry,
     read_scope::ReadScope,
     sftp::remote,
     staged_file::StagedFile,
     transfer::{
-        check_copy_space, entry_metadata, publish_checked_replacement, rename_for_publication,
-        with_preserved_staging, EntryMetadata, TransferItem, TransferSourceManifest,
+        check_copy_space, entry_metadata, publish_checked_replacement_with_rollback,
+        rename_for_publication, with_preserved_staging, EntryMetadata, TransferItem,
+        TransferSourceManifest,
     },
     Location,
 };
 use crate::app::SavedLocation;
 use crate::file_error::{
     AccessAction, AccessError, Failure, MutationError, PublicationError, RecoveryNotice,
-    RecoveryRecordError, RecoveryRecordProblem, ResumeCheckProblem, ResumeRole, StagingError,
+    RecoveryRecordError, RecoveryRecordProblem, ResumeCheckProblem, ResumeRole,
+    StagingCleanupError, StagingError,
 };
 use crate::i18n::text;
 use crate::operations::{AccessStream, Cancellation, HashRead, Progress, TransferError};
@@ -756,23 +759,18 @@ fn finish_move(
             extra,
         )?;
     }
-    finish_record(ticket, paths, progress, true)
+    finish_record(ticket, paths, progress)
 }
 
 fn finish_record(
     ticket: &Ticket,
     paths: &Paths,
     progress: &mut Progress,
-    completed: bool,
 ) -> Result<(), TransferError> {
     // Staging has been cleaned up. An unremoved receipt is not a retained payload.
     progress.partial_copy_retained = false;
     ticket.finish().map_err(|error| {
-        if completed {
-            completed_record_error(&paths.target, ticket.receipt.intent == Intent::Move, error)
-        } else {
-            error.into()
-        }
+        completed_record_error(&paths.target, ticket.receipt.intent == Intent::Move, error)
     })
 }
 
@@ -919,12 +917,13 @@ fn finish_copy(
     let owner = ticket.name();
     progress.partial_copy_retained = true;
     let cancel = progress.cancellation();
-    let mut committed = false;
+    let mut checking_published = false;
     let mut parked = false;
     let backup = paths.stage.join("previous");
+    let payload = paths.stage.join("payload");
     let result = (|| {
-        let payload = paths.stage.join("payload");
         if resuming && entry_metadata(&payload)?.is_none() {
+            checking_published = true;
             let destination = ResumeRole::Destination;
             if FileProof::read(&paths.target, destination, progress)?
                 .0
@@ -933,7 +932,6 @@ fn finish_copy(
             {
                 return Err(destination.error(&paths.target, ResumeCheckProblem::ContentsMismatch));
             }
-            committed = true;
             published();
             return Ok(Completion::AlreadyPresent);
         }
@@ -1008,7 +1006,7 @@ fn finish_copy(
             && !parked
         {
             let mut preserve = false;
-            publish_checked_replacement(
+            publish_checked_replacement_with_rollback(
                 &payload,
                 &paths.target,
                 &paths.stage,
@@ -1021,6 +1019,13 @@ fn finish_copy(
                         candidate != &paths.target,
                         progress,
                     )
+                },
+                |backup, target, cause| {
+                    if matches!(cause, TransferError::Cancelled) {
+                        restore_cancelled_replacement(ticket, paths, backup)
+                    } else {
+                        rename_for_publication(backup, target)
+                    }
                 },
             )
             .map_err(|error| match error {
@@ -1035,47 +1040,150 @@ fn finish_copy(
             }
             rename_for_publication(&payload, &paths.target)?;
         }
-        committed = true;
         published();
         Ok(Completion::Copied(offset))
     })();
-    if committed && receipt.intent == Intent::Move {
-        return result;
-    }
-    let cleanup = if committed {
-        if matches!(&result, Ok(Completion::AlreadyPresent))
-            && entry_metadata(&paths.stage)?.is_none()
+    let completed = match result {
+        Ok(completed) => completed,
+        Err(TransferError::Cancelled) => {
+            progress.results.cancelled = true;
+            if checking_published {
+                progress.partial_copy_retained = false;
+                return Err(TransferError::Cancelled);
+            }
+            if parked {
+                restore_cancelled_replacement(ticket, paths, &backup).map_err(|restore| {
+                    retained_error(
+                        &paths.stage,
+                        PublicationError::Rollback {
+                            target: paths.target.clone(),
+                            backup,
+                            cause: TransferError::Cancelled,
+                            restore,
+                        }
+                        .into(),
+                    )
+                })?;
+            }
+            let cleanup = (|| {
+                stage_contents(&paths.stage, receipt.stage_identity, owner, &["payload"])?;
+                if !required_metadata(&payload, staged)?.is_file() {
+                    return Err(staged.error(&payload, ResumeCheckProblem::WrongType));
+                }
+                remove_staged_entry(&payload, false)?;
+                discard_empty_stage(ticket, paths, progress)
+            })();
+            return finish_cancelled_cleanup(ticket, paths, cleanup);
+        }
+        Err(
+            TransferError::Failed(Failure::Publication(error))
+            | TransferError::PublicationUnconfirmed(Failure::Publication(error)),
+        ) if matches!(
+            &*error,
+            PublicationError::Rollback {
+                cause: TransferError::Cancelled,
+                ..
+            }
+        ) =>
         {
-            Ok(())
-        } else if let Some(previous) = &receipt.previous {
-            verify_target(Some(previous), &backup, true, &mut Progress::default())?;
-            discard_stage(&paths.stage, receipt.stage_identity, owner, &["previous"])
-        } else {
-            discard_stage(&paths.stage, receipt.stage_identity, owner, &[])
-        }
-    } else if matches!(result, Err(TransferError::Cancelled)) {
-        if parked {
-            stage_contents(
+            // Only restoration is uncertain. The new file was never published.
+            progress.results.cancelled = true;
+            return Err(retained_error(
                 &paths.stage,
-                receipt.stage_identity,
-                owner,
-                &["payload", "previous"],
-            )?;
-            verify_target(
-                receipt.previous.as_ref(),
-                &backup,
-                true,
-                &mut Progress::default(),
-            )?;
-            rename_for_publication(&backup, &paths.target)?;
+                TransferError::Failed(Failure::Publication(error)),
+            ));
         }
-        discard_stage(&paths.stage, receipt.stage_identity, owner, &["payload"])
+        Err(error) => return Err(retained_error(&paths.stage, error)),
+    };
+    if receipt.intent == Intent::Move {
+        return Ok(completed);
+    }
+    let cleanup = if matches!(completed, Completion::AlreadyPresent)
+        && entry_metadata(&paths.stage)?.is_none()
+    {
+        Ok(())
+    } else if let Some(previous) = &receipt.previous {
+        verify_target(Some(previous), &backup, true, &mut Progress::default())?;
+        discard_stage(&paths.stage, receipt.stage_identity, owner, &["previous"])
     } else {
-        return result.map_err(|error| retained_error(&paths.stage, error));
+        discard_stage(&paths.stage, receipt.stage_identity, owner, &[])
     };
     cleanup.map_err(|error| retained_error(&paths.stage, error))?;
-    finish_record(ticket, paths, progress, committed)?;
-    result
+    finish_record(ticket, paths, progress)?;
+    Ok(completed)
+}
+
+fn restore_cancelled_replacement(
+    ticket: &Ticket,
+    paths: &Paths,
+    backup: &Location,
+) -> Result<(), TransferError> {
+    let expected = ticket.receipt.previous.as_ref().ok_or_else(|| {
+        ResumeRole::ParkedDestination.error(backup, ResumeCheckProblem::MissingProof)
+    })?;
+    stage_contents(
+        &paths.stage,
+        ticket.receipt.stage_identity,
+        ticket.name(),
+        &["payload", "previous"],
+    )?;
+    let mut verification = Progress::default();
+    verify_target(Some(expected), backup, true, &mut verification)?;
+    rename_for_publication(backup, &paths.target)?;
+    verify_target(Some(expected), &paths.target, true, &mut verification)
+        .map_err(TransferError::with_unconfirmed_publication)
+}
+
+fn discard_empty_stage(
+    ticket: &Ticket,
+    paths: &Paths,
+    progress: &mut Progress,
+) -> Result<(), TransferError> {
+    // An empty staging folder or an unremoved receipt holds no partial copy.
+    progress.partial_copy_retained = false;
+    let owner = ticket.name();
+    stage_contents(&paths.stage, ticket.receipt.stage_identity, owner, &[])?;
+    remove_staged_entry(&paths.stage.join(owner), false)?;
+    remove_staged_entry(&paths.stage, true)
+}
+
+fn remove_staged_entry(location: &Location, directory: bool) -> Result<(), TransferError> {
+    if let Some(path) = location.local() {
+        let (result, action) = if directory {
+            (fs::remove_dir(path), AccessAction::RemoveStagingDirectory)
+        } else {
+            (fs::remove_file(path), AccessAction::RemoveStagingItem)
+        };
+        result.map_err(|error| AccessError::new(location, action, error).into())
+    } else {
+        let sftp = remote(location).map_err(|reason| MutationError::OpenSftpRemoval {
+            location: location.clone(),
+            reason,
+        })?;
+        remove_remote_entry(&sftp, location, directory)
+    }
+}
+
+fn finish_cancelled_cleanup(
+    ticket: &Ticket,
+    paths: &Paths,
+    cleanup: Result<(), TransferError>,
+) -> Result<Completion, TransferError> {
+    cleanup.map_err(|error| {
+        StagingCleanupError::failed_cleanup(
+            Some(TransferError::Cancelled),
+            error,
+            &paths.stage,
+            &paths.target,
+        )
+    })?;
+    ticket
+        .finish()
+        .map_err(|source| StagingError::ResumeReceiptCleanup {
+            cause: TransferError::Cancelled,
+            source,
+        })?;
+    Err(TransferError::Cancelled)
 }
 
 fn copy_suffix(
