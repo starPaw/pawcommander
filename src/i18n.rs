@@ -6,6 +6,8 @@ mod catalog;
 pub(crate) mod display;
 mod file_errors;
 mod formats;
+#[cfg(target_os = "macos")]
+mod smb;
 pub(crate) use catalog::key;
 pub(crate) use file_errors::{
     access_io_message, connection_result_error, credential_error, deletion_failure, file_error,
@@ -19,6 +21,8 @@ pub(crate) use file_errors::{
 #[cfg(target_os = "macos")]
 pub(crate) use formats::czech_format;
 pub(crate) use formats::russian_format;
+#[cfg(target_os = "macos")]
+pub(crate) use smb::smb_error;
 
 pub(crate) fn inspection_report(report: &crate::vfs::InspectionReport) -> String {
     use crate::vfs::{InspectionBlocker, InspectionFinding, InspectionRole};
