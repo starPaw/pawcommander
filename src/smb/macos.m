@@ -69,3 +69,12 @@ int paw_smb_mount_id(const char *path, bool exact, int32_t *id) {
     free(mounts);
     return status;
 }
+
+int paw_smb_directory_id(int fd, int32_t *id, bool *is_smb) {
+    struct statfs volume;
+    if (fstatfs(fd, &volume) != 0) return errno;
+    *is_smb = strcmp(volume.f_fstypename, "smbfs") == 0;
+    id[0] = volume.f_fsid.val[0];
+    id[1] = volume.f_fsid.val[1];
+    return 0;
+}

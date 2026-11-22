@@ -1,6 +1,15 @@
 use super::{Failure, PathError};
 use crate::{operations::TransferError, vfs::Location};
+#[cfg(target_os = "macos")]
+use std::path::{Path, PathBuf};
 use std::{error::Error, fmt};
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum SmbTransferRole {
+    Source,
+    Destination,
+}
 
 #[derive(Debug)]
 pub(crate) enum TransferPlanError {
@@ -25,6 +34,27 @@ pub(crate) enum TransferPlanError {
         destination: Location,
     },
     NoUnusedName(Location),
+    #[cfg(target_os = "macos")]
+    SmbMount {
+        path: PathBuf,
+        role: SmbTransferRole,
+        cause: Box<crate::smb::SmbError>,
+    },
+}
+
+#[cfg(target_os = "macos")]
+impl TransferPlanError {
+    pub(crate) fn smb_mount(
+        path: &Path,
+        role: SmbTransferRole,
+        cause: crate::smb::SmbError,
+    ) -> Self {
+        Self::SmbMount {
+            path: path.to_owned(),
+            role,
+            cause: Box::new(cause),
+        }
+    }
 }
 
 impl From<TransferPlanError> for TransferError {
@@ -62,6 +92,12 @@ impl fmt::Display for TransferPlanError {
                 write!(f, "Cannot copy or move {source} into {destination}")
             }
             Self::NoUnusedName(location) => write!(f, "No unused name found for {location}"),
+            #[cfg(target_os = "macos")]
+            Self::SmbMount { path, role, cause } => write!(
+                f,
+                "Cannot use SMB transfer {role:?} {}: {cause}",
+                path.display()
+            ),
         }
     }
 }
@@ -70,6 +106,8 @@ impl Error for TransferPlanError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::InvalidSourceName { cause, .. } => Some(cause),
+            #[cfg(target_os = "macos")]
+            Self::SmbMount { cause, .. } => Some(cause.as_ref()),
             _ => None,
         }
     }

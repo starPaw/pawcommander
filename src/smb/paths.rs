@@ -1,7 +1,7 @@
 use super::{
     discovery, mount_id, root, PathAction, SmbError, CONNECTION_PREFIX, MOUNT_DIR, RECORD,
 };
-use crate::file_error::{ListingError, ListingErrorKind};
+use crate::file_error::{ListingError, ListingErrorKind, SmbTransferRole, TransferPlanError};
 use crate::operations::TransferError;
 use crate::vfs::Location;
 use std::os::unix::ffi::OsStrExt;
@@ -11,7 +11,7 @@ use std::{fs, io};
 /// Saved layouts and navigation history can refer to SMB folders using local paths.
 pub(crate) fn check_location(location: &Location) -> Result<(), TransferError> {
     if let Some(path) = location.local().or_else(|| location.archive_source()) {
-        check_path(path, root, |mount| mount_id(mount, true)).map_err(|cause| {
+        checked_mount(path).map_err(|cause| {
             ListingError::new(
                 location.clone(),
                 ListingErrorKind::SmbMount(Box::new(cause)),
@@ -21,11 +21,22 @@ pub(crate) fn check_location(location: &Location) -> Result<(), TransferError> {
     Ok(())
 }
 
+pub(crate) fn check_transfer_mount(
+    path: &Path,
+    role: SmbTransferRole,
+) -> Result<Option<[i32; 2]>, TransferError> {
+    checked_mount(path).map_err(|cause| TransferPlanError::smb_mount(path, role, cause).into())
+}
+
+fn checked_mount(path: &Path) -> Result<Option<[i32; 2]>, SmbError> {
+    check_path(path, root, |mount| mount_id(mount, true))
+}
+
 fn check_path(
     path: &Path,
     storage: impl FnOnce() -> Result<PathBuf, SmbError>,
     inspect: impl FnOnce(&Path) -> io::Result<Option<[i32; 2]>>,
-) -> Result<(), SmbError> {
+) -> Result<Option<[i32; 2]>, SmbError> {
     let mut candidates = path
         .ancestors()
         .filter_map(|mount| {
@@ -41,17 +52,17 @@ fn check_path(
     // Ordinary paths need no storage access. Compare registry aliases without
     // resolving the share path, which could touch a different volume.
     if candidates.peek().is_none() {
-        return Ok(());
+        return Ok(None);
     }
     let Ok(root) = storage() else {
-        return Ok(());
+        return Ok(None);
     };
     let canonical = root.canonicalize().ok();
     let Some((_, mount, name)) = candidates.find(|(base, _, _)| {
         base.parent()
             .is_some_and(|parent| parent == root.as_path() || Some(parent) == canonical.as_deref())
     }) else {
-        return Ok(());
+        return Ok(None);
     };
     let base = canonical.as_deref().unwrap_or(&root).join(name);
     let record_path = base.join(RECORD);
@@ -78,7 +89,8 @@ fn check_path(
     }
     share
         .require_expected_mount(inspect)
-        .map_err(|cause| share.open_error(cause))
+        .map_err(|cause| share.open_error(cause))?;
+    Ok(Some(share.record.id))
 }
 
 #[cfg(test)]

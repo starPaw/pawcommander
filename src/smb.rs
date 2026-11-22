@@ -1,12 +1,14 @@
 //! Native SMB shares use a unique, protected mount point and an OS credential entry.
-use crate::file_error::{AccessAction, AccessError, CredentialFailure, PublicationError};
+use crate::file_error::{
+    AccessAction, AccessError, CredentialFailure, PublicationError, SmbTransferRole,
+    TransferPlanError,
+};
 use crate::operations::TransferError;
 use crate::vfs::Location;
 use serde::{Deserialize, Serialize};
-use std::ffi::{c_char, c_int, CStr, CString};
+use std::ffi::{c_char, c_int, CString};
 use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{self, Write};
-use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::{
     ffi::OsStrExt,
@@ -20,7 +22,7 @@ mod error;
 mod paths;
 pub(crate) use discovery::{Discovery, DiscoveryWarnings};
 pub(crate) use error::{MountFailure, PasswordAction, PathAction, RecordProblem, SmbError};
-pub(crate) use paths::check_location;
+pub(crate) use paths::{check_location, check_transfer_mount};
 
 const SERVICE: &str = "dev.pawcommander.smb.v1";
 const RECORD: &str = "connection.json";
@@ -426,7 +428,10 @@ pub(crate) fn is_smb_path(path: &Path) -> bool {
     mount_id(path, false).is_ok_and(|id| id.is_some())
 }
 
-pub(crate) fn open_upload(target: &Location) -> Result<File, TransferError> {
+pub(crate) fn open_upload(
+    target: &Location,
+    expected_mount: Option<[i32; 2]>,
+) -> Result<File, TransferError> {
     let invalid = || {
         AccessError::new(
             target,
@@ -443,15 +448,24 @@ pub(crate) fn open_upload(target: &Location) -> Result<File, TransferError> {
         .open(parent_path)
         .map_err(|error| AccessError::new(&directory, AccessAction::OpenFile, error))?;
     let parent_fd = parent.as_raw_fd();
-    let mut volume = MaybeUninit::<libc::statfs>::uninit();
     let check_volume = |error| AccessError::new(&directory, AccessAction::CheckSmbVolume, error);
     // Check the opened directory and create relative to that handle so an
     // unmount or parent rename cannot redirect the upload to local storage.
-    if unsafe { libc::fstatfs(parent_fd, volume.as_mut_ptr()) } != 0 {
-        return Err(check_volume(io::Error::last_os_error()).into());
+    let mut mount = [0; 2];
+    let mut is_smb = false;
+    let status = unsafe { paw_smb_directory_id(parent_fd, mount.as_mut_ptr(), &mut is_smb) };
+    if status != 0 {
+        return Err(check_volume(io::Error::from_raw_os_error(status)).into());
     }
-    let volume = unsafe { volume.assume_init() };
-    if unsafe { CStr::from_ptr(volume.f_fstypename.as_ptr()) }.to_bytes() != b"smbfs" {
+    if expected_mount.is_some_and(|expected| !is_smb || mount != expected) {
+        return Err(TransferPlanError::smb_mount(
+            path,
+            SmbTransferRole::Destination,
+            SmbError::MountChanged(parent_path.to_owned()),
+        )
+        .into());
+    }
+    if !is_smb {
         return Err(check_volume(io::Error::from(io::ErrorKind::Unsupported)).into());
     }
     let name = CString::new(path.file_name().ok_or_else(invalid)?.as_bytes()).map_err(|error| {
@@ -540,6 +554,7 @@ unsafe extern "C" {
         password_len: usize,
     ) -> c_int;
     fn paw_smb_mount_id(path: *const c_char, exact: bool, id: *mut i32) -> c_int;
+    fn paw_smb_directory_id(fd: c_int, id: *mut i32, is_smb: *mut bool) -> c_int;
 }
 
 #[cfg(test)]
@@ -738,7 +753,7 @@ mod tests {
         let path = endpoint.mountpoint(&base);
         fs::create_dir_all(&path).unwrap();
         let created = path.join("upload");
-        let error = open_upload(&Location::Local(created.clone())).unwrap_err();
+        let error = open_upload(&Location::Local(created.clone()), None).unwrap_err();
         let TransferError::Failed(Failure::Access(error)) = error else {
             panic!("expected a definite SMB volume check failure");
         };
@@ -771,6 +786,22 @@ mod tests {
         fs::write(base.join(RECORD), b"record").unwrap();
         assert!(share.disconnect().unwrap().is_none());
         assert!(!base.exists());
+    }
+
+    #[test]
+    fn managed_smb_upload_checks_the_open_directory_before_creating_a_file() {
+        use crate::file_error::Failure;
+
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("new.txt");
+        let error = open_upload(&Location::Local(target.clone()), Some([4, 9])).unwrap_err();
+        assert!(matches!(error,
+            TransferError::Failed(Failure::TransferPlan(reason)) if matches!(reason.as_ref(),
+                TransferPlanError::SmbMount { path, role: SmbTransferRole::Destination, cause }
+                if path == &target && matches!(cause.as_ref(), SmbError::MountChanged(path) if path == temp.path())
+            )
+        ));
+        assert!(!target.exists());
     }
 
     #[test]

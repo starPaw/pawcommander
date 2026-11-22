@@ -74,6 +74,8 @@ pub(crate) use sync::{
     SyncDifference, SyncError, SyncExclusionProblem, SyncFolderRole, SyncStateAction,
     SyncStateKind, SyncStateProblem, SyncVerification,
 };
+#[cfg(target_os = "macos")]
+pub(crate) use transfer_plan::SmbTransferRole;
 pub(crate) use transfer_plan::TransferPlanError;
 pub(crate) use undo::UndoError;
 

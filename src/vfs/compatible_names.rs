@@ -10,11 +10,14 @@ use super::{
     compare::{MAX_ENTRIES, MAX_PATH_BYTES},
     guarded_directory::Directory,
     read_scope::ReadScope,
-    transfer::{entry_metadata, mounted_smb, transfer_plan, TransferItem, TransferSourceManifest},
+    transfer::{
+        checked_smb_mount, entry_metadata, mounted_smb, transfer_plan, TransferItem,
+        TransferSourceManifest,
+    },
     Location,
 };
 use crate::{
-    file_error::{AccessAction, AccessError, CompatiblePlanError},
+    file_error::{AccessAction, AccessError, CompatiblePlanError, SmbTransferRole},
     fs_ops::TransferKind,
     operations::{Cancellation, Progress, TransferError},
 };
@@ -58,17 +61,26 @@ pub(crate) fn build(
     if sources.is_empty() {
         return Err(CompatiblePlanError::EmptySelection.into());
     }
-    for location in sources.iter().chain([destination]) {
+    for (location, role) in sources
+        .iter()
+        .map(|source| (source, SmbTransferRole::Source))
+        .chain([(destination, SmbTransferRole::Destination)])
+    {
         progress.checkpoint()?;
         if location.local().is_none() {
             return Err(CompatiblePlanError::NonLocal(location.clone()).into());
         }
-        if mounted_smb(location) {
+        if checked_smb_mount(location, role)?.is_some() || mounted_smb(location) {
             return Err(CompatiblePlanError::SmbVolume(location.clone()).into());
         }
     }
     let scope = ReadScope::open(destination)?;
     let destination = Directory::from_scope(&scope)?;
+    if checked_smb_mount(&destination.location, SmbTransferRole::Destination)?.is_some()
+        || mounted_smb(&destination.location)
+    {
+        return Err(CompatiblePlanError::SmbVolume(destination.location).into());
+    }
     let limits = Limits::read(&destination.location)?;
     if limits.read_only {
         return Err(CompatiblePlanError::ReadOnlyDestination(destination.location).into());
@@ -91,7 +103,10 @@ pub(crate) fn build(
         .into_iter()
         .map(|item| {
             cancel.check()?;
-            if item.source != item.original && mounted_smb(&item.source) {
+            if item.source != item.original
+                && (checked_smb_mount(&item.source, SmbTransferRole::Source)?.is_some()
+                    || mounted_smb(&item.source))
+            {
                 return Err(CompatiblePlanError::SmbVolume(item.source).into());
             }
             let name = Name::suggest(

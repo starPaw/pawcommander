@@ -10,12 +10,12 @@ use super::transfer::{
     TransferSourceManifest,
 };
 use super::Location;
-#[cfg(target_os = "macos")]
-use crate::file_error::StagingCleanupError;
 use crate::file_error::{
     AccessAction, AccessError, CopyVerificationError, CrossMoveError, LocalPathAction,
     MutationError, TransferPlanError,
 };
+#[cfg(target_os = "macos")]
+use crate::file_error::{SmbTransferRole, StagingCleanupError};
 use crate::operations::{AccessStream, Cancellation, CopyReader, Progress, TransferError};
 use std::collections::BTreeMap;
 use std::fs;
@@ -27,11 +27,15 @@ mod tests;
 
 pub(super) fn required(item: &TransferItem) -> Result<bool, TransferError> {
     #[cfg(target_os = "macos")]
-    if let Some(path) = [&item.source, &item.target]
-        .into_iter()
-        .find(|path| super::transfer::mounted_smb(path))
-    {
-        return Err(CrossMoveError::Smb(path.clone()).into());
+    for (path, role) in [
+        (&item.source, SmbTransferRole::Source),
+        (&item.target, SmbTransferRole::Destination),
+    ] {
+        if super::transfer::checked_smb_mount(path, role)?.is_some()
+            || super::transfer::mounted_smb(path)
+        {
+            return Err(CrossMoveError::Smb(path.clone()).into());
+        }
     }
     if !item.source.same_backend(&item.target) {
         return Ok(true);
