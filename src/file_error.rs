@@ -5,6 +5,8 @@ use std::{error::Error, fmt, io, path::PathBuf, str::Utf8Error};
 
 mod archive;
 mod checksum;
+#[cfg(target_os = "macos")]
+mod compatible_plan;
 mod conflict;
 #[cfg(target_os = "macos")]
 mod file_promise;
@@ -23,6 +25,8 @@ mod sync;
 mod transfer_plan;
 pub(crate) use archive::ArchiveError;
 pub(crate) use checksum::{ChecksumError, ManifestLineError};
+#[cfg(target_os = "macos")]
+pub(crate) use compatible_plan::CompatiblePlanError;
 pub(crate) use conflict::{ConflictError, ReplacementRefusal};
 #[cfg(target_os = "macos")]
 pub(crate) use file_promise::FilePromiseError;
@@ -75,6 +79,8 @@ pub(crate) enum Failure {
     FilePromise(Box<FilePromiseError>),
     #[cfg(target_os = "macos")]
     FileTemplate(Box<FileTemplateError>),
+    #[cfg(target_os = "macos")]
+    CompatiblePlan(Box<CompatiblePlanError>),
     Mutation(Box<MutationError>),
     Publication(Box<PublicationError>),
     Staging(Box<StagingError>),
@@ -123,6 +129,8 @@ impl Failure {
             Self::FilePromise(error) => Some(error.as_ref()),
             #[cfg(target_os = "macos")]
             Self::FileTemplate(error) => Some(error.as_ref()),
+            #[cfg(target_os = "macos")]
+            Self::CompatiblePlan(error) => Some(error.as_ref()),
             Self::Mutation(error) => Some(error.as_ref()),
             Self::Publication(error) => Some(error.as_ref()),
             Self::Staging(error) => Some(error.as_ref()),
@@ -164,6 +172,8 @@ impl fmt::Display for Failure {
             Self::FilePromise(error) => fmt::Display::fmt(error, f),
             #[cfg(target_os = "macos")]
             Self::FileTemplate(error) => fmt::Display::fmt(error, f),
+            #[cfg(target_os = "macos")]
+            Self::CompatiblePlan(error) => fmt::Display::fmt(error, f),
             Self::Mutation(error) => fmt::Display::fmt(error, f),
             Self::Publication(error) => fmt::Display::fmt(error, f),
             Self::Staging(error) => fmt::Display::fmt(error, f),
@@ -301,6 +311,8 @@ pub(crate) enum AccessAction {
     WriteMetadata,
     #[cfg(target_os = "macos")]
     CheckSmbVolume,
+    #[cfg(target_os = "macos")]
+    ReadVolumeLimits,
     CheckSearchResult,
     #[cfg(target_os = "macos")]
     WritePreviewCache,
@@ -498,6 +510,12 @@ pub(crate) enum ScanError {
         name: PathBuf,
     },
     DepthLimit(Location),
+    TransferDepthLimit {
+        location: Location,
+        limit: usize,
+    },
+    MoveEntryLimit(Location),
+    TransferSizeOverflow(Location),
     FolderUnavailable(Location),
     DuplicateEntry {
         directory: Location,
@@ -532,6 +550,18 @@ impl fmt::Display for ScanError {
                 write!(f, "Invalid entry {name:?} in {directory}")
             }
             Self::DepthLimit(location) => write!(f, "Folder nesting limit reached at {location}"),
+            Self::TransferDepthLimit { location, limit } => {
+                write!(
+                    f,
+                    "Folders are nested more than {limit} levels at {location}"
+                )
+            }
+            Self::MoveEntryLimit(location) => {
+                write!(f, "Per-item transfer limit reached at {location}")
+            }
+            Self::TransferSizeOverflow(location) => {
+                write!(f, "The copy grew beyond its size limit at {location}")
+            }
             Self::FolderUnavailable(location) => {
                 write!(f, "Folder {location} changed or is unavailable")
             }

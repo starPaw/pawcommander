@@ -14,12 +14,11 @@ use super::{
     Location,
 };
 use crate::{
-    file_error::{AccessAction, AccessError},
+    file_error::{AccessAction, AccessError, CompatiblePlanError},
     fs_ops::TransferKind,
-    i18n::text,
     operations::{Cancellation, Progress, TransferError},
 };
-use names::{destination_bytes, metadata_name, path_limit, portable_key, Name};
+use names::{destination_bytes, metadata_name, portable_key, Name};
 use std::{
     collections::{BTreeMap, HashSet},
     ffi::{CStr, CString},
@@ -56,29 +55,32 @@ pub(crate) fn build(
     kind: TransferKind,
     progress: &mut Progress,
 ) -> Result<Plan, TransferError> {
-    if sources.is_empty()
-        || sources
-            .iter()
-            .chain([destination])
-            .any(|path| path.local().is_none())
-    {
-        return Err(
-            text!("Для совместимого переноса выберите объекты в двух локальных папках").into(),
-        );
+    if sources.is_empty() {
+        return Err(CompatiblePlanError::EmptySelection.into());
     }
-    if sources.iter().chain([destination]).any(mounted_smb) {
-        return Err(text!("Совместимый перенос недоступен на томах SMB").into());
+    for location in sources.iter().chain([destination]) {
+        progress.checkpoint()?;
+        if location.local().is_none() {
+            return Err(CompatiblePlanError::NonLocal(location.clone()).into());
+        }
+        if mounted_smb(location) {
+            return Err(CompatiblePlanError::SmbVolume(location.clone()).into());
+        }
     }
     let scope = ReadScope::open(destination)?;
     let destination = Directory::from_scope(&scope)?;
-    let limits = Limits::read(destination.location.path())?;
+    let limits = Limits::read(&destination.location)?;
     if limits.read_only {
-        return Err(text!("Том назначения доступен только для чтения").into());
+        return Err(CompatiblePlanError::ReadOnlyDestination(destination.location).into());
     }
     let direct = limits.exfat;
     let staging = destination.location.path().as_os_str().len() + STAGED_ROOT;
     if !direct && staging > limits.path {
-        return Err(path_limit());
+        return Err(CompatiblePlanError::StagingPathLimit {
+            destination: destination.location,
+            limit: limits.path,
+        }
+        .into());
     }
 
     let selected = transfer_plan(sources, &destination.location, kind, progress)?;
@@ -89,10 +91,14 @@ pub(crate) fn build(
         .into_iter()
         .map(|item| {
             cancel.check()?;
+            if item.source != item.original && mounted_smb(&item.source) {
+                return Err(CompatiblePlanError::SmbVolume(item.source).into());
+            }
             let name = Name::suggest(
                 item.target.path().file_name().expect("planned target"),
                 root_bytes,
                 limits.apple_double,
+                &destination.location,
             )?;
             Ok((item, name))
         })
@@ -111,18 +117,24 @@ pub(crate) fn build(
     for (mut item, suggestion) in candidates {
         progress.checkpoint()?;
         if kind == TransferKind::Move {
-            let volume = Limits::read(item.source.path())?;
-            if volume.apple_double || volume.read_only {
-                return Err(text!(
-                    "Для этого исходного тома выберите копирование с совместимыми именами",
-                )
-                .into());
+            let volume = Limits::read(&item.source)?;
+            if volume.read_only {
+                return Err(CompatiblePlanError::ReadOnlySource(item.source).into());
+            }
+            if volume.apple_double {
+                return Err(CompatiblePlanError::FatSource(item.source).into());
             }
         }
-        let name = suggestion.reserve(root_bytes, limits.apple_double, &mut occupied, |name| {
-            cancel.check()?;
-            Ok(entry_metadata(&preview.destination.location.join(name))?.is_some())
-        })?;
+        let name = suggestion.reserve(
+            root_bytes,
+            limits.apple_double,
+            &preview.destination.location,
+            &mut occupied,
+            |name| {
+                cancel.check()?;
+                Ok(entry_metadata(&preview.destination.location.join(name))?.is_some())
+            },
+        )?;
         item.target = preview.destination.location.join(&name.value);
         let manifest = TransferSourceManifest::capture_move_observed(
             &item.source,
@@ -130,21 +142,28 @@ pub(crate) fn build(
             &mut |path, _| progress.item(path.path()),
         )?;
         let root_metadata = &manifest.entries[&item.source].metadata;
-        if manifest
+        if let Some((path, _)) = manifest
             .entries
-            .values()
-            .any(|entry| root_metadata.same_local_volume(&entry.metadata) != Some(true))
+            .iter()
+            .find(|(_, entry)| root_metadata.same_local_volume(&entry.metadata) != Some(true))
         {
-            return Err(
-                text!("Совместимый перенос не пересекает точки монтирования внутри папки").into(),
-            );
+            return Err(CompatiblePlanError::NestedVolume(path.clone()).into());
         }
         preview.entries += manifest.entries.len();
         // The output manifest also counts AppleDouble companions on FAT.
-        if preview.entries > MAX_ENTRIES
-            || (limits.apple_double && manifest.entries.len() > MAX_ENTRIES / 2)
-        {
-            return Err(limit());
+        if preview.entries > MAX_ENTRIES {
+            return Err(CompatiblePlanError::EntryLimit {
+                source: item.original,
+                limit: MAX_ENTRIES,
+            }
+            .into());
+        }
+        if limits.apple_double && manifest.entries.len() > MAX_ENTRIES / 2 {
+            return Err(CompatiblePlanError::EntryLimit {
+                source: item.original,
+                limit: MAX_ENTRIES / 2,
+            }
+            .into());
         }
         let stage = (!direct).then_some(staging);
         let mut layout = Layout {
@@ -206,7 +225,11 @@ impl Layout<'_> {
             .expect("source in tree");
         *self.path_bytes += source.path().as_os_str().len() + relative.as_os_str().len();
         if *self.path_bytes > MAX_PATH_BYTES {
-            return Err(limit());
+            return Err(CompatiblePlanError::PathBudget {
+                source: source.clone(),
+                limit: MAX_PATH_BYTES,
+            }
+            .into());
         }
         if !reasons.is_empty() {
             let after = if relative.as_os_str().is_empty() {
@@ -222,11 +245,7 @@ impl Layout<'_> {
         }
         let entry = &self.manifest.entries[source];
         if !entry.metadata.is_file() && entry.children.is_none() {
-            return Err(crate::tr_format!(
-                "Compatible transfer supports regular files and folders. Check {source}.",
-                source = source
-            )
-            .into());
+            return Err(CompatiblePlanError::UnsupportedItem(source.clone()).into());
         }
         let root = self.target.path().as_os_str().len() - self.relative_root.as_os_str().len()
             + destination_bytes(
@@ -244,22 +263,35 @@ impl Layout<'_> {
         let Some(children) = &entry.children else {
             return Ok(());
         };
+        let parent = if relative.as_os_str().is_empty() {
+            self.target.clone()
+        } else {
+            self.target.join(&relative)
+        };
         let mut candidates: Vec<_> = children
             .iter()
             .map(|name| {
                 self.cancel.check()?;
-                Ok((name, Name::suggest(name, bytes, self.limits.apple_double)?))
+                Ok((
+                    name,
+                    Name::suggest(name, bytes, self.limits.apple_double, &parent)?,
+                ))
             })
             .collect::<Result<_, TransferError>>()?;
         // Assign compatible originals before a rewritten sibling can claim them.
         candidates.sort_by_key(|(_, name)| !name.reasons.is_empty());
         let mut occupied = HashSet::new();
         for (original, suggestion) in candidates {
-            let name =
-                suggestion.reserve(bytes, self.limits.apple_double, &mut occupied, |_| {
+            let name = suggestion.reserve(
+                bytes,
+                self.limits.apple_double,
+                &parent,
+                &mut occupied,
+                |_| {
                     self.cancel.check()?;
                     Ok(false)
-                })?;
+                },
+            )?;
             self.walk(
                 &source.join(original),
                 relative.join(&name.value),
@@ -295,16 +327,21 @@ struct Limits {
 }
 
 impl Limits {
-    fn read(path: &Path) -> Result<Self, TransferError> {
-        let path = CString::new(path.as_os_str().as_bytes()).map_err(io::Error::from)?;
+    fn read(location: &Location) -> Result<Self, TransferError> {
+        let read_error = |error| AccessError::new(location, AccessAction::ReadVolumeLimits, error);
+        let path = CString::new(location.path().as_os_str().as_bytes())
+            .map_err(|error| read_error(io::Error::from(error)))?;
         let mut info = MaybeUninit::<libc::statfs>::uninit();
         // SAFETY: path is terminated and the output buffer matches statfs.
         if unsafe { libc::statfs(path.as_ptr(), info.as_mut_ptr()) } != 0 {
-            return Err(io::Error::last_os_error().into());
+            return Err(read_error(io::Error::last_os_error()).into());
         }
         // SAFETY: Darwin initializes the buffer and terminates the file-system name.
         let info = unsafe { info.assume_init() };
         let format = unsafe { CStr::from_ptr(info.f_fstypename.as_ptr()) };
+        if format.to_bytes() == b"smbfs" {
+            return Err(CompatiblePlanError::SmbVolume(location.clone()).into());
+        }
         let calc = |key, fallback| {
             // SAFETY: The same terminated path remains valid for this call.
             let length = unsafe { libc::pathconf(path.as_ptr(), key) };
@@ -330,8 +367,4 @@ impl Limits {
         // Leave room for the native ._ companion as well as the data name.
         available.saturating_sub(2 * usize::from(self.apple_double))
     }
-}
-
-fn limit() -> TransferError {
-    text!("План совместимых имён превышает допустимый размер").into()
 }
