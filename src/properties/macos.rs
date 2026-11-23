@@ -1,13 +1,23 @@
-use crate::i18n::text;
+use crate::{
+    file_error::{AccessAction, AccessError, Failure, MutationError, ScanError, SmbMutationAction},
+    i18n::text,
+    operations::TransferError,
+    smb::MutationMount,
+    vfs::Location,
+};
 use objc2::{rc::autoreleasepool, runtime::AnyObject};
 use objc2_foundation::{
     NSArray, NSData, NSPropertyListReadOptions, NSPropertyListSerialization, NSString,
 };
+use rustix::fs::{fstat, statat, AtFlags};
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
-use std::fs::{self, Metadata};
+use std::fs::{self, Metadata, OpenOptions};
 use std::io;
 use std::mem::{size_of, MaybeUninit};
-use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
+use std::os::unix::{
+    ffi::OsStrExt,
+    fs::{MetadataExt, OpenOptionsExt},
+};
 use std::path::Path;
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,7 +32,104 @@ unsafe extern "C" {
     fn acl_free(value: *mut c_void) -> c_int;
 }
 
-pub(super) fn describe(path: &Path, metadata: &Metadata, cancel: &AtomicBool) -> Option<String> {
+pub(super) fn capture_mount(path: &Path) -> Result<MutationMount, TransferError> {
+    let mut mount = MutationMount::new(SmbMutationAction::ReadProperties);
+    mount.check(path)?;
+    Ok(mount)
+}
+
+pub(super) fn is_mount_error(error: &TransferError) -> bool {
+    matches!(error, TransferError::Failed(Failure::Mutation(error))
+        if matches!(error.as_ref(), MutationError::SmbMount { .. }))
+}
+
+pub(super) fn read_item(
+    path: &Path,
+    cancel: &AtomicBool,
+    mount: &MutationMount,
+) -> Result<(Metadata, String), TransferError> {
+    let location = Location::Local(path.to_owned());
+    let read = || -> Result<Metadata, TransferError> {
+        fs::symlink_metadata(path)
+            .map_err(|error| AccessError::new(&location, AccessAction::ReadMetadata, error).into())
+    };
+    mount.recheck()?;
+    let result = (|| {
+        let metadata = read()?;
+        if mount.is_owned() {
+            verify_selected_entry(&location, &metadata, mount)?;
+        }
+        let mut details = super::details(&metadata);
+        if let Some(extended) = describe(path, &metadata, cancel) {
+            details.push('\n');
+            details.push_str(&extended);
+        }
+        if mount.is_owned() {
+            mount.recheck()?;
+            if !same_item(&metadata, &read()?) {
+                return Err(ScanError::PropertiesItemChanged(location.clone()).into());
+            }
+        }
+        Ok((metadata, details))
+    })();
+    mount.recheck().and(result)
+}
+
+fn verify_selected_entry(
+    location: &Location,
+    metadata: &Metadata,
+    mount: &MutationMount,
+) -> Result<(), TransferError> {
+    let path = location.path();
+    let read_open_metadata = |error| {
+        AccessError::new(
+            location,
+            AccessAction::ReadOpenMetadata,
+            io::Error::from(error),
+        )
+    };
+    let actual = if metadata.is_dir() {
+        let directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_SEARCH | libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(|error| AccessError::new(location, AccessAction::OpenFile, error))?;
+        mount.verify_directory(&directory, path, path)?;
+        fstat(&directory).map_err(read_open_metadata)?
+    } else {
+        // Reading metadata relative to the verified parent also works for
+        // symlinks and special files without opening the file or its target.
+        let Some(parent) = mount.open_parent(path)? else {
+            return Err(mount.changed(path));
+        };
+        let name = path
+            .file_name()
+            .ok_or_else(|| ScanError::PropertiesItemChanged(location.clone()))?;
+        let actual = statat(&parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|error| {
+            AccessError::new(location, AccessAction::ReadMetadata, io::Error::from(error))
+        })?;
+        if actual.st_dev != fstat(&parent).map_err(read_open_metadata)?.st_dev {
+            return Err(ScanError::OtherVolume(location.clone()).into());
+        }
+        actual
+    };
+    if (
+        actual.st_dev as u64,
+        actual.st_ino,
+        actual.st_ctime,
+        actual.st_ctime_nsec,
+    ) != (
+        metadata.dev(),
+        metadata.ino(),
+        metadata.ctime(),
+        metadata.ctime_nsec(),
+    ) {
+        return Err(ScanError::PropertiesItemChanged(location.clone()).into());
+    }
+    Ok(())
+}
+
+fn describe(path: &Path, metadata: &Metadata, cancel: &AtomicBool) -> Option<String> {
     let active = || !cancel.load(Ordering::Relaxed);
     if !active() {
         return None;

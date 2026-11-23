@@ -264,7 +264,7 @@ impl Scan<'_> {
             let mut child = Node::new(relative, Kind::Other, Some(node));
             let stat = match stat {
                 Ok(stat) if mount.is_some() && stat.st_dev != device => {
-                    Err(ScanError::DiskUsageOtherVolume(location.join(name)).into())
+                    Err(ScanError::OtherVolume(location.join(name)).into())
                 }
                 Ok(stat) => Ok(stat),
                 Err(error) => {

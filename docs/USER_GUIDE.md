@@ -277,6 +277,8 @@ On macOS, local Properties also show each selected item's file system, the hard-
 
 While counting, **Stop calculation** receives initial keyboard focus. Press `Space` or `Enter` to stop and keep the partial result. Close the window or press `Esc` to dismiss it and request cancellation. Cancellation takes effect between filesystem or SFTP requests. When an entry disappears or cannot be read, the window identifies the result as partial.
 
+For SMB shares connected through PawCommander, **Properties** keep measurements from the verified volume. If a share disconnects or changes, its calculation stops with the path and reason. A separately mounted volume inside the share is skipped.
+
 ### Create and inspect links on macOS
 
 Choose **Create link** from the command palette or a local file's context menu. Enter a new name in the active folder, select **Symbolic link** or **Hard link**, and set the target path. A single selection fills in the target. Relative paths start in the folder where the link will appear. The name must be unused. Hard links require a regular file on the same volume. A symbolic link may point to a folder or a path that does not exist yet.
