@@ -2,6 +2,7 @@ mod protocol;
 mod view;
 mod worker;
 
+use crate::file_error::{PdfError, PdfProblem as Problem};
 use serde::{Deserialize, Serialize};
 
 pub(super) use view::Document;
@@ -48,44 +49,7 @@ struct Image {
 enum Answer {
     Page(Image),
     Matches(Vec<usize>),
-    Error(Problem),
-}
-
-#[derive(Clone, Copy, Serialize, Deserialize)]
-enum Problem {
-    Invalid,
-    Locked,
-    TooLarge,
-    TooManyPages,
-    Page,
-    Search,
-    Service,
-    Timeout,
-}
-
-impl Problem {
-    fn message(self) -> &'static str {
-        match self {
-            Self::Invalid => {
-                crate::i18n::text!("Не удалось открыть PDF. Возможно, документ повреждён.")
-            }
-            Self::Locked => crate::i18n::text!("PDF защищён паролем."),
-            Self::TooLarge => {
-                crate::i18n::text!("PDF больше 64 МиБ. Откройте его во внешнем приложении.")
-            }
-            Self::TooManyPages => {
-                crate::i18n::text!(
-                    "В PDF больше 10 000 страниц. Откройте его во внешнем приложении."
-                )
-            }
-            Self::Page => crate::i18n::text!("Не удалось показать страницу PDF."),
-            Self::Search => crate::i18n::text!("Не удалось выполнить поиск по PDF."),
-            Self::Service => {
-                crate::i18n::text!("Предпросмотр PDF прервался. Откройте документ снова.")
-            }
-            Self::Timeout => crate::i18n::text!("PDF не ответил вовремя. Откройте документ снова."),
-        }
-    }
+    Error(PdfError),
 }
 
 fn accepts_query(text: &str) -> bool {

@@ -20,6 +20,8 @@ mod table;
 use self::encoding::Codec;
 use self::source::Target;
 use crate::file_error::{AccessAction, AccessError, MutationError, PreviewError};
+#[cfg(target_os = "macos")]
+use crate::file_error::{PdfAction, PdfError, PdfProblem};
 use crate::i18n::file_error;
 use crate::operations::{Cancellation, TransferError};
 use crate::vfs::{self, Location};
@@ -865,7 +867,7 @@ fn remote_file_preview(
     }
     #[cfg(target_os = "macos")]
     if pdf::is_pdf(location.path()) {
-        return pdf_content(bytes, length, cancel);
+        return pdf_content(location, bytes, length, cancel);
     }
     if image_path_format(location.path()).is_none() {
         return Ok(text_content(target, bytes, quick_look, encoding));
@@ -974,10 +976,10 @@ fn load_content(
     #[cfg(target_os = "macos")]
     if pdf::is_pdf(path) {
         if length > pdf::FILE_LIMIT as u64 {
-            return Err(pdf_too_large().into());
+            return Err(pdf_too_large(&target.location));
         }
         let bytes = read_bounded(target, pdf::FILE_LIMIT, cancel)?;
-        return pdf_content(bytes, length, cancel);
+        return pdf_content(&target.location, bytes, length, cancel);
     }
     if image_path_format(path).is_some() {
         if length > IMAGE_LIMIT {
@@ -1063,21 +1065,25 @@ fn text_content(
 
 #[cfg(target_os = "macos")]
 fn pdf_content(
+    location: &Location,
     bytes: Vec<u8>,
     length: u64,
     cancel: &Cancellation,
 ) -> Result<Content, TransferError> {
     if length > pdf::FILE_LIMIT as u64 || bytes.len() > pdf::FILE_LIMIT {
-        return Err(pdf_too_large().into());
+        return Err(pdf_too_large(location));
     }
-    pdf::Document::open(bytes, cancel)
-        .map(|document| Content::Pdf(Box::new(document)))
-        .map_err(Into::into)
+    pdf::Document::open(location, bytes, cancel).map(|document| Content::Pdf(Box::new(document)))
 }
 
 #[cfg(target_os = "macos")]
-fn pdf_too_large() -> String {
-    crate::i18n::text!("PDF больше 64 МиБ. Откройте его во внешнем приложении.").into()
+fn pdf_too_large(location: &Location) -> TransferError {
+    PdfError::Rejected {
+        action: PdfAction::Open,
+        problem: PdfProblem::TooLarge,
+    }
+    .at(location)
+    .into()
 }
 
 fn open_regular(path: &Path) -> Result<File, TransferError> {

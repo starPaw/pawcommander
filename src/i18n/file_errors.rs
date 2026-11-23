@@ -14,9 +14,10 @@ use crate::file_error::{
 use crate::file_error::{
     CollectionAction, CollectionError, CollectionUnavailable, CompatiblePlanError, DuplicateError,
     DuplicateRole, FilePromiseError, FileTemplateError, LinkCreateError, LinkIoAction, MediaAction,
-    MediaError, RemoteEditError, ResumeCheckError, ResumeCheckProblem, ResumeRecordEvent,
-    ResumeRole, ScanLimit, ScanLimitKind, SyncDifference, SyncError, SyncExclusionProblem,
-    SyncFolderRole, SyncStateAction, SyncStateKind, SyncStateProblem, SyncVerification,
+    MediaError, PdfAction, PdfError, PdfProblem, RemoteEditError, ResumeCheckError,
+    ResumeCheckProblem, ResumeRecordEvent, ResumeRole, ScanLimit, ScanLimitKind, SyncDifference,
+    SyncError, SyncExclusionProblem, SyncFolderRole, SyncStateAction, SyncStateKind,
+    SyncStateProblem, SyncVerification,
 };
 use crate::file_error::{
     RecoveryRecordAction, RecoveryRecordError, RecoveryRecordProblem, RecoveryRecordSection,
@@ -2338,9 +2339,74 @@ fn preview_error(error: &PreviewError) -> String {
         }
         #[cfg(target_os = "macos")]
         PreviewError::Media { location, cause } => return media_preview_error(location, cause),
+        #[cfg(target_os = "macos")]
+        PreviewError::Pdf { location, cause } => return pdf_preview_error(location, cause),
         PreviewError::WorkerUnavailable => return text!("Служба предпросмотра недоступна").into(),
     };
     format!("{message} · {location}")
+}
+
+#[cfg(target_os = "macos")]
+fn pdf_preview_error(location: &Location, error: &PdfError) -> String {
+    let stopped = text!("Предпросмотр PDF прервался. Откройте документ снова.");
+    match error {
+        PdfError::Rejected { action, problem } => {
+            let message = match problem {
+                PdfProblem::Invalid => {
+                    text!("Не удалось открыть PDF. Возможно, документ повреждён.")
+                }
+                PdfProblem::Locked => text!("PDF защищён паролем."),
+                PdfProblem::TooLarge => {
+                    text!("PDF больше 64 МиБ. Откройте его во внешнем приложении.")
+                }
+                PdfProblem::TooManyPages => {
+                    text!("В PDF больше 10 000 страниц. Откройте его во внешнем приложении.")
+                }
+                PdfProblem::Page => text!("Не удалось показать страницу PDF."),
+                PdfProblem::Search => text!("Не удалось выполнить поиск по PDF."),
+            };
+            match action {
+                PdfAction::RenderPage(_) => {
+                    format!("{message}\n{location}\n{}", pdf_action(*action))
+                }
+                _ => format!("{message}\n{location}"),
+            }
+        }
+        PdfError::Io { action, source } => {
+            let summary = if source.kind() == std::io::ErrorKind::TimedOut {
+                text!("PDF не ответил вовремя. Откройте документ снова.")
+            } else {
+                stopped
+            };
+            format!("{summary}\n{location}\n{}\n{source}", pdf_action(*action))
+        }
+        PdfError::InvalidResponse(action) => format!(
+            "{}\n{location}\n{}",
+            text!("Служба предпросмотра PDF вернула неверный ответ."),
+            pdf_action(*action)
+        ),
+        PdfError::WorkerUnavailable => format!("{stopped}\n{location}"),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn pdf_action(action: PdfAction) -> String {
+    match action {
+        PdfAction::LaunchHelper => text!("Запуск процесса предпросмотра PDF").into(),
+        PdfAction::Open => text!("Открытие PDF").into(),
+        PdfAction::StartReader => text!("Запуск службы чтения PDF").into(),
+        PdfAction::RenderPage(page) => format!(
+            "{} · {}",
+            text!("Отрисовка страницы PDF"),
+            page.saturating_add(1)
+        ),
+        PdfAction::ReadRaster(page) => format!(
+            "{} · {}",
+            text!("Чтение изображения страницы PDF"),
+            page.saturating_add(1)
+        ),
+        PdfAction::Search => text!("Поиск по документу PDF").into(),
+    }
 }
 
 #[cfg(target_os = "macos")]
