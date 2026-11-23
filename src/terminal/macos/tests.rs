@@ -22,6 +22,24 @@ fn terminal_passes_local_folder_as_one_native_argument() {
 }
 
 #[test]
+fn terminal_preserves_a_missing_folder_errno_and_the_open_rejection() {
+    let root = tempfile::tempdir().unwrap();
+    let missing = Location::Local(root.path().join("missing folder"));
+    assert!(matches!(
+        open(&missing),
+        Err(OpenError::ReadFolder(error)) if error.raw_os_error() == Some(libc::ENOENT)
+    ));
+
+    let mut reject = Command::new("/bin/sh");
+    reject.args(["-c", r"printf 'fixture: \377\n' >&2; exit 73"]);
+    assert!(matches!(
+        open_document(reject),
+        Err(OpenError::Rejected { status, stderr })
+            if status.code() == Some(73) && stderr == b"fixture: \xff\n"
+    ));
+}
+
+#[test]
 fn terminal_launcher_is_private_preserves_bytes_and_removes_itself() {
     let arg = OsString::from_vec(b"value '\" * & \\ % \n\xff".to_vec());
     let key = OsStr::new("key ' with %h ${USER}");
@@ -69,13 +87,25 @@ fn terminal_ssh_uses_explicit_coordinates_and_validates_folder() {
     );
     assert_eq!(args.len(), 8);
     assert_eq!(command.get_envs().count(), 0);
-    assert!(ssh_command(&endpoint, Path::new("relative")).is_err());
-    assert!(ssh_command(&endpoint, Path::new("/bad\0path")).is_err());
+    assert!(matches!(
+        ssh_command(&endpoint, Path::new("relative")),
+        Err(SshCommandError::Folder)
+    ));
+    assert!(matches!(
+        ssh_command(&endpoint, Path::new("/bad\0path")),
+        Err(SshCommandError::Folder)
+    ));
     endpoint.host = "-option".into();
-    assert!(ssh_command(&endpoint, Path::new("/")).is_err());
+    assert!(matches!(
+        ssh_command(&endpoint, Path::new("/")),
+        Err(SshCommandError::Host)
+    ));
     endpoint.host = "localhost".into();
     endpoint.user = "first\nsecond".into();
-    assert!(ssh_command(&endpoint, Path::new("/")).is_err());
+    assert!(matches!(
+        ssh_command(&endpoint, Path::new("/")),
+        Err(SshCommandError::UserOrPort)
+    ));
 }
 
 #[test]

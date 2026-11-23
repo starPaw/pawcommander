@@ -1,35 +1,66 @@
 use super::Location;
-use crate::i18n::text;
 use crate::vfs::Endpoint;
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::io::{self, Write};
 use std::os::unix::{ffi::OsStrExt, fs::PermissionsExt};
-use std::path::Path;
-use std::process::{Command, Stdio};
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitStatus, Stdio};
 
 const IDENTITY_PATH: &str = "PAWCOMMANDER_TERMINAL_IDENTITY_FILE";
 const REMOTE_SHELL: &str = r#"folder=$(printf %b "$1.") || exit 1; folder=${folder%.}; cd "$folder" || exit 1; exec "${SHELL:-/bin/sh}" -i"#;
 
-pub(crate) fn open(folder: &Location) -> Result<String, String> {
+pub(crate) enum OpenRequest {
+    Folder,
+    Ssh,
+}
+
+#[derive(Debug)]
+pub(crate) enum OpenError {
+    ResolveFolder(io::Error),
+    ReadFolder(io::Error),
+    NotDirectory,
+    Ssh(SshCommandError),
+    Launcher(io::Error),
+    StartOpen(io::Error),
+    Rejected { status: ExitStatus, stderr: Vec<u8> },
+    Archive,
+    StartWorker(io::Error),
+    WorkerStopped,
+}
+
+#[derive(Debug)]
+pub(crate) enum SshCommandError {
+    ProxyJump,
+    Host,
+    UserOrPort,
+    Folder,
+    ResolveKey { path: PathBuf, source: io::Error },
+    NulKey,
+}
+
+pub(crate) fn open(folder: &Location) -> Result<OpenRequest, OpenError> {
     match folder {
         Location::Local(path) => {
-            let path = std::path::absolute(path).map_err(launch_error)?;
-            if !std::fs::metadata(&path).map_err(launch_error)?.is_dir() {
-                return Err(text!("Выберите папку для открытия терминала.").into());
+            let path = std::path::absolute(path).map_err(OpenError::ResolveFolder)?;
+            if !std::fs::metadata(&path)
+                .map_err(OpenError::ReadFolder)?
+                .is_dir()
+            {
+                return Err(OpenError::NotDirectory);
             }
-            open_document(&path)?;
-            Ok(text!("Запрос открытия передан Terminal.").into())
+            open_document(document_command(&path))?;
+            Ok(OpenRequest::Folder)
         }
         Location::Sftp { endpoint, path } => {
-            let ssh = ssh_command(endpoint, path)?;
-            let mut script = create_launcher(&ssh).map_err(launch_error)?;
-            open_document(script.path())?;
+            let ssh = ssh_command(endpoint, path).map_err(OpenError::Ssh)?;
+            let mut script = create_launcher(&ssh).map_err(OpenError::Launcher)?;
+            open_document(document_command(script.path()))?;
             // Terminal reads the document asynchronously and unlinks it on start.
             script.disable_cleanup(true);
-            Ok(text!("Запрос SSH-сеанса передан Terminal.").into())
+            Ok(OpenRequest::Ssh)
         }
-        Location::Archive { .. } => Err(crate::i18n::archive_read_only().into()),
+        Location::Archive { .. } => Err(OpenError::Archive),
     }
 }
 
@@ -39,36 +70,23 @@ fn document_command(path: &Path) -> Command {
     command
 }
 
-fn open_document(path: &Path) -> Result<(), String> {
-    let output = document_command(path)
+fn open_document(mut command: Command) -> Result<(), OpenError> {
+    let output = command
         .stdin(Stdio::null())
         .output()
-        .map_err(launch_error)?;
+        .map_err(OpenError::StartOpen)?;
     if output.status.success() {
         return Ok(());
     }
-    let status = output.status;
-    let details = String::from_utf8_lossy(&output.stderr);
-    let details = details.trim();
-    Err(crate::tr_format!(
-        "Terminal did not accept the open request ({status}). {details}",
-        details = details,
-        status = status
-    )
-    .trim_end()
-    .to_owned())
+    Err(OpenError::Rejected {
+        status: output.status,
+        stderr: output.stderr,
+    })
 }
 
-fn launch_error(error: io::Error) -> String {
-    crate::tr_format!("Could not open the terminal. {error}", error = error)
-}
-
-pub(super) fn ssh_command(endpoint: &Endpoint, path: &Path) -> Result<Command, String> {
+pub(super) fn ssh_command(endpoint: &Endpoint, path: &Path) -> Result<Command, SshCommandError> {
     if endpoint.jump.is_some() {
-        return Err(text!(
-            "Для этого подключения нужен маршрут ProxyJump. Откройте SSH-алиас в Terminal или Zed.",
-        )
-        .into());
+        return Err(SshCommandError::ProxyJump);
     }
     let host = endpoint.host_name();
     if host.is_empty()
@@ -77,7 +95,7 @@ pub(super) fn ssh_command(endpoint: &Endpoint, path: &Path) -> Result<Command, S
             .chars()
             .all(|ch| ch.is_alphanumeric() || matches!(ch, '.' | '-' | '_' | ':' | '%'))
     {
-        return Err(text!("Некорректный сервер для SSH-сеанса.").into());
+        return Err(SshCommandError::Host);
     }
     if endpoint.port == 0
         || endpoint.user.is_empty()
@@ -87,7 +105,7 @@ pub(super) fn ssh_command(endpoint: &Endpoint, path: &Path) -> Result<Command, S
             .chars()
             .all(|ch| ch.is_alphanumeric() || matches!(ch, '-' | '_' | '.' | '@' | '+'))
     {
-        return Err(text!("Проверьте пользователя и порт для SSH-сеанса.").into());
+        return Err(SshCommandError::UserOrPort);
     }
     let remote = remote_command(path)?;
     let mut command = Command::new("/usr/bin/ssh");
@@ -99,10 +117,13 @@ pub(super) fn ssh_command(endpoint: &Endpoint, path: &Path) -> Result<Command, S
         &endpoint.user,
     ]);
     if let Some(key) = &endpoint.key {
-        let key = std::path::absolute(key).map_err(launch_error)?;
+        let key = std::path::absolute(key).map_err(|source| SshCommandError::ResolveKey {
+            path: key.clone(),
+            source,
+        })?;
         let bytes = key.as_os_str().as_bytes();
         if bytes.contains(&0) {
-            return Err(text!("Путь к ключу SSH содержит NUL.").into());
+            return Err(SshCommandError::NulKey);
         }
         if bytes.contains(&b'%') || bytes.windows(2).any(|pair| pair == b"${") {
             // OpenSSH expands IdentityFile tokens. A variable value is inserted as data.
@@ -117,11 +138,11 @@ pub(super) fn ssh_command(endpoint: &Endpoint, path: &Path) -> Result<Command, S
     Ok(command)
 }
 
-fn remote_command(path: &Path) -> Result<String, String> {
+fn remote_command(path: &Path) -> Result<String, SshCommandError> {
     let path = path
         .to_str()
         .filter(|path| path.starts_with('/') && !path.contains('\0'))
-        .ok_or_else(|| text!("Для SSH-сеанса нужен абсолютный путь UTF-8.").to_owned())?;
+        .ok_or(SshCommandError::Folder)?;
     // ssh sends a command string to the account's shell. Encode the folder
     // as a data argument and decode it inside the fixed POSIX program.
     let mut command = format!("/bin/sh -c '{REMOTE_SHELL}' pawcommander '");

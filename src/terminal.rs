@@ -14,4 +14,7 @@ pub(crate) mod embedded;
 mod pty;
 
 #[cfg(target_os = "macos")]
-pub(crate) use macos::open;
+pub(crate) use macos::{open, OpenError, OpenRequest, SshCommandError};
+
+#[cfg(target_os = "macos")]
+pub(crate) use pty::PtySpawnError;

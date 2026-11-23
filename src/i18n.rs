@@ -8,6 +8,8 @@ mod file_errors;
 mod formats;
 #[cfg(target_os = "macos")]
 mod smb;
+#[cfg(target_os = "macos")]
+pub(crate) mod terminal;
 pub(crate) use catalog::key;
 pub(crate) use file_errors::{
     access_io_message, archive_io_message, connection_result_error, credential_error,

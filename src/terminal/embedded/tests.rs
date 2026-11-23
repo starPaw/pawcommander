@@ -25,7 +25,7 @@ fn until(session: &mut Session, matches: impl Fn(&Session) -> bool) {
             return;
         }
         if let State::Failed(error) = &session.state {
-            panic!("terminal failed: {error}");
+            panic!("terminal failed: {error:?}");
         }
         assert!(
             Instant::now() < deadline,
@@ -34,6 +34,29 @@ fn until(session: &mut Session, matches: impl Fn(&Session) -> bool) {
         );
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[test]
+fn embedded_terminal_preserves_the_process_and_errno_if_its_folder_disappears() {
+    use crate::terminal::PtySpawnError;
+
+    let root = tempfile::tempdir().unwrap();
+    let folder = root.path().join("removed folder");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::remove_dir(&folder).unwrap();
+    let ctx = egui::Context::default();
+    let mut session = Session::start_with(&ctx, move || {
+        let mut shell = Command::new("/bin/sh");
+        shell.current_dir(folder);
+        Ok(shell)
+    })
+    .unwrap();
+    until(&mut session, |session| session.state.finished());
+    assert!(matches!(
+        &session.state,
+        State::Failed(SessionError::Spawn(PtySpawnError::Process { program, source }))
+            if program == std::path::Path::new("/bin/sh") && source.raw_os_error() == Some(libc::ENOENT)
+    ));
 }
 
 #[test]
@@ -227,7 +250,8 @@ fn openssh_terminal_embedded_propagates_pty_size_and_folder() {
     let known_hosts = root.join("known_hosts");
     let ctx = egui::Context::default();
     let mut terminal = Session::start_with(&ctx, move || {
-        let ssh = crate::terminal::macos::ssh_command(&endpoint, &target)?;
+        let ssh =
+            crate::terminal::macos::ssh_command(&endpoint, &target).map_err(SessionError::Ssh)?;
         let mut command = Command::new(ssh.get_program());
         command
             .args([

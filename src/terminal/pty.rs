@@ -4,6 +4,7 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::fd::AsRawFd;
 use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt, process::CommandExt};
+use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
@@ -13,13 +14,25 @@ const TIOCSCTTY: libc::c_ulong = 0x2000_7461;
 const TIOCSWINSZ: libc::c_ulong = 0x8008_7467;
 const HANGUP_GRACE: Duration = Duration::from_millis(180);
 
+#[derive(Debug)]
+pub(crate) enum PtySpawnError {
+    Setup(io::Error),
+    Process { program: PathBuf, source: io::Error },
+}
+
+impl From<io::Error> for PtySpawnError {
+    fn from(error: io::Error) -> Self {
+        Self::Setup(error)
+    }
+}
+
 pub(super) struct Pty {
     master: Option<File>,
     child: Child,
 }
 
 impl Pty {
-    pub(super) fn spawn(mut command: Command, size: Size) -> io::Result<Self> {
+    pub(super) fn spawn(mut command: Command, size: Size) -> Result<Self, PtySpawnError> {
         // OpenOptions marks both descriptors close-on-exec at open, including
         // while other PawCommander workers concurrently launch helpers.
         let master = OpenOptions::new()
@@ -59,7 +72,10 @@ impl Pty {
                 Ok(())
             });
         }
-        let child = command.spawn()?;
+        let child = command.spawn().map_err(|source| PtySpawnError::Process {
+            program: command.get_program().into(),
+            source,
+        })?;
         Ok(Self {
             master: Some(master),
             child,
