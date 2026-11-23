@@ -13,7 +13,8 @@ use super::directory::{
 use super::entry_widget::{entry_widget, EntryOptions, COMPACT_FILE_ROW_HEIGHT};
 use super::footer::operation_details;
 use super::jobs::{
-    wait_for_conflict_answer, Job, TransferEvent, TransferInteraction, MAX_PENDING_JOBS,
+    wait_for_conflict_answer, Job, JobCompletion, TransferEvent, TransferInteraction,
+    MAX_PENDING_JOBS,
 };
 use super::pane_view::{render_pane, PaneOptions};
 use super::selection::RuleKind;
@@ -128,7 +129,7 @@ fn operation_footer_text(output: &egui::FullOutput) -> String {
         .join("\n")
 }
 
-fn hold_queue(app: &mut PawCommander) -> mpsc::Sender<Result<String, String>> {
+fn hold_queue(app: &mut PawCommander) -> mpsc::Sender<JobCompletion> {
     let (send, receive) = mpsc::channel();
     let (_, progress) = Progress::tracked();
     app.jobs.current = Some(Job {
@@ -139,6 +140,8 @@ fn hold_queue(app: &mut PawCommander) -> mpsc::Sender<Result<String, String>> {
         result: receive,
         undo: None,
         progress,
+        #[cfg(target_os = "macos")]
+        remote_save: false,
     });
     send
 }

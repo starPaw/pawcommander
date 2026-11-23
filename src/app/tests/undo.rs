@@ -32,7 +32,8 @@ fn history_undo_owns_one_queued_request_survives_remove_and_spawn_failure() {
     assert_eq!(app.history.undoable[&id], 1);
     app.undo_operation(&ctx, &id);
     app.jobs.fail_spawn = true;
-    held.send(Ok("release".into())).unwrap();
+    held.send(JobCompletion::Text(Ok("release".into())))
+        .unwrap();
     poll_queue_until(&mut app, &ctx, |app| app.jobs.start_failed);
     assert_eq!(app.jobs.pending.len(), 1);
     assert!(!source.path().exists());
@@ -79,7 +80,8 @@ fn history_undo_rechecks_at_dispatch_and_retains_only_failed_work() {
     let held = hold_queue(&mut app);
     app.undo_operation(&ctx, &id);
     std::fs::write(source.join("a").path(), b"external occupant").unwrap();
-    held.send(Ok("release".into())).unwrap();
+    held.send(JobCompletion::Text(Ok("release".into())))
+        .unwrap();
     poll_queue_until(&mut app, &ctx, |app| !app.jobs.is_busy());
     assert_eq!(
         std::fs::read(source.join("a").path()).unwrap(),

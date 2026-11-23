@@ -59,12 +59,71 @@ pub(super) struct Job {
     pub(super) cut: Option<CutRequest>,
     pub(super) label: String,
     pub(super) started: Instant,
-    pub(super) result: Receiver<Result<String, String>>,
+    pub(super) result: Receiver<JobCompletion>,
     pub(super) progress: ProgressView,
     pub(super) undo: Option<Receiver<UndoJob>>,
+    #[cfg(target_os = "macos")]
+    pub(super) remote_save: bool,
 }
 
-pub(super) type JobWork = Box<dyn FnOnce(&mut Progress) -> Result<String, TransferError> + Send>;
+type TextWork = Box<dyn FnOnce(&mut Progress) -> Result<String, TransferError> + Send>;
+
+enum JobWork {
+    Text(TextWork),
+    #[cfg(target_os = "macos")]
+    RemoteSave(Box<crate::vfs::RemoteEdit>),
+}
+
+enum WorkResult {
+    Text(Result<String, TransferError>),
+    #[cfg(target_os = "macos")]
+    RemoteSave(
+        Box<crate::vfs::RemoteEdit>,
+        super::external_editors::SaveResult,
+    ),
+}
+
+impl JobWork {
+    fn text(
+        work: impl FnOnce(&mut Progress) -> Result<String, TransferError> + Send + 'static,
+    ) -> Self {
+        Self::Text(Box::new(work))
+    }
+
+    fn run(self, progress: &mut Progress) -> WorkResult {
+        match self {
+            Self::Text(work) => WorkResult::Text(work(progress)),
+            #[cfg(target_os = "macos")]
+            Self::RemoteSave(mut edit) => {
+                let result = edit.save(progress);
+                WorkResult::RemoteSave(edit, result)
+            }
+        }
+    }
+}
+
+pub(super) enum JobCompletion {
+    Text(Result<String, String>),
+    #[cfg(target_os = "macos")]
+    RemoteSave {
+        edit: Box<crate::vfs::RemoteEdit>,
+        result: super::external_editors::SaveResult,
+        history_warning: Option<String>,
+    },
+}
+
+fn append_history_warning(
+    result: Result<String, String>,
+    warning: Option<String>,
+) -> Result<String, String> {
+    match warning {
+        Some(warning) => Err(format!(
+            "{}\n{warning}",
+            result.unwrap_or_else(|error| error)
+        )),
+        None => result,
+    }
+}
 
 pub(super) type CutRequest = (u64, Vec<Location>);
 
@@ -73,13 +132,24 @@ pub(super) type CutRequest = (u64, Vec<Location>);
 pub(super) struct PendingJob {
     pub(super) label: String,
     pub(super) description: String,
-    pub(super) work: JobWork,
+    work: JobWork,
     pub(super) transfer: Option<TransferInteraction>,
     pub(super) cut: Option<CutRequest>,
     retry_origin: Option<RetryJob>,
     undo_origin: Option<UndoJob>,
     #[cfg(target_os = "macos")]
     native_completion: Option<mpsc::Sender<Result<(), TransferError>>>,
+}
+
+#[cfg(test)]
+impl PendingJob {
+    pub(super) fn run_text_work(self, progress: &mut Progress) -> Result<String, TransferError> {
+        match self.work.run(progress) {
+            WorkResult::Text(result) => result,
+            #[cfg(target_os = "macos")]
+            WorkResult::RemoteSave(..) => panic!("expected a text work result"),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -175,7 +245,7 @@ impl PawCommander {
             PendingJob {
                 label: label.into(),
                 description,
-                work: Box::new(move |progress| work(progress).map_err(TransferError::from)),
+                work: JobWork::text(move |progress| work(progress).map_err(TransferError::from)),
                 transfer: None,
                 cut: None,
                 retry_origin: None,
@@ -200,7 +270,7 @@ impl PawCommander {
             PendingJob {
                 label: label.into(),
                 description,
-                work: Box::new(move |progress| {
+                work: JobWork::text(move |progress| {
                     plan.apply(progress)
                         .map(super::batch_rename::rename_finished)
                 }),
@@ -234,7 +304,7 @@ impl PawCommander {
             PendingJob {
                 label: label.into(),
                 description,
-                work: Box::new(move |progress| {
+                work: JobWork::text(move |progress| {
                     let created = job.create(progress)?;
                     Ok(if let Some(warning) = created.cleanup_warning {
                         crate::i18n::file_error(&warning)
@@ -279,6 +349,38 @@ impl PawCommander {
     }
 
     #[cfg(target_os = "macos")]
+    pub(super) fn enqueue_remote_save(
+        &mut self,
+        edit: crate::vfs::RemoteEdit,
+        ctx: &egui::Context,
+    ) {
+        let label = crate::i18n::text!("Сохранение правки SFTP");
+        let description = format!(
+            "{label} · {}",
+            crate::i18n::display::launch_location(edit.target())
+        );
+        let (_, events) = mpsc::channel();
+        self.submit_job(
+            ctx,
+            PendingJob {
+                label: label.into(),
+                description,
+                work: JobWork::RemoteSave(Box::new(edit)),
+                transfer: Some(TransferInteraction {
+                    events,
+                    cut_generation: None,
+                    conflict: None,
+                    can_pause: false,
+                }),
+                cut: None,
+                retry_origin: None,
+                undo_origin: None,
+                native_completion: None,
+            },
+        );
+    }
+
+    #[cfg(target_os = "macos")]
     pub(super) fn enqueue_compatible_names(
         &mut self,
         plan: crate::vfs::compatible_names::Plan,
@@ -293,7 +395,7 @@ impl PawCommander {
             PendingJob {
                 label: label.into(),
                 description,
-                work: Box::new(move |progress| {
+                work: JobWork::text(move |progress| {
                     progress.set_copy_verification(verify);
                     let summary = plan.apply(progress).map_err(|failure| {
                         let error = crate::i18n::file_error(&failure.error);
@@ -378,7 +480,7 @@ impl PawCommander {
             PendingJob {
                 label: label.into(),
                 description,
-                work: Box::new(move |progress| {
+                work: JobWork::text(move |progress| {
                     progress.resume_directory = recovery;
                     progress.set_copy_verification(verify);
                     let delivery = fs_ops::copy_sftp_for_drop(&source, &target, kind, progress)?;
@@ -427,7 +529,7 @@ impl PawCommander {
             PendingJob {
                 label: label.into(),
                 description,
-                work: Box::new(move |progress| {
+                work: JobWork::text(move |progress| {
                     crate::vfs::resume_copy::resume(&directory, &offer.id, progress)
                         .map(crate::i18n::resume_completion)
                         .or_else(|error| {
@@ -472,7 +574,7 @@ impl PawCommander {
             PendingJob {
                 label: label.into(),
                 description,
-                work: Box::new(move |progress| {
+                work: JobWork::text(move |progress| {
                     let cancel = progress.cancellation();
                     work(progress, &mut |conflict| {
                         ask_conflict(&events, &worker_ctx, &cancel, conflict)
@@ -506,6 +608,11 @@ impl PawCommander {
             rejection
         };
         if let Some(message) = rejection {
+            #[cfg(target_os = "macos")]
+            if matches!(&job.work, JobWork::RemoteSave(_)) {
+                self.remote_editor
+                    .finish_save(None, Err(message.into()), None);
+            }
             if let Some(retry) = job.retry_origin {
                 self.remember_retry(retry);
             }
@@ -562,6 +669,8 @@ impl PawCommander {
             let history_label = label.clone();
             let recovery_directory = self.recovery.directory();
             let recovery_description = description.clone();
+            #[cfg(target_os = "macos")]
+            let remote_save = matches!(&work, JobWork::RemoteSave(_));
             // A failed OS spawn consumes its closure. Retain the work separately
             // so failure cannot discard this job or the jobs behind it.
             let work = Arc::new(Mutex::new(Some(work)));
@@ -574,7 +683,7 @@ impl PawCommander {
                     if let Some(completion) = &worker_completion {
                         let _ = completion.send(Err(error.clone().into()));
                     }
-                    let _ = tx.send(Err(error));
+                    let _ = tx.send(JobCompletion::Text(Err(error)));
                     worker_ctx.request_repaint();
                 };
                 let work = worker_work.lock().unwrap().take().unwrap();
@@ -610,8 +719,8 @@ impl PawCommander {
                 let outcome =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         match pending.as_ref() {
-                            Some(pending) => pending.run(|| work(&mut reporter)),
-                            None => Ok(work(&mut reporter)),
+                            Some(pending) => pending.run(|| work.run(&mut reporter)),
+                            None => Ok(work.run(&mut reporter)),
                         }
                     }));
                 let panicked = outcome.is_err();
@@ -631,24 +740,40 @@ impl PawCommander {
                         fail_to_start(message);
                         return;
                     }
-                    Err(_) => Err(crate::i18n::text!(
+                    Err(_) => WorkResult::Text(Err(crate::i18n::text!(
                         "Фоновая операция неожиданно завершилась. Проверьте файлы в обеих папках.",
                     )
-                    .into()),
+                    .into())),
                 };
                 // The native file promise acknowledges the file operation. History
                 // persistence and recovery record cleanup remain worker follow-up.
-                let display_result = if matches!(&result, Err(TransferError::Cancelled)) {
-                    reporter.results.cancelled = true;
-                    Ok(crate::tr_format!("Operation cancelled"))
-                } else {
-                    result.as_ref().cloned().map_err(crate::i18n::file_error)
-                };
                 #[cfg(target_os = "macos")]
-                if let Some(completion) = worker_completion {
-                    let _ = completion.send(result.map(|_| ()));
-                }
-                let result = display_result;
+                let mut saved_edit = None;
+                let result = match result {
+                    WorkResult::Text(result) => {
+                        let display = if matches!(&result, Err(TransferError::Cancelled)) {
+                            reporter.results.cancelled = true;
+                            Ok(crate::tr_format!("Operation cancelled"))
+                        } else {
+                            result.as_ref().cloned().map_err(crate::i18n::file_error)
+                        };
+                        #[cfg(target_os = "macos")]
+                        if let Some(completion) = worker_completion {
+                            let _ = completion.send(result.map(|_| ()));
+                        }
+                        display
+                    }
+                    #[cfg(target_os = "macos")]
+                    WorkResult::RemoteSave(edit, result) => {
+                        let snapshot = super::external_editors::save_notice(
+                            edit.target(),
+                            edit.copy(),
+                            &result,
+                        );
+                        saved_edit = Some((edit, result));
+                        snapshot
+                    }
+                };
                 let undo_id = undo_id.unwrap_or_else(|| reporter.results.id.clone());
                 let persisted = std::mem::take(&mut reporter.results)
                     .finish(history_label, history_started, &result)
@@ -673,14 +798,17 @@ impl PawCommander {
                         batch: reporter.undo,
                     });
                 }
-                let result = match warning {
-                    Some(warning) => Err(format!(
-                        "{}\n{warning}",
-                        result.unwrap_or_else(|error| error)
-                    )),
-                    None => result,
-                };
-                let _ = tx.send(result);
+                #[cfg(target_os = "macos")]
+                if let Some((edit, result)) = saved_edit {
+                    let _ = tx.send(JobCompletion::RemoteSave {
+                        edit,
+                        result,
+                        history_warning: warning,
+                    });
+                    worker_ctx.request_repaint();
+                    return;
+                }
+                let _ = tx.send(JobCompletion::Text(append_history_warning(result, warning)));
                 worker_ctx.request_repaint();
             };
             let builder = std::thread::Builder::new().name("pawcommander-file-operation".into());
@@ -725,6 +853,8 @@ impl PawCommander {
                 result: rx,
                 progress,
                 undo: Some(undo_receive),
+                #[cfg(target_os = "macos")]
+                remote_save,
             });
             ctx.request_repaint();
         }
@@ -820,7 +950,7 @@ impl PawCommander {
             PendingJob {
                 label: label.into(),
                 description,
-                work: Box::new(move |progress| {
+                work: JobWork::text(move |progress| {
                     let id = crate::result_history::operation_id();
                     progress.results.id = id.clone();
                     let send = |job| {
@@ -1025,7 +1155,7 @@ impl PawCommander {
             PendingJob {
                 label,
                 description,
-                work: Box::new(work),
+                work: JobWork::text(work),
                 transfer: Some(TransferInteraction {
                     events: rx,
                     cut_generation,
@@ -1117,7 +1247,7 @@ impl PawCommander {
             PendingJob {
                 label: label.into(),
                 description,
-                work: Box::new(move |progress| {
+                work: JobWork::text(move |progress| {
                     let result = batch.restore(progress);
                     progress.undo = batch;
                     Ok(match result? {
@@ -1151,6 +1281,11 @@ impl PawCommander {
 
     pub(super) fn remove_pending_job(&mut self, index: usize) {
         if let Some(job) = self.jobs.pending.remove(index) {
+            #[cfg(target_os = "macos")]
+            if matches!(&job.work, JobWork::RemoteSave(_)) {
+                self.remote_editor
+                    .finish_save(None, Err(TransferError::Cancelled), None);
+            }
             if let Some(retry) = job.retry_origin {
                 self.remember_retry(retry);
             }
@@ -1225,11 +1360,15 @@ impl PawCommander {
         if self.conflict_open() && self.dialog_file_focus.is_none() {
             self.remember_dialog_file_focus(ctx);
         }
-        if let Some(notice) = self
+        let application_notice = self
             .application_job
             .as_ref()
-            .and_then(super::actions::ApplicationJob::poll_notice)
-        {
+            .and_then(super::actions::ApplicationJob::poll_notice);
+        #[cfg(target_os = "macos")]
+        let application_error = application_notice
+            .as_ref()
+            .and_then(|(message, failed)| failed.then(|| message.clone()));
+        if let Some(notice) = application_notice {
             self.notice = Some(notice);
             self.application_job = None;
         }
@@ -1350,13 +1489,17 @@ impl PawCommander {
         if let Some(job) = &self.jobs.current {
             let result = match job.result.try_recv() {
                 Ok(result) => Some(result),
-                Err(mpsc::TryRecvError::Disconnected) => Some(Err(crate::i18n::text!(
-                    "Фоновая операция неожиданно завершилась. Проверьте файлы в обеих папках.",
-                )
-                .into())),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Some(JobCompletion::Text(Err(crate::i18n::text!(
+                        "Фоновая операция неожиданно завершилась. Проверьте файлы в обеих папках.",
+                    )
+                    .into())))
+                }
                 Err(mpsc::TryRecvError::Empty) => None,
             };
             if let Some(result) = result {
+                #[cfg(target_os = "macos")]
+                let remote_save = job.remote_save;
                 let undo = job
                     .undo
                     .as_ref()
@@ -1364,6 +1507,41 @@ impl PawCommander {
                 if let Some(undo) = undo {
                     self.remember_undo(undo);
                 }
+                let result = match result {
+                    JobCompletion::Text(result) => {
+                        #[cfg(target_os = "macos")]
+                        if remote_save && let Err(error) = &result {
+                            self.remote_editor
+                                .finish_save(None, Err(error.clone().into()), None);
+                        }
+                        result
+                    }
+                    #[cfg(target_os = "macos")]
+                    JobCompletion::RemoteSave {
+                        edit,
+                        result,
+                        history_warning,
+                    } => {
+                        let notice = super::external_editors::save_notice(
+                            edit.target(),
+                            edit.copy(),
+                            &result,
+                        );
+                        let notice = append_history_warning(notice, history_warning.clone());
+                        self.remote_editor
+                            .finish_save(Some(*edit), result, history_warning);
+                        notice
+                    }
+                };
+                #[cfg(target_os = "macos")]
+                let result = if remote_save && let Some(error) = application_error {
+                    Err(format!(
+                        "{error}\n\n{}",
+                        result.unwrap_or_else(|error| error)
+                    ))
+                } else {
+                    result
+                };
                 self.notice = Some(match result {
                     Ok(s) => (s, false),
                     Err(s) => (s, true),
