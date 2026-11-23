@@ -3261,6 +3261,21 @@ fn listing_error(error: &ListingError) -> String {
         error.location.path().display().to_string()
     };
     let (action, cause): (_, &dyn std::fmt::Display) = match &error.kind {
+        #[cfg(target_os = "macos")]
+        WorkerStart(source) => {
+            return crate::tr_format!(
+                "Could not start “{operation}”. {error}",
+                operation = format_args!("{} · {path}", text!("Чтение папки…")),
+                error = source
+            );
+        }
+        #[cfg(target_os = "macos")]
+        WorkerStopped => {
+            return format!(
+                "{} · {path}",
+                text!("Не удалось прочитать папку: фоновая задача завершилась")
+            );
+        }
         OpenLocal(source) => (text!("Не удалось прочитать папку"), source),
         #[cfg(target_os = "macos")]
         SmbMount(source) => {

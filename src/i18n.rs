@@ -123,10 +123,10 @@ pub(crate) fn inspection_report(report: &crate::vfs::InspectionReport) -> String
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn resume_completion(report: crate::vfs::resume_copy::ResumeCompletion) -> String {
+pub(crate) fn resume_completion(report: &crate::vfs::resume_copy::ResumeCompletion) -> String {
     use crate::vfs::resume_copy::Completion;
 
-    let mut message = match (report.moving, report.kind) {
+    let mut message = match (report.moving, &report.kind) {
         (true, Completion::Copied(offset)) => crate::tr_format!(
             "Move resumed at byte {offset} and completed.",
             offset = offset

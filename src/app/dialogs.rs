@@ -1,10 +1,11 @@
 use super::actions::SelectionChange;
 use super::batch_rename::BatchRenameDialog;
+use super::file_result::FileResult;
 use super::permissions::PermissionsDialog;
 use super::selection::{Rule, RuleKind};
 use super::state::Settings;
 use super::{file_name, PawCommander};
-use crate::archive::{ArchiveVerification, Format};
+use crate::archive::Format;
 use crate::shortcuts::Command;
 use crate::theme::Palette;
 use crate::vfs::{ArchiveEdit, Endpoint, FileEntry, Location};
@@ -141,74 +142,6 @@ fn archive_edit_command(edit: &ArchiveEdit) -> Command {
         ArchiveEdit::Add { .. } => Command::AddToArchive,
         ArchiveEdit::Remove(_) => Command::RemoveFromArchive,
         ArchiveEdit::Rename { .. } => Command::Rename,
-    }
-}
-
-fn archive_extraction_message(
-    result: Result<fs_ops::ExtractionSummary, fs_ops::ExtractionFailure>,
-) -> Result<String, String> {
-    use crate::operations::TransferError;
-
-    let summary_text = |summary: fs_ops::ExtractionSummary| {
-        crate::tr_format!(
-            "Extracted: {completed}. Skipped: {skipped}. Remaining: {remaining}.",
-            completed = summary.completed,
-            skipped = summary.skipped,
-            remaining = summary.remaining()
-        )
-    };
-    match result {
-        Ok(summary) => Ok(summary_text(summary)),
-        Err(fs_ops::ExtractionFailure {
-            summary,
-            error: TransferError::Cancelled,
-        }) => Ok(crate::tr_format!(
-            "Extraction stopped. {summary}",
-            summary = summary_text(summary)
-        )),
-        Err(fs_ops::ExtractionFailure { summary, error }) => {
-            let error = crate::i18n::file_error(&error);
-            if summary.completed != 0 || summary.skipped != 0 {
-                Err(format!("{error}. {}", summary_text(summary)))
-            } else {
-                Err(error)
-            }
-        }
-    }
-}
-
-fn archive_verification_message(report: ArchiveVerification) -> Result<String, String> {
-    use crate::i18n::text;
-    use crate::operations::TransferError;
-
-    let summary = crate::tr_format!(
-        "Verified entries: {}. Entry errors: {}. Unverified: {}.",
-        report.passed,
-        report.damaged,
-        report.unverified
-    );
-    let details = text!("Подробности в журнале результатов.");
-    match report.interruption {
-        Some(TransferError::Cancelled) => Ok(crate::tr_format!(
-            "Archive check stopped. {summary}",
-            summary = summary
-        )),
-        Some(error) => Err(crate::tr_format!(
-            "Archive check could not finish: {error}. {summary} {details}",
-            error = crate::i18n::file_error(&error),
-            summary = summary,
-            details = details
-        )),
-        None if report.damaged != 0 || report.unverified != 0 => {
-            Err(format!("{summary} {details}"))
-        }
-        None => {
-            let scope = match report.format {
-                Format::Zip => text!("Структура и данные ZIP проверены."),
-                Format::Tar => text!("Заголовки TAR проверены, данные прочитаны."),
-            };
-            Ok(format!("{scope} {summary}"))
-        }
     }
 }
 
@@ -1045,7 +978,7 @@ impl PawCommander {
             Dialog::ConnectSmb(form) => self.connect_smb(*form, ctx),
             #[cfg(target_os = "macos")]
             Dialog::CreateLink(form) => form.submit(self, ctx),
-            Dialog::NewFolder { parent, name } => self.start_described_job(
+            Dialog::NewFolder { parent, name } => self.start_file_job(
                 ctx,
                 crate::i18n::text!("Создание папки"),
                 format!(
@@ -1060,15 +993,18 @@ impl PawCommander {
                         .plan(vec![(parent.clone(), Some(target.display()))]);
                     progress.results.begin(&parent);
                     progress.item(&parent.path().join(&name));
-                    fs_ops::create_directory(&parent, &name)
-                        .map(|p| {
-                            progress.results.target(&parent, p.display());
-                            crate::tr_format!("Folder created: {}", p.display())
-                        })
-                        .map_err(|error| crate::i18n::file_error(&error))
+                    let result = fs_ops::create_directory(&parent, &name).map(|p| {
+                        progress.results.target(&parent, p.display());
+                        crate::tr_format!("Folder created: {}", p.display())
+                    });
+                    FileResult::Action {
+                        result,
+                        target: Some(target),
+                        stopped: None,
+                    }
                 },
             ),
-            Dialog::Rename { source, name } => self.start_described_job(
+            Dialog::Rename { source, name } => self.start_file_job(
                 ctx,
                 crate::i18n::text!("Переименование"),
                 format!(
@@ -1077,13 +1013,14 @@ impl PawCommander {
                     source,
                     name
                 ),
-                move |progress| match fs_ops::rename_with_undo(&source, &name, progress) {
-                    Ok(path) => Ok(crate::tr_format!("Renamed: {}", path.display())),
-                    Err(error @ crate::operations::TransferError::Cancelled) => {
-                        progress.results.cancelled = true;
-                        Ok(crate::i18n::file_error(&error))
+                move |progress| {
+                    let result = fs_ops::rename_with_undo(&source, &name, progress)
+                        .map(|path| crate::tr_format!("Renamed: {}", path.display()));
+                    FileResult::Action {
+                        result,
+                        target: Some(source),
+                        stopped: None,
                     }
-                    Err(error) => Err(crate::i18n::file_error(&error)),
                 },
             ),
             Dialog::BatchRename(editor) => {
@@ -1095,8 +1032,11 @@ impl PawCommander {
                 if let Some(plan) = (*editor).into_plan() {
                     let label = Command::ChangePermissions.label();
                     let description = format!("{label} ({}) · {}", plan.changes, plan.directory());
-                    self.start_stoppable_job(ctx, label, description, move |progress| {
-                        super::permissions::apply(plan, progress)
+                    self.start_stoppable_file_job(ctx, label, description, move |progress| {
+                        FileResult::Permissions {
+                            directory: plan.directory().clone(),
+                            result: plan.apply(progress),
+                        }
                     });
                 }
             }
@@ -1109,24 +1049,24 @@ impl PawCommander {
             } => {
                 if let Ok(file) = fs_ops::archive_file_name(&name, format) {
                     let label = Command::CreateArchive.label();
-                    let description = format!("{label} · {}", directory.join(file));
-                    self.start_stoppable_job(ctx, label, description, move |progress| {
-                        match fs_ops::create_archive(
+                    let target = directory.join(file);
+                    let description = format!("{label} · {target}");
+                    self.start_stoppable_file_job(ctx, label, description, move |progress| {
+                        let result = fs_ops::create_archive(
                             &sources,
                             &directory,
                             &name,
                             format,
                             Some(password.as_str()),
                             progress,
-                        ) {
-                            Ok(target) => Ok(crate::tr_format!(
-                                "Archive created: {target}",
-                                target = target
-                            )),
-                            Err(crate::operations::TransferError::Cancelled) => {
-                                Ok(crate::i18n::text!("Создание архива остановлено").into())
-                            }
-                            Err(error) => Err(crate::i18n::file_error(&error)),
+                        )
+                        .map(|target| {
+                            crate::tr_format!("Archive created: {target}", target = target)
+                        });
+                        FileResult::Action {
+                            result,
+                            target: Some(target),
+                            stopped: Some(crate::i18n::key!("Создание архива остановлено")),
                         }
                     });
                 }
@@ -1143,25 +1083,33 @@ impl PawCommander {
                 {
                     let label = Command::ExtractArchive.label();
                     let description = format!("{label} · {}", directory.display());
-                    self.start_conflict_job(ctx, label, description, move |progress, decide| {
-                        archive_extraction_message(fs_ops::extract_archive(
-                            &sources,
-                            &directory,
-                            Some(password.as_str()),
-                            progress,
-                            decide,
-                        ))
-                    });
+                    self.start_conflict_file_job(
+                        ctx,
+                        label,
+                        description,
+                        move |progress, decide| {
+                            let result = fs_ops::extract_archive(
+                                &sources,
+                                &directory,
+                                Some(password.as_str()),
+                                progress,
+                                decide,
+                            );
+                            FileResult::Extract { directory, result }
+                        },
+                    );
                 }
             }
             Dialog::VerifyArchive { archive, password } => {
                 let label = Command::VerifyArchive.label();
                 let description = format!("{label} · {}", archive.display());
-                self.start_stoppable_job(ctx, label, description, move |progress| {
-                    let report =
-                        crate::archive::verify_archive(&archive, Some(password.as_str()), progress)
-                            .map_err(|error| crate::i18n::file_error(&error))?;
-                    archive_verification_message(report)
+                self.start_stoppable_file_job(ctx, label, description, move |progress| {
+                    let result =
+                        crate::archive::verify_archive(&archive, Some(password.as_str()), progress);
+                    FileResult::VerifyArchive {
+                        archive: Location::Local(archive),
+                        result,
+                    }
                 });
             }
             Dialog::CreateChecksumManifest {
@@ -1171,19 +1119,21 @@ impl PawCommander {
             } => {
                 if let Ok(file) = fs_ops::checksum_manifest_name(&name) {
                     let label = Command::CreateChecksumManifest.label();
-                    let description = format!("{label} · {}", directory.join(file));
-                    self.start_stoppable_job(ctx, label, description, move |progress| {
-                        match fs_ops::create_checksum_manifest(
-                            &directory, &name, &sources, progress,
-                        ) {
-                            Ok(target) => Ok(crate::tr_format!(
-                                "SHA-256 manifest created: {target}",
-                                target = target
-                            )),
-                            Err(crate::operations::TransferError::Cancelled) => {
-                                Ok(crate::i18n::text!("Создание манифеста остановлено").into())
-                            }
-                            Err(error) => Err(crate::i18n::file_error(&error)),
+                    let target = directory.join(file);
+                    let description = format!("{label} · {target}");
+                    self.start_stoppable_file_job(ctx, label, description, move |progress| {
+                        let result =
+                            fs_ops::create_checksum_manifest(&directory, &name, &sources, progress)
+                                .map(|target| {
+                                    crate::tr_format!(
+                                        "SHA-256 manifest created: {target}",
+                                        target = target
+                                    )
+                                });
+                        FileResult::Action {
+                            result,
+                            target: Some(target),
+                            stopped: Some(crate::i18n::key!("Создание манифеста остановлено")),
                         }
                     });
                 }
@@ -1195,23 +1145,23 @@ impl PawCommander {
             } => {
                 let label = archive_edit_command(&edit).label();
                 let description = format!("{label} · {}", archive.display());
-                self.start_stoppable_job(ctx, label, description, move |progress| {
-                    match fs_ops::edit_archive(&archive, edit, Some(password.as_str()), progress) {
-                        Ok(source) => Ok(crate::tr_format!(
-                            "Archive updated: {source}",
-                            source = source
-                        )),
-                        Err(crate::operations::TransferError::Cancelled) => {
-                            Ok(crate::i18n::text!("Редактирование архива остановлено").into())
-                        }
-                        Err(error) => Err(crate::i18n::file_error(&error)),
+                self.start_stoppable_file_job(ctx, label, description, move |progress| {
+                    let result =
+                        fs_ops::edit_archive(&archive, edit, Some(password.as_str()), progress)
+                            .map(|source| {
+                                crate::tr_format!("Archive updated: {source}", source = source)
+                            });
+                    FileResult::Action {
+                        result,
+                        target: Some(Location::Local(archive)),
+                        stopped: Some(crate::i18n::key!("Редактирование архива остановлено")),
                     }
                 });
             }
             Dialog::WorkspaceName { editing, name } => {
                 self.save_workspace_name(editing, name);
             }
-            Dialog::Trash { paths } => self.start_described_job(
+            Dialog::Trash { paths } => self.start_file_job(
                 ctx,
                 crate::i18n::text!("Удаление файлов"),
                 format!(
@@ -1220,17 +1170,8 @@ impl PawCommander {
                     paths.len(),
                     paths.first().map(Location::display).unwrap_or_default()
                 ),
-                move |progress| match fs_ops::trash_entries_with_progress(&paths, progress) {
-                    Ok(n) => Ok(crate::tr_format!("Items processed: {n}", n = n)),
-                    Err(failure) => {
-                        let message = crate::i18n::deletion_failure(&failure);
-                        if matches!(failure.error, crate::operations::TransferError::Cancelled) {
-                            progress.results.cancelled = true;
-                            Ok(message)
-                        } else {
-                            Err(message)
-                        }
-                    }
+                move |progress| {
+                    FileResult::Trash(fs_ops::trash_entries_with_progress(&paths, progress))
                 },
             ),
         }

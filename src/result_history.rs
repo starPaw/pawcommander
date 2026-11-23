@@ -61,7 +61,6 @@ pub(crate) enum ChecksumOutcome {
     Matched,
     Changed,
     Missing,
-    Unreadable(TransferError),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -650,10 +649,6 @@ impl Results {
                 (Outcome::Failed, text!("Файл изменён (SHA-256 не совпала)"))
             }
             ChecksumOutcome::Missing => (Outcome::Failed, text!("Файл отсутствует")),
-            ChecksumOutcome::Unreadable(error) => {
-                self.record_with_error(source, Outcome::Failed, Some(&error));
-                return;
-            }
         };
         self.record(source, None, status, Some(reason.into()));
     }

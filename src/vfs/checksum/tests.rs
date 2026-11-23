@@ -43,7 +43,7 @@ pub(crate) fn checksum_round_trip(directory: &Location) {
     fs::remove_file(absent.path()).unwrap();
     let mut after = Progress::default();
     let report = verify_checksum_manifest(&target, &mut after).unwrap();
-    assert_eq!(
+    assert!(matches!(
         report,
         ChecksumVerification {
             matched: 1,
@@ -51,8 +51,9 @@ pub(crate) fn checksum_round_trip(directory: &Location) {
             missing: 1,
             errors: 0,
             cancelled: false,
+            ..
         }
-    );
+    ));
     for (row, path, reason) in [
         (
             &after.results.items[0],
@@ -99,20 +100,30 @@ fn check_sftp_read_denial(directory: &Location, manifest: &Location, source: &Lo
     );
     fs::set_permissions(source.path(), mode).unwrap();
 
-    assert_eq!(
-        verification.unwrap(),
+    let report = verification.unwrap();
+    assert!(matches!(
+        report,
         ChecksumVerification {
             matched: 0,
             changed: 1,
             missing: 1,
             errors: 1,
             cancelled: false,
+            ..
         }
-    );
+    ));
     let row = &progress.results.items[0];
     assert_eq!(row.source, source.display());
     assert_eq!(row.outcome, Outcome::Failed);
     let location = source.with_path(source.path().canonicalize().unwrap());
+    #[cfg(target_os = "macos")]
+    assert!(matches!(
+        report.first_error,
+        Some(TransferError::Failed(Failure::Access(error)))
+            if error.location == location && error.action == AccessAction::OpenFile
+                && matches!(&error.cause, AccessCause::Sftp(source)
+                    if source.code() == ssh2::ErrorCode::SFTP(libssh2_sys::LIBSSH2_FX_PERMISSION_DENIED))
+    ));
     let reason = row.reason.as_deref().unwrap();
     assert!(reason.contains(&location.display()) && reason.contains("SFTP(3)"));
     assert!(matches!(
@@ -247,7 +258,7 @@ fn checksum_manifest_refuses_links_and_accepts_real_nested_files() {
     .unwrap();
     let mut progress = Progress::default();
     let report = verify_checksum_manifest(&manifest, &mut progress).unwrap();
-    assert_eq!(
+    assert!(matches!(
         report,
         ChecksumVerification {
             matched: 1,
@@ -255,8 +266,9 @@ fn checksum_manifest_refuses_links_and_accepts_real_nested_files() {
             missing: 0,
             errors: 2,
             cancelled: false,
+            ..
         }
-    );
+    ));
     assert_eq!(fs::read(outside.join("data")).unwrap(), b"abc");
 }
 
@@ -336,14 +348,17 @@ fn checksum_verification_stop_keeps_completed_results() {
     let report = verify_checksum_manifest(&manifest, &mut progress);
     // Release the view held by the checkpoint, which owns another cancellation handle.
     cancel.set_checkpoint(|| false);
-    assert_eq!(
+    assert!(matches!(
         report.unwrap(),
         ChecksumVerification {
             matched: 1,
             cancelled: true,
-            ..ChecksumVerification::default()
+            changed: 0,
+            missing: 0,
+            errors: 0,
+            ..
         }
-    );
+    ));
     assert!(progress.results.cancelled);
     let record = std::mem::take(&mut progress.results)
         .finish("Verify fixture".into(), 0, &Ok("Stopped".into()))

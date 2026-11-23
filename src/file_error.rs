@@ -1636,6 +1636,10 @@ impl Error for MutationError {
 
 #[derive(Debug)]
 pub(crate) enum ListingErrorKind {
+    #[cfg(target_os = "macos")]
+    WorkerStart(io::Error),
+    #[cfg(target_os = "macos")]
+    WorkerStopped,
     OpenLocal(io::Error),
     #[cfg(target_os = "macos")]
     SmbMount(Box<crate::smb::SmbError>),
@@ -1671,6 +1675,10 @@ impl fmt::Display for ListingError {
         use ListingErrorKind::*;
         write!(f, "{:?}: ", self.location.path())?;
         match &self.kind {
+            #[cfg(target_os = "macos")]
+            WorkerStart(source) => write!(f, "Could not start folder listing: {source}"),
+            #[cfg(target_os = "macos")]
+            WorkerStopped => f.write_str("Folder listing worker stopped"),
             OpenLocal(source) => write!(f, "Could not open folder: {source}"),
             #[cfg(target_os = "macos")]
             SmbMount(source) => write!(f, "Could not open folder: {source}"),
@@ -1692,6 +1700,8 @@ impl Error for ListingError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         use ListingErrorKind::*;
         match &self.kind {
+            #[cfg(target_os = "macos")]
+            WorkerStart(source) => Some(source),
             OpenLocal(source)
             | ReadLocalEntry(source)
             | LocalMetadata(source)

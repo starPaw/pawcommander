@@ -55,7 +55,7 @@ pub(crate) use archive_extract::{extract_archive, ExtractionFailure, ExtractionS
 pub(crate) use batch_rename::{BatchRenameOutcome, BatchRenamePreview, BatchRenameRules};
 pub(crate) use checksum::{
     checksum_manifest_name, create_checksum_manifest, looks_like_checksum_manifest,
-    verify_checksum_manifest,
+    verify_checksum_manifest, ChecksumVerification,
 };
 pub(crate) use compare::{compare_folders, Comparison, ComparisonMode, ComparisonStatus};
 #[cfg(target_os = "macos")]
@@ -73,7 +73,7 @@ pub(crate) use mutations::DeletionFailure;
 pub use mutations::{create_directory, trash_entries_with_progress};
 #[cfg(test)]
 pub use mutations::{rename_entry, trash_entries};
-pub(crate) use permissions::{ModeRule, PermissionsPreview};
+pub(crate) use permissions::{ModeRule, PermissionsPreview, PermissionsReport};
 #[cfg(target_os = "macos")]
 pub(crate) use preview::cache_media_preview;
 pub(crate) use preview::open_preview_stream;

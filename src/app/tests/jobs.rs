@@ -2,6 +2,59 @@ use super::*;
 
 #[cfg(target_os = "macos")]
 #[test]
+fn file_job_delivers_the_original_io_error_to_the_ui() {
+    use crate::app::file_result::FileResult;
+    use crate::file_error::{Failure, LocalPathAction, MutationError};
+    use crate::operations::TransferError;
+
+    let fixture = tempfile::tempdir().unwrap();
+    let parent = Location::Local(fixture.path().canonicalize().unwrap());
+    let target = parent.join("existing");
+    std::fs::create_dir(target.path()).unwrap();
+    let ctx = egui::Context::default();
+    let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+    let mut app = PawCommander::new(&cc, Some(parent.path().to_owned()));
+    app.start_file_job(&ctx, "New folder", target.display(), move |_| {
+        FileResult::Action {
+            result: crate::vfs::create_directory(&parent, "existing").map(|path| path.display()),
+            target: Some(parent.join("existing")),
+            stopped: None,
+        }
+    });
+
+    let completion = app
+        .jobs
+        .current
+        .as_ref()
+        .unwrap()
+        .result
+        .recv_timeout(Duration::from_secs(3))
+        .unwrap();
+    let JobCompletion::File {
+        result,
+        history_warning: None,
+    } = completion
+    else {
+        panic!("expected a typed file completion");
+    };
+    let FileResult::Action {
+        result: Err(TransferError::Failed(Failure::Mutation(error))),
+        target: Some(requested),
+        ..
+    } = *result
+    else {
+        panic!("expected a typed folder error");
+    };
+    assert_eq!(requested, target);
+    assert!(matches!(
+        error.as_ref(),
+        MutationError::LocalIo { path, action: LocalPathAction::CreateDirectory, source }
+            if path == target.path() && source.raw_os_error() == Some(libc::EEXIST)
+    ));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn removing_queued_template_creation_cancels_its_typed_reply_without_creating_a_file() {
     use crate::operations::TransferError;
     use crate::vfs::file_templates::{NewFile, Source, TextEncoding};
