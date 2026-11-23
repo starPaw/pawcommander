@@ -2,6 +2,42 @@ use super::*;
 
 #[cfg(target_os = "macos")]
 #[test]
+fn removing_queued_template_creation_cancels_its_typed_reply_without_creating_a_file() {
+    use crate::operations::TransferError;
+    use crate::vfs::file_templates::{NewFile, Source, TextEncoding};
+
+    let root = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+    let mut app = PawCommander::new(&cc, Some(root.path().into()));
+    let _held = hold_queue(&mut app);
+    let (completion, result) = mpsc::channel();
+    app.enqueue_new_file(
+        NewFile {
+            directory: Location::Local(root.path().to_owned()),
+            name: "untouched.txt".into(),
+            source: Source::Text {
+                value: "draft".into(),
+                encoding: TextEncoding::default(),
+            },
+        },
+        completion,
+        &ctx,
+    );
+    assert_eq!(app.jobs.pending.len(), 1);
+
+    app.remove_pending_job(0);
+
+    assert!(app.jobs.pending.is_empty());
+    assert!(matches!(
+        result.try_recv().unwrap().as_ref(),
+        Err(TransferError::Cancelled)
+    ));
+    assert!(!root.path().join("untouched.txt").exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn editor_launch_error_and_remote_save_result_remain_visible_in_the_same_poll() {
     use crate::app::actions::ApplicationJob;
     use crate::tools::launch::{CommandDetails, InvocationError, Target};

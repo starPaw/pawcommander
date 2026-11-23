@@ -245,6 +245,7 @@ formats! {
     "Saved template “{title}” exceeds 4 MiB." => ("Сохранённый шаблон «{title}» превышает 4 МиБ.", "Uložená šablona „{title}“ je větší než 4 MiB."),
     "The template source file {path} exceeds 4 MiB." => ("Размер исходного файла шаблона {path} превышает 4 МиБ.", "Zdrojový soubor šablony {path} je větší než 4 MiB."),
     "Could not confirm file creation at {path}. Check the destination folder." => ("Не удалось подтвердить создание файла по пути {path}. Проверьте папку назначения.", "Vytvoření souboru na cestě {path} se nepodařilo potvrdit. Zkontrolujte cílovou složku."),
+    "Could not create file at {path}." => ("Не удалось создать файл по пути {path}.", "Nepodařilo se vytvořit soubor na cestě {path}."),
     "Collection JSON error. {error}" => ("Ошибка JSON коллекции. {error}", "Chyba JSON kolekce. {error}"),
     "Collection entry {row}" => ("Запись коллекции {row}", "Záznam kolekce {row}"),
     "The collection file exceeds {limit} bytes." => ("Размер файла коллекции превышает {limit} байт.", "Soubor kolekce překračuje {limit} bajtů."),

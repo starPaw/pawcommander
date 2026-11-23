@@ -9,12 +9,15 @@ use crate::{
     operations::TransferError,
     shortcuts::Command,
     vfs::{
-        file_templates::{self, Library, NewFile, SavedTemplate, Source, TextEncoding},
+        file_templates::{
+            self, CreatedFile, Library, NewFile, SavedTemplate, Source, TextEncoding,
+        },
         Location,
     },
 };
 use eframe::egui;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::Arc;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BuiltIn {
@@ -65,7 +68,48 @@ enum Choice {
 
 struct Creation {
     target: Location,
-    result: Receiver<Result<(), TransferError>>,
+    result: Receiver<Arc<CreationResult>>,
+}
+
+pub(super) type CreationResult = Result<CreatedFile, TransferError>;
+
+fn unconfirmed_creation(target: &Location) -> String {
+    let path = target.display().escape_debug().to_string();
+    crate::tr_format!(
+        "Could not confirm file creation at {path}. Check the destination folder.",
+        path = path
+    )
+}
+
+pub(super) fn creation_notice(
+    target: &Location,
+    result: &CreationResult,
+) -> Result<String, String> {
+    match result {
+        Ok(created) => {
+            let path = created.target.display().escape_debug().to_string();
+            let mut message = crate::tr_format!("File created: {path}", path = path);
+            if let Some(warning) = &created.cleanup_warning {
+                message.push('\n');
+                message.push_str(&crate::tr_format!(
+                    "Cleanup warning: {error}",
+                    error = file_error(warning)
+                ));
+            }
+            Ok(message)
+        }
+        Err(TransferError::Cancelled) => Ok(crate::tr_format!("Operation cancelled")),
+        Err(error @ TransferError::PublicationUnconfirmed(_)) => Err(format!(
+            "{}\n{}",
+            unconfirmed_creation(target),
+            file_error(error)
+        )),
+        Err(error) => {
+            let path = target.display().escape_debug().to_string();
+            let title = crate::tr_format!("Could not create file at {path}.", path = path);
+            Err(format!("{title}\n{}", file_error(error)))
+        }
+    }
 }
 
 pub(super) struct FileTemplatesDialog {
@@ -398,20 +442,19 @@ impl FileTemplatesDialog {
     fn accept_creation(&mut self) -> Option<Location> {
         let pending = self.creating.as_ref()?;
         let notice = match pending.result.try_recv() {
-            Ok(Ok(())) => return Some(self.creating.take().unwrap().target),
-            Ok(Err(TransferError::Cancelled)) => (crate::tr_format!("Operation cancelled"), false),
-            Ok(Err(error)) => (file_error(&error), true),
-            Err(TryRecvError::Empty) => return None,
-            Err(TryRecvError::Disconnected) => {
-                let path = pending.target.display().escape_debug().to_string();
-                (
-                    crate::tr_format!(
-                        "Could not confirm file creation at {path}. Check the destination folder.",
-                        path = path
-                    ),
-                    true,
-                )
+            Ok(result) => {
+                if let Ok(created) = result.as_ref() {
+                    let target = created.target.clone();
+                    self.creating = None;
+                    return Some(target);
+                }
+                match creation_notice(&pending.target, &result) {
+                    Ok(message) => (message, false),
+                    Err(message) => (message, true),
+                }
             }
+            Err(TryRecvError::Empty) => return None,
+            Err(TryRecvError::Disconnected) => (unconfirmed_creation(&pending.target), true),
         };
         self.creating = None;
         self.notice = Some(notice);
@@ -448,5 +491,64 @@ impl PawCommander {
             return_focus,
             ctx,
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn creation_feedback_keeps_the_draft_on_failure_and_reveals_the_confirmed_target() {
+        let directory = Location::Local("/fixture/requested".into());
+        let mut dialog = FileTemplatesDialog::new(directory.clone(), None);
+        dialog.filename = "same name.txt".into();
+        dialog.body = "keep this draft".into();
+        let target = directory.join(&dialog.filename);
+        let (reply, result) = mpsc::channel();
+        dialog.creating = Some(Creation {
+            target: target.clone(),
+            result,
+        });
+        reply
+            .send(Arc::new(Err("staging access denied".into())))
+            .unwrap();
+
+        assert!(dialog.accept_creation().is_none());
+        let (notice, failed) = dialog.notice.as_ref().unwrap();
+        assert!(
+            *failed
+                && notice.contains(&target.display())
+                && notice.contains("staging access denied")
+        );
+        assert!(dialog.creating.is_none() && dialog.focus_name);
+        assert_eq!(dialog.filename, "same name.txt");
+        assert_eq!(dialog.body, "keep this draft");
+
+        let interrupted = Err(TransferError::from("worker stopped").with_unconfirmed_publication());
+        let notice = creation_notice(&target, &interrupted).unwrap_err();
+        assert!(notice.starts_with(&unconfirmed_creation(&target)));
+        assert!(notice.contains("worker stopped"));
+
+        let actual = Location::Local("/fixture/published/same name.txt".into());
+        let report = Arc::new(Ok(CreatedFile {
+            target: actual.clone(),
+            cleanup_warning: Some("stage cleanup was refused".into()),
+        }));
+        let (reply, result) = mpsc::channel();
+        dialog.creating = Some(Creation {
+            target: target.clone(),
+            result,
+        });
+        reply.send(Arc::clone(&report)).unwrap();
+
+        assert_eq!(dialog.accept_creation(), Some(actual.clone()));
+        let notice = creation_notice(&target, &report).unwrap();
+        assert!(notice.starts_with(&crate::tr_format!(
+            "File created: {path}",
+            path = actual.display()
+        )));
+        assert!(notice.contains("stage cleanup was refused"));
+        assert!(dialog.creating.is_none());
     }
 }
