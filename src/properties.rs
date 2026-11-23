@@ -1,5 +1,5 @@
 //! Read-only file properties. Cancellation is cooperative between requests.
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 use crate::file_error::{AccessAction, AccessError};
 #[cfg(test)]
 use crate::test_ui::ContextExt as _;
@@ -9,7 +9,7 @@ use chrono::{DateTime, Local};
 use eframe::egui;
 use std::cell::Cell;
 use std::collections::HashSet;
-#[cfg(any(not(windows), test))]
+#[cfg(any(not(any(windows, target_os = "macos")), test))]
 use std::fs;
 use std::fs::Metadata;
 use std::path::PathBuf;
@@ -71,8 +71,21 @@ impl Summary {
 
     fn read_error(&mut self, error: impl Into<TransferError>) {
         self.errors += 1;
+        let error = error.into();
+        #[cfg(target_os = "macos")]
+        if macos::is_mount_error(&error)
+            && !self
+                .error_examples
+                .iter()
+                .any(|example| macos::is_mount_error(example))
+        {
+            // Keep the first volume failure visible even after many per-item errors.
+            self.error_examples.truncate(4);
+            self.error_examples.insert(0, Arc::new(error));
+            return;
+        }
         if self.error_examples.len() < 5 {
-            self.error_examples.push(Arc::new(error.into()));
+            self.error_examples.push(Arc::new(error));
         }
     }
 }
@@ -184,24 +197,34 @@ impl Properties {
                 ));
                 ui.small(crate::i18n::text!("Включая выбранные объекты и скрытые файлы. Ссылки не раскрываются. Размер — сумма длин обычных файлов, не занятое место на диске."));
                 egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                    #[cfg(target_os = "macos")]
+                    show_read_errors(ui, &summary);
                     for (path, details) in &summary.details {
                         ui.separator();
                         ui.label(path.display());
                         ui.label(details);
                     }
-                    if summary.errors > 0 {
-                        ui.separator();
-                        ui.label(crate::tr_format!("Read errors: {}", crate::i18n::display::integer(summary.errors)));
-                        for error in &summary.error_examples {
-                            ui.label(crate::i18n::file_error(error));
-                        }
-                    }
+                    #[cfg(not(target_os = "macos"))]
+                    show_read_errors(ui, &summary);
                 });
             });
         if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
             open = false;
         }
         open
+    }
+}
+
+fn show_read_errors(ui: &mut egui::Ui, summary: &Summary) {
+    if summary.errors > 0 {
+        ui.separator();
+        ui.label(crate::tr_format!(
+            "Read errors: {}",
+            crate::i18n::display::integer(summary.errors)
+        ));
+        for error in &summary.error_examples {
+            ui.label(crate::i18n::file_error(error));
+        }
     }
 }
 
@@ -260,8 +283,22 @@ fn scan(paths: &[PathBuf], cancel: &AtomicBool, mut progress: impl FnMut(&Summar
     let mut roots = paths.to_vec();
     roots.sort();
     roots.dedup();
+    // Prepare each saved mount before any selected item is measured.
+    #[cfg(target_os = "macos")]
+    let roots: Vec<_> = roots
+        .into_iter()
+        .take_while(|_| !cancel.load(Ordering::Relaxed))
+        .map(|path| {
+            let mount = macos::capture_mount(&path);
+            (path, mount)
+        })
+        .collect();
     let mut accepted = HashSet::new();
-    for path in roots {
+    for root in roots {
+        #[cfg(target_os = "macos")]
+        let (path, mount) = root;
+        #[cfg(not(target_os = "macos"))]
+        let path = root;
         if cancel.load(Ordering::Relaxed) {
             break;
         }
@@ -281,7 +318,7 @@ fn scan(paths: &[PathBuf], cancel: &AtomicBool, mut progress: impl FnMut(&Summar
                 continue;
             }
         };
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "macos")))]
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
             Err(error) => {
@@ -295,12 +332,20 @@ fn scan(paths: &[PathBuf], cancel: &AtomicBool, mut progress: impl FnMut(&Summar
                 continue;
             }
         };
-        let item_details = details(&metadata);
         #[cfg(target_os = "macos")]
-        let item_details = match macos::describe(&path, &metadata, cancel) {
-            Some(extended) => format!("{item_details}\n{extended}"),
-            None => item_details,
+        let (metadata, item_details, mount) = match mount.and_then(|mount| {
+            let (metadata, description) = macos::read_item(&path, cancel, &mount)?;
+            Ok((metadata, description, mount))
+        }) {
+            Ok(item) => item,
+            Err(error) => {
+                summary.read_error(error);
+                progress(&summary);
+                continue;
+            }
         };
+        #[cfg(not(target_os = "macos"))]
+        let item_details = details(&metadata);
         summary.details.push((path.clone().into(), item_details));
         if metadata.is_dir() {
             accepted.insert(path.clone());
@@ -308,7 +353,25 @@ fn scan(paths: &[PathBuf], cancel: &AtomicBool, mut progress: impl FnMut(&Summar
 
         #[cfg(windows)]
         windows::scan_root(path, root, metadata, cancel, &mut summary, &mut progress);
-        #[cfg(not(windows))]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            let result = scan_root(
+                path,
+                metadata,
+                cancel,
+                &mut summary,
+                &mut progress,
+                #[cfg(target_os = "macos")]
+                mount.is_owned().then_some(&mount),
+            );
+            #[cfg(target_os = "macos")]
+            let result = mount.recheck().and(result);
+            if let Err(error) = result {
+                summary.read_error(error);
+                progress(&summary);
+            }
+        }
+        #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
         scan_root(path, metadata, cancel, &mut summary, &mut progress);
     }
     summary.cancelled = cancel.load(Ordering::Relaxed);
@@ -450,10 +513,33 @@ mod tests {
         assert!(matches!(
             result.error_examples[0].as_ref(),
             TransferError::Failed(crate::file_error::Failure::Access(error))
-                if error.location.path() == paths[0] && error.action == AccessAction::ReadMetadata
+                if error.location.path() == paths[0]
+                    && error.action == crate::file_error::AccessAction::ReadMetadata
                     && matches!(&error.cause, crate::file_error::AccessCause::Local(cause)
                         if cause.kind() == std::io::ErrorKind::NotFound)
         ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_late_mount_failure_stays_visible_when_read_error_examples_are_full() {
+        use crate::{file_error::SmbMutationAction, smb::SmbError};
+
+        let mut summary = Summary::default();
+        let root = std::path::Path::new("/test-volume");
+        for index in 0..6 {
+            summary.read_error(ScanError::OtherVolume(Location::Local(
+                root.join(index.to_string()),
+            )));
+        }
+        summary.read_error(crate::file_error::MutationError::smb_mount(
+            root,
+            SmbMutationAction::ReadProperties,
+            SmbError::MissingMount(root.to_owned()),
+        ));
+        assert_eq!(summary.errors, 7);
+        assert_eq!(summary.error_examples.len(), 5);
+        assert!(macos::is_mount_error(&summary.error_examples[0]));
     }
 
     #[cfg(unix)]

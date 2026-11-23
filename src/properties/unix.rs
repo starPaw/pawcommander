@@ -1,4 +1,6 @@
 use super::Summary;
+#[cfg(target_os = "macos")]
+use crate::smb::MutationMount;
 use crate::{
     file_error::{AccessAction, AccessError, ListingError, ListingErrorKind, ScanError},
     operations::TransferError,
@@ -20,14 +22,23 @@ pub(super) fn scan_root(
     cancel: &AtomicBool,
     summary: &mut Summary,
     progress: &mut impl FnMut(&Summary),
-) {
+    #[cfg(target_os = "macos")] mount: Option<&MutationMount>,
+) -> Result<(), TransferError> {
+    let verify_mount = || {
+        #[cfg(target_os = "macos")]
+        if let Some(mount) = mount {
+            mount.recheck()?;
+        }
+        Ok::<_, TransferError>(())
+    };
     if cancel.load(Ordering::Relaxed) {
-        return;
+        return Ok(());
     }
+    verify_mount()?;
     summary.count(&metadata);
     if !metadata.is_dir() || cancel.load(Ordering::Relaxed) {
         progress(summary);
-        return;
+        return Ok(());
     }
 
     let location = Location::Local(path.clone());
@@ -41,16 +52,10 @@ pub(super) fn scan_root(
                 libc::AT_FDCWD,
                 &name,
                 (metadata.dev(), metadata.ino()),
+                #[cfg(target_os = "macos")]
+                mount,
             )
-        });
-    let root = match root {
-        Ok(root) => root,
-        Err(error) => {
-            summary.read_error(error);
-            progress(summary);
-            return;
-        }
-    };
+        })?;
 
     // Keep one open stream per level. Path strings are only for diagnostics
     // after the root is open, so replacing an ancestor cannot redirect a lookup.
@@ -63,6 +68,7 @@ pub(super) fn scan_root(
         let entry = match directory.next() {
             Ok(Some(entry)) => entry,
             result => {
+                verify_mount()?;
                 if let Err(error) = result {
                     summary.read_error(ListingError::new(
                         path.clone(),
@@ -77,32 +83,52 @@ pub(super) fn scan_root(
         };
         let name = OsStr::from_bytes(entry.name.to_bytes());
         match entry.metadata() {
+            #[cfg(target_os = "macos")]
+            Ok(stat) if mount.is_some() && stat.st_dev as u64 != metadata.dev() => {
+                summary.read_error(ScanError::OtherVolume(Location::Local(path.join(name))));
+            }
             Ok(observed) if entry_type(&observed) == libc::S_IFDIR => {
                 progress(summary);
                 if cancel.load(Ordering::Relaxed) {
                     break;
                 }
+                verify_mount()?;
                 path.push(name);
-                match entry.descend(&Location::Local(path.clone()), &observed, summary) {
+                match entry.descend(
+                    &Location::Local(path.clone()),
+                    &observed,
+                    summary,
+                    #[cfg(target_os = "macos")]
+                    mount,
+                ) {
                     Ok(Some(child)) => directories.push(child),
                     Ok(None) => {
                         path.pop();
                     }
                     Err(error) => {
+                        verify_mount()?;
+                        #[cfg(target_os = "macos")]
+                        if super::macos::is_mount_error(&error) {
+                            return Err(error);
+                        }
                         summary.read_error(error);
                         path.pop();
                     }
                 }
             }
             Ok(stat) => count_entry(summary, &stat),
-            Err(error) => summary.read_error(AccessError::new(
-                &Location::Local(path.join(name)),
-                AccessAction::ReadMetadata,
-                error,
-            )),
+            Err(error) => {
+                verify_mount()?;
+                summary.read_error(AccessError::new(
+                    &Location::Local(path.join(name)),
+                    AccessAction::ReadMetadata,
+                    error,
+                ));
+            }
         }
         progress(summary);
     }
+    Ok(())
 }
 
 struct Directory(NonNull<libc::DIR>);
@@ -113,6 +139,7 @@ impl Directory {
         parent: RawFd,
         name: &CStr,
         expected: (u64, u64),
+        #[cfg(target_os = "macos")] mount: Option<&MutationMount>,
     ) -> Result<Self, TransferError> {
         let open_error =
             |error| ListingError::new(location.clone(), ListingErrorKind::OpenLocal(error));
@@ -129,6 +156,11 @@ impl Directory {
         }
         // SAFETY: the successful open returned a fresh fd owned by this function.
         let file = File::from(unsafe { OwnedFd::from_raw_fd(fd) });
+        #[cfg(target_os = "macos")]
+        if let Some(mount) = mount {
+            let path = location.path();
+            mount.verify_directory(&file, path, path)?;
+        }
         let actual = file
             .metadata()
             .map_err(|error| AccessError::new(location, AccessAction::ReadOpenMetadata, error))?;
@@ -219,10 +251,15 @@ impl DirectoryEntry<'_> {
         location: &Location,
         observed: &libc::stat,
         summary: &mut Summary,
+        #[cfg(target_os = "macos")] mount: Option<&MutationMount>,
     ) -> Result<Option<Directory>, TransferError> {
         let current = self
             .metadata()
             .map_err(|error| AccessError::new(location, AccessAction::ReadMetadata, error))?;
+        #[cfg(target_os = "macos")]
+        if mount.is_some() && current.st_dev != observed.st_dev {
+            return Err(ScanError::OtherVolume(location.clone()).into());
+        }
         if entry_type(&current) != libc::S_IFDIR {
             count_entry(summary, &current);
             return Ok(None);
@@ -235,7 +272,15 @@ impl DirectoryEntry<'_> {
         // 32-bit Linux); normalize both fields to MetadataExt identity widths.
         #[allow(clippy::unnecessary_cast)]
         let identity = (current.st_dev as u64, current.st_ino as u64);
-        Directory::open(location, self.parent.fd(), self.name, identity).map(Some)
+        Directory::open(
+            location,
+            self.parent.fd(),
+            self.name,
+            identity,
+            #[cfg(target_os = "macos")]
+            mount,
+        )
+        .map(Some)
     }
 }
 

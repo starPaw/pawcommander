@@ -1956,6 +1956,11 @@ fn scan_error(error: &ScanError) -> String {
         ScanError::PropertiesStart(source) => {
             return format!("{}: {source}", text!("Подсчёт не запущен"));
         }
+        #[cfg(target_os = "macos")]
+        ScanError::PropertiesItemChanged(location) => (
+            text!("Объект изменился во время чтения метаданных."),
+            location,
+        ),
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         ScanError::DirectoryChanged(location) => {
             (text!("Папка изменилась во время подсчёта"), location)
@@ -2072,9 +2077,7 @@ fn scan_error(error: &ScanError) -> String {
             (text!("Анализ места доступен в локальных папках"), location)
         }
         #[cfg(target_os = "macos")]
-        ScanError::DiskUsageOtherVolume(location) => {
-            (text!("Пропущен объект на другом томе"), location)
-        }
+        ScanError::OtherVolume(location) => (text!("Пропущен объект на другом томе"), location),
         #[cfg(target_os = "macos")]
         ScanError::DiskUsageLimit(limit) => return disk_usage_limit(limit),
     };
@@ -2442,7 +2445,9 @@ fn mutation_error(error: &MutationError, unconfirmed: bool) -> String {
                 SmbMutationAction::CompareFiles => text!("Не удалось сравнить файлы"),
                 SmbMutationAction::CheckSyncFolder => text!("Не удалось проверить папку для синхронизации"),
                 SmbMutationAction::FindDuplicates => text!("Не удалось найти дубликаты"),
-                SmbMutationAction::AnalyzeDiskUsage => text!("Не удалось проверить SMB-том"),
+                SmbMutationAction::AnalyzeDiskUsage | SmbMutationAction::ReadProperties => {
+                    text!("Не удалось проверить SMB-том")
+                },
             };
             crate::tr_format!(
                 "{action} at {path} ({error})",

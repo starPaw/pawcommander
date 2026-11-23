@@ -701,6 +701,8 @@ impl fmt::Display for ScanLimit {
 #[derive(Debug)]
 pub(crate) enum ScanError {
     PropertiesStart(io::Error),
+    #[cfg(target_os = "macos")]
+    PropertiesItemChanged(Location),
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     DirectoryChanged(Location),
     InvalidSftpEntry {
@@ -754,7 +756,7 @@ pub(crate) enum ScanError {
     #[cfg(target_os = "macos")]
     DiskUsageRequiresLocalFolder(Location),
     #[cfg(target_os = "macos")]
-    DiskUsageOtherVolume(Location),
+    OtherVolume(Location),
     #[cfg(target_os = "macos")]
     DiskUsageLimit(ScanLimit),
 }
@@ -763,6 +765,10 @@ impl fmt::Display for ScanError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::PropertiesStart(source) => write!(f, "Calculation not started: {source}"),
+            #[cfg(target_os = "macos")]
+            Self::PropertiesItemChanged(location) => {
+                write!(f, "Item changed while reading properties at {location}")
+            }
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             Self::DirectoryChanged(location) => {
                 write!(f, "Folder {location} changed during calculation")
@@ -854,11 +860,8 @@ impl fmt::Display for ScanError {
                 write!(f, "Disk usage analysis needs a local folder at {location}")
             }
             #[cfg(target_os = "macos")]
-            Self::DiskUsageOtherVolume(location) => {
-                write!(
-                    f,
-                    "Disk usage analysis skipped {location} on another volume"
-                )
+            Self::OtherVolume(location) => {
+                write!(f, "Skipped {location} on another volume")
             }
             #[cfg(target_os = "macos")]
             Self::DiskUsageLimit(limit) => write!(f, "Disk usage analysis {limit}"),
@@ -1289,6 +1292,7 @@ pub(crate) enum SmbMutationAction {
     CheckSyncFolder,
     FindDuplicates,
     AnalyzeDiskUsage,
+    ReadProperties,
 }
 
 #[derive(Debug)]
