@@ -2,6 +2,7 @@ mod session;
 mod view;
 mod worker;
 
+use crate::file_error::MediaNativeError;
 use serde::{Deserialize, Serialize};
 use std::{ffi::OsStr, path::Path};
 
@@ -96,7 +97,7 @@ enum Reply {
         size: Option<[u32; 2]>,
         metadata: Option<Metadata>,
     },
-    Failed,
+    Failed(Vec<MediaNativeError>),
     ReadError(i32),
     Truncated,
 }
@@ -117,8 +118,4 @@ fn frame_size([width, height]: [u32; 2]) -> Option<usize> {
         return None;
     }
     Some(width as usize * height as usize * 4)
-}
-
-fn media_error() -> String {
-    crate::i18n::text!("Не удалось воспроизвести медиафайл.").to_owned()
 }

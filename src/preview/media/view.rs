@@ -1,5 +1,6 @@
-use super::{media_error, session::Session, Command, Frame, Metadata, Mode, Snapshot, State};
+use super::{session::Session, Command, Frame, Metadata, Mode, Snapshot, State};
 use crate::{
+    file_error::{MediaAction, MediaError},
     i18n::{file_error, text},
     operations::{Cancellation, TransferError},
     preview::{metadata, source::Target},
@@ -223,7 +224,15 @@ impl Player {
         {
             return Some(self.ticket);
         }
-        self.error = Some(media_error().into());
+        let worker_error = self
+            .controller
+            .as_ref()
+            .and_then(|controller| controller.latest.lock().ok()?.error.take());
+        self.error = Some(worker_error.unwrap_or_else(|| {
+            MediaError::ControllerUnavailable
+                .at(&self.target.location)
+                .into()
+        }));
         None
     }
 
@@ -232,7 +241,11 @@ impl Player {
             return;
         };
         let Ok(mut mailbox) = controller.latest.lock() else {
-            self.error = Some(media_error().into());
+            self.error = Some(
+                MediaError::ControllerUnavailable
+                    .at(&self.target.location)
+                    .into(),
+            );
             return;
         };
         let update = std::mem::take(&mut *mailbox);
@@ -298,6 +311,7 @@ impl Controller {
         let latest = Arc::new(Mutex::new(Update::default()));
         let worker_latest = latest.clone();
         let worker_cancel = cancel.clone();
+        let location = target.location.clone();
         let ctx = ctx.clone();
         let viewport = ctx.viewport_id();
         thread::Builder::new()
@@ -314,7 +328,13 @@ impl Controller {
                     repaint();
                 }
             })
-            .map_err(|_| media_error())?;
+            .map_err(|source| {
+                MediaError::Io {
+                    action: MediaAction::StartController,
+                    source,
+                }
+                .at(&location)
+            })?;
         Ok(Self {
             commands,
             latest,
@@ -357,7 +377,7 @@ fn run(
             metadata,
         } = session.update(command, cancel)?;
         if next.mode == Mode::Loading && began.elapsed() >= STARTUP_LIMIT {
-            return Err(text!("Медиаплеер не ответил вовремя.").into());
+            return Err(MediaError::LoadingTimedOut.at(&target.location).into());
         }
         if next != state || ticket != applied || frame.is_some() || metadata.is_some() {
             let Ok(mut update) = latest.lock() else {

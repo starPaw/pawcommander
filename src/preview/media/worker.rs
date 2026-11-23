@@ -2,12 +2,15 @@ use super::{
     frame_size, media_extension, AudioMetadata, Command, Metadata, Mode, OpenSource, Reply, State,
     VideoMetadata, VIDEO_EDGE,
 };
-use crate::preview::{
-    helper::{read_message, read_size, write_message},
-    metadata::positive,
+use crate::{
+    file_error::MediaNativeError,
+    preview::{
+        helper::{read_message, read_size, write_message},
+        metadata::positive,
+    },
 };
 use std::{
-    ffi::{c_char, c_void, CString, OsStr},
+    ffi::{c_char, c_void, CStr, CString, OsStr},
     io::{self, BufReader, BufWriter, Read, Write},
     ptr::NonNull,
     sync::mpsc,
@@ -38,6 +41,25 @@ struct NativeMetadata {
     has_audio: bool,
 }
 
+#[repr(C)]
+struct NativeError {
+    code: i64,
+    domain: [u8; 128],
+}
+
+impl NativeError {
+    fn into_error(self) -> Option<MediaNativeError> {
+        let domain = CStr::from_bytes_until_nul(&self.domain)
+            .ok()?
+            .to_str()
+            .ok()?;
+        (!domain.is_empty()).then(|| MediaNativeError {
+            domain: domain.to_owned(),
+            code: self.code,
+        })
+    }
+}
+
 unsafe extern "C" {
     fn paw_media_open(path: *const c_char) -> *mut c_void;
     fn paw_media_open_descriptor(fd: i32, extension: *const c_char, error: *mut i32)
@@ -47,6 +69,7 @@ unsafe extern "C" {
     fn paw_media_command(player: *mut c_void, command: i32, seconds: f64) -> bool;
     fn paw_media_state(player: *mut c_void, state: *mut NativeState) -> bool;
     fn paw_media_read_failure(player: *mut c_void) -> i32;
+    fn paw_media_failure(player: *mut c_void, errors: *mut NativeError);
     fn paw_media_metadata(player: *mut c_void, metadata: *mut NativeMetadata);
     fn paw_media_frame(
         player: *mut c_void,
@@ -97,10 +120,10 @@ fn serve(mut input: impl Read + Send + 'static, output: &mut impl Write) -> io::
             return fail(output, reply);
         }
         let Some(state) = state else {
-            return fail(output, Reply::Failed);
+            return fail(output, player.failure());
         };
         let Ok(frame) = player.frame(&mut rgba, state.mode) else {
-            return fail(output, player.read_failure().unwrap_or(Reply::Failed));
+            return fail(output, player.failure());
         };
         let metadata = if !sent_metadata && state.mode != Mode::Loading {
             sent_metadata = true;
@@ -129,22 +152,22 @@ fn open(input: &mut impl Read) -> io::Result<Result<Player, Reply>> {
         OpenSource::Path => {
             let size = read_size(input)?;
             if !(1..=65536).contains(&size) {
-                return Ok(Err(Reply::Failed));
+                return Ok(Err(Reply::Failed(Vec::new())));
             }
             let mut bytes = vec![0; size];
             input.read_exact(&mut bytes)?;
             let Ok(path) = CString::new(bytes) else {
-                return Ok(Err(Reply::Failed));
+                return Ok(Err(Reply::Failed(Vec::new())));
             };
             // The bridge uses the absolute filesystem representation during this call.
             unsafe { paw_media_open(path.as_ptr()) }
         }
         OpenSource::Descriptor { fd, extension } => {
             if fd <= libc::STDERR_FILENO {
-                return Ok(Err(Reply::Failed));
+                return Ok(Err(Reply::Failed(Vec::new())));
             }
             let Some(extension) = media_extension(OsStr::new(&extension)) else {
-                return Ok(Err(Reply::Failed));
+                return Ok(Err(Reply::Failed(Vec::new())));
             };
             let extension = CString::new(extension).expect("known media extension");
             // The inherited descriptor stays open for this dedicated process.
@@ -152,7 +175,7 @@ fn open(input: &mut impl Read) -> io::Result<Result<Player, Reply>> {
         }
     };
     let failure = if error == 0 {
-        Reply::Failed
+        Reply::Failed(Vec::new())
     } else {
         Reply::ReadError(error)
     };
@@ -173,6 +196,23 @@ impl Player {
             -1 => Some(Reply::Truncated),
             errno => Some(Reply::ReadError(errno)),
         }
+    }
+
+    fn failure(&self) -> Reply {
+        let mut errors: [NativeError; 2] = std::array::from_fn(|_| NativeError {
+            code: 0,
+            domain: [0; 128],
+        });
+        // The bridge copies at most the primary error and its immediate cause.
+        unsafe { paw_media_failure(self.0.as_ptr(), errors.as_mut_ptr()) };
+        self.read_failure().unwrap_or_else(|| {
+            Reply::Failed(
+                errors
+                    .into_iter()
+                    .filter_map(NativeError::into_error)
+                    .collect(),
+            )
+        })
     }
 
     fn apply(&self, command: Command) -> Option<State> {

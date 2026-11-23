@@ -128,6 +128,11 @@ typedef struct {
     bool hasAudio;
 } PawMediaMetadata;
 
+typedef struct {
+    int64_t code;
+    uint8_t domain[128];
+} PawMediaError;
+
 static void *open_media(NSURL *url, PawMediaFileSource *source) {
     AVURLAsset *asset = [[AVURLAsset alloc] initWithURL:url options:@{
         AVURLAssetReferenceRestrictionsKey: @(AVAssetReferenceRestrictionForbidAll),
@@ -195,6 +200,44 @@ void *paw_media_open_descriptor(int32_t fd, const char *extension, int32_t *erro
 int32_t paw_media_read_failure(void *handle) {
     PawMedia *media = (__bridge PawMedia *)handle;
     return media.fileSource.readFailure;
+}
+
+static void capture_media_error(NSError *error, PawMediaError *out) {
+    NSString *domain = error.domain;
+    NSUInteger length = domain.length;
+    if (length == 0 || length >= sizeof(out->domain)) {
+        return;
+    }
+    PawMediaError captured = {0};
+    for (NSUInteger index = 0; index < length; index++) {
+        unichar character = [domain characterAtIndex:index];
+        if (!((character >= 'a' && character <= 'z') ||
+              (character >= 'A' && character <= 'Z') ||
+              (character >= '0' && character <= '9') ||
+              character == '.' || character == '_' || character == '-')) {
+            return;
+        }
+        captured.domain[index] = (uint8_t)character;
+    }
+    captured.code = error.code;
+    *out = captured;
+}
+
+// The caller provides two zeroed slots for the error and its immediate cause.
+void paw_media_failure(void *handle, PawMediaError out[2]) {
+    @autoreleasepool {
+        @try {
+            PawMedia *media = (__bridge PawMedia *)handle;
+            NSError *error = media.item.error ?: media.player.error;
+            capture_media_error(error, &out[0]);
+            id cause = error.userInfo[NSUnderlyingErrorKey];
+            if ([cause isKindOfClass:NSError.class]) {
+                capture_media_error(cause, &out[1]);
+            }
+        } @catch (NSException *exception) {
+            // An unavailable diagnosis leaves the corresponding slot empty.
+        }
+    }
 }
 
 void paw_media_close(void *handle) {
