@@ -161,6 +161,10 @@ pub struct PawCommander {
     native_drag: crate::native_drag::NativeDrag,
     application_job: Option<actions::ApplicationJob>,
     #[cfg(target_os = "macos")]
+    system_open_jobs: Vec<actions::SystemOpenJob>,
+    #[cfg(target_os = "macos")]
+    system_open_error: Option<String>,
+    #[cfg(target_os = "macos")]
     smb: smb_connections::Connections,
     #[cfg(target_os = "macos")]
     volumes: volumes::VolumeBrowser,

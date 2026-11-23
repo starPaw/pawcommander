@@ -1,4 +1,5 @@
 use super::display::launch_location;
+use super::launch::system_open_detail;
 use crate::i18n::text;
 use crate::terminal::{
     embedded::SessionError, OpenError, OpenRequest, PtySpawnError, SshCommandError,
@@ -38,19 +39,7 @@ pub(crate) fn open_error(folder: &Location, error: &OpenError) -> String {
                 error = error
             )
         }
-        OpenError::StartOpen(error) => {
-            tr_format!("The macOS open command failed. {error}", error = error)
-        }
-        OpenError::Rejected { status, stderr } => {
-            let details = String::from_utf8_lossy(stderr);
-            tr_format!(
-                "macOS could not hand off the request ({status}). {details}",
-                status = status,
-                details = details.trim()
-            )
-            .trim_end()
-            .into()
-        }
+        OpenError::Handoff(error) => system_open_detail(error),
         OpenError::Archive => super::archive_read_only().into(),
         OpenError::StartWorker(error) => worker_start_error(error),
         OpenError::WorkerStopped => text!("Запуск приложения прервался.").into(),

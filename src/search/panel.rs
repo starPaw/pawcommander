@@ -2,6 +2,8 @@
 use super::{index::IndexStatus, Job, Results};
 #[cfg(test)]
 use crate::test_ui::ContextExt as _;
+#[cfg(target_os = "macos")]
+use crate::tools::system_open::{Error as FileOpenError, Mode as SystemOpenMode};
 use crate::{
     file_error::{AccessAction, AccessError, MutationError},
     i18n::text,
@@ -13,7 +15,7 @@ use eframe::egui;
 use std::{
     collections::BTreeSet,
     io,
-    path::PathBuf,
+    path::{Path, PathBuf},
     rc::Rc,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -185,11 +187,19 @@ struct Snapshot {
     selected: BTreeSet<Location>,
 }
 
+#[cfg(not(target_os = "macos"))]
+type FileOpenError = io::Error;
+
+struct FileLaunch {
+    path: PathBuf,
+    job: Job<Result<(), FileOpenError>>,
+}
+
 #[derive(Default)]
 pub(crate) struct Panel {
     snapshot: Option<Snapshot>,
     check: Option<Check>,
-    launch: Option<Job<io::Result<()>>>,
+    launch: Option<FileLaunch>,
     error: Option<String>,
 }
 
@@ -223,7 +233,7 @@ impl Panel {
     fn close(&mut self) {
         self.cancel_pending();
         if let Some(launch) = &self.launch {
-            launch.cancel();
+            launch.job.cancel();
         }
         self.snapshot = None;
         self.error = None;
@@ -241,13 +251,17 @@ impl Panel {
     }
 
     pub(crate) fn open_file(&mut self, path: PathBuf, ctx: &egui::Context) {
-        self.launch_file(ctx, move || open::that_detached(path));
+        #[cfg(target_os = "macos")]
+        self.launch_file(path, ctx, |path| SystemOpenMode::Open.handoff(path));
+        #[cfg(not(target_os = "macos"))]
+        self.launch_file(path, ctx, |path| open::that_detached(path));
     }
 
     fn launch_file(
         &mut self,
+        path: PathBuf,
         ctx: &egui::Context,
-        launch: impl FnOnce() -> io::Result<()> + Send + 'static,
+        launch: impl FnOnce(&Path) -> Result<(), FileOpenError> + Send + 'static,
     ) {
         if self.launch.is_some() || self.snapshot.is_none() {
             return;
@@ -256,19 +270,27 @@ impl Panel {
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = cancel.clone();
         let worker_ctx = ctx.clone();
+        let target = path.clone();
         match std::thread::Builder::new().spawn(move || {
             if !worker_cancel.load(Ordering::Relaxed) {
-                let _ = sender.send(launch());
+                let _ = sender.send(launch(&target));
             }
             drop(sender);
             worker_ctx.request_repaint();
         }) {
             Ok(_) => {
-                self.launch = Some(Job { cancel, result });
+                self.launch = Some(FileLaunch {
+                    path,
+                    job: Job { cancel, result },
+                });
                 self.error = None;
                 ctx.request_repaint();
             }
-            Err(error) => self.report_launch_error(error, ctx),
+            Err(error) => {
+                #[cfg(target_os = "macos")]
+                let error = FileOpenError::StartWorker(error);
+                self.reject(Self::launch_error(&path, &error), ctx);
+            }
         }
     }
 
@@ -276,21 +298,34 @@ impl Panel {
         let Some(launch) = &self.launch else {
             return;
         };
-        let result = match launch.result.try_recv() {
+        let result = match launch.job.result.try_recv() {
             Ok(result) => result,
             Err(mpsc::TryRecvError::Empty) => return,
-            Err(mpsc::TryRecvError::Disconnected) => Err(io::ErrorKind::Interrupted.into()),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                #[cfg(target_os = "macos")]
+                let error = FileOpenError::WorkerStopped;
+                #[cfg(not(target_os = "macos"))]
+                let error = io::ErrorKind::Interrupted.into();
+                Err(error)
+            }
         };
-        let cancelled = launch.cancelled();
+        if let (false, Err(error)) = (launch.job.cancelled(), result) {
+            self.error = Some(Self::launch_error(&launch.path, &error));
+        }
         self.launch = None;
         ctx.request_repaint();
-        if let (false, Err(error)) = (cancelled, result) {
-            self.report_launch_error(error, ctx);
-        }
     }
 
-    fn report_launch_error(&mut self, e: io::Error, ctx: &egui::Context) {
-        self.reject(crate::tr_format!("Could not open file: {e}", e = e), ctx);
+    fn launch_error(path: &Path, error: &FileOpenError) -> String {
+        #[cfg(target_os = "macos")]
+        {
+            crate::i18n::launch::system_open_error(SystemOpenMode::Open, path, None, error)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = path;
+            crate::tr_format!("Could not open file: {e}", e = error)
+        }
     }
 
     fn start(&mut self, action: Action, ctx: &egui::Context) {
@@ -532,13 +567,28 @@ impl Panel {
                     let count = snapshot.selected.len();
                     ui.small(crate::tr_format!("Selected items: {count}", count = count));
                     if let Some(error) = &self.error {
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(error).color(ui.visuals().error_fg_color),
-                            )
-                            .truncate(),
-                        )
-                        .on_hover_text(error);
+                        let label = egui::Label::new(
+                            egui::RichText::new(error).color(ui.visuals().error_fg_color),
+                        );
+                        #[cfg(target_os = "macos")]
+                        {
+                            let line_height = ui.text_style_height(&egui::TextStyle::Body);
+                            let height = (ui.available_height()
+                                - snapshot.row_height(ui, line_height)
+                                - ui.spacing().item_spacing.y)
+                                .min(64.0);
+                            if height >= 2.0 * line_height {
+                                egui::ScrollArea::vertical()
+                                    .id_salt("search_action_error")
+                                    .max_height(height)
+                                    .min_scrolled_height(0.0)
+                                    .show(ui, |ui| ui.add(label.wrap().selectable(true)));
+                            } else {
+                                ui.add(label.truncate()).on_hover_text(error);
+                            }
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        ui.add(label.truncate()).on_hover_text(error);
                     } else if self
                         .check
                         .as_ref()
@@ -551,7 +601,7 @@ impl Panel {
                     } else if self
                         .launch
                         .as_ref()
-                        .is_some_and(|launch| !launch.cancelled())
+                        .is_some_and(|launch| !launch.job.cancelled())
                     {
                         ui.horizontal(|ui| {
                             ui.spinner();
@@ -583,14 +633,22 @@ impl Panel {
 }
 
 impl Snapshot {
-    fn rows(&mut self, ui: &mut egui::Ui) {
-        let excerpt_height = ui.text_style_height(&egui::TextStyle::Body);
-        let row_height = if self.matching_lines {
+    fn row_height(&self, ui: &egui::Ui, excerpt_height: f32) -> f32 {
+        if self.matching_lines {
             28.0_f32.max(excerpt_height) + excerpt_height + ui.spacing().item_spacing.y
         } else {
             28.0_f32.max(excerpt_height)
-        };
+        }
+    }
+
+    fn rows(&mut self, ui: &mut egui::Ui) {
+        let excerpt_height = ui.text_style_height(&egui::TextStyle::Body);
+        let row_height = self.row_height(ui, excerpt_height);
         let mut scroll = egui::ScrollArea::vertical().auto_shrink([false, false]);
+        #[cfg(target_os = "macos")]
+        {
+            scroll = scroll.min_scrolled_height(row_height);
+        }
         if std::mem::take(&mut self.scroll_to_top) {
             scroll = scroll.vertical_scroll_offset(0.0);
         }
@@ -879,6 +937,13 @@ mod tests {
             assert!(panel.launch.is_none());
         }
 
+        fn failure(message: &str) -> FileOpenError {
+            let error = io::Error::other(message);
+            #[cfg(target_os = "macos")]
+            let error = FileOpenError::RunCommand(error);
+            error
+        }
+
         let ctx = egui::Context::default();
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("file.txt");
@@ -886,10 +951,10 @@ mod tests {
         panel.replace(results(&[&path]), true, "old".into(), None);
         let (started, started_rx) = mpsc::channel();
         let (finish, finish_rx) = mpsc::channel();
-        panel.launch_file(&ctx, move || {
+        panel.launch_file(path.clone(), &ctx, move |_| {
             started.send(std::thread::current().id()).unwrap();
             finish_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-            Err(io::Error::other("retired launcher failure"))
+            Err(failure("retired launcher failure"))
         });
         assert_ne!(
             started_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
@@ -897,15 +962,22 @@ mod tests {
         );
         panel.close();
         panel.replace(results(&[&path]), true, "new".into(), None);
-        panel.launch_file(&ctx, || Err(io::Error::other("unexpected second launch")));
-        assert!(panel.launch.as_ref().unwrap().cancelled());
+        panel.launch_file(path.clone(), &ctx, |_| {
+            Err(failure("unexpected second launch"))
+        });
+        assert!(panel.launch.as_ref().unwrap().job.cancelled());
         finish.send(()).unwrap();
         drain(&mut panel, &ctx);
         assert!(panel.error.is_none());
 
-        panel.launch_file(&ctx, || Err(io::Error::other("active launcher failure")));
+        panel.launch_file(path.clone(), &ctx, |_| {
+            Err(failure("active launcher failure"))
+        });
         drain(&mut panel, &ctx);
-        assert!(panel.error.unwrap().contains("active launcher failure"));
+        let error = panel.error.unwrap();
+        assert!(error.contains("active launcher failure"));
+        #[cfg(target_os = "macos")]
+        assert!(error.contains(path.to_str().unwrap()));
     }
 
     #[test]

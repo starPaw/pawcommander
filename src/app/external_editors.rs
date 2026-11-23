@@ -2,6 +2,7 @@ use super::{dialogs::Dialog, PawCommander};
 use crate::i18n::{key, launch::editor_preparation_error, text, MessageKey};
 use crate::operations::TransferError;
 use crate::tools::launch::{CommandDetails, Invocation, Target};
+use crate::tools::system_open::Mode;
 use crate::vfs::{Location, RemoteEdit, RemoteEditSaveOutcome};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
@@ -311,15 +312,7 @@ impl PawCommander {
         } else if reveal {
             let source = edit.target().clone();
             let copy = edit.copy().to_owned();
-            self.launch_editor(
-                EditorCommand {
-                    program: "/usr/bin/open".into(),
-                    arguments: "-R".into(),
-                },
-                &source,
-                &copy,
-                ctx,
-            );
+            self.launch_system_open(Mode::RevealWorkingCopy, copy, Some(source), ctx);
         } else if finish {
             self.remote_editor = Session::default();
         }

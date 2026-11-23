@@ -6,6 +6,8 @@ use super::{file_name, PawCommander};
 use crate::drag_drop::DropRequest;
 use crate::fs_ops::TransferKind;
 use crate::shortcuts::Command;
+#[cfg(target_os = "macos")]
+use crate::tools::system_open;
 use crate::vfs::{ArchiveEdit, Location};
 use eframe::egui;
 use std::collections::BTreeSet;
@@ -13,6 +15,24 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 type ApplicationReporter<T> = Box<dyn FnOnce(T) + Send>;
+
+#[cfg(target_os = "macos")]
+pub(super) struct SystemOpenJob {
+    mode: system_open::Mode,
+    path: PathBuf,
+    source: Option<Location>,
+    result: mpsc::Receiver<Result<(), system_open::Error>>,
+}
+
+#[cfg(target_os = "macos")]
+fn append_system_open_error(notice: &mut Option<String>, error: String) {
+    if let Some(notice) = notice {
+        notice.push_str("\n\n");
+        notice.push_str(&error);
+    } else {
+        *notice = Some(error);
+    }
+}
 
 pub(super) enum ApplicationJob {
     #[cfg(not(target_os = "macos"))]
@@ -353,6 +373,59 @@ impl PawCommander {
                     true,
                 ));
             }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn launch_system_open(
+        &mut self,
+        mode: system_open::Mode,
+        path: PathBuf,
+        source: Option<Location>,
+        ctx: &egui::Context,
+    ) {
+        if self.system_open_jobs.is_empty() {
+            self.system_open_error = None;
+        }
+        let target = path.clone();
+        match spawn_application(ctx, move |report| report(mode.handoff(&target))) {
+            Ok(result) => self.system_open_jobs.push(SystemOpenJob {
+                mode,
+                path,
+                source,
+                result,
+            }),
+            Err(error) => {
+                let error = system_open::Error::StartWorker(error);
+                let message =
+                    crate::i18n::launch::system_open_error(mode, &path, source.as_ref(), &error);
+                append_system_open_error(&mut self.system_open_error, message);
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn poll_system_open(&mut self, ctx: &egui::Context) {
+        let notice = &mut self.system_open_error;
+        self.system_open_jobs.retain(|job| {
+            let Some(result) =
+                application_result(&job.result, || system_open::Error::WorkerStopped)
+            else {
+                return true;
+            };
+            if let Err(error) = result {
+                let message = crate::i18n::launch::system_open_error(
+                    job.mode,
+                    &job.path,
+                    job.source.as_ref(),
+                    &error,
+                );
+                append_system_open_error(notice, message);
+            }
+            false
+        });
+        if !self.system_open_jobs.is_empty() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
 
@@ -785,7 +858,7 @@ impl PawCommander {
                     self.bookmarks.push(Bookmark::new(path));
                 }
             }
-            Action::Reveal => self.reveal_selection(),
+            Action::Reveal => self.reveal_selection(ctx),
             Action::CopyPath => {
                 let paths = self.selected();
                 ctx.copy_text(if paths.is_empty() {
@@ -909,10 +982,13 @@ impl PawCommander {
             self.notice = Some((crate::i18n::archive_read_only().into(), true));
         } else if location.remote() {
             self.open_in_zed(location, true, ctx);
-        } else if let Some(path) = location.local()
-            && let Err(e) = open::that_detached(path)
-        {
-            self.notice = Some((crate::tr_format!("Could not open file: {e}", e = e), true));
+        } else if let Some(path) = location.local() {
+            #[cfg(target_os = "macos")]
+            self.launch_system_open(system_open::Mode::Open, path.to_owned(), None, ctx);
+            #[cfg(not(target_os = "macos"))]
+            if let Err(e) = open::that_detached(path) {
+                self.notice = Some((crate::tr_format!("Could not open file: {e}", e = e), true));
+            }
         }
     }
 
@@ -972,7 +1048,7 @@ impl PawCommander {
         }
     }
 
-    fn reveal_selection(&mut self) {
+    fn reveal_selection(&mut self, ctx: &egui::Context) {
         let location = self
             .selected()
             .first()
@@ -986,19 +1062,13 @@ impl PawCommander {
             return;
         };
         #[cfg(target_os = "macos")]
-        let result = std::process::Command::new("open")
-            .arg("-R")
-            .arg(path)
-            .spawn()
-            .map(|mut child| {
-                std::thread::spawn(move || {
-                    let _ = child.wait();
-                });
-            });
+        self.launch_system_open(system_open::Mode::Reveal, path.to_owned(), None, ctx);
         #[cfg(not(target_os = "macos"))]
-        let result = open::that_detached(path.parent().unwrap_or(path));
-        if let Err(e) = result {
-            self.notice = Some((crate::tr_format!("Could not reveal file: {e}", e = e), true));
+        {
+            let _ = ctx;
+            if let Err(e) = open::that_detached(path.parent().unwrap_or(path)) {
+                self.notice = Some((crate::tr_format!("Could not reveal file: {e}", e = e), true));
+            }
         }
     }
 

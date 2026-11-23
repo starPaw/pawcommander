@@ -9,6 +9,7 @@ use super::display;
 use crate::tools::{
     custom_action::{ArgumentError, TemplateError},
     launch::{CommandDetails, InvocationError, Target},
+    system_open::{self, Mode},
 };
 #[cfg(target_os = "macos")]
 use crate::vfs::Location;
@@ -82,6 +83,63 @@ fn diff_pane(right: bool) -> &'static str {
         text!("Правая панель")
     } else {
         text!("Левая панель")
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn system_open_error(
+    mode: Mode,
+    path: &Path,
+    source: Option<&Location>,
+    error: &system_open::Error,
+) -> String {
+    let path = format!("{path:?}");
+    let title = match mode {
+        Mode::Open => tr_format!("Could not open {path}.", path = path),
+        Mode::Reveal | Mode::RevealWorkingCopy => {
+            tr_format!("Could not show {path} in Finder.", path = path)
+        }
+    };
+    let mut message = format!("{title}\n{}", system_open_detail(error));
+    if let Some(source) = source {
+        message.push('\n');
+        message.push_str(&tr_format!(
+            "SFTP source · {path}",
+            path = display::launch_location(source)
+        ));
+    }
+    message
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn system_open_detail(error: &system_open::Error) -> String {
+    match error {
+        system_open::Error::ResolvePath(error) => {
+            tr_format!("Could not resolve the local path. {error}", error = error)
+        }
+        system_open::Error::InspectWorkingCopy(error) => {
+            tr_format!("Could not inspect the working copy. {error}", error = error)
+        }
+        system_open::Error::NotRegularWorkingCopy => {
+            text!("Рабочая копия должна быть обычным файлом.").into()
+        }
+        system_open::Error::RunCommand(error) => {
+            tr_format!("The macOS open command failed. {error}", error = error)
+        }
+        system_open::Error::Rejected { status, stderr } => {
+            let details = String::from_utf8_lossy(stderr);
+            tr_format!(
+                "macOS could not hand off the request ({status}). {details}",
+                status = status,
+                details = details.trim()
+            )
+            .trim_end()
+            .into()
+        }
+        system_open::Error::StartWorker(error) => {
+            tr_format!("Could not start the application. {error}", error = error)
+        }
+        system_open::Error::WorkerStopped => text!("Запуск приложения прервался.").into(),
     }
 }
 
