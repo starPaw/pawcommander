@@ -1,5 +1,7 @@
 use super::dialogs::Dialog;
 use super::directory::{FolderVisit, AUTO_REFRESH_INTERVAL};
+#[cfg(target_os = "macos")]
+use super::file_templates::{creation_notice, CreationResult};
 use super::state::FolderMode;
 use super::PawCommander;
 use crate::conflict::{Answer, Conflict, ConflictDialog, Decision};
@@ -71,11 +73,15 @@ type TextWork = Box<dyn FnOnce(&mut Progress) -> Result<String, TransferError> +
 enum JobWork {
     Text(TextWork),
     #[cfg(target_os = "macos")]
+    CreateFile(Box<crate::vfs::file_templates::NewFile>),
+    #[cfg(target_os = "macos")]
     RemoteSave(Box<crate::vfs::RemoteEdit>),
 }
 
 enum WorkResult {
     Text(Result<String, TransferError>),
+    #[cfg(target_os = "macos")]
+    CreateFile(Location, Arc<CreationResult>),
     #[cfg(target_os = "macos")]
     RemoteSave(
         Box<crate::vfs::RemoteEdit>,
@@ -94,6 +100,11 @@ impl JobWork {
         match self {
             Self::Text(work) => WorkResult::Text(work(progress)),
             #[cfg(target_os = "macos")]
+            Self::CreateFile(job) => {
+                let target = job.target();
+                WorkResult::CreateFile(target, Arc::new(job.create(progress)))
+            }
+            #[cfg(target_os = "macos")]
             Self::RemoteSave(mut edit) => {
                 let result = edit.save(progress);
                 WorkResult::RemoteSave(edit, result)
@@ -104,6 +115,12 @@ impl JobWork {
 
 pub(super) enum JobCompletion {
     Text(Result<String, String>),
+    #[cfg(target_os = "macos")]
+    CreateFile {
+        target: Location,
+        result: Arc<CreationResult>,
+        history_warning: Option<String>,
+    },
     #[cfg(target_os = "macos")]
     RemoteSave {
         edit: Box<crate::vfs::RemoteEdit>,
@@ -127,6 +144,27 @@ fn append_history_warning(
 
 pub(super) type CutRequest = (u64, Vec<Location>);
 
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+enum NativeCompletion {
+    FilePromise(mpsc::Sender<Result<(), TransferError>>),
+    CreateFile(mpsc::Sender<Arc<CreationResult>>),
+}
+
+#[cfg(target_os = "macos")]
+impl NativeCompletion {
+    fn report_error(&self, error: TransferError) {
+        match self {
+            Self::FilePromise(completion) => {
+                let _ = completion.send(Err(error));
+            }
+            Self::CreateFile(completion) => {
+                let _ = completion.send(Arc::new(Err(error)));
+            }
+        }
+    }
+}
+
 // One global worker serializes all mutations, including aliased and nested paths.
 // Pending closures own their inputs; no filesystem work is done until dispatch.
 pub(super) struct PendingJob {
@@ -138,7 +176,7 @@ pub(super) struct PendingJob {
     retry_origin: Option<RetryJob>,
     undo_origin: Option<UndoJob>,
     #[cfg(target_os = "macos")]
-    native_completion: Option<mpsc::Sender<Result<(), TransferError>>>,
+    native_completion: Option<NativeCompletion>,
 }
 
 #[cfg(test)]
@@ -147,7 +185,9 @@ impl PendingJob {
         match self.work.run(progress) {
             WorkResult::Text(result) => result,
             #[cfg(target_os = "macos")]
-            WorkResult::RemoteSave(..) => panic!("expected a text work result"),
+            WorkResult::RemoteSave(..) | WorkResult::CreateFile(..) => {
+                panic!("expected a text work result")
+            }
         }
     }
 }
@@ -293,7 +333,7 @@ impl PawCommander {
     pub(super) fn enqueue_new_file(
         &mut self,
         job: crate::vfs::file_templates::NewFile,
-        completion: mpsc::Sender<Result<(), TransferError>>,
+        completion: mpsc::Sender<Arc<CreationResult>>,
         ctx: &egui::Context,
     ) {
         let label = crate::i18n::text!("Создание файла");
@@ -304,15 +344,7 @@ impl PawCommander {
             PendingJob {
                 label: label.into(),
                 description,
-                work: JobWork::text(move |progress| {
-                    let created = job.create(progress)?;
-                    Ok(if let Some(warning) = created.cleanup_warning {
-                        crate::i18n::file_error(&warning)
-                    } else {
-                        let path = created.target.display().escape_debug().to_string();
-                        crate::tr_format!("File created: {path}", path = path)
-                    })
-                }),
+                work: JobWork::CreateFile(Box::new(job)),
                 transfer: Some(TransferInteraction {
                     events: receive,
                     cut_generation: None,
@@ -322,7 +354,7 @@ impl PawCommander {
                 cut: None,
                 retry_origin: None,
                 undo_origin: None,
-                native_completion: Some(completion),
+                native_completion: Some(NativeCompletion::CreateFile(completion)),
             },
         );
     }
@@ -503,7 +535,7 @@ impl PawCommander {
                 cut: None,
                 retry_origin: None,
                 undo_origin: None,
-                native_completion: Some(completion),
+                native_completion: Some(NativeCompletion::FilePromise(completion)),
             },
         );
     }
@@ -621,7 +653,7 @@ impl PawCommander {
             }
             #[cfg(target_os = "macos")]
             if let Some(completion) = job.native_completion {
-                let _ = completion.send(Err(message.into()));
+                completion.report_error(message.into());
             }
             self.notice = Some((message.into(), true));
             return;
@@ -681,12 +713,17 @@ impl PawCommander {
                 let fail_to_start = |error: String| {
                     #[cfg(target_os = "macos")]
                     if let Some(completion) = &worker_completion {
-                        let _ = completion.send(Err(error.clone().into()));
+                        completion.report_error(error.clone().into());
                     }
                     let _ = tx.send(JobCompletion::Text(Err(error)));
                     worker_ctx.request_repaint();
                 };
                 let work = worker_work.lock().unwrap().take().unwrap();
+                #[cfg(target_os = "macos")]
+                let creation_target = match &work {
+                    JobWork::CreateFile(job) => Some(job.target()),
+                    _ => None,
+                };
                 reporter.results.id = crate::result_history::operation_id();
                 let history_started = crate::result_history::now();
                 if recovery_directory.is_none() && !cfg!(test) {
@@ -740,15 +777,33 @@ impl PawCommander {
                         fail_to_start(message);
                         return;
                     }
-                    Err(_) => WorkResult::Text(Err(crate::i18n::text!(
-                        "Фоновая операция неожиданно завершилась. Проверьте файлы в обеих папках.",
-                    )
-                    .into())),
+                    Err(_) => {
+                        let message = crate::i18n::text!(
+                            "Фоновая операция неожиданно завершилась. Проверьте файлы в обеих папках.",
+                        );
+                        #[cfg(target_os = "macos")]
+                        let stopped = if let Some(target) = creation_target {
+                            let error = TransferError::from(message).with_unconfirmed_publication();
+                            reporter.results.record_with_error(
+                                &target,
+                                crate::result_history::Outcome::PublicationUnconfirmed,
+                                Some(&error),
+                            );
+                            WorkResult::CreateFile(target, Arc::new(Err(error)))
+                        } else {
+                            WorkResult::Text(Err(message.into()))
+                        };
+                        #[cfg(not(target_os = "macos"))]
+                        let stopped = WorkResult::Text(Err(message.into()));
+                        stopped
+                    }
                 };
                 // The native file promise acknowledges the file operation. History
                 // persistence and recovery record cleanup remain worker follow-up.
                 #[cfg(target_os = "macos")]
                 let mut saved_edit = None;
+                #[cfg(target_os = "macos")]
+                let mut created_file = None;
                 let result = match result {
                     WorkResult::Text(result) => {
                         let display = if matches!(&result, Err(TransferError::Cancelled)) {
@@ -758,10 +813,26 @@ impl PawCommander {
                             result.as_ref().cloned().map_err(crate::i18n::file_error)
                         };
                         #[cfg(target_os = "macos")]
-                        if let Some(completion) = worker_completion {
-                            let _ = completion.send(result.map(|_| ()));
+                        if let Some(completion) = &worker_completion {
+                            match result {
+                                Err(error) => completion.report_error(error),
+                                Ok(_) => {
+                                    if let NativeCompletion::FilePromise(completion) = completion {
+                                        let _ = completion.send(Ok(()));
+                                    }
+                                }
+                            }
                         }
                         display
+                    }
+                    #[cfg(target_os = "macos")]
+                    WorkResult::CreateFile(target, result) => {
+                        if let Some(NativeCompletion::CreateFile(completion)) = &worker_completion {
+                            let _ = completion.send(result.clone());
+                        }
+                        let snapshot = creation_notice(&target, &result);
+                        created_file = Some((target, result));
+                        snapshot
                     }
                     #[cfg(target_os = "macos")]
                     WorkResult::RemoteSave(edit, result) => {
@@ -799,6 +870,16 @@ impl PawCommander {
                     });
                 }
                 #[cfg(target_os = "macos")]
+                if let Some((target, result)) = created_file {
+                    let _ = tx.send(JobCompletion::CreateFile {
+                        target,
+                        result,
+                        history_warning: warning,
+                    });
+                    worker_ctx.request_repaint();
+                    return;
+                }
+                #[cfg(target_os = "macos")]
                 if let Some((edit, result)) = saved_edit {
                     let _ = tx.send(JobCompletion::RemoteSave {
                         edit,
@@ -826,7 +907,7 @@ impl PawCommander {
                 #[cfg(target_os = "macos")]
                 if let Some(completion) = native_completion {
                     let error = TransferError::io(error, |_| message.clone());
-                    let _ = completion.send(Err(error));
+                    completion.report_error(error);
                     self.notice = Some((message, true));
                     continue;
                 }
@@ -1294,7 +1375,7 @@ impl PawCommander {
             }
             #[cfg(target_os = "macos")]
             if let Some(completion) = job.native_completion {
-                let _ = completion.send(Err(TransferError::Cancelled));
+                completion.report_error(TransferError::Cancelled);
             }
         }
         if self.jobs.pending.is_empty() {
@@ -1516,6 +1597,12 @@ impl PawCommander {
                         }
                         result
                     }
+                    #[cfg(target_os = "macos")]
+                    JobCompletion::CreateFile {
+                        target,
+                        result,
+                        history_warning,
+                    } => append_history_warning(creation_notice(&target, &result), history_warning),
                     #[cfg(target_os = "macos")]
                     JobCompletion::RemoteSave {
                         edit,
