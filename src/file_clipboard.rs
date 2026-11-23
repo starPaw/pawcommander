@@ -12,6 +12,8 @@ mod windows;
 pub use linux::SystemClipboard;
 #[cfg(target_os = "macos")]
 pub use macos::SystemClipboard;
+#[cfg(target_os = "macos")]
+pub(crate) use macos::{ClipboardReadError, ClipboardReadFailure, ClipboardWriteError};
 #[cfg(target_os = "windows")]
 pub use windows::SystemClipboard;
 
@@ -23,21 +25,30 @@ pub struct FileList {
 }
 
 impl FileList {
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     fn new(
-        mut paths: Vec<PathBuf>,
+        paths: Vec<PathBuf>,
         cut: bool,
         revision: Option<String>,
     ) -> Result<Option<Self>, String> {
-        let mut seen = HashSet::new();
-        if paths
+        Self::validated(paths, cut, revision).map_err(|_| {
+            crate::i18n::text!("Файловый буфер содержит путь без имени или относительный путь")
+                .into()
+        })
+    }
+
+    fn validated(
+        mut paths: Vec<PathBuf>,
+        cut: bool,
+        revision: Option<String>,
+    ) -> Result<Option<Self>, PathBuf> {
+        if let Some(invalid) = paths
             .iter()
-            .any(|path| !path.is_absolute() || path.file_name().is_none())
+            .find(|path| !path.is_absolute() || path.file_name().is_none())
         {
-            return Err(crate::i18n::text!(
-                "Файловый буфер содержит путь без имени или относительный путь",
-            )
-            .into());
+            return Err(invalid.clone());
         }
+        let mut seen = HashSet::new();
         paths.retain(|path| seen.insert(path.clone()));
         Ok((!paths.is_empty()).then_some(Self {
             paths,
@@ -47,21 +58,33 @@ impl FileList {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
 fn local_file_url(uri: &str) -> Result<PathBuf, String> {
-    let invalid = || {
+    decode_local_file_url(uri).map_err(|_| {
         crate::i18n::text!("Файловый буфер содержит недопустимый или нелокальный URL").to_string()
-    };
-    let url = url::Url::parse(uri).map_err(|_| invalid())?;
+    })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum LocalFileUrlError {
+    Parse(url::ParseError),
+    Unsupported,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn decode_local_file_url(uri: &str) -> Result<PathBuf, LocalFileUrlError> {
+    let url = url::Url::parse(uri).map_err(LocalFileUrlError::Parse)?;
     if url.scheme() != "file"
         || url.host_str().is_some_and(|host| host != "localhost")
         || url.query().is_some()
         || url.fragment().is_some()
         || url.path().contains("%00")
     {
-        return Err(invalid());
+        return Err(LocalFileUrlError::Unsupported);
     }
-    url.to_file_path().map_err(|_| invalid())
+    url.to_file_path()
+        .map_err(|()| LocalFileUrlError::Unsupported)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
@@ -89,7 +112,7 @@ mod tests {
     #[test]
     fn decodes_local_file_urls_only() {
         assert_eq!(
-            local_file_url("file:///tmp/%D1%84%20%25%23%0A").unwrap(),
+            decode_local_file_url("file:///tmp/%D1%84%20%25%23%0A").unwrap(),
             PathBuf::from("/tmp/ф %#\n")
         );
         for uri in [
@@ -98,7 +121,7 @@ mod tests {
             "file:///tmp/a?foo",
             "https://localhost/test",
         ] {
-            assert!(local_file_url(uri).is_err(), "{uri}");
+            assert!(decode_local_file_url(uri).is_err(), "{uri}");
         }
     }
 }

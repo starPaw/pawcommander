@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU8, Ordering};
 
 mod catalog;
+#[cfg(target_os = "macos")]
+mod clipboard;
 pub(crate) mod display;
 mod file_errors;
 mod formats;
@@ -13,6 +15,8 @@ mod smb;
 pub(crate) mod terminal;
 pub(crate) mod zed;
 pub(crate) use catalog::key;
+#[cfg(target_os = "macos")]
+pub(crate) use clipboard::{clipboard_read_error, clipboard_write_error};
 pub(crate) use file_errors::{
     access_io_message, archive_io_message, connection_result_error, credential_error,
     deletion_failure, file_error, history_error, metadata_warning, recovery_record_error,
