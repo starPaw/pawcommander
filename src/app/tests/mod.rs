@@ -142,6 +142,8 @@ fn hold_queue(app: &mut PawCommander) -> mpsc::Sender<JobCompletion> {
         progress,
         #[cfg(target_os = "macos")]
         remote_save: false,
+        #[cfg(target_os = "macos")]
+        export_target: None,
     });
     send
 }

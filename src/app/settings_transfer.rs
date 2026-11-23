@@ -6,14 +6,14 @@ use super::{
     PawCommander,
 };
 use crate::{
-    i18n::{self, display, text, Language},
+    file_error::{ExportKind, ExportTarget},
+    i18n::{self, display, invalid_preferences_message, text, Language},
     shortcuts::{Command, Shortcuts},
     theme::paint_focus,
 };
 pub(super) use document::Preferences;
-use document::{InvalidPreferences, ReadError};
+use document::ReadError;
 use eframe::egui;
-use icu_normalizer::ComposingNormalizerBorrowed;
 use std::{borrow::Cow, io, path::PathBuf, sync::mpsc, thread, time::Duration};
 
 pub(super) struct SettingsTransfer {
@@ -78,11 +78,9 @@ impl Error {
             ),
             ImportFailure::WorkerStopped => text!("Чтение файла настроек не завершилось.").into(),
         };
-        let path = path.to_string_lossy();
-        let path = ComposingNormalizerBorrowed::new_nfc().normalize(&path);
         crate::tr_format!(
             "Could not import settings from “{path}”.\n{reason}",
-            path = path.escape_debug(),
+            path = display::macos_path(path),
             reason = reason
         )
         .into()
@@ -104,16 +102,6 @@ fn json_error_message(error: &serde_json::Error) -> String {
         "Invalid PawCommander settings file ({error}).",
         error = detail.escape_debug()
     )
-}
-
-fn invalid_preferences_message(error: &InvalidPreferences) -> &'static str {
-    match error {
-        InvalidPreferences::Layout => text!("Недопустимый масштаб или размер панелей."),
-        InvalidPreferences::Columns => text!("Недопустимые размеры или порядок столбцов."),
-        InvalidPreferences::Shortcuts => {
-            text!("Файл содержит недопустимые или конфликтующие сочетания клавиш.")
-        }
-    }
 }
 
 impl SettingsTransfer {
@@ -415,10 +403,11 @@ impl PawCommander {
         preferences: Preferences,
         ctx: &egui::Context,
     ) {
-        self.start_job(ctx, text!("Экспорт настроек"), move || {
-            preferences.save(&path)?;
-            Ok(text!("Настройки экспортированы.").into())
-        });
+        let target = ExportTarget {
+            kind: ExportKind::Settings,
+            path,
+        };
+        self.start_export(ctx, target, None, move |target| preferences.save(target));
     }
 
     pub(super) fn import_settings(&mut self, preferences: Preferences, ctx: &egui::Context) {

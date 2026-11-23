@@ -6,7 +6,7 @@ use super::state::FolderMode;
 use super::PawCommander;
 use crate::conflict::{Answer, Conflict, ConflictDialog, Decision};
 #[cfg(target_os = "macos")]
-use crate::file_error::FilePromiseError;
+use crate::file_error::{ExportKind, ExportTarget, FilePromiseError};
 use crate::file_error::{Failure, MutationError};
 use crate::fs_ops::TransferKind;
 use crate::operations::{Cancellation, Progress, ProgressView, TransferError};
@@ -66,6 +66,8 @@ pub(super) struct Job {
     pub(super) undo: Option<Receiver<UndoJob>>,
     #[cfg(target_os = "macos")]
     pub(super) remote_save: bool,
+    #[cfg(target_os = "macos")]
+    pub(super) export_target: Option<ExportTarget>,
 }
 
 type TextWork = Box<dyn FnOnce(&mut Progress) -> Result<String, TransferError> + Send>;
@@ -149,18 +151,55 @@ pub(super) type CutRequest = (u64, Vec<Location>);
 enum NativeCompletion {
     FilePromise(mpsc::Sender<Result<(), TransferError>>),
     CreateFile(mpsc::Sender<Arc<CreationResult>>),
+    Export {
+        target: ExportTarget,
+        reply: Option<mpsc::Sender<Result<(), TransferError>>>,
+    },
 }
 
 #[cfg(target_os = "macos")]
 impl NativeCompletion {
+    fn export_target(&self) -> Option<&ExportTarget> {
+        match self {
+            Self::Export { target, .. } => Some(target),
+            _ => None,
+        }
+    }
+
+    fn report_start_error(&self, error: TransferError) -> String {
+        let error = match self.export_target() {
+            Some(target) => target.operation_error(error),
+            None => error,
+        };
+        let notice = crate::i18n::file_error(&error);
+        self.report_error(error);
+        notice
+    }
+
     fn report_error(&self, error: TransferError) {
         match self {
-            Self::FilePromise(completion) => {
+            Self::FilePromise(completion)
+            | Self::Export {
+                reply: Some(completion),
+                ..
+            } => {
                 let _ = completion.send(Err(error));
             }
             Self::CreateFile(completion) => {
                 let _ = completion.send(Arc::new(Err(error)));
             }
+            Self::Export { reply: None, .. } => {}
+        }
+    }
+
+    fn report_success(&self) {
+        if let Self::FilePromise(completion)
+        | Self::Export {
+            reply: Some(completion),
+            ..
+        } = self
+        {
+            let _ = completion.send(Ok(()));
         }
     }
 }
@@ -292,6 +331,44 @@ impl PawCommander {
                 undo_origin: None,
                 #[cfg(target_os = "macos")]
                 native_completion: None,
+            },
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn start_export(
+        &mut self,
+        ctx: &egui::Context,
+        target: ExportTarget,
+        reply: Option<mpsc::Sender<Result<(), TransferError>>>,
+        write: impl FnOnce(&ExportTarget) -> Result<(), TransferError> + Send + 'static,
+    ) {
+        use crate::i18n::{display, key, text};
+
+        let (label, finished) = match target.kind {
+            ExportKind::Settings => (key!("Экспорт настроек"), key!("Настройки экспортированы.")),
+            ExportKind::DiagnosticReport => (
+                key!("Экспорт диагностического отчёта"),
+                key!("Диагностический отчёт сохранён."),
+            ),
+        };
+        let label = text(label);
+        let description = format!("{label} · {}", display::macos_path(&target.path));
+        let destination = target.clone();
+        self.submit_job(
+            ctx,
+            PendingJob {
+                label: label.into(),
+                description,
+                work: JobWork::text(move |_| {
+                    write(&destination)?;
+                    Ok(text(finished).into())
+                }),
+                transfer: None,
+                cut: None,
+                retry_origin: None,
+                undo_origin: None,
+                native_completion: Some(NativeCompletion::Export { target, reply }),
             },
         );
     }
@@ -652,10 +729,13 @@ impl PawCommander {
                 self.remember_undo(undo);
             }
             #[cfg(target_os = "macos")]
-            if let Some(completion) = job.native_completion {
-                completion.report_error(message.into());
-            }
-            self.notice = Some((message.into(), true));
+            let message = match job.native_completion {
+                Some(completion) => completion.report_start_error(message.into()),
+                None => message.into(),
+            };
+            #[cfg(not(target_os = "macos"))]
+            let message = message.into();
+            self.notice = Some((message, true));
             return;
         }
         if !self.jobs.is_busy() {
@@ -709,12 +789,18 @@ impl PawCommander {
             let worker_work = work.clone();
             #[cfg(target_os = "macos")]
             let worker_completion = native_completion.clone();
+            #[cfg(target_os = "macos")]
+            let export_target = native_completion
+                .as_ref()
+                .and_then(NativeCompletion::export_target)
+                .cloned();
             let worker = move || {
                 let fail_to_start = |error: String| {
                     #[cfg(target_os = "macos")]
-                    if let Some(completion) = &worker_completion {
-                        completion.report_error(error.clone().into());
-                    }
+                    let error = match &worker_completion {
+                        Some(completion) => completion.report_start_error(error.into()),
+                        None => error,
+                    };
                     let _ = tx.send(JobCompletion::Text(Err(error)));
                     worker_ctx.request_repaint();
                 };
@@ -790,6 +876,11 @@ impl PawCommander {
                                 Some(&error),
                             );
                             WorkResult::CreateFile(target, Arc::new(Err(error)))
+                        } else if let Some(target) = worker_completion
+                            .as_ref()
+                            .and_then(NativeCompletion::export_target)
+                        {
+                            WorkResult::Text(Err(target.worker_stopped()))
                         } else {
                             WorkResult::Text(Err(message.into()))
                         };
@@ -816,11 +907,7 @@ impl PawCommander {
                         if let Some(completion) = &worker_completion {
                             match result {
                                 Err(error) => completion.report_error(error),
-                                Ok(_) => {
-                                    if let NativeCompletion::FilePromise(completion) = completion {
-                                        let _ = completion.send(Ok(()));
-                                    }
-                                }
+                                Ok(_) => completion.report_success(),
                             }
                         }
                         display
@@ -906,8 +993,8 @@ impl PawCommander {
                     crate::tr_format!("Could not start operation: {error}", error = error);
                 #[cfg(target_os = "macos")]
                 if let Some(completion) = native_completion {
-                    let error = TransferError::io(error, |_| message.clone());
-                    completion.report_error(error);
+                    let error = TransferError::io(error, |_| message);
+                    let message = completion.report_start_error(error);
                     self.notice = Some((message, true));
                     continue;
                 }
@@ -936,6 +1023,8 @@ impl PawCommander {
                 undo: Some(undo_receive),
                 #[cfg(target_os = "macos")]
                 remote_save,
+                #[cfg(target_os = "macos")]
+                export_target,
             });
             ctx.request_repaint();
         }
@@ -1571,10 +1660,19 @@ impl PawCommander {
             let result = match job.result.try_recv() {
                 Ok(result) => Some(result),
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    Some(JobCompletion::Text(Err(crate::i18n::text!(
-                        "Фоновая операция неожиданно завершилась. Проверьте файлы в обеих папках.",
-                    )
-                    .into())))
+                    #[cfg(target_os = "macos")]
+                    let export_notice = job
+                        .export_target
+                        .as_ref()
+                        .map(|target| crate::i18n::file_error(&target.worker_stopped()));
+                    #[cfg(not(target_os = "macos"))]
+                    let export_notice: Option<String> = None;
+                    Some(JobCompletion::Text(Err(export_notice.unwrap_or_else(|| {
+                        crate::i18n::text!(
+                            "Фоновая операция неожиданно завершилась. Проверьте файлы в обеих папках.",
+                        )
+                        .into()
+                    }))))
                 }
                 Err(mpsc::TryRecvError::Empty) => None,
             };

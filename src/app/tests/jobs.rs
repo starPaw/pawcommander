@@ -1028,6 +1028,8 @@ fn transfer_stop_button_keeps_pending_ownership_and_navigation_until_result() {
         progress,
         #[cfg(target_os = "macos")]
         remote_save: false,
+        #[cfg(target_os = "macos")]
+        export_target: None,
     });
     let ordinary = operation_footer_frame(&mut app, &ctx, vec![]);
     assert!(!operation_footer_text(&ordinary).contains("Stop"));
@@ -1479,6 +1481,8 @@ fn late_stop_keeps_final_success_and_consumes_committed_cut_events() {
         progress,
         #[cfg(target_os = "macos")]
         remote_save: false,
+        #[cfg(target_os = "macos")]
+        export_target: None,
     });
     let (events, receiver) = mpsc::channel();
     app.jobs.current.as_mut().unwrap().transfer = Some(TransferInteraction {

@@ -68,7 +68,11 @@ pub(super) enum ComparisonResponse {
     #[cfg(target_os = "macos")]
     ViewerExtensionsChanged(crate::extensions::Catalog),
     #[cfg(target_os = "macos")]
-    ExportDiagnostic(std::path::PathBuf, String, mpsc::Sender<Result<(), String>>),
+    ExportDiagnostic(
+        crate::file_error::ExportTarget,
+        String,
+        mpsc::Sender<Result<(), TransferError>>,
+    ),
     #[cfg(target_os = "macos")]
     CreateFile(
         crate::vfs::file_templates::NewFile,
@@ -194,8 +198,8 @@ impl PawCommander {
             return;
         }
         #[cfg(target_os = "macos")]
-        if let ComparisonResponse::ExportDiagnostic(path, draft, send) = response {
-            self.export_diagnostics(path, draft, send, ctx);
+        if let ComparisonResponse::ExportDiagnostic(target, draft, send) = response {
+            self.export_diagnostics(target, draft, send, ctx);
             return;
         }
         if matches!(response, ComparisonResponse::Open) {
