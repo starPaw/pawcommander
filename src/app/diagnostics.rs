@@ -5,17 +5,14 @@ use super::{
     PawCommander,
 };
 use crate::{
+    file_error::{ExportKind, ExportTarget},
     i18n::{display, text, Language},
+    operations::TransferError,
     result_history::DiagnosticFailure,
     theme::paint_focus,
 };
 use eframe::egui;
-use std::{
-    path::{Path, PathBuf},
-    process::Command,
-    sync::mpsc,
-    thread,
-};
+use std::{borrow::Cow, path::PathBuf, process::Command, sync::mpsc, thread};
 
 const RECENT_FAILURES: usize = 8;
 const MAX_DETAIL_CHARS: usize = 512;
@@ -161,8 +158,13 @@ pub(super) struct DiagnosticDialog {
     system_summary: Option<(mpsc::Receiver<String>, String)>,
     picker: Option<Picker>,
     destination: Option<PathBuf>,
-    export: Option<mpsc::Receiver<Result<(), String>>>,
-    status: Option<(String, bool)>,
+    export: Option<(ExportTarget, mpsc::Receiver<Result<(), TransferError>>)>,
+    status: Option<Status>,
+}
+
+enum Status {
+    PickerError(String),
+    Export(Result<(), TransferError>),
 }
 
 impl DiagnosticDialog {
@@ -202,30 +204,30 @@ impl DiagnosticDialog {
             self.picker = None;
             match result {
                 Ok(path) => self.destination = path,
-                Err(error) => self.status = Some((error, true)),
+                Err(error) => self.status = Some(Status::PickerError(error)),
             }
         }
-        if let Some(export) = &self.export {
-            let result = match export.try_recv() {
+        if let Some((target, receive)) = &self.export {
+            let result = match receive.try_recv() {
                 Ok(result) => result,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    Err(text!("Экспорт отчёта завершился без результата.").into())
-                }
+                Err(mpsc::TryRecvError::Disconnected) => Err(target.worker_stopped()),
                 Err(mpsc::TryRecvError::Empty) => return,
             };
             self.export = None;
-            self.status = Some(match result {
-                Ok(()) => (text!("Диагностический отчёт сохранён.").into(), false),
-                Err(error) => (error, true),
-            });
+            self.status = Some(Status::Export(result));
         }
     }
 
     pub(super) fn show(&mut self, ctx: &egui::Context) -> ComparisonResponse {
         if let Some(path) = self.destination.take() {
+            let target = ExportTarget {
+                kind: ExportKind::DiagnosticReport,
+                path,
+            };
             let (send, receive) = mpsc::channel();
-            self.export = Some(receive);
-            return ComparisonResponse::ExportDiagnostic(path, self.draft.clone(), send);
+            self.export = Some((target.clone(), receive));
+            self.status = None;
+            return ComparisonResponse::ExportDiagnostic(target, self.draft.clone(), send);
         }
         let mut add_details = false;
         let mut save = false;
@@ -233,8 +235,18 @@ impl DiagnosticDialog {
         let modal = egui::Modal::new(egui::Id::unique("diagnostic-report")).show(ctx, |ui| {
             ui.set_width((ctx.content_rect().width() - 44.0).clamp(240.0, 660.0));
             ui.heading(text!("Диагностический отчёт"));
-            if let Some((message, is_error)) = &self.status {
-                let color = if *is_error {
+            if let Some(status) = &self.status {
+                let (message, failed): (Cow<'_, str>, bool) = match status {
+                    Status::PickerError(error) => (error.as_str().into(), true),
+                    Status::Export(Ok(())) => {
+                        (text!("Диагностический отчёт сохранён.").into(), false)
+                    }
+                    Status::Export(Err(error)) => (
+                        crate::i18n::file_error(error).into(),
+                        !matches!(error, TransferError::Cancelled),
+                    ),
+                };
+                let color = if failed {
                     ui.visuals().error_fg_color
                 } else {
                     ui.visuals().text_color()
@@ -285,7 +297,6 @@ impl DiagnosticDialog {
             self.draft.push_str(&details);
         }
         if save {
-            self.status = None;
             match Picker::open(
                 Mode::Save {
                     suggested_name: "PawCommander-diagnostics.txt",
@@ -294,7 +305,7 @@ impl DiagnosticDialog {
                 ctx,
             ) {
                 Ok(picker) => self.picker = Some(picker),
-                Err(error) => self.status = Some((error, true)),
+                Err(error) => self.status = Some(Status::PickerError(error)),
             }
         }
         if self.picker.is_none() && (close || modal.should_close()) {
@@ -314,19 +325,6 @@ fn button(ui: &mut egui::Ui, enabled: bool, label: &str) -> bool {
     let response = ui.add_enabled(enabled, egui::Button::new(label));
     paint_focus(ui, &response, 4);
     response.clicked()
-}
-
-fn save_to(path: &Path, draft: &str) -> Result<(), String> {
-    export_file::write_new(path, draft.as_bytes()).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::AlreadyExists {
-            text!("Файл уже существует. Выберите другое имя для экспорта.").into()
-        } else {
-            crate::tr_format!(
-                "Could not save the diagnostic report ({error}).",
-                error = error
-            )
-        }
-    })
 }
 
 impl PawCommander {
@@ -355,26 +353,21 @@ impl PawCommander {
 
     pub(super) fn export_diagnostics(
         &mut self,
-        path: PathBuf,
+        target: ExportTarget,
         draft: String,
-        send: mpsc::Sender<Result<(), String>>,
+        send: mpsc::Sender<Result<(), TransferError>>,
         ctx: &egui::Context,
     ) {
-        self.start_job(
-            ctx,
-            text!("Экспорт диагностического отчёта"),
-            move || {
-                let result = save_to(&path, &draft);
-                let _ = send.send(result.clone());
-                result.map(|()| text!("Диагностический отчёт сохранён.").into())
-            },
-        );
+        self.start_export(ctx, target, Some(send), move |target| {
+            export_file::write_new(target, draft.as_bytes())
+        });
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_error::{ExportIoAction, ExportProblem, Failure};
 
     #[test]
     fn report_summary_keeps_raw_errors_for_explicit_inclusion_and_bounds_them() {
@@ -419,9 +412,12 @@ mod tests {
     fn report_writes_exact_draft_and_keeps_it_when_export_fails() {
         let draft = "Summary\nEdited message = [redacted]\n";
         let folder = tempfile::tempdir().unwrap();
-        let path = folder.path().join("report.txt");
-        save_to(&path, draft).unwrap();
-        let failure = save_to(&path, "other content").unwrap_err();
+        let target = ExportTarget {
+            kind: ExportKind::DiagnosticReport,
+            path: folder.path().join("report.txt"),
+        };
+        export_file::write_new(&target, draft.as_bytes()).unwrap();
+        let failure = export_file::write_new(&target, b"other content").unwrap_err();
         let (send, receive) = mpsc::channel();
         send.send(Err(failure)).unwrap();
         let mut dialog = DiagnosticDialog {
@@ -430,13 +426,22 @@ mod tests {
             system_summary: None,
             picker: None,
             destination: None,
-            export: Some(receive),
+            export: Some((target.clone(), receive)),
             status: None,
         };
         dialog.poll();
         assert_eq!(dialog.draft, draft);
-        assert!(dialog.export.is_none() && dialog.status.is_some_and(|(_, error)| error));
-        assert_eq!(std::fs::read(&path).unwrap(), draft.as_bytes());
+        assert!(dialog.export.is_none());
+        let Some(Status::Export(Err(TransferError::Failed(Failure::Export(error))))) =
+            dialog.status
+        else {
+            panic!("expected the original typed error in the report dialog");
+        };
+        assert_eq!(error.target.path, target.path);
+        assert!(matches!(error.problem, ExportProblem::Io {
+            action: ExportIoAction::Publish, source,
+        } if source.raw_os_error() == Some(libc::EEXIST)));
+        assert_eq!(std::fs::read(&target.path).unwrap(), draft.as_bytes());
         assert_eq!(folder.path().read_dir().unwrap().count(), 1);
     }
 }

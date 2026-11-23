@@ -21,7 +21,7 @@ pub(crate) use file_errors::{
 #[cfg(target_os = "macos")]
 pub(crate) use file_errors::{
     collection_error, collection_unavailable, disk_usage_limit, duplicate_search_skip,
-    duplicate_trash_summary, file_template_encoding,
+    duplicate_trash_summary, file_template_encoding, invalid_preferences_message,
 };
 #[cfg(target_os = "macos")]
 pub(crate) use formats::czech_format;

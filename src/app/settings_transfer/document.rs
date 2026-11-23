@@ -1,7 +1,9 @@
 use super::super::state::{PaneLayout, Settings};
 use crate::{
-    i18n::{text, Language},
+    file_error::{ExportProblem, ExportTarget, InvalidPreferences},
+    i18n::Language,
     list_columns::ListColumns,
+    operations::TransferError,
     shortcuts::Shortcuts,
     theme::Theme,
 };
@@ -26,13 +28,6 @@ pub(super) enum ReadError {
     WrongFormat,
     Version(u32),
     InvalidPreferences(InvalidPreferences),
-}
-
-#[derive(Debug)]
-pub(super) enum InvalidPreferences {
-    Layout,
-    Columns,
-    Shortcuts,
 }
 
 // Keep the transfer file independent from the persisted application profile.
@@ -167,30 +162,24 @@ impl Preferences {
         Self::decode(&bytes)
     }
 
-    pub(super) fn save(&self, path: &Path) -> Result<(), String> {
+    pub(super) fn save(&self, target: &ExportTarget) -> Result<(), TransferError> {
         self.validate()
-            .map_err(|error| super::invalid_preferences_message(&error))?;
-        let export_error = |error: std::io::Error| {
-            if error.kind() == std::io::ErrorKind::AlreadyExists {
-                text!("Файл уже существует. Выберите другое имя для экспорта.").to_owned()
-            } else {
-                crate::tr_format!("Could not save the settings file ({error}).", error = error)
-            }
-        };
+            .map_err(|error| target.failure(ExportProblem::InvalidSettings(error)))?;
         let mut contents = serde_json::to_vec_pretty(&Export {
             format: FORMAT,
             version: VERSION,
             preferences: self,
         })
-        .map_err(|_| text!("Не удалось подготовить файл настроек."))?;
+        .map_err(|error| target.failure(ExportProblem::EncodeSettings(error)))?;
         contents.push(b'\n');
-        super::super::export_file::write_new(path, &contents).map_err(export_error)
+        super::super::export_file::write_new(target, &contents)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_error::{ExportIoAction, ExportKind, Failure};
     use crate::vfs::{Endpoint, Location};
     use eframe::egui::{Key, KeyboardShortcut, Modifiers};
     use serde_json::json;
@@ -224,16 +213,26 @@ mod tests {
             path: "/home".into(),
         });
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("settings.json");
+        let target = ExportTarget {
+            kind: ExportKind::Settings,
+            path: dir.path().join("settings.json"),
+        };
         let prefs = Preferences::capture(&settings);
-        prefs.save(&path).unwrap();
-        let encoded = fs::read_to_string(&path).unwrap();
+        prefs.save(&target).unwrap();
+        let encoded = fs::read_to_string(&target.path).unwrap();
         assert!(!encoded.contains("SECRET") && !encoded.contains("private-secret"));
-        assert_eq!(Preferences::load(&path).unwrap(), prefs);
-        assert!(Preferences::capture(&Settings::default())
-            .save(&path)
-            .is_err());
-        assert_eq!(fs::read_to_string(&path).unwrap(), encoded);
+        assert_eq!(Preferences::load(&target.path).unwrap(), prefs);
+        let error = Preferences::capture(&Settings::default())
+            .save(&target)
+            .unwrap_err();
+        let TransferError::Failed(Failure::Export(error)) = error else {
+            panic!("expected an export error");
+        };
+        assert_eq!(error.target.path, target.path);
+        assert!(matches!(error.problem, ExportProblem::Io {
+            action: ExportIoAction::Publish, source,
+        } if source.raw_os_error() == Some(libc::EEXIST)));
+        assert_eq!(fs::read_to_string(&target.path).unwrap(), encoded);
         assert_eq!(dir.path().read_dir().unwrap().count(), 1);
     }
 

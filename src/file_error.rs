@@ -19,6 +19,8 @@ mod cross_move;
 #[cfg(target_os = "macos")]
 mod duplicates;
 #[cfg(target_os = "macos")]
+mod export;
+#[cfg(target_os = "macos")]
 mod external_editor;
 #[cfg(target_os = "macos")]
 mod file_promise;
@@ -62,6 +64,10 @@ pub(crate) use credential::{
 pub(crate) use cross_move::CrossMoveError;
 #[cfg(target_os = "macos")]
 pub(crate) use duplicates::{DuplicateError, DuplicateRole, MacTrashError};
+#[cfg(target_os = "macos")]
+pub(crate) use export::{
+    ExportError, ExportIoAction, ExportKind, ExportProblem, ExportTarget, InvalidPreferences,
+};
 #[cfg(target_os = "macos")]
 pub(crate) use external_editor::RemoteEditError;
 #[cfg(target_os = "macos")]
@@ -142,6 +148,8 @@ pub(crate) enum Failure {
     #[cfg(target_os = "macos")]
     FileTemplate(Box<FileTemplateError>),
     #[cfg(target_os = "macos")]
+    Export(Box<ExportError>),
+    #[cfg(target_os = "macos")]
     LinkCreate(Box<LinkCreateError>),
     #[cfg(target_os = "macos")]
     Collection(Box<CollectionError>),
@@ -211,6 +219,8 @@ impl Error for Failure {
             #[cfg(target_os = "macos")]
             Self::FileTemplate(error) => Some(error.as_ref()),
             #[cfg(target_os = "macos")]
+            Self::Export(error) => Some(error.as_ref()),
+            #[cfg(target_os = "macos")]
             Self::LinkCreate(error) => Some(error.as_ref()),
             #[cfg(target_os = "macos")]
             Self::Collection(error) => Some(error.as_ref()),
@@ -266,6 +276,8 @@ impl fmt::Display for Failure {
             Self::FilePromise(error) => fmt::Display::fmt(error, f),
             #[cfg(target_os = "macos")]
             Self::FileTemplate(error) => fmt::Display::fmt(error, f),
+            #[cfg(target_os = "macos")]
+            Self::Export(error) => fmt::Display::fmt(error, f),
             #[cfg(target_os = "macos")]
             Self::LinkCreate(error) => fmt::Display::fmt(error, f),
             #[cfg(target_os = "macos")]

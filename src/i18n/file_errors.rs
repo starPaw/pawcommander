@@ -14,11 +14,12 @@ use crate::file_error::{
 #[cfg(target_os = "macos")]
 use crate::file_error::{
     CollectionAction, CollectionError, CollectionUnavailable, CompatiblePlanError, DuplicateError,
-    DuplicateRole, FilePromiseError, FileTemplateError, LinkCreateError, LinkIoAction, MediaAction,
-    MediaError, PdfAction, PdfError, PdfProblem, RemoteEditError, ResumeCheckError,
-    ResumeCheckProblem, ResumeRecordEvent, ResumeRole, ScanLimit, ScanLimitKind, SyncDifference,
-    SyncError, SyncExclusionProblem, SyncFolderRole, SyncStateAction, SyncStateKind,
-    SyncStateProblem, SyncVerification,
+    DuplicateRole, ExportError, ExportIoAction, ExportKind, ExportProblem, FilePromiseError,
+    FileTemplateError, InvalidPreferences, LinkCreateError, LinkIoAction, MediaAction, MediaError,
+    PdfAction, PdfError, PdfProblem, RemoteEditError, ResumeCheckError, ResumeCheckProblem,
+    ResumeRecordEvent, ResumeRole, ScanLimit, ScanLimitKind, SyncDifference, SyncError,
+    SyncExclusionProblem, SyncFolderRole, SyncStateAction, SyncStateKind, SyncStateProblem,
+    SyncVerification,
 };
 use crate::file_error::{
     RecoveryRecordAction, RecoveryRecordError, RecoveryRecordProblem, RecoveryRecordSection,
@@ -75,6 +76,8 @@ fn file_failure(reason: &Failure, unconfirmed: bool) -> String {
         #[cfg(target_os = "macos")]
         Failure::FileTemplate(error) => file_template_error(error),
         #[cfg(target_os = "macos")]
+        Failure::Export(error) => export_error(error, unconfirmed),
+        #[cfg(target_os = "macos")]
         Failure::LinkCreate(error) => link_create_error(error),
         #[cfg(target_os = "macos")]
         Failure::Collection(error) => collection_error(error),
@@ -90,6 +93,70 @@ fn file_failure(reason: &Failure, unconfirmed: bool) -> String {
         Failure::RecoveryRecord(error) => recovery_record_error(error),
         Failure::StagingCleanup(error) => staging_cleanup_error(error),
         _ => reason.to_string(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn invalid_preferences_message(error: &InvalidPreferences) -> &'static str {
+    match error {
+        InvalidPreferences::Layout => text!("Недопустимый масштаб или размер панелей."),
+        InvalidPreferences::Columns => text!("Недопустимые размеры или порядок столбцов."),
+        InvalidPreferences::Shortcuts => {
+            text!("Файл содержит недопустимые или конфликтующие сочетания клавиш.")
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn export_error(error: &ExportError, unconfirmed: bool) -> String {
+    let reason = match &error.problem {
+        ExportProblem::InvalidSettings(error) => invalid_preferences_message(error).into(),
+        ExportProblem::EncodeSettings(error) => crate::tr_format!(
+            "Could not prepare the settings file ({error}).",
+            error = error
+        ),
+        ExportProblem::Io {
+            action: ExportIoAction::Publish,
+            source,
+        } if source.kind() == std::io::ErrorKind::AlreadyExists => {
+            let collision = text!("Файл уже существует. Выберите другое имя для экспорта.");
+            format!("{collision}\n{source}")
+        }
+        ExportProblem::Io { action, source } => {
+            let message = match action {
+                ExportIoAction::CreateTemporary => {
+                    text!("Не удалось создать временный файл экспорта")
+                }
+                ExportIoAction::Write => text!("Не удалось записать временный файл экспорта"),
+                ExportIoAction::Sync => text!("Не удалось сохранить временный файл на диск"),
+                ExportIoAction::Publish => text!("Не удалось поместить файл по указанному пути"),
+            };
+            format!("{message} ({source}).")
+        }
+        ExportProblem::Operation(cause) => file_error(cause),
+        ExportProblem::WorkerStopped => {
+            text!("Фоновая задача экспорта завершилась без ответа.").into()
+        }
+    };
+    let path = super::display::macos_path(&error.target.path);
+    if unconfirmed {
+        return crate::tr_format!(
+            "Could not confirm the export to “{path}”. Check the destination.\n{reason}",
+            path = path,
+            reason = reason
+        );
+    }
+    match error.target.kind {
+        ExportKind::Settings => crate::tr_format!(
+            "Could not export settings to “{path}”.\n{reason}",
+            path = path,
+            reason = reason
+        ),
+        ExportKind::DiagnosticReport => crate::tr_format!(
+            "Could not save the diagnostic report to “{path}”.\n{reason}",
+            path = path,
+            reason = reason
+        ),
     }
 }
 

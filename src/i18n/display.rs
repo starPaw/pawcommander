@@ -3,6 +3,15 @@ use super::{language, Language};
 use chrono::{DateTime, Local};
 
 #[cfg(target_os = "macos")]
+pub(crate) fn macos_path(path: &std::path::Path) -> String {
+    let path = path.to_string_lossy();
+    icu_normalizer::ComposingNormalizerBorrowed::new_nfc()
+        .normalize(&path)
+        .escape_debug()
+        .to_string()
+}
+
+#[cfg(target_os = "macos")]
 pub(crate) fn launch_location(location: &crate::vfs::Location) -> String {
     let label = match location {
         crate::vfs::Location::Sftp { endpoint, path } => {
