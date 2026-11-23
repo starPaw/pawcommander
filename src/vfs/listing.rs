@@ -41,12 +41,12 @@ pub fn visit_directory(
     if cancelled() {
         return Ok(());
     }
-    #[cfg(target_os = "macos")]
-    crate::smb::check_location(location)?;
     if let Some(path) = location.local() {
         return fs_ops::visit_directory(path, cancelled, |entry| visit(entry.into()));
     }
     if let Some(path) = location.archive_source() {
+        #[cfg(target_os = "macos")]
+        crate::smb::check_location(location)?;
         for entry in archive::Index::load(path, cancelled)?.list(location, cancelled)? {
             visit(entry);
         }
@@ -62,13 +62,13 @@ pub fn read_directory(
     if cancelled() {
         return Ok(Vec::new());
     }
-    #[cfg(target_os = "macos")]
-    crate::smb::check_location(location)?;
     if let Some(path) = location.local() {
         return fs_ops::read_directory(path, cancelled)
             .map(|entries| entries.into_iter().map(FileEntry::from).collect());
     }
     if let Some(path) = location.archive_source() {
+        #[cfg(target_os = "macos")]
+        crate::smb::check_location(location)?;
         return archive::Index::load(path, cancelled)?.list(location, cancelled);
     }
     read_sftp_directory(location, &remote(location)?, cancelled)
@@ -239,6 +239,8 @@ pub(super) fn visit_sftp_directory(
                 local_file: None,
                 #[cfg(target_os = "macos")]
                 link_status: None,
+                #[cfg(target_os = "macos")]
+                smb_mount: None,
             },
         });
     }

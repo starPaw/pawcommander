@@ -12,16 +12,32 @@ use std::path::{Component, Path, PathBuf};
 use std::{fs, io};
 
 /// Saved layouts and navigation history can refer to SMB folders using local paths.
-pub(crate) fn check_location(location: &Location) -> Result<(), TransferError> {
+pub(crate) fn check_location(location: &Location) -> Result<Option<[i32; 2]>, TransferError> {
     if let Some(path) = location.local().or_else(|| location.archive_source()) {
-        checked_mount(path).map_err(|cause| {
-            ListingError::new(
-                location.clone(),
-                ListingErrorKind::SmbMount(Box::new(cause)),
-            )
-        })?;
+        return checked_mount(path).map_err(|cause| listing_mount_error(location, cause));
+    }
+    Ok(None)
+}
+
+pub(crate) fn verify_listing_mount(
+    location: &Location,
+    expected: [i32; 2],
+) -> Result<(), TransferError> {
+    if check_location(location)? != Some(expected) {
+        return Err(listing_mount_error(
+            location,
+            SmbError::MountChanged(location.path().to_owned()),
+        ));
     }
     Ok(())
+}
+
+fn listing_mount_error(location: &Location, cause: SmbError) -> TransferError {
+    ListingError::new(
+        location.clone(),
+        ListingErrorKind::SmbMount(Box::new(cause)),
+    )
+    .into()
 }
 
 pub(crate) fn check_transfer_mount(
@@ -72,6 +88,10 @@ impl MutationMount {
 
     pub(crate) fn is_owned(&self) -> bool {
         self.saved.is_some()
+    }
+
+    pub(crate) fn id(&self) -> Option<[i32; 2]> {
+        self.saved.as_ref().map(|(_, id)| *id)
     }
 
     pub(crate) fn open_parent(&self, path: &Path) -> Result<Option<fs::File>, TransferError> {

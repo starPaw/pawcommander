@@ -43,6 +43,8 @@ pub struct ListingMetadata {
     pub(crate) local_file: Option<LocalFileIdentity>,
     #[cfg(target_os = "macos")]
     pub(crate) link_status: Option<links::LinkStatus>,
+    #[cfg(target_os = "macos")]
+    pub(crate) smb_mount: Option<[i32; 2]>,
 }
 
 impl ListingMetadata {
@@ -65,6 +67,8 @@ impl ListingMetadata {
             local_file: LocalFileIdentity::from_metadata(metadata),
             #[cfg(target_os = "macos")]
             link_status: None,
+            #[cfg(target_os = "macos")]
+            smb_mount: None,
         }
     }
 }
@@ -134,11 +138,37 @@ pub fn read_directory(
 pub fn visit_directory(
     path: &Path,
     cancelled: &impl Fn() -> bool,
-    mut visit: impl FnMut(FileEntry),
+    visit: impl FnMut(FileEntry),
 ) -> Result<(), TransferError> {
     if cancelled() {
         return Ok(());
     }
+    #[cfg(target_os = "macos")]
+    let location = Location::Local(path.to_owned());
+    #[cfg(target_os = "macos")]
+    let mount = crate::smb::check_location(&location)?;
+    let result = visit_local_directory(
+        path,
+        cancelled,
+        visit,
+        #[cfg(target_os = "macos")]
+        mount,
+    );
+    #[cfg(target_os = "macos")]
+    if let Some(id) = mount
+        && !cancelled()
+    {
+        crate::smb::verify_listing_mount(&location, id)?;
+    }
+    result
+}
+
+fn visit_local_directory(
+    path: &Path,
+    cancelled: &impl Fn() -> bool,
+    mut visit: impl FnMut(FileEntry),
+    #[cfg(target_os = "macos")] mount: Option<[i32; 2]>,
+) -> Result<(), TransferError> {
     let mut directory = fs::read_dir(path)
         .map_err(|error| ListingError::new(path.to_owned(), ListingErrorKind::OpenLocal(error)))?;
     while !cancelled() {
@@ -169,6 +199,7 @@ pub fn visit_directory(
         #[cfg(target_os = "macos")]
         let listing = ListingMetadata {
             link_status: target.as_ref().map(links::LinkStatus::from_stat),
+            smb_mount: mount,
             ..listing
         };
         visit(FileEntry {
