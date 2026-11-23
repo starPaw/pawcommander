@@ -1,4 +1,7 @@
-use crate::{i18n::text, vfs::Location};
+use crate::{
+    i18n::{terminal, text},
+    vfs::Location,
+};
 use alacritty_terminal::grid::Scroll;
 use eframe::egui;
 use session::{Session, State};
@@ -7,6 +10,7 @@ mod input;
 mod palette;
 mod screen;
 pub(super) mod session;
+pub(crate) use session::SessionError;
 
 pub(crate) struct Panel {
     folder: Location,
@@ -19,11 +23,11 @@ pub(crate) struct Panel {
 }
 
 impl Panel {
-    pub(crate) fn open(folder: Location, ctx: &egui::Context) -> Result<Self, String> {
-        let session = Session::start(folder.clone(), ctx).map_err(|error| error.to_string())?;
+    pub(crate) fn open(folder: &Location, ctx: &egui::Context) -> Result<Self, SessionError> {
+        let session = Session::start(folder.clone(), ctx)?;
         ctx.request_repaint();
         Ok(Self {
-            folder,
+            folder: folder.clone(),
             session,
             close_requested: false,
             focus_requested: true,
@@ -137,8 +141,8 @@ impl Panel {
                                 egui::Button::new(text!("Закрыть терминал")),
                             )
                             .clicked();
-                        let folder = self.folder.display();
-                        let origin = crate::tr_format!("Started in · {folder}", folder = folder);
+                        let folder = terminal::folder_label(&self.folder);
+                        let origin = crate::tr_format!("Launch folder · {folder}", folder = folder);
                         ui.add(egui::Label::new(&origin).truncate())
                             .on_hover_text(origin);
                     });
@@ -152,22 +156,14 @@ impl Panel {
                         }
                         State::Running => {}
                         State::Exited(status) => {
-                            let message = status.code().map_or_else(
-                                || text!("Процесс терминала завершён.").into(),
-                                |code| {
-                                    crate::tr_format!(
-                                        "The terminal process exited with code {code}.",
-                                        code = code
-                                    )
-                                },
-                            );
-                            ui.label(message);
+                            ui.label(terminal::process_exit(*status));
                         }
                         State::Stopped => {
                             ui.label(text!("Процесс терминала завершён."));
                         }
                         State::Failed(error) => {
-                            ui.colored_label(colors.error, error);
+                            let message = terminal::embedded_error(&self.folder, error);
+                            ui.colored_label(colors.error, message);
                         }
                     }
                     if self.input_full {

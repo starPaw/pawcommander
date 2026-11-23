@@ -1,5 +1,5 @@
 use super::{palette, Location};
-use crate::terminal::{macos::ssh_command, pty::Pty};
+use crate::terminal::{macos::ssh_command, pty::Pty, PtySpawnError, SshCommandError};
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::sync::FairMutex;
@@ -70,7 +70,18 @@ pub(super) enum State {
     Running,
     Exited(ExitStatus),
     Stopped,
-    Failed(String),
+    Failed(SessionError),
+}
+
+#[derive(Debug)]
+pub(crate) enum SessionError {
+    Control(io::Error),
+    StartWorker(io::Error),
+    Ssh(SshCommandError),
+    Archive,
+    Spawn(PtySpawnError),
+    Communication(io::Error),
+    WorkerStopped,
 }
 
 impl State {
@@ -117,17 +128,19 @@ pub(super) struct Session {
 }
 
 impl Session {
-    pub(super) fn start(folder: Location, ctx: &egui::Context) -> io::Result<Self> {
+    pub(super) fn start(folder: Location, ctx: &egui::Context) -> Result<Self, SessionError> {
         Self::start_with(ctx, move || command(&folder))
     }
 
     pub(super) fn start_with(
         ctx: &egui::Context,
-        start: impl FnOnce() -> Result<Command, String> + Send + 'static,
-    ) -> io::Result<Self> {
-        let (wake, read_wake) = UnixStream::pair()?;
-        wake.set_nonblocking(true)?;
-        read_wake.set_nonblocking(true)?;
+        start: impl FnOnce() -> Result<Command, SessionError> + Send + 'static,
+    ) -> Result<Self, SessionError> {
+        let (wake, read_wake) = UnixStream::pair().map_err(SessionError::Control)?;
+        wake.set_nonblocking(true).map_err(SessionError::Control)?;
+        read_wake
+            .set_nonblocking(true)
+            .map_err(SessionError::Control)?;
         let control = Arc::new(Control {
             requests: Mutex::default(),
             stop: AtomicBool::default(),
@@ -163,16 +176,17 @@ impl Session {
                         .env("COLORTERM", "truecolor")
                         .env("TERM_PROGRAM", "PawCommander");
                     let mut pty =
-                        Pty::spawn(command, requested_size).map_err(|error| error.to_string())?;
+                        Pty::spawn(command, requested_size).map_err(SessionError::Spawn)?;
                     let _ = send.send(State::Running);
                     ctx.request_repaint();
                     run(&mut pty, read_wake, &worker_control, &worker_terminal, &ctx)
-                        .map_err(|error| error.to_string())
+                        .map_err(SessionError::Communication)
                 })()
                 .unwrap_or_else(State::Failed);
                 let _ = send.send(state);
                 ctx.request_repaint();
-            })?;
+            })
+            .map_err(SessionError::StartWorker)?;
         Ok(Self {
             terminal,
             state: State::Starting,
@@ -190,8 +204,7 @@ impl Session {
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
                     if !self.state.finished() {
-                        self.state =
-                            State::Failed(crate::i18n::text!("Сеанс терминала прервался.").into());
+                        self.state = State::Failed(SessionError::WorkerStopped);
                     }
                     break;
                 }
@@ -247,7 +260,7 @@ impl Drop for Session {
     }
 }
 
-fn command(folder: &Location) -> Result<Command, String> {
+fn command(folder: &Location) -> Result<Command, SessionError> {
     match folder {
         Location::Local(path) => {
             let shell = std::env::var_os("SHELL")
@@ -264,8 +277,8 @@ fn command(folder: &Location) -> Result<Command, String> {
             }
             Ok(shell)
         }
-        Location::Sftp { endpoint, path } => ssh_command(endpoint, path),
-        Location::Archive { .. } => Err(crate::i18n::archive_read_only().into()),
+        Location::Sftp { endpoint, path } => ssh_command(endpoint, path).map_err(SessionError::Ssh),
+        Location::Archive { .. } => Err(SessionError::Archive),
     }
 }
 

@@ -12,7 +12,63 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
-type ApplicationReporter = Box<dyn FnOnce(Result<String, String>) + Send>;
+type ApplicationReporter<T> = Box<dyn FnOnce(T) + Send>;
+
+pub(super) enum ApplicationJob {
+    External(mpsc::Receiver<Result<String, String>>),
+    #[cfg(target_os = "macos")]
+    Terminal {
+        folder: Location,
+        result: mpsc::Receiver<Result<crate::terminal::OpenRequest, crate::terminal::OpenError>>,
+    },
+}
+
+impl ApplicationJob {
+    pub(super) fn poll_notice(&self) -> Option<(String, bool)> {
+        let result = match self {
+            Self::External(result) => match result.try_recv() {
+                Ok(result) => result,
+                Err(mpsc::TryRecvError::Empty) => return None,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Err(crate::i18n::text!("Запуск приложения прервался.").into())
+                }
+            },
+            #[cfg(target_os = "macos")]
+            Self::Terminal { folder, result } => {
+                use crate::i18n::terminal;
+                let result = match result.try_recv() {
+                    Ok(result) => result,
+                    Err(mpsc::TryRecvError::Empty) => return None,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        Err(crate::terminal::OpenError::WorkerStopped)
+                    }
+                };
+                result
+                    .map(|request| terminal::open_request(request).into())
+                    .map_err(|error| terminal::open_error(folder, &error))
+            }
+        };
+        Some(match result {
+            Ok(message) => (message, false),
+            Err(error) => (error, true),
+        })
+    }
+}
+
+fn spawn_application<T: Send + 'static>(
+    ctx: &egui::Context,
+    launch: impl FnOnce(ApplicationReporter<T>) + Send + 'static,
+) -> std::io::Result<mpsc::Receiver<T>> {
+    let (tx, rx) = mpsc::channel();
+    let ctx = ctx.clone();
+    std::thread::Builder::new().spawn(move || {
+        launch(Box::new(move |result| {
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        }));
+    })?;
+    Ok(rx)
+}
 
 #[derive(Clone)]
 pub(super) enum ColumnNavigation {
@@ -204,21 +260,14 @@ impl PawCommander {
         &mut self,
         ctx: &egui::Context,
         status: &str,
-        launch: impl FnOnce(ApplicationReporter) + Send + 'static,
+        launch: impl FnOnce(ApplicationReporter<Result<String, String>>) + Send + 'static,
     ) {
         if self.application_job.is_some() {
             return;
         }
-        let (tx, rx) = mpsc::channel();
-        let ctx = ctx.clone();
-        match std::thread::Builder::new().spawn(move || {
-            launch(Box::new(move |result| {
-                let _ = tx.send(result);
-                ctx.request_repaint();
-            }));
-        }) {
-            Ok(_) => {
-                self.application_job = Some(rx);
+        match spawn_application(ctx, launch) {
+            Ok(result) => {
+                self.application_job = Some(ApplicationJob::External(result));
                 self.notice = Some((status.into(), false));
             }
             Err(error) => {
@@ -413,11 +462,7 @@ impl PawCommander {
                     return;
                 }
                 #[cfg(target_os = "macos")]
-                self.launch_application(
-                    ctx,
-                    crate::i18n::text!("Открытие терминала…"),
-                    move |report| report(crate::terminal::open(&folder)),
-                );
+                self.open_terminal(folder, ctx);
             }
             #[cfg(target_os = "macos")]
             Action::ManageCustomActions => {
@@ -727,6 +772,28 @@ impl PawCommander {
     }
 
     #[cfg(target_os = "macos")]
+    fn open_terminal(&mut self, folder: Location, ctx: &egui::Context) {
+        use crate::terminal::{open, OpenError};
+
+        if self.application_job.is_some() {
+            return;
+        }
+        let target = folder.clone();
+        match spawn_application(ctx, move |report| report(open(&target))) {
+            Ok(result) => {
+                self.application_job = Some(ApplicationJob::Terminal { folder, result });
+                self.notice = Some((crate::i18n::text!("Открытие терминала…").into(), false));
+            }
+            Err(error) => {
+                self.notice = Some((
+                    crate::i18n::terminal::open_error(&folder, &OpenError::StartWorker(error)),
+                    true,
+                ));
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
     fn open_embedded_terminal(&mut self, folder: Location, ctx: &egui::Context) {
         if let Some(terminal) = self
             .embedded_terminal
@@ -736,16 +803,10 @@ impl PawCommander {
             terminal.focus(ctx);
             return;
         }
-        match crate::terminal::embedded::Panel::open(folder, ctx) {
+        match crate::terminal::embedded::Panel::open(&folder, ctx) {
             Ok(terminal) => self.embedded_terminal = Some(terminal),
             Err(error) => {
-                self.notice = Some((
-                    crate::tr_format!(
-                        "Could not open the embedded terminal. {error}",
-                        error = error
-                    ),
-                    true,
-                ))
+                self.notice = Some((crate::i18n::terminal::embedded_error(&folder, &error), true))
             }
         }
     }

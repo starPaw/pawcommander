@@ -10,22 +10,38 @@ fn terminal_command_uses_the_current_folder_and_reports_a_launch_error() {
     let cc = eframe::CreationContext::_new_kittest(ctx.clone());
     let mut app = PawCommander::new(&cc, Some(fixture.path().into()));
     wait_for_directory(app.tab_mut());
-    app.tab_mut().path = Location::Local(file);
+    app.tab_mut().path = Location::Local(file.clone());
     app.run_shortcut(Command::OpenTerminal, &ctx);
     assert!(app.application_job.is_some());
+    app.active = 1 - app.active;
     let deadline = Instant::now() + Duration::from_secs(5);
     while app.application_job.is_some() && Instant::now() < deadline {
         app.poll(&ctx);
         std::thread::sleep(Duration::from_millis(1));
     }
     assert!(app.application_job.is_none());
-    assert_eq!(
-        app.notice,
-        Some((
-            crate::i18n::text!("Выберите папку для открытия терминала.").into(),
-            true
-        ))
+    let (notice, failed) = app.notice.unwrap();
+    assert!(
+        failed && notice.contains(file.to_str().unwrap()),
+        "{notice}"
     );
+    assert!(notice.contains(crate::i18n::text!("Выберите папку для открытия терминала.")));
+    assert_eq!(std::fs::read(file).unwrap(), b"fixture");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn terminal_application_job_reports_its_origin_if_the_worker_stops() {
+    use crate::app::actions::ApplicationJob;
+
+    let folder = Location::Local(PathBuf::from("/fixture/original terminal folder"));
+    let (sender, result) = std::sync::mpsc::channel();
+    let job = ApplicationJob::Terminal { folder, result };
+    assert!(job.poll_notice().is_none());
+    drop(sender);
+    let (message, error) = job.poll_notice().unwrap();
+    assert!(error && message.contains("/fixture/original terminal folder"));
+    assert!(message.contains(crate::i18n::text!("Запуск приложения прервался.")));
 }
 
 #[test]

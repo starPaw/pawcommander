@@ -1225,22 +1225,13 @@ impl PawCommander {
         if self.conflict_open() && self.dialog_file_focus.is_none() {
             self.remember_dialog_file_focus(ctx);
         }
-        if let Some(rx) = &self.application_job {
-            let result = match rx.try_recv() {
-                Ok(result) => Some(result),
-                Err(mpsc::TryRecvError::Disconnected) => Some(Err(crate::i18n::text!(
-                    "Запуск приложения прервался."
-                )
-                .into())),
-                Err(mpsc::TryRecvError::Empty) => None,
-            };
-            if let Some(result) = result {
-                self.notice = Some(match result {
-                    Ok(message) => (message, false),
-                    Err(error) => (error, true),
-                });
-                self.application_job = None;
-            }
+        if let Some(notice) = self
+            .application_job
+            .as_ref()
+            .and_then(super::actions::ApplicationJob::poll_notice)
+        {
+            self.notice = Some(notice);
+            self.application_job = None;
         }
         if let Some(job) = &self.connection {
             let result = match job.result.try_recv() {

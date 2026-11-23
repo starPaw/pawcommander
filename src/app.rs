@@ -102,7 +102,6 @@ use state::{
     Settings, WorkspaceSession,
 };
 pub(crate) use state::{SavedLocation, SavedPath};
-use std::sync::mpsc::Receiver;
 use std::time::Duration;
 use tabs::{move_tab, Pane, Tab};
 
@@ -160,7 +159,7 @@ pub struct PawCommander {
     sftp_form: Option<SftpForm>,
     connection: Option<ConnectionJob>,
     native_drag: crate::native_drag::NativeDrag,
-    application_job: Option<Receiver<Result<String, String>>>,
+    application_job: Option<actions::ApplicationJob>,
     #[cfg(target_os = "macos")]
     smb: smb_connections::Connections,
     #[cfg(target_os = "macos")]
