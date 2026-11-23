@@ -11,23 +11,109 @@ use crate::{
     theme::paint_focus,
 };
 pub(super) use document::Preferences;
+use document::{InvalidPreferences, ReadError};
 use eframe::egui;
-use std::{path::PathBuf, sync::mpsc, thread};
+use icu_normalizer::ComposingNormalizerBorrowed;
+use std::{borrow::Cow, io, path::PathBuf, sync::mpsc, thread, time::Duration};
 
 pub(super) struct SettingsTransfer {
     current: Preferences,
     bookmark_keys: Vec<egui::KeyboardShortcut>,
     state: State,
-    error: Option<String>,
+    error: Option<Error>,
     ctx: egui::Context,
 }
 
 enum State {
     Ready,
     Picking(Picker),
-    Reading(mpsc::Receiver<Result<Preferences, String>>),
+    Reading {
+        path: PathBuf,
+        receiver: mpsc::Receiver<Result<Preferences, ReadError>>,
+    },
     Preview(Box<Preferences>),
     Export(PathBuf),
+}
+
+enum Error {
+    Picker(String),
+    Import { path: PathBuf, cause: ImportFailure },
+}
+
+enum ImportFailure {
+    File(ReadError),
+    WorkerStart(io::Error),
+    WorkerStopped,
+}
+
+impl Error {
+    fn message(&self) -> Cow<'_, str> {
+        let (path, cause) = match self {
+            Self::Picker(error) => return error.as_str().into(),
+            Self::Import { path, cause } => (path, cause),
+        };
+        let reason = match cause {
+            ImportFailure::File(ReadError::Io(error)) => {
+                crate::tr_format!("Could not read the settings file ({error}).", error = error)
+            }
+            ImportFailure::File(ReadError::NotRegular) => {
+                text!("Выберите обычный файл настроек.").into()
+            }
+            ImportFailure::File(ReadError::TooLarge) => {
+                text!("Файл настроек превышает 256 КиБ.").into()
+            }
+            ImportFailure::File(ReadError::Json(error)) => json_error_message(error),
+            ImportFailure::File(ReadError::WrongFormat) => {
+                text!("Неверный формат файла настроек PawCommander.").into()
+            }
+            ImportFailure::File(ReadError::Version(version)) => {
+                crate::tr_format!("Unsupported settings version {version}.", version = version)
+            }
+            ImportFailure::File(ReadError::InvalidPreferences(error)) => {
+                invalid_preferences_message(error).into()
+            }
+            ImportFailure::WorkerStart(error) => crate::tr_format!(
+                "Could not start reading the settings file ({error}).",
+                error = error
+            ),
+            ImportFailure::WorkerStopped => text!("Чтение файла настроек не завершилось.").into(),
+        };
+        let path = path.to_string_lossy();
+        let path = ComposingNormalizerBorrowed::new_nfc().normalize(&path);
+        crate::tr_format!(
+            "Could not import settings from “{path}”.\n{reason}",
+            path = path.escape_debug(),
+            reason = reason
+        )
+        .into()
+    }
+}
+
+fn json_error_message(error: &serde_json::Error) -> String {
+    let mut detail = error.to_string();
+    if let Some((end, _)) = detail.char_indices().nth(240) {
+        detail.truncate(end);
+        return crate::tr_format!(
+            "Invalid PawCommander settings file at line {line}, column {column} ({error}…).",
+            line = error.line(),
+            column = error.column(),
+            error = detail.escape_debug()
+        );
+    }
+    crate::tr_format!(
+        "Invalid PawCommander settings file ({error}).",
+        error = detail.escape_debug()
+    )
+}
+
+fn invalid_preferences_message(error: &InvalidPreferences) -> &'static str {
+    match error {
+        InvalidPreferences::Layout => text!("Недопустимый масштаб или размер панелей."),
+        InvalidPreferences::Columns => text!("Недопустимые размеры или порядок столбцов."),
+        InvalidPreferences::Shortcuts => {
+            text!("Файл содержит недопустимые или конфликтующие сочетания клавиш.")
+        }
+    }
 }
 
 impl SettingsTransfer {
@@ -43,21 +129,24 @@ impl SettingsTransfer {
                         Mode::Save { .. } => self.state = State::Export(path),
                     },
                     Ok(None) => {}
-                    Err(error) => self.error = Some(error),
+                    Err(error) => self.error = Some(Error::Picker(error)),
                 }
             }
-            State::Reading(receiver) => {
+            State::Reading { path, receiver } => {
                 let result = match receiver.try_recv() {
-                    Ok(result) => result,
+                    Ok(result) => result.map_err(ImportFailure::File),
                     Err(mpsc::TryRecvError::Empty) => return,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        Err(text!("Чтение файла настроек не завершилось.").into())
-                    }
+                    Err(mpsc::TryRecvError::Disconnected) => Err(ImportFailure::WorkerStopped),
                 };
-                self.state = State::Ready;
                 match result {
                     Ok(preferences) => self.state = State::Preview(Box::new(preferences)),
-                    Err(error) => self.error = Some(error),
+                    Err(cause) => {
+                        self.error = Some(Error::Import {
+                            path: path.clone(),
+                            cause,
+                        });
+                        self.state = State::Ready;
+                    }
                 }
             }
             _ => {}
@@ -67,18 +156,19 @@ impl SettingsTransfer {
     fn read(&mut self, path: PathBuf) {
         let (sender, receiver) = mpsc::channel();
         let ctx = self.ctx.clone();
+        let source = path.clone();
         match thread::Builder::new()
             .name("pawcommander-settings".into())
             .spawn(move || {
-                let _ = sender.send(Preferences::load(&path));
+                let _ = sender.send(Preferences::load(&source));
                 ctx.request_repaint_of(egui::ViewportId::ROOT);
             }) {
-            Ok(_) => self.state = State::Reading(receiver),
+            Ok(_) => self.state = State::Reading { path, receiver },
             Err(error) => {
-                self.error = Some(crate::tr_format!(
-                    "Could not read the settings file ({error}).",
-                    error = error
-                ))
+                self.error = Some(Error::Import {
+                    path,
+                    cause: ImportFailure::WorkerStart(error),
+                });
             }
         }
     }
@@ -87,7 +177,7 @@ impl SettingsTransfer {
         self.error = None;
         match Picker::open(mode, &self.ctx) {
             Ok(picker) => self.state = State::Picking(picker),
-            Err(error) => self.error = Some(error),
+            Err(error) => self.error = Some(Error::Picker(error)),
         }
     }
 
@@ -98,16 +188,19 @@ impl SettingsTransfer {
                 Box::new(self.current.clone()),
             );
         }
-        let busy = matches!(self.state, State::Reading(_) | State::Picking(_));
+        let busy = matches!(self.state, State::Reading { .. } | State::Picking(_));
         let modal = egui::Modal::new(egui::Id::unique("settings-transfer")).show(ctx, |ui| {
             ui.set_width((ctx.content_rect().width() - 44.0).clamp(240.0, 540.0));
             ui.heading(text!("Перенос настроек"));
             if let Some(error) = &self.error {
-                ui.colored_label(ui.visuals().error_fg_color, error);
+                ui.colored_label(ui.visuals().error_fg_color, error.message());
             }
             match &self.state {
                 State::Picking(_) => { ui.label(text!("Выберите файл в окне macOS.")); }
-                State::Reading(_) => { ui.label(text!("Проверка файла настроек…")); }
+                State::Reading { .. } => {
+                    ui.label(text!("Проверка файла настроек…"));
+                    ctx.request_repaint_after(Duration::from_millis(100));
+                }
                 State::Preview(preferences) => {
                     let preferences = preferences.as_ref();
                     let conflict = bookmark_conflict(&preferences.shortcuts, &self.bookmark_keys);
