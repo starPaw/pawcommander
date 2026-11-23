@@ -20,7 +20,7 @@ mod table;
 use self::encoding::Codec;
 use self::source::Target;
 use crate::file_error::{
-    AccessAction, AccessError, ImagePreviewError, MutationError, PreviewError,
+    AccessAction, AccessError, ImagePreviewError, MutationError, PreviewError, TextDecodeError,
 };
 #[cfg(target_os = "macos")]
 use crate::file_error::{PdfAction, PdfError, PdfProblem};
@@ -101,7 +101,7 @@ enum Content {
     Media(Box<media::Player>),
     Table(Box<table::Document>),
     LargeText(Box<large_text::Document>),
-    TextError(Codec, String),
+    TextError(Codec, TransferError),
     Unavailable(TransferError),
 }
 
@@ -402,7 +402,7 @@ impl Preview {
                         ui.label(file_error(error));
                     }
                     Content::TextError(_, error) => {
-                        ui.colored_label(ui.visuals().error_fg_color, error);
+                        ui.colored_label(ui.visuals().error_fg_color, file_error(error));
                     }
                     Content::Directory => {
                         ui.label(&loaded.kind);
@@ -649,7 +649,7 @@ impl Preview {
                         }
                         Content::TextError(_, error) => {
                             ui.add_space(12.0);
-                            ui.colored_label(ui.visuals().error_fg_color, error);
+                            ui.colored_label(ui.visuals().error_fg_color, file_error(error));
                         }
                         #[cfg(target_os = "macos")]
                         Content::Image { exif, .. } => {
@@ -1046,12 +1046,16 @@ fn text_content(
     let truncated = bytes.len() > TEXT_LIMIT;
     bytes.truncate(TEXT_LIMIT);
     let encoding = Codec::choose(encoding, &bytes);
-    let Some(mut body) = encoding
-        .prefix(&bytes, truncated)
-        .filter(|text| preview_text_chars(text))
-    else {
-        return Content::TextError(encoding, encoding.error());
+    let failed = |error: TextDecodeError| {
+        Content::TextError(encoding, error.at(location, encoding.name(), None).into())
     };
+    let mut body = match encoding.checked_prefix(&bytes, truncated) {
+        Ok(body) => body,
+        Err(error) => return failed(error),
+    };
+    if let Some(character) = invalid_preview_text_char(&body) {
+        return failed(TextDecodeError::ForbiddenCharacter(character));
+    }
     let truncated = code::bound(&mut body) || truncated;
     let markup = markup::parse(location.path(), &body);
     if quick_look && truncated {
@@ -1127,15 +1131,15 @@ fn read_bounded(
     source::Source::open(target)?.read_up_to(limit.saturating_add(1), cancel)
 }
 
-fn preview_text_chars(text: &str) -> bool {
+fn invalid_preview_text_char(text: &str) -> Option<char> {
     text.chars()
-        .all(|ch| (!ch.is_control() && ch != '\u{fffe}') || matches!(ch, '\n' | '\r' | '\t'))
+        .find(|ch| (ch.is_control() || *ch == '\u{fffe}') && !matches!(*ch, '\n' | '\r' | '\t'))
 }
 
 pub(crate) fn decode_comparison_text(bytes: &[u8], truncated: bool) -> Option<String> {
     Codec::choose(None, bytes)
         .prefix(bytes, truncated)
-        .filter(|value| preview_text_chars(value))
+        .filter(|value| invalid_preview_text_char(value).is_none())
 }
 
 fn format_size(bytes: u64) -> String {
@@ -1285,11 +1289,13 @@ mod tests {
         assert_eq!(Codec::Utf8.prefix(&[b'a', 0xd0], true).unwrap(), "a");
         assert!(Codec::Utf8.prefix(&[b'a', 0xd0], false).is_none());
         assert!(Codec::Utf8.prefix(&[b'a', 0xff], true).is_none());
-        assert!(!preview_text_chars("binary\0data"));
+        assert_eq!(invalid_preview_text_char("binary\0data"), Some('\0'));
     }
 
     #[test]
     fn quick_look_encoding_menu_recovers_legacy_text_and_resets_on_file_change() {
+        use crate::file_error::Failure;
+
         let directory = tempfile::tempdir().unwrap();
         let legacy = directory.path().join("legacy.txt");
         let next = directory.path().join("next.txt");
@@ -1358,9 +1364,17 @@ mod tests {
         assert!(matches!(
             &preview.result,
             Some(Ok(Loaded {
-                content: Content::TextError(Codec::Utf8, _),
+                content: Content::TextError(Codec::Utf8, TransferError::Failed(Failure::Preview(error))),
                 ..
-            }))
+            })) if matches!(
+                error.as_ref(),
+                PreviewError::Text {
+                    location,
+                    encoding: "UTF-8",
+                    record: None,
+                    cause: TextDecodeError::Utf8 { byte: Some(0), .. },
+                } if location == &legacy_location
+            )
         ));
         click(
             &mut preview,

@@ -1,5 +1,9 @@
 use super::{Codec, Position, Separator};
-use crate::operations::{Cancellation, TransferError};
+use crate::{
+    file_error::TextDecodeError,
+    operations::{Cancellation, TransferError},
+    vfs::Location,
+};
 use csv_core::{ReadRecordResult, Reader, ReaderBuilder};
 use encoding_rs::{Decoder, DecoderResult};
 use std::io::{BufRead, Cursor};
@@ -23,29 +27,35 @@ struct TextInput<R> {
     decoder: Option<Decoder>,
     text: String,
     consumed: usize,
+    raw_read_through: u64,
     eof: bool,
-    malformed: bool,
+    malformed: Option<(u8, u8)>,
 }
 
 impl<R: BufRead> TextInput<R> {
-    fn new(raw: R, encoding: Codec) -> Self {
+    fn new(raw: R, encoding: Codec, start: u64) -> Self {
         Self {
             raw,
             encoding,
             decoder: (encoding != Codec::Utf8).then(|| encoding.decoder()),
             text: String::new(),
             consumed: 0,
+            raw_read_through: start,
             eof: false,
-            malformed: false,
+            malformed: None,
         }
     }
 
-    fn fill(&mut self, cancel: &Cancellation) -> Result<&[u8], TransferError> {
+    fn fill(
+        &mut self,
+        cancel: &Cancellation,
+        decode_error: &impl Fn(TextDecodeError) -> TransferError,
+    ) -> Result<&[u8], TransferError> {
         cancel.check()?;
         let Some(decoder) = self.decoder.as_mut() else {
             return self.raw.fill_buf().map_err(Into::into);
         };
-        while self.consumed == self.text.len() && !self.eof && !self.malformed {
+        while self.consumed == self.text.len() && !self.eof && self.malformed.is_none() {
             cancel.check()?;
             let bytes = self.raw.fill_buf()?;
             let last = bytes.is_empty();
@@ -54,22 +64,32 @@ impl<R: BufRead> TextInput<R> {
             self.text.reserve(
                 decoder
                     .max_utf8_buffer_length_without_replacement(bytes.len())
-                    .ok_or_else(|| self.encoding.error())?,
+                    .ok_or_else(|| decode_error(TextDecodeError::BufferLimit))?,
             );
             let (status, read) =
                 decoder.decode_to_string_without_replacement(bytes, &mut self.text, last);
             self.raw.consume(read);
+            // The decoder can read ahead of the parser or buffer an incomplete unit.
+            self.raw_read_through += read as u64;
             match status {
-                DecoderResult::Malformed(..) => self.malformed = true,
+                DecoderResult::Malformed(length, consumed_after) => {
+                    self.malformed = Some((length, consumed_after))
+                }
                 DecoderResult::InputEmpty => self.eof = last,
                 DecoderResult::OutputFull if self.text.is_empty() => {
-                    return Err(self.encoding.error().into())
+                    return Err(decode_error(TextDecodeError::BufferLimit));
                 }
                 DecoderResult::OutputFull => {}
             }
         }
-        if self.consumed == self.text.len() && self.malformed {
-            return Err(self.encoding.error().into());
+        if self.consumed == self.text.len()
+            && let Some((length, consumed_after)) = self.malformed
+        {
+            return Err(decode_error(TextDecodeError::malformed(
+                self.raw_read_through,
+                length,
+                consumed_after,
+            )));
         }
         Ok(&self.text.as_bytes()[self.consumed..])
     }
@@ -120,7 +140,7 @@ impl<R: BufRead> Records<R> {
             reader.read_record(b"\n", &mut [0], &mut [0]);
         }
         Self {
-            input: TextInput::new(input, encoding),
+            input: TextInput::new(input, encoding, position.byte),
             reader,
             output: vec![0; RECORD_BYTES + 1],
             ends: [0; COLUMNS + 1],
@@ -135,13 +155,17 @@ impl<R: BufRead> Records<R> {
 
     pub(super) fn next(
         &mut self,
+        location: &Location,
         cancel: &Cancellation,
     ) -> Result<Option<Record<'_>>, TransferError> {
         let number = self.position.records + 1;
+        let encoding = self.input.encoding.name();
+        let decode_error =
+            |cause: TextDecodeError| cause.at(location, encoding, Some(number)).into();
         let mut written = 0;
         let mut fields = 0;
         loop {
-            let input = self.input.fill(cancel)?;
+            let input = self.input.fill(cancel, &decode_error)?;
             if input.is_empty() && !self.complete_input {
                 return Ok(None);
             }
@@ -168,20 +192,19 @@ impl<R: BufRead> Records<R> {
             match status {
                 ReadRecordResult::Record => {
                     let ends = &self.ends[..fields];
+                    // The CSV parser has joined cells and removed quoting, so its
+                    // output byte positions cannot locate bytes in the file.
                     let text = std::str::from_utf8(&self.output[..written])
-                        .ok()
-                        .filter(|text| {
-                            ends.iter().all(|&end| text.is_char_boundary(end))
-                                && !text.as_bytes().contains(&0)
-                                && !text.contains('\u{fffe}')
-                        })
-                        .ok_or_else(|| {
-                            crate::tr_format!(
-                                "Record {number} contains invalid {} text.",
-                                self.input.encoding.name(),
-                                number = number
-                            )
-                        })?;
+                        .map_err(|source| decode_error(TextDecodeError::utf8(source, None)))?;
+                    if !ends.iter().all(|&end| text.is_char_boundary(end)) {
+                        return Err(decode_error(TextDecodeError::InvalidCellBoundary));
+                    }
+                    if let Some(character) = ['\0', '\u{fffe}']
+                        .into_iter()
+                        .find(|&character| text.contains(character))
+                    {
+                        return Err(decode_error(TextDecodeError::ForbiddenCharacter(character)));
+                    }
                     self.position.records = number;
                     return Ok(Some(Record { text, ends }));
                 }
@@ -193,6 +216,7 @@ impl<R: BufRead> Records<R> {
 }
 
 pub(super) fn detect(
+    location: &Location,
     sample: &[u8],
     complete: bool,
     preferred: Separator,
@@ -225,7 +249,7 @@ pub(super) fn detect(
         let mut widths = [0; 8];
         let mut count = 0;
         for width in &mut widths {
-            let Ok(Some(record)) = records.next(cancel) else {
+            let Ok(Some(record)) = records.next(location, cancel) else {
                 break;
             };
             *width = record.ends.len();
@@ -253,14 +277,17 @@ pub(super) fn detect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_error::{Failure, PreviewError};
     use std::io::BufReader;
 
     #[test]
     fn tsv_records_preserve_tab_quotes_multiline_and_trailing_empty_cells() {
         let source = "\u{feff}A\tB\tC\r\n\"one\ttwo\"\t\"say \"\"hi\"\"\r\nagain\"\t";
         let cancel = Cancellation::default();
+        let location = Location::Local("fixture.tsv".into());
         assert_eq!(
             detect(
+                &location,
                 source.as_bytes(),
                 true,
                 Separator::Tab,
@@ -279,7 +306,7 @@ mod tests {
         );
         assert_eq!(
             records
-                .next(&cancel)
+                .next(&location, &cancel)
                 .unwrap()
                 .unwrap()
                 .cells()
@@ -288,20 +315,21 @@ mod tests {
         );
         assert_eq!(
             records
-                .next(&cancel)
+                .next(&location, &cancel)
                 .unwrap()
                 .unwrap()
                 .cells()
                 .collect::<Vec<_>>(),
             ["one\ttwo", "say \"hi\"\r\nagain", ""]
         );
-        assert!(records.next(&cancel).unwrap().is_none());
+        assert!(records.next(&location, &cancel).unwrap().is_none());
         assert_eq!(records.position().byte, source.len() as u64);
     }
 
     #[test]
     fn table_record_limits_preserve_valid_edges_and_guard_utf8_field_boundaries() {
         let cancel = Cancellation::default();
+        let location = Location::Local("fixture.csv".into());
         let at_limit = format!("{},{}\n", "x".repeat(RECORD_BYTES), ",".repeat(COLUMNS - 2));
         let mut records = Records::new(
             Cursor::new(at_limit.as_bytes()),
@@ -310,7 +338,7 @@ mod tests {
             true,
             Codec::Utf8,
         );
-        let row = records.next(&cancel).unwrap().unwrap();
+        let row = records.next(&location, &cancel).unwrap().unwrap();
         assert_eq!(row.len(), RECORD_BYTES);
         assert_eq!(row.cells().count(), COLUMNS);
 
@@ -326,7 +354,7 @@ mod tests {
                 true,
                 Codec::Utf8,
             );
-            assert!(records.next(&cancel).is_err());
+            assert!(records.next(&location, &cancel).is_err());
         }
     }
 
@@ -338,16 +366,41 @@ mod tests {
         let good_length = bytes.len();
         bytes.extend_from_slice(&[0x3d, 0xd8]);
         let cancel = Cancellation::default();
+        let location = Location::Local("resumed.csv".into());
+        let start = Position {
+            byte: 96,
+            records: 11,
+        };
         let mut records = Records::new(
             BufReader::with_capacity(3, Cursor::new(bytes)),
             Separator::Semicolon,
-            Position::default(),
+            start,
             true,
             encoding,
         );
-        let first = records.next(&cancel).unwrap().unwrap();
+        let first = records.next(&location, &cancel).unwrap().unwrap();
         assert_eq!(first.cells().collect::<Vec<_>>(), ["Город", "строка 🙂"]);
-        assert!(records.position().byte >= (good_length - 2) as u64);
-        assert!(records.next(&cancel).is_err());
+        assert!(records.position().byte >= start.byte + (good_length - 2) as u64);
+        let Err(TransferError::Failed(Failure::Preview(error))) = records.next(&location, &cancel)
+        else {
+            panic!("expected a typed decoding error after the first row");
+        };
+        let PreviewError::Text {
+            location: source,
+            encoding: name,
+            record: Some(13),
+            cause:
+                TextDecodeError::Malformed {
+                    byte,
+                    length: 2,
+                    consumed_after: 0,
+                },
+        } = *error
+        else {
+            panic!("expected the malformed UTF-16 diagnostic for row 13");
+        };
+        assert_eq!(source, location);
+        assert_eq!(name, encoding.name());
+        assert_eq!(byte, start.byte + good_length as u64);
     }
 }

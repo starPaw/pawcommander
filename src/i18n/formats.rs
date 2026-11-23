@@ -532,6 +532,8 @@ formats! {
     "Page {}" => ("Страница {}", "Stránka {}"),
     "Match on line {line}" => ("Совпадение в строке {line}", "Shoda na řádku {line}"),
     "Could not show text in {}. Choose an encoding." => ("Не удалось показать текст в {}. Выберите кодировку.", "Text se nepodařilo zobrazit v {}. Zvolte kódování."),
+    "Malformed byte sequence ({length} B)." => ("Некорректная последовательность байтов ({length} Б).", "Neplatná posloupnost bajtů ({length} B)."),
+    "Character {code} is invalid in this preview." => ("Символ {code} недопустим в предпросмотре.", "Znak {code} je v náhledu neplatný."),
     "Pages: {}" => ("Страниц: {}", "Stránky: {}"),
     "of {}" => ("из {}", "z {}"),
     "Matching pages: {}" => ("Страниц с совпадениями: {}", "Stránky se shodou: {}"),
