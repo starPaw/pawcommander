@@ -764,6 +764,7 @@ catalog! {
     "SFTP-файл не распознан как текстовый. Используйте «Открыть в Zed» в контекстном меню для явного открытия или скопируйте файл локально." => ("SFTP file was not recognized as text. Choose “Open in Zed” from the context menu to open it explicitly, or copy it locally.", "Soubor SFTP nebyl rozpoznán jako text. Zvolte „Otevřít v Zedu“ v místní nabídce nebo soubor zkopírujte do místní složky."),
     "Запрос открытия передан Zed. Подключение и SSH-аутентификация выполняются в Zed." => ("Open request sent to Zed. Zed handles the connection and SSH authentication.", "Požadavek na otevření byl předán Zedu. Připojení a ověření SSH zajišťuje Zed."),
     "Запрос открытия передан Zed." => ("Open request sent to Zed.", "Požadavek na otevření byl předán Zedu."),
+    "Часть диагностического вывода Zed скрыта." => ("Zed's diagnostic output was truncated.", "Diagnostický výstup Zedu byl zkrácen."),
     "Путь SFTP должен быть UTF-8" => ("SFTP path must be UTF-8", "Cesta SFTP musí být v UTF-8"),
     "Для Zed нужен абсолютный POSIX-путь SFTP" => ("Zed requires an absolute POSIX SFTP path", "Zed vyžaduje absolutní cestu SFTP ve formátu POSIX"),
     "Некорректный сервер SSH для Zed" => ("Invalid SSH host for Zed", "Neplatný hostitel SSH pro Zed"),
