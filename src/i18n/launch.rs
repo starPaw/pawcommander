@@ -1,8 +1,10 @@
-use crate::tools::launch::StartupError;
+use super::text;
+use crate::tools::{launch::StartupError, DiffLaunchError};
 use crate::tr_format;
+use std::path::Path;
 
 #[cfg(target_os = "macos")]
-use super::{display, text};
+use super::display;
 #[cfg(target_os = "macos")]
 use crate::tools::{
     custom_action::{ArgumentError, TemplateError},
@@ -10,9 +12,6 @@ use crate::tools::{
 };
 #[cfg(target_os = "macos")]
 use crate::vfs::Location;
-#[cfg(target_os = "macos")]
-use std::path::Path;
-
 pub(crate) fn startup_error(error: &StartupError) -> String {
     match error {
         StartupError::Spawn(error) | StartupError::Observe(error) => {
@@ -22,6 +21,67 @@ pub(crate) fn startup_error(error: &StartupError) -> String {
             "The external tool exited with an error ({status})",
             status = status
         ),
+    }
+}
+
+pub(crate) fn diff_error(tool: Option<&Path>, failure: &DiffLaunchError) -> String {
+    let message = match failure {
+        DiffLaunchError::ProgramPath if cfg!(target_os = "macos") => {
+            text!("Укажите абсолютный путь к исполняемому файлу").into()
+        }
+        DiffLaunchError::ProgramMetadata(error) if cfg!(target_os = "macos") => tr_format!(
+            "Could not inspect the external diff tool. {error}",
+            error = error
+        ),
+        DiffLaunchError::ProgramNotExecutable if cfg!(target_os = "macos") => {
+            text!("Для сравнения нужен исполняемый файл.").into()
+        }
+        DiffLaunchError::ProgramPath
+        | DiffLaunchError::ProgramMetadata(_)
+        | DiffLaunchError::ProgramNotExecutable => {
+            text!("Внешний инструмент сравнения недоступен").into()
+        }
+        DiffLaunchError::RelativeInput { right, path } if cfg!(target_os = "macos") => {
+            let error = text!("Внешнему инструменту нужны два локальных файла");
+            format!("{} · {error} · {path:?}", diff_pane(*right))
+        }
+        DiffLaunchError::RelativeInput { .. } => {
+            text!("Внешнему инструменту нужны два локальных файла").into()
+        }
+        DiffLaunchError::Input { right, source } => {
+            let error = super::access_io_message(source);
+            if cfg!(target_os = "macos") {
+                format!("{} · {error}", diff_pane(*right))
+            } else {
+                error
+            }
+        }
+        DiffLaunchError::Startup(error) => startup_error(error),
+        DiffLaunchError::WorkerStart(error) if cfg!(target_os = "macos") => tr_format!(
+            "Could not start the external comparison worker. {error}",
+            error = error
+        ),
+        DiffLaunchError::WorkerStart(error) => {
+            tr_format!("Could not launch the external tool: {error}", error = error)
+        }
+        DiffLaunchError::WorkerStopped => {
+            text!("Не удалось запустить внешний инструмент сравнения").into()
+        }
+    };
+    #[cfg(target_os = "macos")]
+    if let Some(tool) = tool {
+        return format!("{message}\n{}", executable(tool));
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = tool;
+    message
+}
+
+fn diff_pane(right: bool) -> &'static str {
+    if right {
+        text!("Правая панель")
+    } else {
+        text!("Левая панель")
     }
 }
 

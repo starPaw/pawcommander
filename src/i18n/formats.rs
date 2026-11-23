@@ -261,6 +261,8 @@ formats! {
     "Could not open “{path}” in the external editor. {error}" => ("Не удалось открыть «{path}» во внешнем редакторе. {error}", "Soubor „{path}“ se nepodařilo otevřít v externím editoru. {error}"),
     "Could not inspect the file for the editor. {error}" => ("Не удалось проверить файл для редактора. {error}", "Soubor pro editor se nepodařilo ověřit. {error}"),
     "Could not check the external process. {error}" => ("Не удалось проверить состояние внешнего процесса. {error}", "Stav externího procesu se nepodařilo ověřit. {error}"),
+    "Could not inspect the external diff tool. {error}" => ("Не удалось проверить внешний инструмент сравнения. {error}", "Externí nástroj pro porovnávání se nepodařilo ověřit. {error}"),
+    "Could not start the external comparison worker. {error}" => ("Не удалось запустить фоновую задачу внешнего сравнения. {error}", "Úlohu externího porovnávání se nepodařilo spustit. {error}"),
     "Executable · {path}" => ("Исполняемый файл · {path}", "Spustitelný soubor · {path}"),
     "Working folder · {path}" => ("Рабочая папка · {path}", "Pracovní složka · {path}"),
     "Working copy · {path}" => ("Рабочая копия · {path}", "Pracovní kopie · {path}"),

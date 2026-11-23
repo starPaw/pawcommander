@@ -6,7 +6,7 @@ pub(crate) mod launch;
 
 use std::path::{Path, PathBuf};
 
-pub(crate) use diff::launch_diff;
+pub(crate) use diff::{launch_diff, DiffLaunchError};
 
 #[derive(Default)]
 pub struct Tools {
@@ -79,9 +79,11 @@ fn find(names: &[&str], extra: impl IntoIterator<Item = PathBuf>) -> Option<Path
 }
 
 fn executable(path: &Path) -> bool {
-    let Ok(metadata) = path.metadata() else {
-        return false;
-    };
+    path.metadata()
+        .is_ok_and(|metadata| executable_metadata(&metadata))
+}
+
+fn executable_metadata(metadata: &std::fs::Metadata) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
