@@ -1,4 +1,4 @@
-use super::{local_file_url, FileList};
+use super::{decode_local_file_url, FileList, LocalFileUrlError};
 use objc2::rc::{autoreleasepool, Retained};
 use objc2::runtime::ProtocolObject;
 use objc2_app_kit::{NSPasteboard, NSPasteboardTypeFileURL, NSPasteboardTypeString};
@@ -21,6 +21,38 @@ struct Selection {
     consumed: HashSet<usize>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ClipboardWriteError {
+    PathContainsNul(PathBuf),
+    Rejected,
+    Changed,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ClipboardReadError {
+    Changed,
+    Unreadable {
+        revision: isize,
+        cause: ClipboardReadFailure,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ClipboardReadFailure {
+    ItemsUnavailable,
+    FileUrlUnavailable(usize),
+    InvalidFileUrl {
+        slot: usize,
+        cause: LocalFileUrlError,
+    },
+    FoundationRejectedUrl(usize),
+    UnresolvedReference {
+        slot: usize,
+        path: PathBuf,
+    },
+    InvalidPath(PathBuf),
+}
+
 impl SystemClipboard {
     pub fn new(_: &eframe::CreationContext<'_>) -> Self {
         Self::default()
@@ -34,14 +66,17 @@ impl SystemClipboard {
         })
     }
 
-    pub fn write(&mut self, paths: &[PathBuf], cut: bool) -> Result<(), String> {
+    pub(crate) fn write(
+        &mut self,
+        paths: &[PathBuf],
+        cut: bool,
+    ) -> Result<(), ClipboardWriteError> {
         autoreleasepool(|_| {
             let urls = paths
                 .iter()
                 .map(|path| {
-                    let bytes = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
-                        crate::i18n::text!("Путь содержит нулевой байт").to_string()
-                    })?;
+                    let bytes = CString::new(path.as_os_str().as_bytes())
+                        .map_err(|_| ClipboardWriteError::PathContainsNul(path.clone()))?;
                     let is_dir = path.symlink_metadata().is_ok_and(|meta| meta.is_dir());
                     // The file-system representation preserves symlinks and non-UTF-8 path bytes.
                     let url = unsafe {
@@ -53,28 +88,43 @@ impl SystemClipboard {
                     };
                     Ok(ProtocolObject::from_retained(url))
                 })
-                .collect::<Result<Vec<_>, String>>()?;
+                .collect::<Result<Vec<_>, _>>()?;
             let objects = NSArray::from_retained_slice(&urls);
             // AppKit owns the resulting URLs independently of PawCommander.
             let pasteboard = NSPasteboard::generalPasteboard();
-            pasteboard.clearContents();
-            if !pasteboard.writeObjects(&objects) {
-                return Err(crate::i18n::text!("Не удалось записать файлы в буфер Finder").into());
+            let revision = pasteboard.clearContents();
+            let written = pasteboard.writeObjects(&objects);
+            self.cut_revision = None;
+            if pasteboard.changeCount() != revision {
+                return Err(ClipboardWriteError::Changed);
             }
-            self.cut_revision = cut.then(|| pasteboard.changeCount());
+            if !written {
+                return Err(ClipboardWriteError::Rejected);
+            }
+            // clearContents returns the revision we own. A later change count
+            // could already belong to a selection written by another app.
+            self.cut_revision = cut.then_some(revision);
             Ok(())
         })
     }
 
-    pub fn read(&mut self) -> Result<Option<FileList>, String> {
+    pub(crate) fn read(&mut self) -> Result<Option<FileList>, ClipboardReadError> {
         autoreleasepool(|_| {
             let pasteboard = NSPasteboard::generalPasteboard();
             let revision = pasteboard.changeCount();
             let items = pasteboard.pasteboardItems();
             self.read_items(
                 revision,
-                items.iter().flat_map(|items| items.iter()),
-                |item| unsafe { item.stringForType(NSPasteboardTypeFileURL) },
+                items.as_ref().map(|items| items.iter()),
+                |item, slot| {
+                    let file_url_type = unsafe { NSPasteboardTypeFileURL };
+                    if !item.types().containsObject(file_url_type) {
+                        return Ok(None);
+                    }
+                    item.stringForType(file_url_type)
+                        .map(Some)
+                        .ok_or(ClipboardReadFailure::FileUrlUnavailable(slot))
+                },
                 || pasteboard.changeCount(),
             )
         })
@@ -83,30 +133,38 @@ impl SystemClipboard {
     fn read_items<T>(
         &mut self,
         revision: isize,
-        items: impl Iterator<Item = T>,
-        mut file_url: impl FnMut(T) -> Option<Retained<NSString>>,
+        items: Option<impl Iterator<Item = T>>,
+        mut file_url: impl FnMut(T, usize) -> Result<Option<Retained<NSString>>, ClipboardReadFailure>,
         current_revision: impl FnOnce() -> isize,
-    ) -> Result<Option<FileList>, String> {
+    ) -> Result<Option<FileList>, ClipboardReadError> {
         let same_revision = self.selection.revision == Some(revision);
-        let mut paths = Vec::new();
-        for (slot, item) in items.enumerate() {
-            // Finder references can follow a move without a pasteboard change.
-            // Skip completed items by slot before resolving the remaining URLs.
-            if same_revision && self.selection.consumed.contains(&slot) {
-                continue;
-            }
-            if let Some(url) = file_url(item) {
-                paths.push((slot, clipboard_path(&url)?));
-            }
-        }
+        let parsed = items
+            .ok_or(ClipboardReadFailure::ItemsUnavailable)
+            .and_then(|items| {
+                let mut paths = Vec::new();
+                for (slot, item) in items.enumerate() {
+                    // Finder references can follow a move without a pasteboard change.
+                    // Skip completed items by slot before resolving the remaining URLs.
+                    if same_revision && self.selection.consumed.contains(&slot) {
+                        continue;
+                    }
+                    if let Some(url) = file_url(item, slot)? {
+                        paths.push((slot, clipboard_path(&url, slot)?));
+                    }
+                }
+                Ok(paths)
+            });
         if revision != current_revision() {
-            return Err(crate::i18n::text!("Системный буфер изменился. Повторите вставку.").into());
+            return Err(ClipboardReadError::Changed);
         }
-        let files = FileList::new(
+        let failure = |cause| ClipboardReadError::Unreadable { revision, cause };
+        let paths = parsed.map_err(failure)?;
+        let files = FileList::validated(
             paths.iter().map(|(_, path)| path.clone()).collect(),
             self.cut_revision == Some(revision),
             Some(revision.to_string()),
-        )?;
+        )
+        .map_err(|path| failure(ClipboardReadFailure::InvalidPath(path)))?;
         if !same_revision {
             self.selection.consumed.clear();
         }
@@ -137,21 +195,21 @@ impl SystemClipboard {
     }
 }
 
-fn clipboard_path(value: &NSString) -> Result<PathBuf, String> {
+fn clipboard_path(value: &NSString, slot: usize) -> Result<PathBuf, ClipboardReadFailure> {
     // Keep the same local-only validation as the other Unix clipboard backend.
-    let path = local_file_url(&value.to_string())?;
+    let path = decode_local_file_url(&value.to_string())
+        .map_err(|cause| ClipboardReadFailure::InvalidFileUrl { slot, cause })?;
     // Foundation copies/parses the live NSString. A Finder file-reference
     // URL identifies a resource, rather than a literal `/.file/id=...` path.
-    let url = NSURL::URLWithString(value).ok_or(crate::i18n::text!(
-        "Файловый буфер содержит недопустимый URL",
-    ))?;
+    let url =
+        NSURL::URLWithString(value).ok_or(ClipboardReadFailure::FoundationRejectedUrl(slot))?;
     if !url.isFileReferenceURL() {
         // Ordinary paths must retain symlinks and need not currently exist.
         return Ok(path);
     }
-    let resolved = url.filePathURL().ok_or(crate::i18n::text!(
-        "Не удалось найти файл из буфера Finder: ссылка устарела или файл недоступен",
-    ))?;
+    let resolved = url
+        .filePathURL()
+        .ok_or(ClipboardReadFailure::UnresolvedReference { slot, path })?;
     // SAFETY: the filesystem representation belongs to the live resolved NSURL;
     // copy its bytes before releasing the URL, preserving non-UTF-8 filenames.
     let bytes = unsafe { CStr::from_ptr(resolved.fileSystemRepresentation().as_ptr()) }.to_bytes();
@@ -192,7 +250,12 @@ mod tests {
             let urls = [&folder, &child, &folder, &pending].map(|path| reference_string(path));
             let read = |clipboard: &mut SystemClipboard, revision, urls: &[Retained<NSString>]| {
                 clipboard
-                    .read_items(revision, urls.iter(), |url| Some(url.clone()), || revision)
+                    .read_items(
+                        revision,
+                        Some(urls.iter()),
+                        |url, _| Ok(Some(url.clone())),
+                        || revision,
+                    )
                     .unwrap()
             };
             let mut clipboard = SystemClipboard::default();
@@ -253,7 +316,7 @@ mod tests {
             .map(|path| native_url(path).absoluteString().unwrap());
             let read = |clipboard: &mut SystemClipboard| {
                 clipboard
-                    .read_items(1, urls.iter(), |url| Some(url.clone()), || 1)
+                    .read_items(1, Some(urls.iter()), |url, _| Ok(Some(url.clone())), || 1)
                     .unwrap()
                     .unwrap()
             };
@@ -325,13 +388,16 @@ mod tests {
             std::fs::create_dir(&directory).unwrap();
             for path in [&file, &directory] {
                 let reference = reference_string(path);
-                assert_ne!(local_file_url(&reference.to_string()).unwrap(), *path);
-                assert_eq!(clipboard_path(&reference).unwrap(), *path);
+                assert_ne!(
+                    decode_local_file_url(&reference.to_string()).unwrap(),
+                    *path
+                );
+                assert_eq!(clipboard_path(&reference, 0).unwrap(), *path);
             }
             let reference = reference_string(&file);
             let renamed = root.path().join("renamed.txt");
             std::fs::rename(&file, &renamed).unwrap();
-            assert_eq!(clipboard_path(&reference).unwrap(), renamed);
+            assert_eq!(clipboard_path(&reference, 0).unwrap(), renamed);
         });
     }
 
@@ -343,7 +409,14 @@ mod tests {
             std::fs::write(&file, b"clipboard").unwrap();
             let reference = reference_string(&file);
             std::fs::remove_file(&file).unwrap();
-            assert!(clipboard_path(&reference).is_err());
+            let reference_path = decode_local_file_url(&reference.to_string()).unwrap();
+            assert_eq!(
+                clipboard_path(&reference, 2),
+                Err(ClipboardReadFailure::UnresolvedReference {
+                    slot: 2,
+                    path: reference_path,
+                })
+            );
         });
     }
 
@@ -363,7 +436,7 @@ mod tests {
                 let url = native_url(path);
                 assert!(!url.isFileReferenceURL());
                 assert_eq!(
-                    clipboard_path(&url.absoluteString().unwrap()).unwrap(),
+                    clipboard_path(&url.absoluteString().unwrap(), 0).unwrap(),
                     *path
                 );
             }
@@ -382,9 +455,69 @@ mod tests {
             "not a URL",
         ] {
             assert!(
-                clipboard_path(&NSString::from_str(value)).is_err(),
+                clipboard_path(&NSString::from_str(value), 0).is_err(),
                 "{value}"
             );
         }
+    }
+
+    #[test]
+    fn unreadable_file_and_revision_change_leave_the_last_selection_intact() {
+        autoreleasepool(|_| {
+            let mut clipboard = SystemClipboard::default();
+            let first = NSString::from_str("file:///private/tmp/first.txt");
+            let read = |clipboard: &mut SystemClipboard, revision, current_revision| {
+                clipboard.read_items(
+                    revision,
+                    Some([true, false].into_iter()),
+                    |has_url, slot| {
+                        if has_url {
+                            Ok(Some(first.clone()))
+                        } else {
+                            Err(ClipboardReadFailure::FileUrlUnavailable(slot))
+                        }
+                    },
+                    || current_revision,
+                )
+            };
+            let previous = clipboard
+                .read_items(
+                    1,
+                    Some([NSString::from_str("file:///private/tmp/previous.txt")].into_iter()),
+                    |url, _| Ok(Some(url)),
+                    || 1,
+                )
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(
+                read(&mut clipboard, 2, 2),
+                Err(ClipboardReadError::Unreadable {
+                    revision: 2,
+                    cause: ClipboardReadFailure::FileUrlUnavailable(1),
+                })
+            );
+            assert_eq!(read(&mut clipboard, 2, 3), Err(ClipboardReadError::Changed));
+            assert_eq!(clipboard.selection.revision, Some(1));
+            assert_eq!(clipboard.selection.paths[0].1, previous.paths[0]);
+            assert_eq!(clipboard.selection.paths.len(), 1);
+        });
+    }
+
+    #[test]
+    fn empty_clipboard_and_unavailable_items_are_distinct() {
+        let mut clipboard = SystemClipboard::default();
+        let file_url = |(), _| unreachable!("the snapshot has no items");
+        assert_eq!(
+            clipboard.read_items(1, None::<std::iter::Empty<()>>, file_url, || 1),
+            Err(ClipboardReadError::Unreadable {
+                revision: 1,
+                cause: ClipboardReadFailure::ItemsUnavailable,
+            })
+        );
+        assert_eq!(
+            clipboard.read_items(1, Some(std::iter::empty()), file_url, || 1),
+            Ok(None)
+        );
     }
 }

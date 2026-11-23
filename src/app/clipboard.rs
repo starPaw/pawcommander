@@ -1,6 +1,8 @@
 use super::actions::Action;
 use super::PawCommander;
 use crate::file_clipboard::FileList;
+#[cfg(target_os = "macos")]
+use crate::file_clipboard::{ClipboardReadError, ClipboardWriteError};
 use crate::fs_ops::TransferKind;
 use crate::vfs::Location;
 use eframe::egui;
@@ -19,7 +21,20 @@ pub(super) enum ClipboardOrigin {
     // Remember which system selection preceded the app-only copy. A newly copied system file
     // takes precedence, while an unrelated or empty text clipboard leaves SFTP copies usable.
     App(Option<FileList>),
+    #[cfg(target_os = "macos")]
+    AppWithUnreadablePasteboard(isize),
     System(FileList),
+}
+
+#[cfg(target_os = "macos")]
+impl ClipboardOrigin {
+    fn accepts_unreadable(&self, error: &ClipboardReadError) -> bool {
+        matches!(
+            (self, error),
+            (Self::AppWithUnreadablePasteboard(previous), ClipboardReadError::Unreadable { revision, .. })
+                if previous == revision
+        )
+    }
 }
 
 impl Clipboard {
@@ -36,6 +51,8 @@ impl Clipboard {
     pub(super) fn matches(&self, observed: Option<&FileList>) -> bool {
         match &self.origin {
             ClipboardOrigin::App(previous) => observed.is_none() || previous.as_ref() == observed,
+            #[cfg(target_os = "macos")]
+            ClipboardOrigin::AppWithUnreadablePasteboard(_) => observed.is_none(),
             ClipboardOrigin::System(previous) => Some(previous) == observed,
         }
     }
@@ -131,13 +148,26 @@ impl PawCommander {
                     ));
                     return;
                 }
+                #[cfg(target_os = "macos")]
+                Err(error @ ClipboardWriteError::Changed) => {
+                    self.notice = Some((crate::i18n::clipboard_write_error(&error), true));
+                    return;
+                }
                 Err(error) => Some(error),
             }
         } else {
             None
         };
-        let observed = self.system_clipboard.read().ok().flatten();
-        self.clipboard = Some(Clipboard::new(paths, cut, ClipboardOrigin::App(observed)));
+        let origin = match self.system_clipboard.read() {
+            #[cfg(target_os = "macos")]
+            Err(ClipboardReadError::Unreadable { revision, .. }) => {
+                ClipboardOrigin::AppWithUnreadablePasteboard(revision)
+            }
+            observed => ClipboardOrigin::App(observed.ok().flatten()),
+        };
+        self.clipboard = Some(Clipboard::new(paths, cut, origin));
+        #[cfg(target_os = "macos")]
+        let write_error = write_error.as_ref().map(crate::i18n::clipboard_write_error);
         self.notice = Some(match write_error {
             Some(error) => (
                 crate::tr_format!(
@@ -156,6 +186,16 @@ impl PawCommander {
     pub(super) fn paste_files(&mut self, move_here: bool, ctx: &egui::Context) {
         let observed = match self.system_clipboard.read() {
             Ok(files) => files,
+            #[cfg(target_os = "macos")]
+            Err(error)
+                if self
+                    .clipboard
+                    .as_ref()
+                    .is_some_and(|clipboard| clipboard.origin.accepts_unreadable(&error)) =>
+            {
+                None
+            }
+            #[cfg(not(target_os = "macos"))]
             Err(_)
                 if self.clipboard.as_ref().is_some_and(|clipboard| {
                     matches!(clipboard.origin, ClipboardOrigin::App(_))
@@ -164,6 +204,8 @@ impl PawCommander {
                 None
             }
             Err(error) => {
+                #[cfg(target_os = "macos")]
+                let error = crate::i18n::clipboard_read_error(&error);
                 self.notice = Some((
                     crate::tr_format!(
                         "Could not read system file clipboard: {error}",
@@ -244,5 +286,25 @@ impl PawCommander {
                 });
             }
         }
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+    use crate::file_clipboard::ClipboardReadFailure;
+
+    #[test]
+    fn app_cut_fallback_requires_the_same_unreadable_pasteboard_revision() {
+        let origin = ClipboardOrigin::AppWithUnreadablePasteboard(12);
+        let unreadable = |revision| ClipboardReadError::Unreadable {
+            revision,
+            cause: ClipboardReadFailure::ItemsUnavailable,
+        };
+
+        assert!(origin.accepts_unreadable(&unreadable(12)));
+        assert!(!origin.accepts_unreadable(&unreadable(13)));
+        assert!(!origin.accepts_unreadable(&ClipboardReadError::Changed));
+        assert!(!ClipboardOrigin::App(None).accepts_unreadable(&unreadable(12)));
     }
 }
