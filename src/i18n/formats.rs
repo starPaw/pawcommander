@@ -473,6 +473,7 @@ formats! {
     "Could not read details: {e}" => ("Не удалось прочитать сведения: {e}", "Podrobnosti se nepodařilo načíst: {e}"),
     "Could not open item: {e}" => ("Не удалось открыть объект: {e}", "Položku se nepodařilo otevřít: {e}"),
     "Could not detect image format: {e}" => ("Не удалось определить формат изображения: {e}", "Formát obrázku se nepodařilo zjistit: {e}"),
+    "Image exceeds {size}. Open it in an external application." => ("Изображение больше {size}. Откройте его во внешнем приложении.", "Obrázek překračuje {size}. Otevřete jej v externí aplikaci."),
     "Image preview unavailable: {e}" => ("Предпросмотр изображения недоступен: {e}", "Náhled obrázku není dostupný: {e}"),
     "Could not read file: {e}" => ("Не удалось прочитать файл: {e}", "Soubor se nepodařilo načíst: {e}"),
     "The SFTP media file exceeds {size}. Open a local copy of {location}." => ("Медиафайл SFTP больше {size}. Откройте локальную копию {location}.", "Mediální soubor na SFTP překračuje {size}. Otevřete místní kopii {location}."),

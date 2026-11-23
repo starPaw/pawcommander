@@ -327,7 +327,6 @@ impl From<AccessError> for TransferError {
 
 impl From<PreviewError> for TransferError {
     fn from(error: PreviewError) -> Self {
-        #[cfg(target_os = "macos")]
         if error.io_cause().is_some_and(Self::is_cancelled_io) {
             return Self::Cancelled;
         }

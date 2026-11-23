@@ -3,12 +3,13 @@ use crate::file_error::{
     AccessAction, AccessCause, AccessError, ArchiveError, ArchiveIoError, ArchiveIssue,
     ArchiveMemberError, BatchRenameError, ChecksumError, ConflictError, ConnectionError,
     CopyVerificationError, CredentialAction, CredentialError, CredentialFailure, CrossMoveError,
-    DescendantProblem, Failure, HostKeyError, KnownHostEntryError, KnownHostsError, ListingError,
-    ListingErrorKind, LocalPathAction, ManifestLineError, MetadataError, MetadataField,
-    MetadataWarning, MoveHistoryError, MutationError, PathError, PermissionError, PinError,
-    PreviewError, ProbeAction, PublicationError, RecoveryNotice, ReplacementRefusal, RetryError,
-    RetryProblem, ScanError, SearchError, SftpStateLock, SpaceError, SshStage, StagingCleanupError,
-    StagingError, StagingRecordAction, TransferPlanError, UndoError,
+    DescendantProblem, Failure, HostKeyError, ImagePreviewError, KnownHostEntryError,
+    KnownHostsError, ListingError, ListingErrorKind, LocalPathAction, ManifestLineError,
+    MetadataError, MetadataField, MetadataWarning, MoveHistoryError, MutationError, PathError,
+    PermissionError, PinError, PreviewError, ProbeAction, PublicationError, RecoveryNotice,
+    ReplacementRefusal, RetryError, RetryProblem, ScanError, SearchError, SftpStateLock,
+    SpaceError, SshStage, StagingCleanupError, StagingError, StagingRecordAction,
+    TransferPlanError, UndoError,
 };
 #[cfg(target_os = "macos")]
 use crate::file_error::{
@@ -2323,17 +2324,12 @@ fn preview_error(error: &PreviewError) -> String {
             text!("Файл изменился во время чтения. Откройте предпросмотр заново."),
             location,
         ),
+        PreviewError::Image { location, cause } => return image_preview_error(location, cause),
         #[cfg(target_os = "macos")]
         PreviewError::MediaLimit { location, limit } => {
-            let mib = 1024 * 1024;
-            let size = if limit.is_multiple_of(mib) {
-                format!("{} {}", limit / mib, text!("МиБ"))
-            } else {
-                format!("{} {}", limit, text!("Б"))
-            };
             return crate::tr_format!(
                 "The SFTP media file exceeds {size}. Open a local copy of {location}.",
-                size = size,
+                size = preview_limit_size(*limit),
                 location = location
             );
         }
@@ -2344,6 +2340,57 @@ fn preview_error(error: &PreviewError) -> String {
         PreviewError::WorkerUnavailable => return text!("Служба предпросмотра недоступна").into(),
     };
     format!("{message} · {location}")
+}
+
+fn preview_limit_size(limit: u64) -> String {
+    let mib = 1024 * 1024;
+    if limit.is_multiple_of(mib) {
+        format!("{} {}", limit / mib, text!("МиБ"))
+    } else {
+        format!("{limit} {}", text!("Б"))
+    }
+}
+
+fn image_preview_error(location: &Location, error: &ImagePreviewError) -> String {
+    use image::{
+        error::{ImageFormatHint, LimitErrorKind, UnsupportedErrorKind},
+        ImageError,
+    };
+
+    let format_unknown = |source: &dyn std::fmt::Display| {
+        crate::tr_format!("Could not detect image format: {e}", e = source)
+    };
+    let message = match error {
+        ImagePreviewError::FileLimit { limit } => crate::tr_format!(
+            "Image exceeds {size}. Open it in an external application.",
+            size = preview_limit_size(*limit)
+        ),
+        ImagePreviewError::Detect(source) => format_unknown(source),
+        ImagePreviewError::Decode(ImageError::Unsupported(source))
+            if matches!(
+                source.kind(),
+                UnsupportedErrorKind::Format(ImageFormatHint::Unknown)
+            ) =>
+        {
+            format_unknown(source)
+        }
+        ImagePreviewError::Decode(ImageError::Limits(source)) => {
+            let reason = match source.kind() {
+                LimitErrorKind::DimensionError => {
+                    text!("Изображение превышает допустимые размеры предпросмотра.")
+                }
+                LimitErrorKind::InsufficientMemory => {
+                    text!("Изображению требуется больше памяти, чем доступно для предпросмотра.")
+                }
+                _ => text!("Предпросмотр изображения недоступен."),
+            };
+            return format!("{reason}\n{location}\n{source}");
+        }
+        ImagePreviewError::Decode(source) => {
+            crate::tr_format!("Image preview unavailable: {e}", e = source)
+        }
+    };
+    format!("{message}\n{location}")
 }
 
 #[cfg(target_os = "macos")]
