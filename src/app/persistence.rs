@@ -260,6 +260,10 @@ impl PawCommander {
             native_drag: Default::default(),
             application_job: None,
             #[cfg(target_os = "macos")]
+            system_open_jobs: Vec::new(),
+            #[cfg(target_os = "macos")]
+            system_open_error: None,
+            #[cfg(target_os = "macos")]
             smb: super::smb_connections::Connections::load(&cc.egui_ctx),
             #[cfg(target_os = "macos")]
             volumes: Default::default(),

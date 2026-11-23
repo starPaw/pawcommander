@@ -2,7 +2,7 @@ use super::*;
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
 use std::path::PathBuf;
-use std::process::Output;
+use std::process::{Output, Stdio};
 use std::time::{Duration, Instant};
 
 #[test]
@@ -33,8 +33,8 @@ fn terminal_preserves_a_missing_folder_errno_and_the_open_rejection() {
     let mut reject = Command::new("/bin/sh");
     reject.args(["-c", r"printf 'fixture: \377\n' >&2; exit 73"]);
     assert!(matches!(
-        open_document(reject),
-        Err(OpenError::Rejected { status, stderr })
+        system_open::run_command(reject),
+        Err(system_open::Error::Rejected { status, stderr })
             if status.code() == Some(73) && stderr == b"fixture: \xff\n"
     ));
 }

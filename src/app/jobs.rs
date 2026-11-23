@@ -1233,6 +1233,8 @@ impl PawCommander {
             self.notice = Some(notice);
             self.application_job = None;
         }
+        #[cfg(target_os = "macos")]
+        self.poll_system_open(ctx);
         if let Some(job) = &self.connection {
             let result = match job.result.try_recv() {
                 Ok(result) => Some(result),

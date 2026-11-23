@@ -93,6 +93,18 @@ pub(super) fn human_size(bytes: u64) -> String {
     format!("{} {unit}", display::decimal(bytes as f64 / scale, 1))
 }
 
+fn scroll_notice(ui: &mut egui::Ui, id: &str, message: RichText, max_height: f32) {
+    egui::ScrollArea::vertical()
+        .id_salt(id)
+        .max_height(max_height)
+        .show(ui, |ui| {
+            // Use vertical layout so the first text row does not clip the remaining paths.
+            ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                ui.add(egui::Label::new(message).wrap().selectable(true));
+            });
+        });
+}
+
 impl PawCommander {
     pub(super) fn footer(&mut self, ui: &mut egui::Ui) {
         let ctx = &ui.ctx().clone();
@@ -203,25 +215,13 @@ impl PawCommander {
                         if ui.small_button("×").clicked() {
                             self.notice = None;
                         }
-                        egui::ScrollArea::vertical()
-                            .id_salt("operation_notice")
-                            .max_height(160.0)
-                            .show(ui, |ui| {
-                                // Scroll content must use ordinary vertical layout. A
-                                // wrapped horizontal layout gives the first text row
-                                // the viewport's height and clips subsequent paths.
-                                ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
-                                    ui.add(
-                                        egui::Label::new(RichText::new(message).color(if error {
-                                            colors.error
-                                        } else {
-                                            colors.success
-                                        }))
-                                        .wrap()
-                                        .selectable(true),
-                                    );
-                                });
-                            });
+                        let color = if error { colors.error } else { colors.success };
+                        scroll_notice(
+                            ui,
+                            "operation_notice",
+                            RichText::new(message).color(color),
+                            160.0,
+                        );
                     });
                 } else {
                     ui.horizontal(|ui| {
@@ -258,6 +258,26 @@ impl PawCommander {
                             }
                         });
                     });
+                }
+                #[cfg(target_os = "macos")]
+                if let Some(message) = &self.system_open_error {
+                    let dismissed = ui
+                        .with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                            let dismiss = ui
+                                .small_button("×")
+                                .on_hover_text(crate::i18n::text!("Закрыть"));
+                            scroll_notice(
+                                ui,
+                                "system_open_error",
+                                RichText::new(message).color(colors.error),
+                                80.0,
+                            );
+                            dismiss.clicked()
+                        })
+                        .inner;
+                    if dismissed {
+                        self.system_open_error = None;
+                    }
                 }
                 self.pending_queue_ui(ui);
             });

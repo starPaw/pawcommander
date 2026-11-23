@@ -1,5 +1,62 @@
 use super::*;
 
+#[cfg(target_os = "macos")]
+#[test]
+fn system_open_and_reveal_report_the_original_selection_after_focus_changes() {
+    let fixture = tempfile::tempdir().unwrap();
+    let name = "-moved ' & % report.txt";
+    let path = fixture.path().join(name);
+    let retained = fixture.path().join("retained.txt");
+    std::fs::write(&path, b"example").unwrap();
+    let ctx = egui::Context::default();
+    let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+    let mut app = PawCommander::new(&cc, Some(fixture.path().into()));
+    wait_for_directory(app.tab_mut());
+    let location = Location::Local(path.clone());
+    app.tab_mut().selected.insert(location.clone());
+    std::fs::rename(&path, &retained).unwrap();
+
+    app.action(Action::Open(app.active, location), &ctx);
+    app.action(Action::Reveal, &ctx);
+    assert_eq!(app.system_open_jobs.len(), 2);
+    app.active = 1 - app.active;
+    let completed = hold_queue(&mut app);
+    completed
+        .send(Ok("file operation finished".into()))
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !app.system_open_jobs.is_empty() && Instant::now() < deadline {
+        app.poll(&ctx);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(app.system_open_jobs.is_empty());
+    let messages = app.system_open_error.as_deref().unwrap();
+    let reports: Vec<_> = messages.split("\n\n").collect();
+    assert_eq!(reports.len(), 2, "{messages}");
+    for report in &reports {
+        assert!(
+            report
+                .lines()
+                .next()
+                .unwrap()
+                .contains(path.to_str().unwrap()),
+            "{report}"
+        );
+        assert!(report.contains("exit status: 1"), "{report}");
+        assert!(report.contains("does not exist"), "{report}");
+    }
+    assert!(reports.iter().any(|report| report.contains("Finder")));
+    assert_eq!(std::fs::read(retained).unwrap(), b"example");
+
+    operation_footer_frame(&mut app, &ctx, vec![]);
+    let output = operation_footer_frame(&mut app, &ctx, vec![]);
+    let footer = operation_footer_text(&output);
+    assert!(footer.contains("file operation finished"), "{footer}");
+    assert!(footer.contains(path.to_str().unwrap()), "{footer}");
+    assert!(footer.contains("does not exist"), "{footer}");
+}
+
 #[test]
 fn directory_tree_targets_the_active_pane_and_preserves_current_selection() {
     use egui::accesskit::{Action as AxAction, ActionRequest, Role, Toggled};

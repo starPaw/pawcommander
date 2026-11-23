@@ -1,11 +1,12 @@
 use super::Location;
+use crate::tools::system_open;
 use crate::vfs::Endpoint;
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::io::{self, Write};
 use std::os::unix::{ffi::OsStrExt, fs::PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::Command;
 
 const IDENTITY_PATH: &str = "PAWCOMMANDER_TERMINAL_IDENTITY_FILE";
 const REMOTE_SHELL: &str = r#"folder=$(printf %b "$1.") || exit 1; folder=${folder%.}; cd "$folder" || exit 1; exec "${SHELL:-/bin/sh}" -i"#;
@@ -22,8 +23,7 @@ pub(crate) enum OpenError {
     NotDirectory,
     Ssh(SshCommandError),
     Launcher(io::Error),
-    StartOpen(io::Error),
-    Rejected { status: ExitStatus, stderr: Vec<u8> },
+    Handoff(system_open::Error),
     Archive,
     StartWorker(io::Error),
     WorkerStopped,
@@ -49,13 +49,14 @@ pub(crate) fn open(folder: &Location) -> Result<OpenRequest, OpenError> {
             {
                 return Err(OpenError::NotDirectory);
             }
-            open_document(document_command(&path))?;
+            system_open::run_command(document_command(&path)).map_err(OpenError::Handoff)?;
             Ok(OpenRequest::Folder)
         }
         Location::Sftp { endpoint, path } => {
             let ssh = ssh_command(endpoint, path).map_err(OpenError::Ssh)?;
             let mut script = create_launcher(&ssh).map_err(OpenError::Launcher)?;
-            open_document(document_command(script.path()))?;
+            system_open::run_command(document_command(script.path()))
+                .map_err(OpenError::Handoff)?;
             // Terminal reads the document asynchronously and unlinks it on start.
             script.disable_cleanup(true);
             Ok(OpenRequest::Ssh)
@@ -68,20 +69,6 @@ fn document_command(path: &Path) -> Command {
     let mut command = Command::new("/usr/bin/open");
     command.args(["-b", "com.apple.Terminal", "--"]).arg(path);
     command
-}
-
-fn open_document(mut command: Command) -> Result<(), OpenError> {
-    let output = command
-        .stdin(Stdio::null())
-        .output()
-        .map_err(OpenError::StartOpen)?;
-    if output.status.success() {
-        return Ok(());
-    }
-    Err(OpenError::Rejected {
-        status: output.status,
-        stderr: output.stderr,
-    })
 }
 
 pub(super) fn ssh_command(endpoint: &Endpoint, path: &Path) -> Result<Command, SshCommandError> {

@@ -918,6 +918,7 @@ catalog! {
     "Копирование файлов" => ("Copying files", "Kopírování souborů"),
     "Открытие файла в Zed…" => ("Opening file in Zed…", "Otevírání souboru v Zedu…"),
     "Запуск приложения прервался." => ("The application launch stopped unexpectedly.", "Spouštění aplikace bylo neočekávaně ukončeno."),
+    "Рабочая копия должна быть обычным файлом." => ("The working copy must be a regular file.", "Pracovní kopie musí být běžný soubor."),
     "Открыть терминал здесь" => ("Open Terminal Here", "Otevřít terminál zde"),
     "Открыть встроенный терминал" => ("Open Embedded Terminal", "Otevřít vestavěný terminál"),
     "Терминал" => ("Terminal", "Terminál"),

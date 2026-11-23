@@ -3,6 +3,8 @@
 pub(crate) mod custom_action;
 mod diff;
 pub(crate) mod launch;
+#[cfg(target_os = "macos")]
+pub(crate) mod system_open;
 
 use std::path::{Path, PathBuf};
 
