@@ -279,6 +279,7 @@ impl Document {
                     }
                 }
             }
+            Err(TransferError::Cancelled) => {}
             Err(error) => self.error = Some(error),
         }
     }

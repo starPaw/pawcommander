@@ -20,7 +20,8 @@ mod table;
 use self::encoding::Codec;
 use self::source::Target;
 use crate::file_error::{
-    AccessAction, AccessError, ImagePreviewError, MutationError, PreviewError, TextDecodeError,
+    AccessAction, AccessError, ImagePreviewError, MutationError, PreviewError, PreviewWorkerError,
+    PreviewWorkerKind, TextDecodeError,
 };
 #[cfg(target_os = "macos")]
 use crate::file_error::{PdfAction, PdfError, PdfProblem};
@@ -139,8 +140,8 @@ impl From<&vfs::FileEntry> for Fingerprint {
 
 /// A read-only preview with one background reader and a bounded image decoder.
 pub struct Preview {
-    requests: Sender<Request>,
-    responses: Receiver<Response>,
+    reader: Option<PreviewReader>,
+    quick_look: bool,
     target: Option<Target>,
     generation: u64,
     result: Option<Result<Loaded, TransferError>>,
@@ -152,6 +153,54 @@ pub struct Preview {
     hex: Option<Result<Box<hex::Document>, TransferError>>,
     fingerprint: Option<Fingerprint>,
     cancel: Cancellation,
+}
+
+struct PreviewReader {
+    requests: Sender<Request>,
+    responses: Receiver<Response>,
+}
+
+impl PreviewReader {
+    fn start(quick_look: bool) -> std::io::Result<Self> {
+        let (requests, receiver) = mpsc::channel::<Request>();
+        let (sender, responses) = mpsc::channel();
+        thread::Builder::new()
+            .name("pawcommander-preview".into())
+            .spawn(move || {
+                while let Ok(mut request) = receiver.recv() {
+                    // Fast navigation should not queue a read for every visited item.
+                    while let Ok(newer) = receiver.try_recv() {
+                        request = newer;
+                    }
+                    if request.cancel.is_requested() {
+                        continue;
+                    }
+                    let result = load_location(
+                        &request.target,
+                        &request.cancel,
+                        quick_look,
+                        request.encoding,
+                    );
+                    if request.cancel.is_requested() {
+                        continue;
+                    }
+                    if sender
+                        .send(Response {
+                            generation: request.generation,
+                            result,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                    request.context.request_repaint_of(request.viewport);
+                }
+            })?;
+        Ok(Self {
+            requests,
+            responses,
+        })
+    }
 }
 
 #[derive(Default)]
@@ -171,41 +220,9 @@ impl Preview {
     }
 
     fn with_quick_look(quick_look: bool) -> Self {
-        let (requests, receiver) = mpsc::channel::<Request>();
-        let (sender, responses) = mpsc::channel();
-        thread::spawn(move || {
-            while let Ok(mut request) = receiver.recv() {
-                // Fast navigation should not queue a read for every visited item.
-                while let Ok(newer) = receiver.try_recv() {
-                    request = newer;
-                }
-                if request.cancel.is_requested() {
-                    continue;
-                }
-                let result = load_location(
-                    &request.target,
-                    &request.cancel,
-                    quick_look,
-                    request.encoding,
-                );
-                if request.cancel.is_requested() {
-                    continue;
-                }
-                if sender
-                    .send(Response {
-                        generation: request.generation,
-                        result,
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-                request.context.request_repaint_of(request.viewport);
-            }
-        });
         Self {
-            requests,
-            responses,
+            reader: None,
+            quick_look,
             target: None,
             generation: 0,
             result: None,
@@ -455,6 +472,7 @@ impl Preview {
         path: Option<&Location>,
         fingerprint: Option<Fingerprint>,
     ) {
+        self.poll_reader();
         let changed_path = self.target.as_ref().map(|target| &target.location) != path;
         if changed_path {
             self.encoding = None;
@@ -477,27 +495,65 @@ impl Preview {
                     self.result = Some(Err(MutationError::ReadOnlyArchive(path.clone()).into()));
                 } else if self.hex_mode {
                     self.hex = Some(hex::Document::start(target.clone(), ctx).map(Box::new));
-                } else if self
-                    .requests
-                    .send(Request {
+                } else {
+                    let request = Request {
                         generation: self.generation,
                         target: target.clone(),
                         context: ctx.clone(),
                         viewport: ctx.viewport_id(),
                         cancel: self.cancel.clone(),
                         encoding: self.encoding,
-                    })
-                    .is_err()
-                {
-                    self.result = Some(Err(PreviewError::WorkerUnavailable.into()));
+                    };
+                    if let Err(error) = self.request_read(request) {
+                        self.result = Some(Err(error));
+                    }
                 }
             }
         }
-        while let Ok(response) = self.responses.try_recv() {
-            if response.generation == self.generation {
-                self.result = Some(response.result);
-                self.texture = None;
+    }
+
+    fn request_read(&mut self, request: Request) -> Result<(), TransferError> {
+        if self.reader.is_none() {
+            self.reader = Some(PreviewReader::start(self.quick_look).map_err(|source| {
+                PreviewWorkerError::Start(source)
+                    .at(&request.target.location, PreviewWorkerKind::File)
+            })?);
+        }
+        let reader = self.reader.as_ref().expect("started preview reader");
+        if let Err(mpsc::SendError(request)) = reader.requests.send(request) {
+            self.reader = None;
+            return Err(PreviewWorkerError::Disconnected
+                .at(&request.target.location, PreviewWorkerKind::File)
+                .into());
+        }
+        Ok(())
+    }
+
+    fn poll_reader(&mut self) {
+        let Some(reader) = &self.reader else {
+            return;
+        };
+        loop {
+            match reader.responses.try_recv() {
+                Ok(response) => {
+                    if response.generation == self.generation && !self.cancel.is_requested() {
+                        self.result = Some(response.result);
+                        self.texture = None;
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => return,
+                Err(mpsc::TryRecvError::Disconnected) => break,
             }
+        }
+        self.reader = None;
+        if self.result.is_none()
+            && !self.hex_mode
+            && !self.cancel.is_requested()
+            && let Some(target) = &self.target
+        {
+            self.result = Some(Err(PreviewWorkerError::Disconnected
+                .at(&target.location, PreviewWorkerKind::File)
+                .into()));
         }
     }
 
@@ -1192,6 +1248,69 @@ mod tests {
             }
         ));
         assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn preview_recovers_after_the_active_reader_disconnects() {
+        use crate::file_error::Failure;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = Location::Local(dir.path().join("selected.txt"));
+        fs::write(path.path(), "Ready after refresh").unwrap();
+        let previous = Location::Local(dir.path().join("previous.txt"));
+        let ctx = egui::Context::default();
+        let (requests, reader) = mpsc::channel();
+        let (reply, responses) = mpsc::channel();
+        let mut preview = Preview::new();
+        assert!(preview.reader.is_none());
+        preview.reader = Some(PreviewReader {
+            requests,
+            responses,
+        });
+        preview.update(&ctx, Some(&previous), None);
+        let previous_job = reader.try_recv().unwrap();
+        preview.update(&ctx, Some(&path), None);
+        let current_job = reader.try_recv().unwrap();
+        assert_eq!(current_job.target.location, path);
+        assert!(previous_job.cancel.is_requested());
+        reply
+            .send(Response {
+                generation: previous_job.generation,
+                result: Err(PreviewWorkerError::Disconnected
+                    .at(&previous, PreviewWorkerKind::File)
+                    .into()),
+            })
+            .unwrap();
+        drop(reply);
+        drop(reader);
+
+        preview.update(&ctx, Some(&path), None);
+        let Some(Err(TransferError::Failed(Failure::Preview(error)))) = &preview.result else {
+            panic!("expected a failure for the current selection");
+        };
+        assert!(matches!(
+            error.as_ref(),
+            PreviewError::Worker {
+                location,
+                kind: PreviewWorkerKind::File,
+                cause: PreviewWorkerError::Disconnected,
+            } if location == &path
+        ));
+        assert!(preview.reader.is_none());
+
+        preview.refresh();
+        for _ in 0..200 {
+            preview.update(&ctx, Some(&path), None);
+            if matches!(
+                &preview.result,
+                Some(Ok(Loaded { content: Content::Text { body, .. }, .. }))
+                    if body == "Ready after refresh"
+            ) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(4));
+        }
+        panic!("the preview reader did not restart on refresh");
     }
 
     #[test]

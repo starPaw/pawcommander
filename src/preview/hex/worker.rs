@@ -2,7 +2,7 @@ use super::{PAGE_BYTES, PATTERN_LIMIT};
 #[cfg(test)]
 use crate::vfs::Location;
 use crate::{
-    file_error::PreviewError,
+    file_error::{PreviewError, PreviewWorkerKind},
     operations::{Cancellation, TransferError},
     preview::{
         read_worker,
@@ -47,9 +47,13 @@ pub(super) type Worker = read_worker::Worker<(Work, Option<Version>), Output>;
 pub(super) type Pending = read_worker::Pending<Output>;
 
 pub(super) fn start(target: Target, ctx: &egui::Context) -> Result<Worker, TransferError> {
-    Worker::start("pawcommander-hex", ctx, move |(work, version), cancel| {
-        run(&target, work, *version, cancel)
-    })
+    Worker::start(
+        "pawcommander-hex",
+        target.location.clone(),
+        PreviewWorkerKind::Hex,
+        ctx,
+        move |(work, version), cancel| run(&target, work, *version, cancel),
+    )
 }
 
 fn run(

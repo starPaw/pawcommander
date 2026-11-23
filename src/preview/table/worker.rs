@@ -3,7 +3,10 @@ use super::{
     Codec, Position, Row, Separator,
 };
 use crate::{
-    file_error::{AccessError, Failure, PreviewError, TablePreviewError},
+    file_error::{
+        AccessError, Failure, PreviewError, PreviewWorkerError, PreviewWorkerKind,
+        TablePreviewError,
+    },
     operations::{Cancellation, TransferError},
     preview::source::{Source, Target, Version},
     vfs::Location,
@@ -47,12 +50,28 @@ pub(super) struct Update {
 
 pub(super) struct Scan {
     updates: Arc<Mutex<Update>>,
+    liveness: mpsc::Receiver<()>,
     cancel: Cancellation,
 }
 
 impl Scan {
-    pub(super) fn take_update(&self) -> Update {
-        std::mem::take(&mut *self.updates.lock().expect("table updates"))
+    pub(super) fn take_update(&self, location: &Location) -> Update {
+        // A request drops its sender after posting its final update.
+        let disconnected = matches!(
+            self.liveness.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        );
+        let slot = self.updates.lock();
+        let poisoned = slot.is_err();
+        let mut update = std::mem::take(&mut *slot.unwrap_or_else(|error| error.into_inner()));
+        if self.cancel.is_requested() {
+            update.finished = Some(Err(TransferError::Cancelled));
+        } else if update.finished.is_none() && (disconnected || poisoned) {
+            update.finished = Some(Err(PreviewWorkerError::Disconnected
+                .at(location, PreviewWorkerKind::Table)
+                .into()));
+        }
+        update
     }
 }
 
@@ -62,13 +81,17 @@ impl Drop for Scan {
     }
 }
 
-pub(super) struct Worker(mpsc::Sender<Request>);
+pub(super) struct Worker {
+    requests: mpsc::Sender<Request>,
+    location: Location,
+}
 
 struct Request {
     settings: Settings,
     start: Option<Bookmark>,
     updates: Arc<Mutex<Update>>,
     cancel: Cancellation,
+    _liveness: mpsc::Sender<()>,
 }
 
 struct Reporter<'a> {
@@ -79,8 +102,11 @@ struct Reporter<'a> {
 
 impl Reporter<'_> {
     fn send(&self, change: impl FnOnce(&mut Update)) {
-        if !self.request.cancel.is_requested() {
-            change(&mut self.request.updates.lock().expect("table updates"));
+        if !self.request.cancel.is_requested()
+            && let Ok(mut update) = self.request.updates.lock()
+        {
+            change(&mut update);
+            drop(update);
             self.ctx.request_repaint_of(self.viewport);
         }
     }
@@ -93,7 +119,8 @@ impl Worker {
         encoding: Codec,
         ctx: &egui::Context,
     ) -> Result<Self, TransferError> {
-        let (sender, incoming) = mpsc::channel::<Request>();
+        let (requests, incoming) = mpsc::channel::<Request>();
+        let location = target.location.clone();
         let ctx = ctx.clone();
         let viewport = ctx.viewport_id();
         thread::Builder::new()
@@ -114,8 +141,11 @@ impl Worker {
                     let result = read_page(&target, preferred, encoding, &reporter);
                     reporter.send(|update| update.finished = Some(result));
                 }
+            })
+            .map_err(|source| {
+                PreviewWorkerError::Start(source).at(&location, PreviewWorkerKind::Table)
             })?;
-        Ok(Self(sender))
+        Ok(Self { requests, location })
     }
 
     pub(super) fn load(
@@ -123,18 +153,23 @@ impl Worker {
         settings: Settings,
         start: Option<Bookmark>,
     ) -> Result<Scan, TransferError> {
+        let (liveness_sender, liveness) = mpsc::channel();
         let scan = Scan {
             updates: Arc::new(Mutex::new(Update::default())),
+            liveness,
             cancel: Cancellation::default(),
         };
-        self.0
+        self.requests
             .send(Request {
                 settings,
                 start,
                 updates: scan.updates.clone(),
                 cancel: scan.cancel.clone(),
+                _liveness: liveness_sender,
             })
-            .map_err(|_| PreviewError::WorkerUnavailable)?;
+            .map_err(|_| {
+                PreviewWorkerError::Disconnected.at(&self.location, PreviewWorkerKind::Table)
+            })?;
         Ok(scan)
     }
 }
@@ -345,6 +380,107 @@ mod tests {
     use crate::file_error::TextDecodeError;
     use std::{fs::File, io::Write};
 
+    fn scan_with_row(location: &Location) -> (Scan, Request) {
+        let (requests, incoming) = mpsc::channel();
+        let worker = Worker {
+            requests,
+            location: location.clone(),
+        };
+        let scan = worker
+            .load(
+                Settings {
+                    separator: None,
+                    header: true,
+                    query: String::new(),
+                },
+                None,
+            )
+            .unwrap();
+        let request = incoming.recv().unwrap();
+        {
+            let mut update = request.updates.lock().unwrap();
+            update.rows.push(Row {
+                number: 2,
+                cells: vec!["retained".into()],
+            });
+            update.scanned = 2;
+        }
+        (scan, request)
+    }
+
+    #[test]
+    fn table_scan_keeps_published_results_after_the_request_ends() {
+        let location = Location::Local("fixture.csv".into());
+        let position = Position {
+            byte: 16,
+            records: 2,
+        };
+        let (scan, request) = scan_with_row(&location);
+        request.updates.lock().unwrap().finished = Some(Ok(Some(position)));
+        drop(request);
+        let update = scan.take_update(&location);
+        assert_eq!(update.finished.unwrap().unwrap(), Some(position));
+        assert_eq!(update.rows[0].number, 2);
+
+        let (scan, request) = scan_with_row(&location);
+        let source = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let failure = AccessError::read(&location, source).into();
+        request.updates.lock().unwrap().finished = Some(Err(failure));
+        drop(request);
+        let update = scan.take_update(&location);
+        let Some(Err(TransferError::Failed(Failure::Access(error)))) = update.finished else {
+            panic!("expected the worker's original access error");
+        };
+        assert_eq!(error.location, location);
+        assert_eq!(update.rows[0].number, 2);
+    }
+
+    #[test]
+    fn table_scan_reports_a_dropped_request_or_poisoned_slot_with_partial_rows() {
+        let location = Location::Local("fixture.csv".into());
+        for poison_slot in [false, true] {
+            let (scan, request) = scan_with_row(&location);
+            let active_request = poison_slot.then_some(request);
+            if let Some(request) = &active_request {
+                let slot = Arc::clone(&request.updates);
+                assert!(thread::spawn(move || {
+                    let _guard = slot.lock().unwrap();
+                    panic!("fixture poisons the update slot");
+                })
+                .join()
+                .is_err());
+            }
+            let update = scan.take_update(&location);
+            let Some(Err(TransferError::Failed(Failure::Preview(error)))) = update.finished else {
+                panic!("expected a table worker error");
+            };
+            assert!(matches!(*error, PreviewError::Worker {
+                location: ref source,
+                kind: PreviewWorkerKind::Table,
+                cause: PreviewWorkerError::Disconnected,
+            } if source == &location));
+            assert_eq!(update.rows[0].cells, ["retained"]);
+            assert_eq!(update.scanned, 2);
+        }
+    }
+
+    #[test]
+    fn cancelled_table_scan_suppresses_a_published_failure() {
+        let location = Location::Local("fixture.csv".into());
+        let (scan, request) = scan_with_row(&location);
+        let source = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        request.updates.lock().unwrap().finished =
+            Some(Err(AccessError::read(&location, source).into()));
+        scan.cancel.request();
+        drop(request);
+        let update = scan.take_update(&location);
+        assert!(matches!(
+            update.finished,
+            Some(Err(TransferError::Cancelled))
+        ));
+        assert_eq!(update.rows[0].number, 2);
+    }
+
     fn load(
         location: &Location,
         query: &str,
@@ -361,6 +497,7 @@ mod tests {
             start,
             updates: Arc::new(Mutex::new(Update::default())),
             cancel: Cancellation::default(),
+            _liveness: mpsc::channel().0,
         };
         let ctx = egui::Context::default();
         let reporter = Reporter {

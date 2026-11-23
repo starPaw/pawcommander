@@ -6,10 +6,10 @@ use crate::file_error::{
     DescendantProblem, Failure, HostKeyError, ImagePreviewError, KnownHostEntryError,
     KnownHostsError, ListingError, ListingErrorKind, LocalPathAction, ManifestLineError,
     MetadataError, MetadataField, MetadataWarning, MoveHistoryError, MutationError, PathError,
-    PermissionError, PinError, PreviewError, ProbeAction, PublicationError, RecoveryNotice,
-    ReplacementRefusal, RetryError, RetryProblem, ScanError, SearchError, SftpStateLock,
-    SpaceError, SshStage, StagingCleanupError, StagingError, StagingRecordAction,
-    TablePreviewError, TextDecodeError, TransferPlanError, UndoError,
+    PermissionError, PinError, PreviewError, PreviewWorkerError, PreviewWorkerKind, ProbeAction,
+    PublicationError, RecoveryNotice, ReplacementRefusal, RetryError, RetryProblem, ScanError,
+    SearchError, SftpStateLock, SpaceError, SshStage, StagingCleanupError, StagingError,
+    StagingRecordAction, TablePreviewError, TextDecodeError, TransferPlanError, UndoError,
 };
 #[cfg(target_os = "macos")]
 use crate::file_error::{
@@ -2346,9 +2346,38 @@ fn preview_error(error: &PreviewError) -> String {
         PreviewError::Media { location, cause } => return media_preview_error(location, cause),
         #[cfg(target_os = "macos")]
         PreviewError::Pdf { location, cause } => return pdf_preview_error(location, cause),
-        PreviewError::WorkerUnavailable => return text!("Служба предпросмотра недоступна").into(),
+        PreviewError::Worker {
+            location,
+            kind,
+            cause,
+        } => {
+            return preview_worker_error(location, *kind, cause);
+        }
     };
     format!("{message} · {location}")
+}
+
+fn preview_worker_error(
+    location: &Location,
+    kind: PreviewWorkerKind,
+    cause: &PreviewWorkerError,
+) -> String {
+    let kind = match kind {
+        PreviewWorkerKind::File => text!("Предпросмотр файла"),
+        PreviewWorkerKind::Text => text!("Предпросмотр текста"),
+        PreviewWorkerKind::Hex => text!("Предпросмотр в Hex"),
+        PreviewWorkerKind::Table => text!("Предпросмотр таблицы"),
+    };
+    match cause {
+        PreviewWorkerError::Start(source) => format!(
+            "{}\n{location}\n{kind}\n{source}",
+            text!("Не удалось запустить службу предпросмотра.")
+        ),
+        PreviewWorkerError::Disconnected => format!(
+            "{}\n{location}\n{kind}",
+            text!("Служба предпросмотра остановилась.")
+        ),
+    }
 }
 
 fn text_preview_error(
