@@ -7,9 +7,8 @@ use crate::{
     i18n::{file_error, text},
     icons::{self, Icon},
     operations::TransferError,
-    preview::source::Version,
+    preview::source::{Target, Version},
     theme::Palette,
-    vfs::Location,
 };
 use eframe::egui::{self, text::LayoutJob, FontId, TextFormat};
 use std::ops::Range;
@@ -31,10 +30,10 @@ pub(in crate::preview) struct Document {
 
 impl Document {
     pub(in crate::preview) fn start(
-        location: Location,
+        target: Target,
         ctx: &egui::Context,
     ) -> Result<Self, TransferError> {
-        let worker = worker::start(location, ctx)?;
+        let worker = worker::start(target, ctx)?;
         let pending = worker.load((Work::Page(0), None))?;
         Ok(Self {
             worker,

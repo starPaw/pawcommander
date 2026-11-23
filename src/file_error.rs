@@ -1293,6 +1293,7 @@ pub(crate) enum SmbMutationAction {
     FindDuplicates,
     AnalyzeDiskUsage,
     ReadProperties,
+    ReadPreview,
 }
 
 #[derive(Debug)]

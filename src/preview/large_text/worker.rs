@@ -2,15 +2,16 @@ use super::{
     reader::{PageText, Reader},
     Codec, Direction, Hit, Position,
 };
+#[cfg(test)]
+use crate::vfs::Location;
 use crate::{
     file_error::PreviewError,
     operations::{Cancellation, TransferError},
     preview::{
         code::Code,
         read_worker,
-        source::{Source, Version},
+        source::{Source, Target, Version},
     },
-    vfs::Location,
 };
 use eframe::egui;
 use std::ops::Range;
@@ -50,23 +51,24 @@ pub(super) type Worker = read_worker::Worker<(Work, Option<Version>), Output>;
 pub(super) type Pending = read_worker::Pending<Output>;
 
 pub(super) fn start(
-    location: Location,
+    target: Target,
     encoding: Codec,
     ctx: &egui::Context,
 ) -> Result<Worker, TransferError> {
     Worker::start("pawcommander-text", ctx, move |(work, version), cancel| {
-        run(&location, work, *version, encoding, cancel)
+        run(&target, work, *version, encoding, cancel)
     })
 }
 fn run(
-    location: &Location,
+    target: &Target,
     work: &Work,
     expected: Option<Version>,
     encoding: Codec,
     cancel: &Cancellation,
 ) -> Result<Output, TransferError> {
     cancel.check()?;
-    let mut source = Source::open(location)?;
+    let location = &target.location;
+    let mut source = Source::open(target)?;
     let version = source.version()?;
     if expected.is_some_and(|expected| expected != version) {
         return Err(PreviewError::ChangedWhileReading(location.clone()).into());
@@ -134,8 +136,9 @@ mod tests {
         let cancel = Cancellation::default();
         let (_, prefix) = crate::vfs::preview_data(location, 3, &cancel).unwrap();
         let encoding = Codec::choose(None, &prefix);
+        let target = location.clone().into();
         let (version, first) = run(
-            location,
+            &target,
             &Work::Page {
                 index: 0,
                 near: Position::START,
@@ -150,7 +153,7 @@ mod tests {
         };
         assert!(first.text.has_next);
         let (_, found) = run(
-            location,
+            &target,
             &Work::Match {
                 query: "REMOTE PREVIEW MARKER".into(),
                 from: first.text.start,
@@ -178,9 +181,10 @@ mod tests {
         file.write_all(b"normal line\n".repeat(5000).as_slice())
             .unwrap();
         let location = Location::Local(file.path().to_owned());
+        let target = location.clone().into();
         let cancel = Cancellation::default();
         let (version, first) = run(
-            &location,
+            &target,
             &Work::Page {
                 index: 0,
                 near: Position::START,
@@ -196,7 +200,7 @@ mod tests {
         assert!(first.text.has_next);
         std::fs::write(file.path(), b"replacement").unwrap();
         let changed = run(
-            &location,
+            &target,
             &Work::Page {
                 index: 1,
                 near: first.text.start,

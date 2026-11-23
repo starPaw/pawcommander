@@ -5,7 +5,7 @@ use super::{
 use crate::{
     file_error::{AccessError, Failure, PreviewError},
     operations::{Cancellation, TransferError},
-    preview::source::{Source, Version},
+    preview::source::{Source, Target, Version},
     vfs::Location,
 };
 use eframe::egui;
@@ -88,7 +88,7 @@ impl Reporter<'_> {
 
 impl Worker {
     pub(super) fn start(
-        location: Location,
+        target: Target,
         preferred: Separator,
         encoding: Codec,
         ctx: &egui::Context,
@@ -111,7 +111,7 @@ impl Worker {
                         ctx: &ctx,
                         viewport,
                     };
-                    let result = read_page(&location, preferred, encoding, &reporter);
+                    let result = read_page(&target, preferred, encoding, &reporter);
                     reporter.send(|update| update.finished = Some(result));
                 }
             })?;
@@ -140,15 +140,41 @@ impl Worker {
 }
 
 fn read_page(
-    location: &Location,
+    target: &Target,
     preferred: Separator,
     encoding: Codec,
     reporter: &Reporter<'_>,
 ) -> Result<Option<Position>, TransferError> {
     let request = reporter.request;
     request.cancel.check()?;
-    let mut source = Source::open(location)?;
+    let mut source = Source::open(target)?;
     let version = source.version()?;
+    let read = scan_page(
+        &target.location,
+        preferred,
+        encoding,
+        &mut source,
+        version,
+        reporter,
+    );
+    request.cancel.check()?;
+    let next = source.checked(read)?;
+    if source.version()? != version {
+        return Err(PreviewError::ChangedWhileReading(target.location.clone()).into());
+    }
+    // A full page whose last row ends at EOF has no continuation.
+    Ok(next.filter(|at| version.size.is_none_or(|size| at.byte < size)))
+}
+
+fn scan_page(
+    location: &Location,
+    preferred: Separator,
+    encoding: Codec,
+    source: &mut Source,
+    version: Version,
+    reporter: &Reporter<'_>,
+) -> Result<Option<Position>, TransferError> {
+    let request = reporter.request;
     let mut position = request
         .start
         .as_ref()
@@ -171,10 +197,7 @@ fn read_page(
         let limit = version
             .size
             .map_or(limit, |size| size.min(limit as u64) as usize);
-        sample = request
-            .cancel
-            .read_up_to(&mut source, limit)
-            .map_err(|error| AccessError::read(location, error))?;
+        sample = source.read_up_to(limit, &request.cancel)?;
     } else {
         source.seek_to(position.byte)?;
     }
@@ -198,7 +221,7 @@ fn read_page(
         0
     };
     position.byte += bom as u64;
-    let input = (&sample[bom..]).chain((&mut source).take(remaining));
+    let input = (&sample[bom..]).chain(source.take(remaining));
     let buffer = BufReader::with_capacity(64 * 1024, input);
     let mut records = Records::new(buffer, separator, position, true, encoding);
     let layout = if let Some(bookmark) = &request.start {
@@ -244,14 +267,7 @@ fn read_page(
     let result = collect_rows(&mut records, filter.as_ref(), &mut batch, reporter)
         .map_err(|error| table_access_error(location, error));
     batch.publish(reporter);
-    drop(records);
-    let next = result?;
-    request.cancel.check()?;
-    if source.version()? != version {
-        return Err(PreviewError::ChangedWhileReading(location.clone()).into());
-    }
-    // A full page whose last row ends at EOF has no continuation.
-    Ok(next.filter(|at| version.size.is_none_or(|size| at.byte < size)))
+    result
 }
 
 struct Batch {
@@ -343,7 +359,12 @@ mod tests {
             ctx: &ctx,
             viewport: ctx.viewport_id(),
         };
-        let result = read_page(location, Separator::Comma, encoding, &reporter);
+        let result = read_page(
+            &location.clone().into(),
+            Separator::Comma,
+            encoding,
+            &reporter,
+        );
         let update = std::mem::take(&mut *request.updates.lock().unwrap());
         (update, result)
     }

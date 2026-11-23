@@ -5,14 +5,14 @@ use super::{
 use crate::{
     i18n::{file_error, text},
     operations::TransferError,
-    vfs::Location,
+    preview::source::Target,
 };
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 use std::time::{Duration, Instant};
 
 pub(in crate::preview) struct Document {
-    location: Location,
+    target: Target,
     preferred: Separator,
     encoding: Codec,
     settings: Settings,
@@ -36,13 +36,9 @@ struct Page {
 }
 
 impl Document {
-    pub(in crate::preview) fn new(
-        location: Location,
-        preferred: Separator,
-        encoding: Codec,
-    ) -> Self {
+    pub(in crate::preview) fn new(target: Target, preferred: Separator, encoding: Codec) -> Self {
         Self {
-            location,
+            target,
             preferred,
             encoding,
             settings: Settings {
@@ -210,7 +206,7 @@ impl Document {
         let result = (|| {
             if self.worker.is_none() {
                 self.worker = Some(Worker::start(
-                    self.location.clone(),
+                    self.target.clone(),
                     self.preferred,
                     self.encoding,
                     ctx,
@@ -245,7 +241,13 @@ impl Document {
             self.scan = None;
             match result {
                 Ok(next) => self.page.next = next,
-                Err(error) => self.page.error = Some(error),
+                Err(error) => {
+                    #[cfg(target_os = "macos")]
+                    if crate::preview::source::is_smb_mount_error(&error) {
+                        self.page = Page::default();
+                    }
+                    self.page.error = Some(error);
+                }
             }
         }
     }

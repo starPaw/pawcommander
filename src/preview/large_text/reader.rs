@@ -375,7 +375,7 @@ mod tests {
     fn fixture(bytes: &[u8]) -> (tempfile::NamedTempFile, Source) {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         file.write_all(bytes).unwrap();
-        let source = Source::open(&crate::vfs::Location::Local(file.path().into())).unwrap();
+        let source = Source::open(&crate::vfs::Location::Local(file.path().into()).into()).unwrap();
         (file, source)
     }
 

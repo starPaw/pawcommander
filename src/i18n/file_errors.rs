@@ -2445,7 +2445,9 @@ fn mutation_error(error: &MutationError, unconfirmed: bool) -> String {
                 SmbMutationAction::CompareFiles => text!("Не удалось сравнить файлы"),
                 SmbMutationAction::CheckSyncFolder => text!("Не удалось проверить папку для синхронизации"),
                 SmbMutationAction::FindDuplicates => text!("Не удалось найти дубликаты"),
-                SmbMutationAction::AnalyzeDiskUsage | SmbMutationAction::ReadProperties => {
+                SmbMutationAction::AnalyzeDiskUsage
+                | SmbMutationAction::ReadProperties
+                | SmbMutationAction::ReadPreview => {
                     text!("Не удалось проверить SMB-том")
                 },
             };
