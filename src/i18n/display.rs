@@ -2,6 +2,17 @@
 use super::{language, Language};
 use chrono::{DateTime, Local};
 
+#[cfg(target_os = "macos")]
+pub(crate) fn launch_location(location: &crate::vfs::Location) -> String {
+    let label = match location {
+        crate::vfs::Location::Sftp { endpoint, path } => {
+            format!("{} · {}", endpoint.label(), path.display())
+        }
+        _ => location.display(),
+    };
+    label.escape_debug().to_string()
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum DateStyle {
     Column,

@@ -21,6 +21,11 @@ pub(super) enum ApplicationJob {
         folder: Location,
         result: mpsc::Receiver<Result<crate::terminal::OpenRequest, crate::terminal::OpenError>>,
     },
+    #[cfg(target_os = "macos")]
+    Zed {
+        path: Location,
+        result: mpsc::Receiver<Result<crate::zed::OpenRequest, crate::zed::OpenError>>,
+    },
 }
 
 impl ApplicationJob {
@@ -46,6 +51,20 @@ impl ApplicationJob {
                 result
                     .map(|request| terminal::open_request(request).into())
                     .map_err(|error| terminal::open_error(folder, &error))
+            }
+            #[cfg(target_os = "macos")]
+            Self::Zed { path, result } => {
+                use crate::i18n::zed;
+                let result = match result.try_recv() {
+                    Ok(result) => result,
+                    Err(mpsc::TryRecvError::Empty) => return None,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        Err(crate::zed::OpenError::WorkerStopped)
+                    }
+                };
+                result
+                    .map(|request| zed::open_request(request).into())
+                    .map_err(|error| zed::open_error(path, &error))
             }
         };
         Some(match result {
@@ -242,18 +261,40 @@ impl PawCommander {
     }
 
     pub(super) fn open_in_zed(&mut self, path: Location, text_only: bool, ctx: &egui::Context) {
+        use crate::{i18n, zed};
+
         if self.application_job.is_some() {
             return;
         }
         if path.is_archive() {
-            self.notice = Some((crate::i18n::archive_read_only().into(), true));
+            self.notice = Some((i18n::zed::open_error(&path, &zed::OpenError::Archive), true));
             return;
         }
-        self.launch_application(
-            ctx,
-            crate::i18n::text!("Открытие файла в Zed…"),
-            move |report| report(crate::zed::open(&path, text_only)),
-        );
+        let status = i18n::text!("Открытие файла в Zed…");
+        #[cfg(target_os = "macos")]
+        {
+            let target = path.clone();
+            match spawn_application(ctx, move |report| report(zed::open(&target, text_only))) {
+                Ok(result) => {
+                    self.application_job = Some(ApplicationJob::Zed { path, result });
+                    self.notice = Some((status.into(), false));
+                }
+                Err(error) => {
+                    self.notice = Some((
+                        i18n::zed::open_error(&path, &zed::OpenError::WorkerStart(error)),
+                        true,
+                    ));
+                }
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        self.launch_application(ctx, status, move |report| {
+            report(
+                zed::open(&path, text_only)
+                    .map(|request| i18n::zed::open_request(request).into())
+                    .map_err(|error| i18n::zed::open_error(&path, &error)),
+            );
+        });
     }
 
     pub(super) fn launch_application(

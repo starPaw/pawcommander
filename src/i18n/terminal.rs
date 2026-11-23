@@ -1,3 +1,4 @@
+use super::display::launch_location;
 use crate::i18n::text;
 use crate::terminal::{
     embedded::SessionError, OpenError, OpenRequest, PtySpawnError, SshCommandError,
@@ -7,14 +8,6 @@ use crate::vfs::Location;
 use std::io;
 use std::os::unix::process::ExitStatusExt;
 use std::process::ExitStatus;
-
-pub(crate) fn folder_label(folder: &Location) -> String {
-    let label = match folder {
-        Location::Sftp { endpoint, path } => format!("{} · {}", endpoint.label(), path.display()),
-        _ => folder.display(),
-    };
-    label.escape_debug().to_string()
-}
 
 pub(crate) fn open_request(request: OpenRequest) -> &'static str {
     match request {
@@ -64,7 +57,7 @@ pub(crate) fn open_error(folder: &Location, error: &OpenError) -> String {
     };
     tr_format!(
         "Could not open Terminal in “{folder}”. {details}",
-        folder = folder_label(folder),
+        folder = launch_location(folder),
         details = details
     )
 }
@@ -101,7 +94,7 @@ pub(crate) fn embedded_error(folder: &Location, error: &SessionError) -> String 
     };
     tr_format!(
         "Embedded terminal in “{folder}”. {details}",
-        folder = folder_label(folder),
+        folder = launch_location(folder),
         details = details
     )
 }

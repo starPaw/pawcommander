@@ -141,7 +141,7 @@ impl Panel {
                                 egui::Button::new(text!("Закрыть терминал")),
                             )
                             .clicked();
-                        let folder = terminal::folder_label(&self.folder);
+                        let folder = crate::i18n::display::launch_location(&self.folder);
                         let origin = crate::tr_format!("Launch folder · {folder}", folder = folder);
                         ui.add(egui::Label::new(&origin).truncate())
                             .on_hover_text(origin);
