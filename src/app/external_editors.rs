@@ -104,14 +104,19 @@ impl Editors {
 #[derive(Default)]
 pub(super) struct Session {
     edit: Option<RemoteEdit>,
-    work: Option<Receiver<Finished>>,
-    feedback: Option<Result<String, String>>,
+    download: Option<Receiver<Downloaded>>,
+    saving: bool,
+    feedback: Option<SaveFeedback>,
     open: bool,
 }
 
-enum Finished {
-    Downloaded(RemoteEdit, EditorCommand),
-    Saved(RemoteEdit, Result<String, String>),
+struct Downloaded(RemoteEdit, EditorCommand);
+
+pub(super) type SaveResult = Result<RemoteEditSaveOutcome, TransferError>;
+
+struct SaveFeedback {
+    result: SaveResult,
+    history_warning: Option<String>,
 }
 
 impl Session {
@@ -121,6 +126,22 @@ impl Session {
 
     pub(super) fn reveal(&mut self) {
         self.open = true;
+    }
+
+    pub(super) fn finish_save(
+        &mut self,
+        edit: Option<RemoteEdit>,
+        result: SaveResult,
+        history_warning: Option<String>,
+    ) {
+        if let Some(edit) = edit {
+            self.edit = Some(edit);
+        }
+        self.saving = false;
+        self.feedback = Some(SaveFeedback {
+            result,
+            history_warning,
+        });
     }
 }
 
@@ -156,7 +177,7 @@ impl PawCommander {
             self.remote_editor.reveal();
             return;
         }
-        if self.remote_editor.work.is_some() {
+        if self.remote_editor.download.is_some() {
             return;
         }
         let command = self.settings.external_editors.sftp.clone();
@@ -170,13 +191,13 @@ impl PawCommander {
         }
         let label = text!("Подготовка рабочей копии SFTP");
         let (send, receive) = mpsc::channel();
-        self.remote_editor.work = Some(receive);
+        self.remote_editor.download = Some(receive);
         self.start_typed_stoppable_job(ctx, label, format!("{label} · {path}"), move |progress| {
             let copies = dirs::data_local_dir()
                 .ok_or_else(|| text!("Не найдена папка данных приложения."))?
                 .join("PawCommander/Editor Copies");
             let edit = RemoteEdit::download(path, &copies, progress)?;
-            let _ = send.send(Finished::Downloaded(edit, command));
+            let _ = send.send(Downloaded(edit, command));
             Ok(text!("Рабочая копия готова.").into())
         });
     }
@@ -205,49 +226,27 @@ impl PawCommander {
         if self.application_job.is_some() {
             return;
         }
-        let Some(work) = self.remote_editor.work.as_ref() else {
+        let Some(download) = self.remote_editor.download.as_ref() else {
             return;
         };
-        let result = match work.try_recv() {
+        let result = match download.try_recv() {
             Err(TryRecvError::Empty) => return,
             other => other,
         };
-        self.remote_editor.work = None;
-        match result {
-            Ok(Finished::Downloaded(edit, command)) => {
-                self.launch_editor(command, edit.target(), edit.copy(), ctx);
-                self.remote_editor.edit = Some(edit);
-                self.remote_editor.feedback = None;
-                self.remote_editor.open = true;
-            }
-            Ok(Finished::Saved(edit, result)) => {
-                self.remote_editor.edit = Some(edit);
-                self.remote_editor.feedback = Some(result);
-            }
-            Err(_) => {}
+        self.remote_editor.download = None;
+        if let Ok(Downloaded(edit, command)) = result {
+            self.launch_editor(command, edit.target(), edit.copy(), ctx);
+            self.remote_editor.edit = Some(edit);
+            self.remote_editor.feedback = None;
+            self.remote_editor.open = true;
         }
     }
 
-    fn save_remote_edit(&mut self, mut edit: RemoteEdit, ctx: &egui::Context) {
-        let label = text!("Сохранение правки SFTP");
-        let (send, receive) = mpsc::channel();
-        self.remote_editor.work = Some(receive);
+    fn save_remote_edit(&mut self, edit: RemoteEdit, ctx: &egui::Context) {
+        self.remote_editor.saving = true;
         self.remote_editor.feedback = None;
         self.notice = None;
-        self.start_typed_stoppable_job(
-            ctx,
-            label,
-            format!("{label} · {}", edit.target()),
-            move |progress| {
-                let result = edit.save(progress).map(save_message);
-                let feedback = match &result {
-                    Err(TransferError::Cancelled) => Ok(crate::tr_format!("Operation cancelled")),
-                    _ => result.as_ref().cloned().map_err(crate::i18n::file_error),
-                };
-                let _ = send.send(Finished::Saved(edit, feedback));
-                result
-            },
-        );
+        self.enqueue_remote_save(edit, ctx);
     }
 
     pub(super) fn show_remote_editor(&mut self, ctx: &egui::Context) {
@@ -272,18 +271,24 @@ impl PawCommander {
                 ui.small(text!(
                     "Сохраните файл в редакторе, затем отправьте правку на сервер.",
                 ));
-                if let Some(result) = &session.feedback {
-                    match result {
-                        Ok(message) => {
-                            ui.label(message);
+                if let Some(feedback) = &session.feedback {
+                    let notice = save_notice(edit.target(), edit.copy(), &feedback.result);
+                    let message = match notice {
+                        Ok(message) if has_cleanup_warning(&feedback.result) => {
+                            egui::RichText::new(message).color(ui.visuals().warn_fg_color)
                         }
-                        Err(error) => {
-                            ui.colored_label(ui.visuals().error_fg_color, error);
-                        }
+                        Ok(message) => egui::RichText::new(message),
+                        Err(error) => egui::RichText::new(error).color(ui.visuals().error_fg_color),
+                    };
+                    ui.add(egui::Label::new(message).wrap().selectable(true));
+                    if let Some(warning) = &feedback.history_warning {
+                        let warning =
+                            egui::RichText::new(warning).color(ui.visuals().warn_fg_color);
+                        ui.add(egui::Label::new(warning).wrap().selectable(true));
                     }
                 }
                 ui.horizontal_wrapped(|ui| {
-                    let available = session.work.is_none();
+                    let available = !session.saving;
                     save = ui
                         .add_enabled(available, egui::Button::new(text!("Сохранить на сервере")))
                         .clicked();
@@ -319,16 +324,115 @@ impl PawCommander {
     }
 }
 
-fn save_message(outcome: RemoteEditSaveOutcome) -> String {
-    match outcome {
-        RemoteEditSaveOutcome::AlreadyCurrent => {
-            text!("На сервере уже сохранена эта версия.").into()
+fn has_cleanup_warning(result: &SaveResult) -> bool {
+    matches!(
+        result,
+        Ok(RemoteEditSaveOutcome::Saved {
+            cleanup_warning: Some(_)
+        })
+    )
+}
+
+pub(super) fn save_notice(
+    target: &Location,
+    copy: &Path,
+    result: &SaveResult,
+) -> Result<String, String> {
+    use crate::i18n::{display::launch_location, file_error};
+
+    let saved = text!("Правка сохранена на сервере.");
+    let details = |message: &str| {
+        let destination =
+            crate::tr_format!("SFTP destination · {path}", path = launch_location(target));
+        let copy = crate::tr_format!("Working copy · {path}", path = format_args!("{copy:?}"));
+        format!("{message}\n{destination}\n{copy}")
+    };
+    match result {
+        Ok(RemoteEditSaveOutcome::AlreadyCurrent) => {
+            Ok(text!("На сервере уже сохранена эта версия.").into())
         }
-        RemoteEditSaveOutcome::Saved {
+        Ok(RemoteEditSaveOutcome::Saved {
             cleanup_warning: None,
-        } => text!("Правка сохранена на сервере.").into(),
-        RemoteEditSaveOutcome::Saved {
+        }) => Ok(saved.into()),
+        Ok(RemoteEditSaveOutcome::Saved {
             cleanup_warning: Some(warning),
-        } => crate::i18n::file_error(&warning),
+        }) => {
+            let warning =
+                crate::tr_format!("Cleanup warning: {error}", error = file_error(warning));
+            Ok(details(&format!("{saved}\n{warning}")))
+        }
+        Err(TransferError::Cancelled) => Ok(crate::tr_format!("Operation cancelled")),
+        Err(error @ TransferError::PublicationUnconfirmed(_)) => Err(details(&crate::tr_format!(
+            "Could not confirm the SFTP save. {error}",
+            error = file_error(error)
+        ))),
+        Err(error) => Err(details(&file_error(error))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::file_error::Failure;
+
+    #[test]
+    fn editor_save_notice_keeps_publication_warning_distinct_from_failed_or_stopped_save() {
+        let target = Location::Local("/fixture/server 'edit'.txt".into());
+        let copy = Path::new("/fixture/local copy.txt");
+        let warning = Ok(RemoteEditSaveOutcome::Saved {
+            cleanup_warning: Some("retained backup at /fixture/staging".into()),
+        });
+        let message = save_notice(&target, copy, &warning).unwrap();
+        assert!(has_cleanup_warning(&warning));
+        assert!(message.starts_with(text!("Правка сохранена на сервере.")));
+        assert!(message.contains("retained backup at /fixture/staging"));
+        assert!(message.contains("/fixture/server"));
+        assert!(message.contains("/fixture/local copy.txt"));
+
+        let unconfirmed = Err(TransferError::PublicationUnconfirmed(Failure::Message(
+            "server disconnected after rename".into(),
+        )));
+        let message = save_notice(&target, copy, &unconfirmed).unwrap_err();
+        assert!(message.contains(&crate::tr_format!(
+            "Could not confirm the SFTP save. {error}",
+            error = "server disconnected after rename"
+        )));
+        assert!(message.contains("/fixture/local copy.txt"));
+        assert!(!has_cleanup_warning(&unconfirmed));
+
+        let cancelled = Err(TransferError::Cancelled);
+        assert_eq!(
+            save_notice(&target, copy, &cancelled),
+            Ok(crate::tr_format!("Operation cancelled"))
+        );
+        assert!(!has_cleanup_warning(&cancelled));
+    }
+
+    #[test]
+    fn editor_session_keeps_history_warning_when_the_window_reopens() {
+        let mut session = Session {
+            saving: true,
+            ..Session::default()
+        };
+        session.finish_save(
+            None,
+            Ok(RemoteEditSaveOutcome::Saved {
+                cleanup_warning: None,
+            }),
+            Some("recovery record kept at /fixture/recovery".into()),
+        );
+        session.reveal();
+        let feedback = session.feedback.unwrap();
+        assert!(session.open && !session.saving);
+        assert!(matches!(
+            feedback.result,
+            Ok(RemoteEditSaveOutcome::Saved {
+                cleanup_warning: None
+            })
+        ));
+        assert_eq!(
+            feedback.history_warning.as_deref(),
+            Some("recovery record kept at /fixture/recovery")
+        );
     }
 }
