@@ -2,6 +2,150 @@ use super::{ArchiveMemberError, PathError};
 use crate::vfs::Location;
 use std::{error::Error, fmt, io};
 
+/// A diagnostic produced by archive readers and writers, before presentation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ArchiveIssue {
+    FileDirectoryCollision,
+    InvalidEntry,
+    ZipHeaderMismatch,
+    ZipHeaderSizeOrCrcMismatch,
+    InvalidPath,
+    MetadataLimit,
+    NotRegularFile,
+    InvalidZipStructure,
+    RebuiltEntryListMismatch,
+    UnsupportedRebuildFormat,
+    UnsupportedZipEditMethod,
+    UnsafeZipRebuild,
+    EntrySizeMismatch,
+    UnsupportedSparseTarRebuild,
+    TarHardLinkToRemovedEntry,
+    InvalidTarExtendedHeader,
+    UnsafeTarGlobalMetadata,
+    InvalidZipPasswordOrData,
+    UnsupportedZipEncryptionOrCompression,
+    UnsupportedZipCompression,
+    UnsupportedExtractionEntry,
+    CorruptEntryData,
+    ZipCrcMismatch,
+    OverlappingZipEntries,
+    ZipCheckPasswordRequired,
+    InvalidTarLength,
+    UnverifiableSparseTar,
+    MissingTarTrailer,
+    UnexpectedTarTrailerData,
+    ZipExtractionPasswordRequired,
+    InvalidZipPassword,
+    PasswordRequiresZip,
+}
+
+impl ArchiveIssue {
+    fn io_kind(self) -> io::ErrorKind {
+        match self {
+            Self::UnsupportedZipEncryptionOrCompression
+            | Self::UnsupportedZipCompression
+            | Self::UnsupportedExtractionEntry
+            | Self::ZipCheckPasswordRequired
+            | Self::UnverifiableSparseTar => io::ErrorKind::Unsupported,
+            Self::ZipExtractionPasswordRequired | Self::InvalidZipPassword => {
+                io::ErrorKind::InvalidInput
+            }
+            _ => io::ErrorKind::InvalidData,
+        }
+    }
+
+    pub(crate) fn io_error(self) -> io::Error {
+        io::Error::new(
+            self.io_kind(),
+            ArchiveIoError {
+                issue: self,
+                source: None,
+            },
+        )
+    }
+
+    pub(crate) fn with_source(self, source: impl Error + Send + Sync + 'static) -> io::Error {
+        io::Error::new(
+            self.io_kind(),
+            ArchiveIoError {
+                issue: self,
+                source: Some(Box::new(source)),
+            },
+        )
+    }
+}
+
+impl fmt::Display for ArchiveIssue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::FileDirectoryCollision => "The same archive path is used for a folder and a file",
+            Self::InvalidEntry => "Invalid archive entry",
+            Self::ZipHeaderMismatch => "ZIP local header disagrees with the directory",
+            Self::ZipHeaderSizeOrCrcMismatch => "ZIP headers disagree on size or CRC",
+            Self::InvalidPath => "Invalid path inside the archive",
+            Self::MetadataLimit => "Archive contains too much metadata to browse",
+            Self::NotRegularFile => "Archive must be a regular file",
+            Self::InvalidZipStructure => "Invalid ZIP structure",
+            Self::RebuiltEntryListMismatch => "The rebuilt archive has an unexpected entry list",
+            Self::UnsupportedRebuildFormat => "Unsupported archive rebuild format",
+            Self::UnsupportedZipEditMethod => "Editing this ZIP method is unsupported",
+            Self::UnsafeZipRebuild => "This ZIP structure cannot be rebuilt safely",
+            Self::EntrySizeMismatch => "Archive entry size does not match",
+            Self::UnsupportedSparseTarRebuild => "Rebuilding a sparse TAR is unsupported",
+            Self::TarHardLinkToRemovedEntry => {
+                "A TAR hard link refers to an entry selected for removal"
+            }
+            Self::InvalidTarExtendedHeader => "Damaged TAR extension header",
+            Self::UnsafeTarGlobalMetadata => "TAR global paths or sizes cannot be rebuilt safely",
+            Self::InvalidZipPasswordOrData => "Incorrect password or damaged ZIP data",
+            Self::UnsupportedZipEncryptionOrCompression => {
+                "ZIP encryption or compression method is unsupported"
+            }
+            Self::UnsupportedZipCompression => "ZIP compression method is unsupported",
+            Self::UnsupportedExtractionEntry => "Only regular files and folders can be extracted",
+            Self::CorruptEntryData => "Archive entry data is corrupt",
+            Self::ZipCrcMismatch => "ZIP CRC does not match",
+            Self::OverlappingZipEntries => "ZIP entry data overlaps",
+            Self::ZipCheckPasswordRequired => "Enter a password to check this ZIP",
+            Self::InvalidTarLength => "Invalid TAR length",
+            Self::UnverifiableSparseTar => "This sparse TAR entry requires a different verifier",
+            Self::MissingTarTrailer => "TAR end blocks are missing",
+            Self::UnexpectedTarTrailerData => "Unexpected data after the TAR end blocks",
+            Self::ZipExtractionPasswordRequired => "Enter a password to extract this ZIP",
+            Self::InvalidZipPassword => "Incorrect ZIP password",
+            Self::PasswordRequiresZip => "Passwords are supported for ZIP archives only",
+        })
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ArchiveIoError {
+    pub(crate) issue: ArchiveIssue,
+    source: Option<Box<dyn Error + Send + Sync>>,
+}
+
+impl ArchiveIoError {
+    pub(crate) fn from_io(error: &io::Error) -> Option<&Self> {
+        error.get_ref()?.downcast_ref()
+    }
+}
+
+impl fmt::Display for ArchiveIoError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.issue.fmt(f)?;
+        if let Some(source) = &self.source {
+            write!(f, ": {source}")?;
+        }
+        Ok(())
+    }
+}
+
+impl Error for ArchiveIoError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.source.as_deref().map(|error| error as _)
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum ArchiveError {
     InvalidName(PathError),

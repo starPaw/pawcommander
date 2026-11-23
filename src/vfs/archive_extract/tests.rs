@@ -153,7 +153,20 @@ fn password_zip_uses_aes_and_keeps_secrets_out_of_results() {
         &mut progress,
         unexpected_conflict,
     );
-    let error = crate::i18n::file_error(&wrong_result.unwrap_err().error);
+    let wrong_error = wrong_result.unwrap_err().error;
+    let TransferError::Failed(Failure::Archive(reason)) = &wrong_error else {
+        panic!("expected a typed archive failure: {wrong_error:?}");
+    };
+    let source = reason.io_cause().unwrap();
+    let issue = crate::file_error::ArchiveIoError::from_io(source).unwrap();
+    assert_eq!(
+        issue.issue,
+        crate::file_error::ArchiveIssue::InvalidZipPassword
+    );
+    assert!(std::error::Error::source(issue)
+        .unwrap()
+        .is::<zip::result::ZipError>());
+    let error = crate::i18n::file_error(&wrong_error);
     assert!(error.contains(crate::i18n::text!("Неверный пароль ZIP")));
     let failed_record = std::mem::take(&mut progress.results)
         .finish("Extract".into(), 0, &Err(error))

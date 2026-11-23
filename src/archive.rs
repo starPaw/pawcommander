@@ -11,9 +11,8 @@ pub(crate) use integrity::{verify_archive, ArchiveVerification};
 pub(crate) use writer::{ArchiveWriter, Attributes, CreationLimits};
 
 use crate::{
-    file_error::{ArchiveMemberError, ListingError, ListingErrorKind},
+    file_error::{ArchiveIssue, ArchiveMemberError, ListingError, ListingErrorKind},
     fs_ops::ListingMetadata,
-    i18n::text,
     operations::{Cancelled, TransferError},
     vfs::{FileEntry, Location},
 };
@@ -203,9 +202,7 @@ impl Index {
                 *existing = member;
                 return Ok(());
             }
-            return Err(invalid(crate::i18n::key!(
-                "Путь в архиве занят и папкой, и файлом"
-            )));
+            return Err(ArchiveIssue::FileDirectoryCollision.io_error());
         }
         self.nodes += 1;
         self.path_bytes += path.as_os_str().len();
@@ -229,7 +226,7 @@ impl Index {
     fn read_tar(&mut self, input: MetadataReader<'_>) -> io::Result<()> {
         let cancelled = input.cancelled;
         if input.length < 512 {
-            return Err(invalid(crate::i18n::key!("Недопустимая запись архива")));
+            return Err(ArchiveIssue::InvalidEntry.io_error());
         }
         let mut archive = tar::Archive::new(input);
         for (index, entry) in archive.entries_with_seek()?.enumerate() {
@@ -297,11 +294,10 @@ fn scan_zip(
     let cancelled = input.cancelled;
     let mut buffer = vec![0; 3 * usize::from(u16::MAX)];
     let mut headers = check_headers.then(|| vec![0; 2 * usize::from(u16::MAX)]);
-    let archive =
-        rawzip::ZipArchive::from_seekable(input, &mut buffer).map_err(io::Error::other)?;
+    let archive = rawzip::ZipArchive::from_seekable(input, &mut buffer).map_err(zip_read_error)?;
     let mut entries = archive.entries(&mut buffer);
     let mut count = 0;
-    while let Some(entry) = entries.next_entry().map_err(io::Error::other)? {
+    while let Some(entry) = entries.next_entry().map_err(zip_read_error)? {
         if cancelled() {
             return Err(cancelled_read());
         }
@@ -315,7 +311,9 @@ fn scan_zip(
             Err(_) => String::from_utf8_lossy(entry.file_path().as_bytes()),
         };
         let record = (|| {
-            let name = name.as_ref().map_err(|_| invalid_path())?;
+            let name = name
+                .as_ref()
+                .map_err(|error| ArchiveIssue::InvalidPath.with_source(*error))?;
             let path = if name.contains('\\') {
                 member_path(name.replace('\\', "/").as_bytes())?
             } else {
@@ -336,25 +334,23 @@ fn scan_zip(
                 !is_symlink && (mode.value() & 0o170000 == 0o040000 || name.ends_with(['/', '\\']));
             let directory = archive.directory_offset();
             if entry.local_header_offset() >= directory {
-                return Err(invalid(crate::i18n::key!("Недопустимая запись архива")));
+                return Err(ArchiveIssue::InvalidEntry.io_error());
             }
             let local = archive
                 .get_entry(entry.wayfinder())
-                .map_err(io::Error::other)?;
+                .map_err(zip_read_error)?;
             let (offset, end) = local.compressed_data_range();
             if end > directory {
-                return Err(invalid(crate::i18n::key!("Недопустимая запись архива")));
+                return Err(ArchiveIssue::InvalidEntry.io_error());
             }
             let mut record_end = end;
             if let Some(buffer) = &mut headers {
-                let local_header = local.local_header(buffer).map_err(io::Error::other)?;
+                let local_header = local.local_header(buffer).map_err(zip_read_error)?;
                 if local_header.file_path().as_bytes() != entry.file_path().as_bytes()
                     || local_header.flags() != entry.flags()
                     || local_header.compression_method() != entry.compression_method()
                 {
-                    return Err(invalid(crate::i18n::key!(
-                        "Локальный заголовок ZIP отличается от каталога"
-                    )));
+                    return Err(ArchiveIssue::ZipHeaderMismatch.io_error());
                 }
                 if entry.flags().has_data_descriptor() {
                     record_end = check_zip_descriptor(
@@ -373,9 +369,7 @@ fn scan_zip(
                     entry.compressed_size_hint(),
                     entry.uncompressed_size_hint(),
                 ) {
-                    return Err(invalid(crate::i18n::key!(
-                        "Размер или контрольная сумма ZIP отличаются в заголовках"
-                    )));
+                    return Err(ArchiveIssue::ZipHeaderSizeOrCrcMismatch.io_error());
                 }
             }
             let payload = zip_payload(&entry, count - 1, offset, end - offset);
@@ -408,7 +402,7 @@ fn scan_zip(
         visit(count, &shown, record)?;
     }
     if count as u64 != archive.entries_hint() {
-        return Err(invalid(crate::i18n::key!("Недопустимая запись архива")));
+        return Err(ArchiveIssue::InvalidEntry.io_error());
     }
     Ok(())
 }
@@ -454,9 +448,7 @@ fn check_zip_descriptor(
     } else if actual.starts_with(body) {
         Ok(end + width as u64)
     } else {
-        Err(invalid(crate::i18n::key!(
-            "Размер или контрольная сумма ZIP отличаются в заголовках"
-        )))
+        Err(ArchiveIssue::ZipHeaderSizeOrCrcMismatch.io_error())
     }
 }
 
@@ -499,12 +491,23 @@ fn zip_payload(
     }
 }
 
-fn zip_name<'a>(entry: &'a rawzip::ZipFileHeaderRecord<'_>) -> io::Result<Cow<'a, str>> {
+fn zip_read_error(error: rawzip::Error) -> io::Error {
+    if matches!(error.kind(), rawzip::ErrorKind::IO(_)) {
+        let rawzip::ErrorKind::IO(source) = error.into_kind() else {
+            unreachable!();
+        };
+        source
+    } else {
+        ArchiveIssue::InvalidZipStructure.with_source(error)
+    }
+}
+
+fn zip_name<'a>(
+    entry: &'a rawzip::ZipFileHeaderRecord<'_>,
+) -> Result<Cow<'a, str>, std::str::Utf8Error> {
     let raw = entry.file_path().as_bytes();
     if entry.flags().is_utf8() {
-        return std::str::from_utf8(raw)
-            .map(Cow::Borrowed)
-            .map_err(|_| invalid_path());
+        return std::str::from_utf8(raw).map(Cow::Borrowed);
     }
     for (kind, data) in entry.extra_fields() {
         if kind == rawzip::extra_fields::ExtraFieldId::INFO_ZIP_UNICODE_PATH
@@ -512,9 +515,7 @@ fn zip_name<'a>(entry: &'a rawzip::ZipFileHeaderRecord<'_>) -> io::Result<Cow<'a
             && let Some((checksum, utf8)) = crc.split_first_chunk::<4>()
             && u32::from_le_bytes(*checksum) == rawzip::crc32(raw)
         {
-            return std::str::from_utf8(utf8)
-                .map(Cow::Borrowed)
-                .map_err(|_| invalid_path());
+            return std::str::from_utf8(utf8).map(Cow::Borrowed);
         }
     }
     if raw.is_ascii() {
@@ -601,58 +602,12 @@ pub(crate) fn parse_member_path(raw: &[u8]) -> Result<PathBuf, ArchiveMemberErro
     Ok(path)
 }
 
-pub(crate) fn readonly() -> &'static str {
-    text!("Эта операция недоступна внутри архива")
-}
-
-#[derive(Debug)]
-struct ArchiveMessage {
-    key: crate::i18n::MessageKey,
-    cause: Option<Box<dyn std::error::Error + Send + Sync>>,
-}
-
-impl std::fmt::Display for ArchiveMessage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(text(self.key))
-    }
-}
-
-impl std::error::Error for ArchiveMessage {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.cause.as_deref().map(|error| error as _)
-    }
-}
-
-fn archive_io_error(kind: io::ErrorKind, key: crate::i18n::MessageKey) -> io::Error {
-    io::Error::new(kind, ArchiveMessage { key, cause: None })
-}
-
-fn archive_io_error_with_cause(
-    kind: io::ErrorKind,
-    key: crate::i18n::MessageKey,
-    cause: impl std::error::Error + Send + Sync + 'static,
-) -> io::Error {
-    io::Error::new(
-        kind,
-        ArchiveMessage {
-            key,
-            cause: Some(Box::new(cause)),
-        },
-    )
-}
-
-fn invalid(message: crate::i18n::MessageKey) -> io::Error {
-    archive_io_error(io::ErrorKind::InvalidData, message)
-}
-
 fn invalid_path() -> io::Error {
-    invalid(crate::i18n::key!("Недопустимый путь внутри архива"))
+    ArchiveIssue::InvalidPath.io_error()
 }
 
 fn too_large() -> io::Error {
-    invalid(crate::i18n::key!(
-        "Слишком много данных для просмотра архива"
-    ))
+    ArchiveIssue::MetadataLimit.io_error()
 }
 
 fn cancelled_read() -> io::Error {
@@ -668,16 +623,12 @@ fn open_regular(path: &Path) -> io::Result<(File, fs::Metadata)> {
         options.custom_flags(libc::O_NONBLOCK);
     }
     if !fs::metadata(path)?.is_file() {
-        return Err(invalid(crate::i18n::key!(
-            "Архив должен быть обычным файлом"
-        )));
+        return Err(ArchiveIssue::NotRegularFile.io_error());
     }
     let file = options.open(path)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
-        return Err(invalid(crate::i18n::key!(
-            "Архив должен быть обычным файлом"
-        )));
+        return Err(ArchiveIssue::NotRegularFile.io_error());
     }
     Ok((file, metadata))
 }
@@ -715,7 +666,7 @@ impl Read for MetadataReader<'_> {
         }
         let read = self.file.read(&mut buf[..count])?;
         if read == 0 {
-            return Err(invalid(crate::i18n::key!("Недопустимая запись архива")));
+            return Err(ArchiveIssue::InvalidEntry.io_error());
         }
         self.position += read as u64;
         if charge_metadata {
@@ -737,7 +688,7 @@ impl Seek for MetadataReader<'_> {
         };
         let offset = offset
             .filter(|offset| *offset <= self.length)
-            .ok_or_else(|| invalid(crate::i18n::key!("Недопустимая запись архива")))?;
+            .ok_or_else(|| ArchiveIssue::InvalidEntry.io_error())?;
         if offset != self.position {
             self.file.seek(SeekFrom::Start(offset))?;
             self.position = offset;
@@ -866,10 +817,23 @@ mod tests {
 
     #[test]
     fn archive_rejects_corrupt_metadata_and_unsafe_member_paths() {
+        use crate::file_error::{ArchiveIoError, Failure};
+        use std::error::Error;
+
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("broken.zip");
         fs::write(&file, b"not an archive").unwrap();
-        assert!(Index::load(&file, &|| false).is_err());
+        let Err(TransferError::Failed(Failure::Listing(report))) = Index::load(&file, &|| false)
+        else {
+            panic!("expected a listing error for the broken ZIP");
+        };
+        assert_eq!(report.location, Location::Local(file.clone()));
+        let ListingErrorKind::ReadArchive(source) = &report.kind else {
+            panic!("expected an archive read error");
+        };
+        let error = ArchiveIoError::from_io(source).unwrap();
+        assert_eq!(error.issue, ArchiveIssue::InvalidZipStructure);
+        assert!(error.source().unwrap().is::<rawzip::Error>());
         write_zip(&file, &[b"valid/path"]);
         let mut data = fs::read(&file).unwrap();
         data[..4].copy_from_slice(b"NOPE");

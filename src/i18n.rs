@@ -10,8 +10,9 @@ mod formats;
 mod smb;
 pub(crate) use catalog::key;
 pub(crate) use file_errors::{
-    access_io_message, connection_result_error, credential_error, deletion_failure, file_error,
-    history_error, metadata_warning, recovery_record_error, replacement_refusal, transfer_failure,
+    access_io_message, archive_io_message, connection_result_error, credential_error,
+    deletion_failure, file_error, history_error, metadata_warning, recovery_record_error,
+    replacement_refusal, transfer_failure,
 };
 #[cfg(target_os = "macos")]
 pub(crate) use file_errors::{
@@ -23,6 +24,10 @@ pub(crate) use formats::czech_format;
 pub(crate) use formats::russian_format;
 #[cfg(target_os = "macos")]
 pub(crate) use smb::smb_error;
+
+pub(crate) fn archive_read_only() -> &'static str {
+    text!("Эта операция недоступна внутри архива")
+}
 
 pub(crate) fn inspection_report(report: &crate::vfs::InspectionReport) -> String {
     use crate::vfs::{InspectionBlocker, InspectionFinding, InspectionRole};

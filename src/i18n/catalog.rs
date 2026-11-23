@@ -456,6 +456,7 @@ catalog! {
     "Архив изменился во время проверки" => ("Archive changed during the check", "Archiv se během kontroly změnil"),
     "Укажите пароль для проверки ZIP" => ("Enter a password to check this ZIP", "Zadejte heslo ke kontrole tohoto ZIP"),
     "Некорректная длина TAR" => ("Invalid TAR length", "Neplatná délka TAR"),
+    "Повреждена структура ZIP" => ("Invalid ZIP structure", "Neplatná struktura ZIP"),
     "Заголовок TAR" => ("TAR header", "Hlavička TAR"),
     "Повреждён расширенный заголовок TAR" => ("Damaged TAR extension header", "Poškozená rozšířená hlavička TAR"),
     "Разреженная запись TAR требует другой проверки" => ("This sparse TAR entry requires a different verifier", "Tato řídká položka TAR vyžaduje jiný způsob ověření"),

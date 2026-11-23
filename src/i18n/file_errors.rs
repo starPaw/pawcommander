@@ -1,14 +1,14 @@
 use super::text;
 use crate::file_error::{
-    AccessAction, AccessCause, AccessError, ArchiveError, ArchiveMemberError, BatchRenameError,
-    ChecksumError, ConflictError, ConnectionError, CopyVerificationError, CredentialAction,
-    CredentialError, CredentialFailure, CrossMoveError, DescendantProblem, Failure, HostKeyError,
-    KnownHostEntryError, KnownHostsError, ListingError, ListingErrorKind, LocalPathAction,
-    ManifestLineError, MetadataError, MetadataField, MetadataWarning, MoveHistoryError,
-    MutationError, PathError, PermissionError, PinError, PreviewError, ProbeAction,
-    PublicationError, RecoveryNotice, ReplacementRefusal, RetryError, RetryProblem, ScanError,
-    SearchError, SftpStateLock, SpaceError, SshStage, StagingCleanupError, StagingError,
-    StagingRecordAction, TransferPlanError, UndoError,
+    AccessAction, AccessCause, AccessError, ArchiveError, ArchiveIoError, ArchiveIssue,
+    ArchiveMemberError, BatchRenameError, ChecksumError, ConflictError, ConnectionError,
+    CopyVerificationError, CredentialAction, CredentialError, CredentialFailure, CrossMoveError,
+    DescendantProblem, Failure, HostKeyError, KnownHostEntryError, KnownHostsError, ListingError,
+    ListingErrorKind, LocalPathAction, ManifestLineError, MetadataError, MetadataField,
+    MetadataWarning, MoveHistoryError, MutationError, PathError, PermissionError, PinError,
+    PreviewError, ProbeAction, PublicationError, RecoveryNotice, ReplacementRefusal, RetryError,
+    RetryProblem, ScanError, SearchError, SftpStateLock, SpaceError, SshStage, StagingCleanupError,
+    StagingError, StagingRecordAction, TransferPlanError, UndoError,
 };
 #[cfg(target_os = "macos")]
 use crate::file_error::{
@@ -1468,6 +1468,107 @@ fn space_error(error: &SpaceError) -> String {
     }
 }
 
+pub(crate) fn archive_io_message(error: &std::io::Error) -> String {
+    archive_io_message_in(error, super::language())
+}
+
+fn archive_io_message_in(error: &std::io::Error, language: super::Language) -> String {
+    use std::error::Error;
+
+    let Some(error) = ArchiveIoError::from_io(error) else {
+        return error.to_string();
+    };
+    let key = match error.issue {
+        ArchiveIssue::FileDirectoryCollision => {
+            crate::i18n::key!("Путь в архиве занят и папкой, и файлом")
+        }
+        ArchiveIssue::InvalidZipStructure => crate::i18n::key!("Повреждена структура ZIP"),
+        ArchiveIssue::InvalidEntry => crate::i18n::key!("Недопустимая запись архива"),
+        ArchiveIssue::ZipHeaderMismatch => {
+            crate::i18n::key!("Локальный заголовок ZIP отличается от каталога")
+        }
+        ArchiveIssue::ZipHeaderSizeOrCrcMismatch => {
+            crate::i18n::key!("Размер или контрольная сумма ZIP отличаются в заголовках")
+        }
+        ArchiveIssue::InvalidPath => crate::i18n::key!("Недопустимый путь внутри архива"),
+        ArchiveIssue::MetadataLimit => {
+            crate::i18n::key!("Слишком много данных для просмотра архива")
+        }
+        ArchiveIssue::NotRegularFile => crate::i18n::key!("Архив должен быть обычным файлом"),
+        ArchiveIssue::RebuiltEntryListMismatch => {
+            crate::i18n::key!("Список записей пересобранного архива не совпадает")
+        }
+        ArchiveIssue::UnsupportedRebuildFormat => {
+            crate::i18n::key!("Неподдерживаемый формат пересборки")
+        }
+        ArchiveIssue::UnsupportedZipEditMethod => {
+            crate::i18n::key!("Редактирование этого метода ZIP не поддерживается")
+        }
+        ArchiveIssue::UnsafeZipRebuild => {
+            crate::i18n::key!("Структура ZIP не поддерживает безопасную пересборку")
+        }
+        ArchiveIssue::EntrySizeMismatch => {
+            crate::i18n::key!("Размер данных записи архива не совпадает")
+        }
+        ArchiveIssue::UnsupportedSparseTarRebuild => {
+            crate::i18n::key!("Пересборка разреженного TAR не поддерживается")
+        }
+        ArchiveIssue::TarHardLinkToRemovedEntry => {
+            crate::i18n::key!("В TAR есть жёсткая ссылка на удаляемую запись")
+        }
+        ArchiveIssue::InvalidTarExtendedHeader => {
+            crate::i18n::key!("Повреждён расширенный заголовок TAR")
+        }
+        ArchiveIssue::UnsafeTarGlobalMetadata => {
+            crate::i18n::key!("Глобальные пути или размеры TAR нельзя безопасно пересобрать")
+        }
+        ArchiveIssue::InvalidZipPasswordOrData => {
+            crate::i18n::key!("Неверный пароль или повреждены данные ZIP")
+        }
+        ArchiveIssue::UnsupportedZipEncryptionOrCompression => {
+            crate::i18n::key!("Шифрование или сжатие ZIP не поддерживается")
+        }
+        ArchiveIssue::UnsupportedZipCompression => {
+            crate::i18n::key!("Метод сжатия ZIP не поддерживается")
+        }
+        ArchiveIssue::UnsupportedExtractionEntry => {
+            crate::i18n::key!("Распаковка поддерживает только обычные файлы и папки")
+        }
+        ArchiveIssue::CorruptEntryData => crate::i18n::key!("Повреждены данные записи архива"),
+        ArchiveIssue::ZipCrcMismatch => crate::i18n::key!("Контрольная сумма ZIP не совпадает"),
+        ArchiveIssue::OverlappingZipEntries => {
+            crate::i18n::key!("Данные записей ZIP перекрываются")
+        }
+        ArchiveIssue::ZipCheckPasswordRequired => {
+            crate::i18n::key!("Укажите пароль для проверки ZIP")
+        }
+        ArchiveIssue::InvalidTarLength => crate::i18n::key!("Некорректная длина TAR"),
+        ArchiveIssue::UnverifiableSparseTar => {
+            crate::i18n::key!("Разреженная запись TAR требует другой проверки")
+        }
+        ArchiveIssue::MissingTarTrailer => crate::i18n::key!("Отсутствуют завершающие блоки TAR"),
+        ArchiveIssue::UnexpectedTarTrailerData => {
+            crate::i18n::key!("Неожиданные данные после конца TAR")
+        }
+        ArchiveIssue::ZipExtractionPasswordRequired => {
+            crate::i18n::key!("Укажите пароль для распаковки ZIP")
+        }
+        ArchiveIssue::InvalidZipPassword => crate::i18n::key!("Неверный пароль ZIP"),
+        ArchiveIssue::PasswordRequiresZip => {
+            crate::i18n::key!("Пароль можно задать только для ZIP")
+        }
+    };
+    let message = key.translated(language);
+    let Some(source) = error.source() else {
+        return message.into();
+    };
+    let detail = source.downcast_ref::<std::io::Error>().map_or_else(
+        || source.to_string(),
+        |source| archive_io_message_in(source, language),
+    );
+    format!("{message}: {detail}")
+}
+
 fn archive_error(error: &ArchiveError) -> String {
     match error {
         ArchiveError::InvalidName(_) => text!("Введите допустимое имя архива").into(),
@@ -1536,7 +1637,7 @@ fn archive_error(error: &ArchiveError) -> String {
         ArchiveError::StageOutput { target, source } => crate::tr_format!(
             "Could not prepare temporary data for {target} ({error}).",
             target = target,
-            error = source
+            error = archive_io_message(source)
         ),
         ArchiveError::EntryPath { entry, source } => {
             let reason = match source {
@@ -1555,12 +1656,12 @@ fn archive_error(error: &ArchiveError) -> String {
             "Could not add {entry} to archive {archive}: {error}",
             archive = archive,
             entry = entry,
-            error = source
+            error = archive_io_message(source)
         ),
         ArchiveError::Read { archive, source } => crate::tr_format!(
             "Could not read archive “{}”: {error}",
             archive,
-            error = source
+            error = archive_io_message(source)
         ),
         ArchiveError::ExtractEntry {
             entry,
@@ -1570,14 +1671,16 @@ fn archive_error(error: &ArchiveError) -> String {
             "Could not extract {entry} to {destination}: {error}",
             entry = entry,
             destination = destination,
-            error = source
+            error = archive_io_message(source)
         ),
         ArchiveError::Rebuild { location, source } => crate::tr_format!(
             "Could not rebuild archive at {location}: {error}",
             location = location,
-            error = source
+            error = archive_io_message(source)
         ),
-        ArchiveError::Verify { archive, source } => format!("{archive}: {source}"),
+        ArchiveError::Verify { archive, source } => {
+            format!("{archive}: {}", archive_io_message(source))
+        }
         ArchiveError::ChangedDuringVerification(archive) => {
             format!("{} · {archive}", text!("Архив изменился во время проверки"))
         }
@@ -1864,6 +1967,7 @@ fn host_key_error(error: &HostKeyError) -> String {
 fn access_error(error: &AccessError) -> String {
     let cause = match &error.cause {
         AccessCause::Connection(error) => file_error(error),
+        AccessCause::Local(error) => archive_io_message(error),
         #[cfg(target_os = "macos")]
         AccessCause::Path(error) => path_error(error),
         cause => cause.to_string(),
@@ -1931,7 +2035,7 @@ pub(crate) fn access_io_message(error: &std::io::Error) -> String {
     if let Some(error) = cause.downcast_ref::<AccessError>() {
         return access_error(error);
     }
-    error.to_string()
+    archive_io_message(error)
 }
 
 fn search_error(error: &SearchError) -> String {
@@ -2499,7 +2603,7 @@ fn mutation_error(error: &MutationError, unconfirmed: bool) -> String {
             "{} · {path}",
             text!("В SMB можно скопировать обычные файлы со свободными именами.")
         ),
-        ReadOnlyArchive(_) => text!("Эта операция недоступна внутри архива").into(),
+        ReadOnlyArchive(_) => super::archive_read_only().into(),
         RenameLocal { from, to, source } => {
             #[cfg(unix)]
             let cross_volume = source.raw_os_error() == Some(libc::EXDEV);
@@ -2820,7 +2924,11 @@ fn listing_error(error: &ListingError) -> String {
         LocalMetadata(source) => (text!("Не удалось получить сведения об элементе"), source),
         ArchiveFormat => return text!("Поддерживаются архивы ZIP и TAR").into(),
         ReadArchive(source) => {
-            return crate::tr_format!("Could not read archive “{}”: {error}", path, error = source);
+            return crate::tr_format!(
+                "Could not read archive “{}”: {error}",
+                path,
+                error = archive_io_message(source)
+            );
         }
         MissingArchiveFolder => return text!("Папка отсутствует в архиве").into(),
         SftpNameEncoding(name) => {
@@ -2852,6 +2960,40 @@ mod tests {
         vfs::{Endpoint, Location},
     };
     use ssh2::{Error, ErrorCode};
+
+    #[test]
+    fn archive_messages_translate_nested_issues_and_keep_the_original_cause() {
+        use crate::i18n::Language;
+        use std::io;
+
+        let source = io::Error::from(io::ErrorKind::UnexpectedEof);
+        let original = source.to_string();
+        let error = ArchiveIssue::InvalidZipPasswordOrData
+            .with_source(ArchiveIssue::EntrySizeMismatch.with_source(source));
+        for (language, outer, inner) in [
+            (
+                Language::English,
+                "Incorrect password or damaged ZIP data",
+                "Archive entry size does not match",
+            ),
+            (
+                Language::Russian,
+                "Неверный пароль или повреждены данные ZIP",
+                "Размер данных записи архива не совпадает",
+            ),
+            #[cfg(target_os = "macos")]
+            (
+                Language::Czech,
+                "Nesprávné heslo nebo poškozená data ZIP",
+                "Velikost dat položky archivu nesouhlasí",
+            ),
+        ] {
+            assert_eq!(
+                archive_io_message_in(&error, language),
+                format!("{outer}: {inner}: {original}")
+            );
+        }
+    }
 
     #[test]
     fn space_probe_reports_unsupported_status_and_additional_cleanup_failure() {
