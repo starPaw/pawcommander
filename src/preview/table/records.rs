@@ -1,6 +1,6 @@
 use super::{Codec, Position, Separator};
 use crate::{
-    file_error::TextDecodeError,
+    file_error::{TablePreviewError, TextDecodeError},
     operations::{Cancellation, TransferError},
     vfs::Location,
 };
@@ -178,15 +178,19 @@ impl<R: BufRead> Records<R> {
             written += bytes;
             fields += columns;
             if written > RECORD_BYTES || status == ReadRecordResult::OutputFull {
-                return Err(
-                    crate::tr_format!("Record {number} exceeds 256 KiB.", number = number).into(),
-                );
+                return Err(TablePreviewError::RecordBytes {
+                    record: number,
+                    limit: RECORD_BYTES,
+                }
+                .at(location)
+                .into());
             }
             if fields > COLUMNS || status == ReadRecordResult::OutputEndsFull {
-                return Err(crate::tr_format!(
-                    "Record {number} has more than 256 columns.",
-                    number = number
-                )
+                return Err(TablePreviewError::ColumnCount {
+                    record: number,
+                    limit: COLUMNS,
+                }
+                .at(location)
                 .into());
             }
             match status {
@@ -342,11 +346,7 @@ mod tests {
         assert_eq!(row.len(), RECORD_BYTES);
         assert_eq!(row.cells().count(), COLUMNS);
 
-        for bad in [
-            vec![b'x'; RECORD_BYTES + 1],
-            vec![b','; COLUMNS],
-            vec![0xc2, b',', 0xa9],
-        ] {
+        let rejected = |bad| {
             let mut records = Records::new(
                 Cursor::new(bad),
                 Separator::Comma,
@@ -354,8 +354,36 @@ mod tests {
                 true,
                 Codec::Utf8,
             );
-            assert!(records.next(&location, &cancel).is_err());
-        }
+            let Err(TransferError::Failed(Failure::Preview(error))) =
+                records.next(&location, &cancel)
+            else {
+                panic!("expected a typed table error");
+            };
+            error
+        };
+        assert!(matches!(
+            *rejected(vec![b'x'; RECORD_BYTES + 1]),
+            PreviewError::Table {
+                location: source,
+                cause: TablePreviewError::RecordBytes { record: 1, limit: RECORD_BYTES },
+            } if source == location
+        ));
+        assert!(matches!(
+            *rejected(vec![b','; COLUMNS]),
+            PreviewError::Table {
+                location: source,
+                cause: TablePreviewError::ColumnCount { record: 1, limit: COLUMNS },
+            } if source == location
+        ));
+        assert!(matches!(
+            *rejected(vec![0xc2, b',', 0xa9]),
+            PreviewError::Text {
+                location: source,
+                record: Some(1),
+                cause: TextDecodeError::InvalidCellBoundary,
+                ..
+            } if source == location
+        ));
     }
 
     #[test]

@@ -8,8 +8,8 @@ use crate::file_error::{
     MetadataError, MetadataField, MetadataWarning, MoveHistoryError, MutationError, PathError,
     PermissionError, PinError, PreviewError, ProbeAction, PublicationError, RecoveryNotice,
     ReplacementRefusal, RetryError, RetryProblem, ScanError, SearchError, SftpStateLock,
-    SpaceError, SshStage, StagingCleanupError, StagingError, StagingRecordAction, TextDecodeError,
-    TransferPlanError, UndoError,
+    SpaceError, SshStage, StagingCleanupError, StagingError, StagingRecordAction,
+    TablePreviewError, TextDecodeError, TransferPlanError, UndoError,
 };
 #[cfg(target_os = "macos")]
 use crate::file_error::{
@@ -2333,6 +2333,7 @@ fn preview_error(error: &PreviewError) -> String {
         } => {
             return text_preview_error(location, encoding, *record, cause);
         }
+        PreviewError::Table { location, cause } => return table_preview_error(location, cause),
         #[cfg(target_os = "macos")]
         PreviewError::MediaLimit { location, limit } => {
             return crate::tr_format!(
@@ -2398,10 +2399,35 @@ fn text_preview_error(
     }
 }
 
+fn table_preview_error(location: &Location, error: &TablePreviewError) -> String {
+    let message = match error {
+        TablePreviewError::RecordBytes { record, limit } => crate::tr_format!(
+            "Record {number} exceeds {size}.",
+            number = record,
+            size = preview_limit_size(*limit as u64)
+        ),
+        TablePreviewError::ColumnCount { record, limit } => crate::tr_format!(
+            "Record {number} has more than {limit} columns.",
+            number = record,
+            limit = limit
+        ),
+        TablePreviewError::Filter(source) => {
+            return format!(
+                "{}\n{location}\n{source}",
+                text!("Не удалось подготовить фильтр таблицы.")
+            );
+        }
+    };
+    format!("{message}\n{location}")
+}
+
 fn preview_limit_size(limit: u64) -> String {
-    let mib = 1024 * 1024;
+    let kib = 1024;
+    let mib = kib * 1024;
     if limit.is_multiple_of(mib) {
         format!("{} {}", limit / mib, text!("МиБ"))
+    } else if limit.is_multiple_of(kib) {
+        format!("{} {}", limit / kib, text!("КиБ"))
     } else {
         format!("{limit} {}", text!("Б"))
     }

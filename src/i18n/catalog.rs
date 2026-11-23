@@ -679,6 +679,7 @@ catalog! {
     "Чтение таблицы…" => ("Reading table…", "Načítání tabulky…"),
     "В таблице нет строк данных." => ("The table has no data rows.", "Tabulka neobsahuje datové řádky."),
     "Нет строк, подходящих под фильтр." => ("No rows match the filter.", "Filtru neodpovídá žádný řádek."),
+    "Не удалось подготовить фильтр таблицы." => ("Could not prepare the table filter.", "Filtr tabulky se nepodařilo připravit."),
     "Показано начало файла: до 32 КиБ, 1000 строк и 8 КиБ на строку." => ("Showing the file prefix: up to 32 KiB, 1000 lines and 8 KiB per line.", "Zobrazen je začátek souboru: nejvýše 32 KiB, 1 000 řádků a 8 KiB na řádek."),
     "Пустой файл" => ("Empty file", "Prázdný soubor"),
     "Показано начало файла (до 32 КиБ)." => ("Showing the start of the file (up to 32 KiB).", "Zobrazen je začátek souboru (do 32 KiB)."),
