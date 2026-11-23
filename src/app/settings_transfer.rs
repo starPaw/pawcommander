@@ -124,10 +124,13 @@ impl SettingsTransfer {
                 let mode = picker.mode;
                 self.state = State::Ready;
                 match result {
-                    Ok(Some(path)) => match mode {
-                        Mode::Open => self.read(path),
-                        Mode::Save { .. } => self.state = State::Export(path),
-                    },
+                    Ok(Some(path)) => {
+                        self.error = None;
+                        match mode {
+                            Mode::Open => self.read(path),
+                            Mode::Save { .. } => self.state = State::Export(path),
+                        }
+                    }
                     Ok(None) => {}
                     Err(error) => self.error = Some(Error::Picker(error)),
                 }
@@ -174,7 +177,6 @@ impl SettingsTransfer {
     }
 
     fn choose(&mut self, mode: Mode) {
-        self.error = None;
         match Picker::open(mode, &self.ctx) {
             Ok(picker) => self.state = State::Picking(picker),
             Err(error) => self.error = Some(Error::Picker(error)),
@@ -188,7 +190,6 @@ impl SettingsTransfer {
                 Box::new(self.current.clone()),
             );
         }
-        let busy = matches!(self.state, State::Reading { .. } | State::Picking(_));
         let modal = egui::Modal::new(egui::Id::unique("settings-transfer")).show(ctx, |ui| {
             ui.set_width((ctx.content_rect().width() - 44.0).clamp(240.0, 540.0));
             ui.heading(text!("Перенос настроек"));
@@ -250,6 +251,7 @@ impl SettingsTransfer {
             }
             ComparisonResponse::Open
         });
+        let busy = matches!(self.state, State::Reading { .. } | State::Picking(_));
         if !busy && modal.should_close() {
             ComparisonResponse::Close
         } else {
