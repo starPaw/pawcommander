@@ -19,7 +19,9 @@ mod table;
 
 use self::encoding::Codec;
 use self::source::Target;
-use crate::file_error::{AccessAction, AccessError, MutationError, PreviewError};
+use crate::file_error::{
+    AccessAction, AccessError, ImagePreviewError, MutationError, PreviewError,
+};
 #[cfg(target_os = "macos")]
 use crate::file_error::{PdfAction, PdfError, PdfProblem};
 use crate::i18n::file_error;
@@ -873,9 +875,9 @@ fn remote_file_preview(
         return Ok(text_content(target, bytes, quick_look, encoding));
     }
     if length > IMAGE_LIMIT {
-        return Err(image_too_large().into());
+        return Err(image_too_large(location));
     }
-    image_content(&bytes, cancel)
+    image_content(location, &bytes, cancel)
 }
 
 fn load_local(
@@ -983,10 +985,10 @@ fn load_content(
     }
     if image_path_format(path).is_some() {
         if length > IMAGE_LIMIT {
-            return Err(image_too_large().into());
+            return Err(image_too_large(&target.location));
         }
         let bytes = read_bounded(target, IMAGE_LIMIT as usize, cancel)?;
-        return image_content(&bytes, cancel);
+        return image_content(&target.location, &bytes, cancel);
     }
     Ok(text_content(
         target,
@@ -996,26 +998,32 @@ fn load_content(
     ))
 }
 
-fn image_too_large() -> String {
-    crate::i18n::text!("Изображение больше 20 МиБ. Откройте его во внешнем приложении.").into()
+fn image_too_large(location: &Location) -> TransferError {
+    ImagePreviewError::FileLimit { limit: IMAGE_LIMIT }
+        .at(location)
+        .into()
 }
 
-fn image_content(bytes: &[u8], cancel: &Cancellation) -> Result<Content, TransferError> {
-    if bytes.len() > IMAGE_LIMIT as usize {
-        return Err(crate::i18n::text!("Изображение больше 20 МиБ.").into());
-    }
+fn image_content(
+    location: &Location,
+    bytes: &[u8],
+    cancel: &Cancellation,
+) -> Result<Content, TransferError> {
     cancel.check()?;
+    if bytes.len() > IMAGE_LIMIT as usize {
+        return Err(image_too_large(location));
+    }
     let mut reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
-        .map_err(|e| crate::tr_format!("Could not detect image format: {e}", e = e))?;
+        .map_err(|e| ImagePreviewError::Detect(e).at(location))?;
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(IMAGE_EDGE_LIMIT);
     limits.max_image_height = Some(IMAGE_EDGE_LIMIT);
     limits.max_alloc = Some(128 * 1024 * 1024);
     reader.limits(limits);
-    let decoded = reader
-        .decode()
-        .map_err(|e| crate::tr_format!("Image preview unavailable: {e}", e = e))?;
+    let decoded = reader.decode();
+    cancel.check()?;
+    let decoded = decoded.map_err(|e| ImagePreviewError::Decode(e).at(location))?;
     let original_size = [decoded.width(), decoded.height()];
     let thumbnail = decoded.thumbnail(1200, 1200).to_rgba8();
     cancel.check()?;
@@ -1690,13 +1698,78 @@ mod tests {
 
     #[test]
     fn rejects_image_with_excessive_dimensions() {
+        use crate::file_error::Failure;
+        use image::{error::LimitErrorKind, ImageError};
+
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("wide.png");
         image::RgbaImage::new(IMAGE_EDGE_LIMIT + 1, 1)
             .save(&path)
             .unwrap();
         let loaded = load_test_file(&path);
-        assert!(matches!(loaded.content, Content::Unavailable(_)));
+        let Content::Unavailable(TransferError::Failed(Failure::Preview(error))) = loaded.content
+        else {
+            panic!("expected a typed image limit failure");
+        };
+        assert!(matches!(
+            error.as_ref(),
+            PreviewError::Image {
+                location,
+                cause: ImagePreviewError::Decode(ImageError::Limits(source)),
+            } if location.path() == path && source.kind() == LimitErrorKind::DimensionError
+        ));
+    }
+
+    #[test]
+    fn sftp_image_preview_retains_the_source_and_cancels_after_decode() {
+        use crate::{file_error::Failure, vfs::Endpoint};
+        use std::error::Error;
+
+        let location = Location::Sftp {
+            endpoint: Endpoint {
+                host: "example.test".into(),
+                port: 22,
+                user: "fixture".into(),
+                key: None,
+                jump: None,
+            },
+            path: "/photos/битый.png".into(),
+        };
+        let target = Target::from(location.clone());
+        // The PNG signature is recognized, but there is no image header.
+        let broken = b"\x89PNG\r\n\x1a\n";
+        let Err(error) = remote_file_preview(
+            &target,
+            broken.to_vec(),
+            broken.len() as u64,
+            &Cancellation::default(),
+            true,
+            None,
+        ) else {
+            panic!("expected a decoder failure");
+        };
+        let TransferError::Failed(Failure::Preview(preview)) = &error else {
+            panic!("expected a typed preview failure");
+        };
+        assert!(matches!(
+            preview.as_ref(),
+            PreviewError::Image { location: origin, cause: ImagePreviewError::Decode(_) }
+                if origin == &location
+        ));
+        let source = preview.source().unwrap().source().unwrap();
+        assert!(source.is::<image::ImageError>());
+        let message = file_error(&error);
+        assert!(message.contains(&location.display()) && message.contains(&source.to_string()));
+
+        let mut checks = 0;
+        let cancel = Cancellation::at_checkpoint(move || {
+            checks += 1;
+            checks == 2
+        });
+        assert!(matches!(
+            image_content(&location, broken, &cancel),
+            Err(TransferError::Cancelled)
+        ));
     }
 
     #[test]

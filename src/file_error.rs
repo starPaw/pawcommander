@@ -25,6 +25,7 @@ mod file_promise;
 #[cfg(target_os = "macos")]
 mod file_template;
 mod host_key;
+mod image_preview;
 #[cfg(target_os = "macos")]
 mod link_create;
 #[cfg(target_os = "macos")]
@@ -65,6 +66,7 @@ pub(crate) use file_promise::FilePromiseError;
 #[cfg(target_os = "macos")]
 pub(crate) use file_template::FileTemplateError;
 pub(crate) use host_key::{HostKeyError, KnownHostEntryError, KnownHostsError, PinError};
+pub(crate) use image_preview::ImagePreviewError;
 #[cfg(target_os = "macos")]
 pub(crate) use link_create::{LinkCreateError, LinkIoAction};
 #[cfg(target_os = "macos")]
@@ -620,6 +622,10 @@ pub(crate) enum PreviewError {
     UnsupportedFile(Location),
     ChangedBeforeRead(Location),
     ChangedWhileReading(Location),
+    Image {
+        location: Location,
+        cause: ImagePreviewError,
+    },
     #[cfg(target_os = "macos")]
     MediaLimit {
         location: Location,
@@ -638,10 +644,11 @@ pub(crate) enum PreviewError {
     WorkerUnavailable,
 }
 
-#[cfg(target_os = "macos")]
 impl PreviewError {
     pub(crate) fn io_cause(&self) -> Option<&io::Error> {
         match self {
+            Self::Image { cause, .. } => cause.io_cause(),
+            #[cfg(target_os = "macos")]
             Self::Media {
                 cause: MediaError::Io { source, .. },
                 ..
@@ -665,6 +672,7 @@ impl fmt::Display for PreviewError {
             Self::ChangedWhileReading(location) => {
                 write!(f, "File changed while reading: {location}")
             }
+            Self::Image { location, cause } => write!(f, "Image preview at {location}: {cause}"),
             #[cfg(target_os = "macos")]
             Self::MediaLimit { location, limit } => {
                 write!(f, "Media preview exceeds {limit} bytes: {location}")
@@ -681,6 +689,7 @@ impl fmt::Display for PreviewError {
 impl Error for PreviewError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::Image { cause, .. } => Some(cause),
             #[cfg(target_os = "macos")]
             Self::Media { cause, .. } => Some(cause),
             #[cfg(target_os = "macos")]
