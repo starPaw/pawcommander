@@ -1,5 +1,6 @@
 use crate::i18n::text;
-use crate::tools::custom_action::{Invocation, Template};
+use crate::tools::custom_action::{Template, TemplateError};
+use crate::tools::launch::Invocation;
 use eframe::egui::{self, RichText};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -95,6 +96,7 @@ impl Editor {
             .find_map(|template| template.validate().err().map(|error| (template, error)))
         {
             let name = template_name(template);
+            let error = crate::i18n::launch::template_error(&error);
             ui.colored_label(ui.visuals().error_fg_color, format!("{name} · {error}"));
         }
     }
@@ -138,7 +140,7 @@ pub(super) struct Preview {
     files: Vec<PathBuf>,
     templates: Vec<Template>,
     selected: usize,
-    prepared: Result<Prepared, String>,
+    prepared: Result<Prepared, TemplateError>,
 }
 
 struct Prepared {
@@ -147,7 +149,7 @@ struct Prepared {
 }
 
 impl Prepared {
-    fn new(template: &Template, folder: &Path, files: &[PathBuf]) -> Result<Self, String> {
+    fn new(template: &Template, folder: &Path, files: &[PathBuf]) -> Result<Self, TemplateError> {
         let invocation = template.prepare(folder, files)?;
         let mut arguments = String::new();
         for (index, value) in invocation.arguments.iter().enumerate() {
@@ -195,9 +197,9 @@ impl Preview {
             Ok(prepared) => {
                 let invocation = &prepared.invocation;
                 ui.label(text!("Исполняемый файл"));
-                ui.monospace(format!("{:?}", invocation.program.as_os_str()));
+                ui.monospace(format!("{:?}", invocation.details.program.as_os_str()));
                 ui.label(text!("Рабочая папка"));
-                ui.monospace(format!("{:?}", invocation.folder.as_os_str()));
+                ui.monospace(format!("{:?}", invocation.details.folder.as_os_str()));
                 ui.label(crate::tr_format!(
                     "Arguments ({})",
                     invocation.arguments.len()
@@ -215,7 +217,10 @@ impl Preview {
                     });
             }
             Err(error) => {
-                ui.colored_label(ui.visuals().error_fg_color, error);
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    crate::i18n::launch::template_error(error),
+                );
             }
         }
     }

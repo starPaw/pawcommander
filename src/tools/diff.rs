@@ -1,4 +1,5 @@
-use super::launch::{report_startup, start_error};
+use super::launch::{report_startup, StartupError};
+use crate::i18n::launch::startup_error;
 use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -34,7 +35,9 @@ pub(crate) fn launch_diff(
     report: impl FnOnce(Result<(), String>),
 ) {
     match spawn(tool, files) {
-        Ok(child) => report_startup(child, report),
+        Ok(child) => report_startup(child, |result| {
+            report(result.map_err(|error| startup_error(&error)))
+        }),
         Err(error) => report(Err(error)),
     }
 }
@@ -58,5 +61,5 @@ fn spawn(tool: &Path, files: &[PathBuf; 2]) -> Result<Child, String> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(start_error)
+        .map_err(|error| startup_error(&StartupError::Spawn(error)))
 }

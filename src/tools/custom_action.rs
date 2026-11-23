@@ -1,12 +1,26 @@
-use super::launch::{report_startup, start_error};
-use crate::i18n::text;
+use super::launch::{CommandDetails, Invocation, Target};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
-const LOCAL_SELECTION: crate::i18n::MessageKey =
-    crate::i18n::key!("Выберите локальные файлы или папки для запуска действия.");
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum TemplateError {
+    Name,
+    ProgramPath,
+    LocalSelection,
+    Argument {
+        index: usize,
+        problem: ArgumentError,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ArgumentError {
+    Nul,
+    FilesMustBeSeparate,
+    Placeholder,
+    SingleFile,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub(crate) struct Template {
@@ -26,34 +40,45 @@ impl Default for Template {
 }
 
 impl Template {
-    fn program_path(&self) -> Result<&Path, String> {
+    fn program_path(&self) -> Result<&Path, TemplateError> {
         if self.name.trim().is_empty() {
-            return Err(text!("Введите название действия.").into());
+            return Err(TemplateError::Name);
         }
         let program = Path::new(&self.program);
         if !program.is_absolute() || self.program.contains('\0') {
-            return Err(text!("Укажите абсолютный путь к исполняемому файлу").into());
+            return Err(TemplateError::ProgramPath);
         }
         Ok(program)
     }
 
-    pub(crate) fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<(), TemplateError> {
         self.program_path()?;
-        for source in &self.arguments {
-            Argument::parse(source)?;
+        for (index, source) in self.arguments.iter().enumerate() {
+            Argument::parse(source).map_err(|problem| TemplateError::Argument {
+                index: index + 1,
+                problem,
+            })?;
         }
         Ok(())
     }
 
-    pub(crate) fn prepare(&self, folder: &Path, files: &[PathBuf]) -> Result<Invocation, String> {
+    pub(crate) fn prepare(
+        &self,
+        folder: &Path,
+        files: &[PathBuf],
+    ) -> Result<Invocation, TemplateError> {
         let program = self.program_path()?.to_owned();
         if !folder.is_absolute() || files.is_empty() || files.iter().any(|path| !path.is_absolute())
         {
-            return Err(text(LOCAL_SELECTION).into());
+            return Err(TemplateError::LocalSelection);
         }
         let mut arguments = Vec::with_capacity(self.arguments.len());
-        for source in &self.arguments {
-            match Argument::parse(source)? {
+        for (index, source) in self.arguments.iter().enumerate() {
+            let error = |problem| TemplateError::Argument {
+                index: index + 1,
+                problem,
+            };
+            match Argument::parse(source).map_err(error)? {
                 Argument::Files => {
                     arguments.extend(files.iter().map(|path| path.as_os_str().to_owned()))
                 }
@@ -65,9 +90,7 @@ impl Template {
                             Part::Folder => value.push(folder),
                             Part::File => {
                                 let [file] = files else {
-                                    return Err(
-                                        text!("Для {file} выберите ровно один объект.").into()
-                                    );
+                                    return Err(error(ArgumentError::SingleFile));
                                 };
                                 value.push(file);
                             }
@@ -78,9 +101,14 @@ impl Template {
             }
         }
         Ok(Invocation {
-            name: self.name.trim().to_owned(),
-            program,
-            folder: folder.to_owned(),
+            details: CommandDetails {
+                target: Target::Action {
+                    name: self.name.trim().to_owned(),
+                    files: files.to_owned(),
+                },
+                program,
+                folder: folder.to_owned(),
+            },
             arguments,
         })
     }
@@ -98,9 +126,9 @@ enum Part<'a> {
 }
 
 impl<'a> Argument<'a> {
-    fn parse(source: &'a str) -> Result<Self, String> {
+    fn parse(source: &'a str) -> Result<Self, ArgumentError> {
         if source.contains('\0') {
-            return Err(text!("Аргумент содержит нулевой байт.").into());
+            return Err(ArgumentError::Nul);
         }
         if source == "{files}" {
             return Ok(Self::Files);
@@ -121,12 +149,9 @@ impl<'a> Argument<'a> {
             } else if let Some(tail) = suffix.strip_prefix("{folder}") {
                 (Part::Folder, tail)
             } else if suffix.starts_with("{files}") {
-                return Err(text!("{files} должен занимать отдельный аргумент.").into());
+                return Err(ArgumentError::FilesMustBeSeparate);
             } else {
-                return Err(text!(
-                    "Неизвестная подстановка. Удваивайте фигурные скобки для буквального ввода.",
-                )
-                .into());
+                return Err(ArgumentError::Placeholder);
             };
             parts.push(part);
             rest = tail;
@@ -138,36 +163,10 @@ impl<'a> Argument<'a> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct Invocation {
-    pub(crate) name: String,
-    pub(crate) program: PathBuf,
-    pub(crate) folder: PathBuf,
-    pub(crate) arguments: Vec<OsString>,
-}
-
-impl Invocation {
-    pub(crate) fn launch(self, report: impl FnOnce(Result<String, String>)) {
-        let child = Command::new(&self.program)
-            .args(&self.arguments)
-            .current_dir(&self.folder)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-        match child {
-            Ok(child) => report_startup(child, |result| {
-                let name = self.name;
-                report(result.map(|()| crate::tr_format!("Started action “{name}”", name = name)));
-            }),
-            Err(error) => report(Err(start_error(error))),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::launch::{InvocationError, StartupError};
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
 
@@ -194,7 +193,14 @@ mod tests {
         ])
         .prepare(folder, &[first.clone(), second.clone()])
         .unwrap();
-        assert_eq!(invocation.folder, folder);
+        assert_eq!(invocation.details.folder, folder);
+        assert_eq!(
+            invocation.details.target,
+            Target::Action {
+                name: "Example".into(),
+                files: vec![first.clone(), second.clone()],
+            }
+        );
         assert_eq!(
             invocation.arguments,
             [
@@ -218,12 +224,27 @@ mod tests {
             .prepare(folder, std::slice::from_ref(&first))
             .unwrap();
         assert_eq!(invocation.arguments, ["--input=/work/one file"]);
-        assert!(single
-            .prepare(folder, &[first, folder.join("two")])
-            .is_err());
+        assert_eq!(
+            single
+                .prepare(folder, &[first, folder.join("two")])
+                .unwrap_err(),
+            TemplateError::Argument {
+                index: 1,
+                problem: ArgumentError::SingleFile,
+            }
+        );
         for invalid in ["--input={files}", "{unknown}", "unmatched}", "\0"] {
             assert!(template(&[invalid]).validate().is_err(), "{invalid:?}");
         }
+        assert_eq!(
+            template(&["--literal", "{unknown}"])
+                .validate()
+                .unwrap_err(),
+            TemplateError::Argument {
+                index: 2,
+                problem: ArgumentError::Placeholder,
+            }
+        );
         let relative_program = Template {
             program: "open".into(),
             ..template(&["{files}"])
@@ -246,6 +267,12 @@ mod tests {
         let launch = action
             .prepare(folder.path(), &[folder.path().join("item")])
             .unwrap();
-        launch.launch(|result| assert!(result.is_err()));
+        launch.launch(|result| {
+            assert!(matches!(
+                result,
+                Err(InvocationError::Startup(StartupError::Spawn(error)))
+                    if error.raw_os_error() == Some(libc::ENOENT)
+            ));
+        });
     }
 }

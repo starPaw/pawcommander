@@ -1034,7 +1034,11 @@ impl PawCommander {
             #[cfg(target_os = "macos")]
             Dialog::RunCustomAction(preview) => {
                 if let Some(invocation) = preview.into_invocation() {
-                    self.launch_custom_action(invocation, ctx);
+                    self.launch_configured(
+                        ctx,
+                        crate::i18n::text!("Запуск пользовательского действия…"),
+                        invocation,
+                    );
                 }
             }
             #[cfg(target_os = "macos")]

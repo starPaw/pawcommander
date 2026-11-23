@@ -1,7 +1,7 @@
 use super::{dialogs::Dialog, PawCommander};
-use crate::i18n::text;
+use crate::i18n::{key, launch::editor_preparation_error, text, MessageKey};
 use crate::operations::TransferError;
-use crate::tools::custom_action::Invocation;
+use crate::tools::launch::{CommandDetails, Invocation, Target};
 use crate::vfs::{Location, RemoteEdit, RemoteEditSaveOutcome};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
@@ -31,19 +31,19 @@ impl Default for EditorCommand {
 }
 
 impl EditorCommand {
-    fn check(&self) -> Result<(), &'static str> {
+    fn check(&self) -> Result<(), MessageKey> {
         if !Path::new(&self.program).is_absolute() || self.program.contains('\0') {
-            return Err(text!("Укажите абсолютный путь к исполняемому файлу"));
+            return Err(key!("Укажите абсолютный путь к исполняемому файлу"));
         }
         if self.arguments.contains('\0') {
-            return Err(text!("Аргумент содержит нулевой байт."));
+            return Err(key!("Аргумент содержит нулевой байт."));
         }
         Ok(())
     }
 
-    fn invocation(self, file: &Path) -> Result<Invocation, String> {
+    fn invocation(&self, source: &Location, file: &Path) -> Result<Invocation, MessageKey> {
         self.check()?;
-        let folder = file.parent().ok_or_else(|| text!("Недопустимый путь"))?;
+        let folder = file.parent().ok_or(key!("Недопустимый путь"))?;
         let arguments = self
             .arguments
             .lines()
@@ -51,9 +51,14 @@ impl EditorCommand {
             .chain([file.as_os_str().to_owned()])
             .collect();
         Ok(Invocation {
-            name: text!("Внешний редактор").into(),
-            program: self.program.into(),
-            folder: folder.to_owned(),
+            details: CommandDetails {
+                target: Target::Editor {
+                    source: source.clone(),
+                    file: file.to_owned(),
+                },
+                program: self.program.as_str().into(),
+                folder: folder.to_owned(),
+            },
             arguments,
         })
     }
@@ -88,7 +93,7 @@ impl Editors {
                 )
                 .labelled_by(args.id);
                 if let Err(error) = command.check() {
-                    ui.colored_label(ui.visuals().error_fg_color, error);
+                    ui.colored_label(ui.visuals().error_fg_color, text(error));
                 }
             });
         }
@@ -128,8 +133,13 @@ impl PawCommander {
     }
 
     pub(super) fn open_external_editor(&mut self, path: Location, ctx: &egui::Context) {
-        if let Some(path) = path.local() {
-            self.launch_editor(self.settings.external_editors.local.clone(), path, ctx);
+        if let Some(file) = path.local() {
+            self.launch_editor(
+                self.settings.external_editors.local.clone(),
+                &path,
+                file,
+                ctx,
+            );
             return;
         }
         if !path.remote() {
@@ -150,7 +160,10 @@ impl PawCommander {
         }
         let command = self.settings.external_editors.sftp.clone();
         if let Err(error) = command.check() {
-            self.notice = Some((error.into(), true));
+            self.notice = Some((
+                editor_preparation_error(&path, Path::new(&command.program), text(error)),
+                true,
+            ));
             self.configure_external_editors(ctx);
             return;
         }
@@ -167,26 +180,24 @@ impl PawCommander {
         });
     }
 
-    fn launch_editor(&mut self, command: EditorCommand, file: &Path, ctx: &egui::Context) {
-        let invocation = match command.invocation(file) {
+    fn launch_editor(
+        &mut self,
+        command: EditorCommand,
+        source: &Location,
+        file: &Path,
+        ctx: &egui::Context,
+    ) {
+        let invocation = match command.invocation(source, file) {
             Ok(invocation) => invocation,
             Err(error) => {
-                self.notice = Some((error, true));
+                self.notice = Some((
+                    editor_preparation_error(source, Path::new(&command.program), text(error)),
+                    true,
+                ));
                 return;
             }
         };
-        let path = file.to_owned();
-        self.launch_application(
-            ctx,
-            text!("Открытие внешнего редактора…"),
-            move |report| {
-                if path.is_file() {
-                    invocation.launch(report);
-                } else {
-                    report(Err(text!("Файл для редактирования недоступен.").into()));
-                }
-            },
-        );
+        self.launch_configured(ctx, text!("Открытие внешнего редактора…"), invocation);
     }
 
     pub(super) fn poll_external_editors(&mut self, ctx: &egui::Context) {
@@ -203,7 +214,7 @@ impl PawCommander {
         self.remote_editor.work = None;
         match result {
             Ok(Finished::Downloaded(edit, command)) => {
-                self.launch_editor(command, edit.copy(), ctx);
+                self.launch_editor(command, edit.target(), edit.copy(), ctx);
                 self.remote_editor.edit = Some(edit);
                 self.remote_editor.feedback = None;
                 self.remote_editor.open = true;
@@ -289,15 +300,23 @@ impl PawCommander {
             let edit = edit.clone();
             self.save_remote_edit(edit, ctx);
         } else if reopen {
+            let source = edit.target().clone();
             let copy = edit.copy().to_owned();
-            self.launch_editor(self.settings.external_editors.sftp.clone(), &copy, ctx);
+            self.launch_editor(
+                self.settings.external_editors.sftp.clone(),
+                &source,
+                &copy,
+                ctx,
+            );
         } else if reveal {
+            let source = edit.target().clone();
             let copy = edit.copy().to_owned();
             self.launch_editor(
                 EditorCommand {
                     program: "/usr/bin/open".into(),
                     arguments: "-R".into(),
                 },
+                &source,
                 &copy,
                 ctx,
             );
