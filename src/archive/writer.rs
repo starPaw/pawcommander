@@ -1,5 +1,5 @@
 use super::{parse_member_path, Format, MAX_ENTRIES, MAX_INDEX_BYTES, MAX_METADATA_BYTES};
-use crate::file_error::ArchiveMemberError;
+use crate::file_error::{ArchiveIssue, ArchiveMemberError};
 use flate2::{write::DeflateEncoder, Compression};
 use rawzip::time::{DosDateTime, UtcDateTime};
 use std::{
@@ -80,11 +80,7 @@ impl<'a, W: Write> ArchiveWriter<'a, W> {
             },
             (Format::Zip, None) => Self::Zip(rawzip::ZipArchiveWriter::new(output)),
             (Format::Tar, None) => Self::Tar(tar::Builder::new(output)),
-            (Format::Tar, Some(_)) => {
-                return Err(super::invalid(crate::i18n::key!(
-                    "Пароль можно задать только для ZIP"
-                )))
-            }
+            (Format::Tar, Some(_)) => return Err(ArchiveIssue::PasswordRequiresZip.io_error()),
         })
     }
 

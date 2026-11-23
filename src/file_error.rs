@@ -39,7 +39,7 @@ mod staging;
 mod sync;
 mod transfer_plan;
 mod undo;
-pub(crate) use archive::ArchiveError;
+pub(crate) use archive::{ArchiveError, ArchiveIoError, ArchiveIssue};
 pub(crate) use batch_rename::BatchRenameError;
 pub(crate) use checksum::{ChecksumError, ManifestLineError};
 #[cfg(target_os = "macos")]

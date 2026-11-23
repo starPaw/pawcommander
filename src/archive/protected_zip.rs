@@ -1,7 +1,4 @@
-use super::{
-    archive_io_error, archive_io_error_with_cause, invalid, too_large, MetadataReader, MAX_ENTRIES,
-    MAX_METADATA_BYTES,
-};
+use super::{too_large, ArchiveIssue, MetadataReader, MAX_ENTRIES, MAX_METADATA_BYTES};
 use crate::operations::Cancellation;
 use std::{
     collections::BTreeMap,
@@ -37,11 +34,8 @@ enum EntryProblem {
 impl EntryProblem {
     fn io_error(&self) -> io::Error {
         match self {
-            Self::Invalid => invalid(crate::i18n::key!("Недопустимая запись архива")),
-            Self::UnsupportedCompression => archive_io_error(
-                io::ErrorKind::Unsupported,
-                crate::i18n::key!("Метод сжатия ZIP не поддерживается"),
-            ),
+            Self::Invalid => ArchiveIssue::InvalidEntry.io_error(),
+            Self::UnsupportedCompression => ArchiveIssue::UnsupportedZipCompression.io_error(),
         }
     }
 }
@@ -97,7 +91,7 @@ impl ProtectedZip {
             }
         }
         if !wanted.is_empty() {
-            return Err(invalid(crate::i18n::key!("Недопустимая запись архива")));
+            return Err(ArchiveIssue::InvalidEntry.io_error());
         }
         Ok(archive)
     }
@@ -117,7 +111,7 @@ impl ProtectedZip {
         let entry = self
             .entries
             .get(&member.index)
-            .ok_or_else(|| invalid(crate::i18n::key!("Недопустимая запись архива")))?
+            .ok_or_else(|| ArchiveIssue::InvalidEntry.io_error())?
             .as_ref()
             .map_err(EntryProblem::io_error)?;
         let options = ZipReadOptions::new().password(Some(password.as_bytes()));
@@ -126,36 +120,26 @@ impl ProtectedZip {
             .with_reader(input, options)
             .map_err(zip_error)?;
         if entry.data_start() != Some(member.data) {
-            return Err(invalid(crate::i18n::key!("Недопустимая запись архива")));
+            return Err(ArchiveIssue::InvalidEntry.io_error());
         }
         Ok(entry)
     }
 }
 
 pub(super) fn password_required() -> io::Error {
-    archive_io_error(
-        io::ErrorKind::InvalidInput,
-        crate::i18n::key!("Укажите пароль для распаковки ZIP"),
-    )
+    ArchiveIssue::ZipExtractionPasswordRequired.io_error()
 }
 
 pub(super) fn zip_error(error: ZipError) -> io::Error {
-    let (kind, key) = match error {
+    let issue = match error {
         ZipError::Io(error) => return error,
-        ZipError::InvalidPassword => (
-            io::ErrorKind::InvalidInput,
-            crate::i18n::key!("Неверный пароль ZIP"),
-        ),
-        ZipError::UnsupportedArchive(_) | ZipError::CompressionMethodNotSupported(_) => (
-            io::ErrorKind::Unsupported,
-            crate::i18n::key!("Шифрование или сжатие ZIP не поддерживается"),
-        ),
-        _ => (
-            io::ErrorKind::InvalidData,
-            crate::i18n::key!("Недопустимая запись архива"),
-        ),
+        ZipError::InvalidPassword => ArchiveIssue::InvalidZipPassword,
+        ZipError::UnsupportedArchive(_) | ZipError::CompressionMethodNotSupported(_) => {
+            ArchiveIssue::UnsupportedZipEncryptionOrCompression
+        }
+        _ => ArchiveIssue::InvalidEntry,
     };
-    archive_io_error_with_cause(kind, key, error)
+    issue.with_source(error)
 }
 
 pub(super) struct EntryReader<'a> {

@@ -1,10 +1,10 @@
 use super::{
     extraction::{archive_read_error, Extraction},
     integrity::check_tar_trailer,
-    invalid, invalid_path, member_path, parse_member_path,
+    invalid_path, member_path, parse_member_path,
     protected_zip::zip_error,
-    scan_zip, too_large, ArchiveWriter, Contents, Format, Index, Member, MetadataReader,
-    MAX_ENTRIES, MAX_INDEX_BYTES, MAX_METADATA_BYTES,
+    scan_zip, too_large, ArchiveIssue, ArchiveWriter, Contents, Format, Index, Member,
+    MetadataReader, MAX_ENTRIES, MAX_INDEX_BYTES, MAX_METADATA_BYTES,
 };
 use crate::{
     file_error::{AccessError, ArchiveError, ArchiveMemberError},
@@ -209,9 +209,7 @@ impl EditableArchive {
         if !matches || actual.next().is_some() {
             return Err(ArchiveError::Rebuild {
                 location: self.source.location(),
-                source: invalid(crate::i18n::key!(
-                    "Список записей пересобранного архива не совпадает"
-                )),
+                source: ArchiveIssue::RebuiltEntryListMismatch.io_error(),
             }
             .into());
         }
@@ -245,10 +243,7 @@ impl EditableArchive {
                 self.write_zip(writer, progress)
             }
             (Format::Tar, ArchiveWriter::Tar(writer)) => self.write_tar(writer, progress),
-            _ => Err(self.rebuild_error(
-                None,
-                invalid(crate::i18n::key!("Неподдерживаемый формат пересборки")),
-            )),
+            _ => Err(self.rebuild_error(None, ArchiveIssue::UnsupportedRebuildFormat.io_error())),
         }
     }
 
@@ -282,9 +277,7 @@ impl EditableArchive {
                 _ => {
                     return Err(self.rebuild_error(
                         Some(path),
-                        invalid(crate::i18n::key!(
-                            "Редактирование этого метода ZIP не поддерживается"
-                        )),
+                        ArchiveIssue::UnsupportedZipEditMethod.io_error(),
                     ))
                 }
             }
@@ -305,12 +298,7 @@ impl EditableArchive {
         // The second reader keys its records by name. Comparing its count and
         // the exact local offsets prevents silently losing or copying aliases.
         if zip.len() != self.zip_entries || zip.offset() != 0 {
-            return Err(self.rebuild_error(
-                None,
-                invalid(crate::i18n::key!(
-                    "Структура ZIP не поддерживает безопасную пересборку"
-                )),
-            ));
+            return Err(self.rebuild_error(None, ArchiveIssue::UnsafeZipRebuild.io_error()));
         }
         writer
             .set_raw_comment(zip.comment().into())
@@ -343,9 +331,7 @@ impl EditableArchive {
                 || entry.crc32() != crc
                 || entry.encrypted() != encrypted
             {
-                return Err(failure(invalid(crate::i18n::key!(
-                    "Структура ZIP не поддерживает безопасную пересборку"
-                ))));
+                return Err(failure(ArchiveIssue::UnsafeZipRebuild.io_error()));
             }
             copying.set(true);
             if let Some(name) = &record.renamed {
@@ -402,9 +388,7 @@ impl EditableArchive {
                 })
                 .map_err(failure)?;
             if actual != expected {
-                return Err(failure(invalid(crate::i18n::key!(
-                    "Размер данных записи архива не совпадает"
-                ))));
+                return Err(failure(ArchiveIssue::EntrySizeMismatch.io_error()));
             }
         }
         Ok(())
@@ -498,9 +482,7 @@ fn read_zip(input: MetadataReader<'_>) -> io::Result<(Vec<Record>, bool)> {
             .windows(2)
             .any(|ranges| ranges[0].end > ranges[1].start)
     {
-        return Err(invalid(crate::i18n::key!(
-            "Структура ZIP не поддерживает безопасную пересборку"
-        )));
+        return Err(ArchiveIssue::UnsafeZipRebuild.io_error());
     }
     Ok((records, protected))
 }
@@ -524,9 +506,7 @@ fn read_tar(
         let mut entry = entry?;
         let kind = entry.header().entry_type();
         if kind.is_gnu_sparse() {
-            return Err(invalid(crate::i18n::key!(
-                "Пересборка разреженного TAR не поддерживается"
-            )));
+            return Err(ArchiveIssue::UnsupportedSparseTarRebuild.io_error());
         }
         let data_start = entry.raw_file_position();
         let size = entry.size();
@@ -552,9 +532,7 @@ fn read_tar(
         if kind.is_hard_link() && !member.as_deref().is_some_and(|path| edit.removes(path)) {
             let link_path = member_path(link.as_deref().ok_or_else(invalid_path)?)?;
             if edit.removes(&link_path) {
-                return Err(invalid(crate::i18n::key!(
-                    "В TAR есть жёсткая ссылка на удаляемую запись"
-                )));
+                return Err(ArchiveIssue::TarHardLinkToRemovedEntry.io_error());
             }
             new_link = edit.renamed(&link_path);
         }
@@ -563,21 +541,16 @@ fn read_tar(
         let mut pax = Vec::new();
         if let Some(extensions) = entry.pax_extensions()? {
             for field in extensions {
-                let field = field.map_err(|_| {
-                    invalid(crate::i18n::key!("Повреждён расширенный заголовок TAR"))
-                })?;
-                let key = field.key().map_err(|_| {
-                    invalid(crate::i18n::key!("Повреждён расширенный заголовок TAR"))
-                })?;
+                let field = field
+                    .map_err(|source| ArchiveIssue::InvalidTarExtendedHeader.with_source(source))?;
+                let key = field
+                    .key()
+                    .map_err(|source| ArchiveIssue::InvalidTarExtendedHeader.with_source(source))?;
                 if key.starts_with("GNU.sparse.") {
-                    return Err(invalid(crate::i18n::key!(
-                        "Пересборка разреженного TAR не поддерживается"
-                    )));
+                    return Err(ArchiveIssue::UnsupportedSparseTarRebuild.io_error());
                 }
                 if kind.is_pax_global_extensions() && matches!(key, "path" | "linkpath" | "size") {
-                    return Err(invalid(crate::i18n::key!(
-                        "Глобальные пути или размеры TAR нельзя безопасно пересобрать"
-                    )));
+                    return Err(ArchiveIssue::UnsafeTarGlobalMetadata.io_error());
                 }
                 if rewriting && key != "path" && key != "linkpath" {
                     pax.push((key.to_owned(), field.value_bytes().to_owned()));

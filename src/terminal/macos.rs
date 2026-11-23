@@ -29,7 +29,7 @@ pub(crate) fn open(folder: &Location) -> Result<String, String> {
             script.disable_cleanup(true);
             Ok(text!("Запрос SSH-сеанса передан Terminal.").into())
         }
-        Location::Archive { .. } => Err(crate::archive::readonly().into()),
+        Location::Archive { .. } => Err(crate::i18n::archive_read_only().into()),
     }
 }
 

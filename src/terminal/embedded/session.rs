@@ -265,7 +265,7 @@ fn command(folder: &Location) -> Result<Command, String> {
             Ok(shell)
         }
         Location::Sftp { endpoint, path } => ssh_command(endpoint, path),
-        Location::Archive { .. } => Err(crate::archive::readonly().into()),
+        Location::Archive { .. } => Err(crate::i18n::archive_read_only().into()),
     }
 }
 

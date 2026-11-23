@@ -238,7 +238,7 @@ fn extraction_destination(
     let destination =
         fs_ops::resolve(address, base).map_err(|error| crate::i18n::file_error(&error))?;
     if destination.is_archive() {
-        Err(crate::archive::readonly().into())
+        Err(crate::i18n::archive_read_only().into())
     } else {
         Ok(destination)
     }

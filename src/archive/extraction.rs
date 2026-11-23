@@ -1,8 +1,5 @@
 use super::protected_zip::{password_required, EntryReader, ProtectedZip};
-use super::{
-    archive_io_error, archive_io_error_with_cause, invalid, open_regular, Contents, Format, Index,
-    Member,
-};
+use super::{open_regular, ArchiveIssue, Contents, Format, Index, Member};
 use crate::{
     file_error::{AccessAction, AccessError, ArchiveError, ArchiveMemberError},
     fs_ops,
@@ -307,17 +304,13 @@ impl<'a> Extraction<'a> {
                 // In AES ZIP, the reader authenticates the data at EOF.
                 copy_exact(path, size, &mut input, output, progress).map_err(|error| {
                     if error.kind() == io::ErrorKind::InvalidData {
-                        archive_io_error_with_cause(
-                            io::ErrorKind::InvalidData,
-                            crate::i18n::key!("Неверный пароль или повреждены данные ZIP"),
-                            error,
-                        )
+                        ArchiveIssue::InvalidZipPasswordOrData.with_source(error)
                     } else {
                         error
                     }
                 })
             }
-            _ => Err(invalid(crate::i18n::key!("Недопустимая запись архива"))),
+            _ => Err(ArchiveIssue::InvalidEntry.io_error()),
         }
     }
 }
@@ -361,18 +354,12 @@ impl Selection<'_> {
             contents => {
                 let reason = match contents {
                     Contents::UnsupportedEncryption => {
-                        crate::i18n::key!("Шифрование или сжатие ZIP не поддерживается")
+                        ArchiveIssue::UnsupportedZipEncryptionOrCompression
                     }
-                    Contents::UnsupportedCompression => {
-                        crate::i18n::key!("Метод сжатия ZIP не поддерживается")
-                    }
-                    _ => crate::i18n::key!("Распаковка поддерживает только обычные файлы и папки"),
+                    Contents::UnsupportedCompression => ArchiveIssue::UnsupportedZipCompression,
+                    _ => ArchiveIssue::UnsupportedExtractionEntry,
                 };
-                return Err(AccessError::read(
-                    &location(),
-                    archive_io_error(io::ErrorKind::Unsupported, reason),
-                )
-                .into());
+                return Err(AccessError::read(&location(), reason.io_error()).into());
             }
         };
         *self.budget = self
@@ -418,7 +405,7 @@ pub(super) fn archive_read_error(path: &Path, source: io::Error) -> TransferErro
 }
 
 fn bad_data() -> io::Error {
-    invalid(crate::i18n::key!("Повреждены данные записи архива"))
+    ArchiveIssue::CorruptEntryData.io_error()
 }
 
 pub(super) fn copy_exact(
@@ -442,9 +429,7 @@ pub(super) fn copy_exact(
     };
     progress.check_cancelled()?;
     if copied != size || input.read(&mut [0])? != 0 {
-        return Err(invalid(crate::i18n::key!(
-            "Размер данных записи архива не совпадает"
-        )));
+        return Err(ArchiveIssue::EntrySizeMismatch.io_error());
     }
     Ok(())
 }
@@ -460,9 +445,7 @@ fn copy_zip(
     let mut input = CrcReader::new(input);
     copy_exact(path, size, &mut input, output, progress)?;
     if input.crc().sum() != crc {
-        return Err(invalid(crate::i18n::key!(
-            "Контрольная сумма ZIP не совпадает"
-        )));
+        return Err(ArchiveIssue::ZipCrcMismatch.io_error());
     }
     Ok(())
 }
@@ -488,13 +471,7 @@ impl<R: Read> Read for DeflateReader<R> {
             let status = self
                 .codec
                 .decompress(input, buffer, FlushDecompress::None)
-                .map_err(|error| {
-                    archive_io_error_with_cause(
-                        io::ErrorKind::InvalidData,
-                        crate::i18n::key!("Повреждены данные записи архива"),
-                        error,
-                    )
-                })?;
+                .map_err(|error| ArchiveIssue::CorruptEntryData.with_source(error))?;
             let consumed = (self.codec.total_in() - before) as usize;
             let produced = (self.codec.total_out() - written) as usize;
             self.input.consume(consumed);

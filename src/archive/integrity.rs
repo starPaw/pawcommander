@@ -1,7 +1,7 @@
 use super::extraction::{copy_exact, Extraction};
 use super::{
-    archive_io_error, invalid, member_path, scan_zip, too_large, Contents, Format, MetadataReader,
-    MAX_ENTRIES, MAX_INDEX_BYTES, MAX_METADATA_BYTES,
+    member_path, scan_zip, too_large, ArchiveIssue, Contents, Format, MetadataReader, MAX_ENTRIES,
+    MAX_INDEX_BYTES, MAX_METADATA_BYTES,
 };
 use crate::{
     file_error::{AccessAction, AccessError, ArchiveError},
@@ -180,22 +180,20 @@ impl Report<'_> {
                 self.member_result(
                     index,
                     name,
-                    Err(&invalid(crate::i18n::key!(
-                        "Данные записей ZIP перекрываются"
-                    ))),
+                    Err(&ArchiveIssue::OverlappingZipEntries.io_error()),
                 )?;
                 continue;
             }
             let result = match record.payload {
-                Contents::UnsupportedEncryption => Err(unsupported(crate::i18n::key!(
-                    "Шифрование или сжатие ZIP не поддерживается"
-                ))),
-                Contents::UnsupportedCompression => Err(unsupported(crate::i18n::key!(
-                    "Метод сжатия ZIP не поддерживается"
-                ))),
-                Contents::Encrypted(_) if !has_password => Err(unsupported(crate::i18n::key!(
-                    "Укажите пароль для проверки ZIP"
-                ))),
+                Contents::UnsupportedEncryption => {
+                    Err(ArchiveIssue::UnsupportedZipEncryptionOrCompression.io_error())
+                }
+                Contents::UnsupportedCompression => {
+                    Err(ArchiveIssue::UnsupportedZipCompression.io_error())
+                }
+                Contents::Encrypted(_) if !has_password => {
+                    Err(ArchiveIssue::ZipCheckPasswordRequired.io_error())
+                }
                 Contents::Encrypted(_) if let Some(ref error) = protected_error => {
                     self.member_failure(index, name, Outcome::Skipped, error)?;
                     continue;
@@ -217,7 +215,7 @@ impl Report<'_> {
         let cancel = self.progress.cancellation();
         let (file, length) = archive.input();
         if length < BLOCK {
-            return Err(invalid(crate::i18n::key!("Некорректная длина TAR")));
+            return Err(ArchiveIssue::InvalidTarLength.io_error());
         }
         let reading_payload = Cell::new(false);
         let cancelled = || cancel.is_requested();
@@ -245,25 +243,24 @@ impl Report<'_> {
             let path = member_path(&raw);
             let global_pax = entry.header().entry_type().is_pax_global_extensions();
             let mut sparse_pax = false;
-            let mut bad_pax = false;
+            let mut bad_pax = None;
             if let Some(extensions) = entry.pax_extensions()? {
                 for extension in extensions {
                     match extension {
                         Ok(field) => sparse_pax |= field.key_bytes().starts_with(b"GNU.sparse."),
-                        Err(_) => bad_pax = true,
+                        Err(error) => {
+                            bad_pax = Some(error);
+                            break;
+                        }
                     }
                 }
             }
             let result = path.and_then(|path| {
-                if bad_pax {
-                    return Err(invalid(crate::i18n::key!(
-                        "Повреждён расширенный заголовок TAR"
-                    )));
+                if let Some(error) = bad_pax {
+                    return Err(ArchiveIssue::InvalidTarExtendedHeader.with_source(error));
                 }
                 if sparse_pax {
-                    return Err(unsupported(crate::i18n::key!(
-                        "Разреженная запись TAR требует другой проверки"
-                    )));
+                    return Err(ArchiveIssue::UnverifiableSparseTar.io_error());
                 }
                 if global_pax {
                     // Reading the global PAX records already consumed this payload.
@@ -338,9 +335,7 @@ pub(super) fn check_tar_trailer(
     // zero block and may have additional zero padding.
     let remaining = input.length - input.position;
     if remaining < BLOCK || !input.length.is_multiple_of(BLOCK) {
-        return Err(invalid(crate::i18n::key!(
-            "Отсутствуют завершающие блоки TAR"
-        )));
+        return Err(ArchiveIssue::MissingTarTrailer.io_error());
     }
     let reading_payload = Cell::new(true);
     let trailer = MetadataReader {
@@ -355,22 +350,14 @@ pub(super) fn check_tar_trailer(
                 return Ok(());
             }
             if buffer[..count].iter().any(|&byte| byte != 0) {
-                return Err(invalid(crate::i18n::key!(
-                    "Неожиданные данные после конца TAR"
-                )));
+                return Err(ArchiveIssue::UnexpectedTarTrailerData.io_error());
             }
         }
     })?;
     if read != remaining {
-        return Err(invalid(crate::i18n::key!(
-            "Отсутствуют завершающие блоки TAR"
-        )));
+        return Err(ArchiveIssue::MissingTarTrailer.io_error());
     }
     Ok(())
-}
-
-fn unsupported(message: crate::i18n::MessageKey) -> io::Error {
-    archive_io_error(io::ErrorKind::Unsupported, message)
 }
 
 #[cfg(test)]

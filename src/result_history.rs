@@ -245,7 +245,7 @@ impl Results {
         let parent = self.index.get(archive).copied();
         if let Some(index) = self.add_display_row(&name, None, parent) {
             self.items[index].outcome = outcome;
-            self.reason(index, Some(&error.to_string()));
+            self.reason(index, Some(&crate::i18n::archive_io_message(error)));
         }
     }
 

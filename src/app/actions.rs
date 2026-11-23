@@ -190,7 +190,7 @@ impl PawCommander {
             return;
         }
         if path.is_archive() {
-            self.notice = Some((crate::archive::readonly().into(), true));
+            self.notice = Some((crate::i18n::archive_read_only().into(), true));
             return;
         }
         self.launch_application(
@@ -257,7 +257,7 @@ impl PawCommander {
                     | Action::Reveal
             )
         {
-            self.notice = Some((crate::archive::readonly().into(), true));
+            self.notice = Some((crate::i18n::archive_read_only().into(), true));
             return;
         }
         match action {
@@ -781,7 +781,7 @@ impl PawCommander {
                 self.panes[pane].tab_mut().navigate(browse, ctx);
             }
         } else if location.is_archive() {
-            self.notice = Some((crate::archive::readonly().into(), true));
+            self.notice = Some((crate::i18n::archive_read_only().into(), true));
         } else if location.remote() {
             self.open_in_zed(location, true, ctx);
         } else if let Some(path) = location.local()
