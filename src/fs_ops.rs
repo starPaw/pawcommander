@@ -665,7 +665,6 @@ fn create_staging_directory(parent: &Path) -> Result<StagingDirectory, TransferE
                 return Err(local_copy_error(
                     Some(parent),
                     access_io(&location, AccessAction::CreateStagingDirectory, e),
-                    ToString::to_string,
                 ));
             }
         }
@@ -742,15 +741,6 @@ pub(crate) fn copy_atomically_cancellable(
                 .results
                 .capturing(&source_location, &target_location, &location);
         }
-    })
-    .map_err(|e| {
-        TransferError::io(e, |e| {
-            at(
-                crate::i18n::text!("Не удалось проверить источник"),
-                source,
-                e,
-            )
-        })
     })?;
     progress.results.captured();
     let parent = destination
@@ -789,11 +779,7 @@ pub(crate) fn copy_atomically_cancellable(
         })
     })
     .and_then(|()| cancel.check())
-    .map_err(|e| {
-        local_copy_error(Some(parent), e, |e| {
-            at(crate::i18n::text!("Не удалось скопировать"), source, e)
-        })
-    })
+    .map_err(|error| local_copy_error(Some(parent), error))
     .and_then(|()| staging.ensure_owned())
     // No cancellation inside publication, rollback, or staging cleanup.
     .and_then(|()| publish(&payload, destination));
@@ -871,11 +857,7 @@ pub(crate) fn check_local_copy_space(required: u64, parent: &Path) -> Result<(),
     ensure_copy_space(required, available, &Location::Local(parent.to_owned()))
 }
 
-pub(crate) fn local_copy_error(
-    parent: Option<&Path>,
-    error: io::Error,
-    context: impl FnOnce(&io::Error) -> String,
-) -> TransferError {
+pub(crate) fn local_copy_error(parent: Option<&Path>, error: io::Error) -> TransferError {
     if let Some(parent) = parent
         && matches!(
             error.kind(),
@@ -888,7 +870,8 @@ pub(crate) fn local_copy_error(
             && !matches!(
                 access,
                 AccessError {
-                    action: AccessAction::CreateFile
+                    action: AccessAction::CopyEntry
+                        | AccessAction::CreateFile
                         | AccessAction::CreateDirectory
                         | AccessAction::CreateStagingDirectory
                         | AccessAction::CreateLink
@@ -910,7 +893,7 @@ pub(crate) fn local_copy_error(
         }
         .into()
     } else {
-        TransferError::io(error, context)
+        error.into()
     }
 }
 
@@ -922,7 +905,6 @@ pub(crate) fn local_copy_write_error(
     local_copy_error(
         target.local().and_then(Path::parent),
         access_io(target, action, error),
-        ToString::to_string,
     )
 }
 
@@ -1162,7 +1144,17 @@ fn copy_tree(
     manifest: &SourceManifest,
     after_entry: &mut impl FnMut(&Path) -> io::Result<()>,
 ) -> io::Result<()> {
-    let result = copy_tree_entry(source, staged, target, progress, manifest, after_entry);
+    let result =
+        copy_tree_entry(source, staged, target, progress, manifest, after_entry).map_err(|error| {
+            if error
+                .get_ref()
+                .is_some_and(|cause| cause.is::<AccessError>() || cause.is::<Failure>())
+            {
+                error
+            } else {
+                source_io(source, AccessAction::CopyEntry, error)
+            }
+        });
     progress.results.staged_io(
         &crate::vfs::Location::Local(source.to_path_buf()),
         result.as_ref().err(),
@@ -1461,18 +1453,9 @@ pub(crate) fn rename_no_replace(source: &Path, destination: &Path) -> io::Result
     use std::ffi::CString;
     use std::os::raw::{c_char, c_int, c_uint};
     use std::os::unix::ffi::OsStrExt;
-    let source = CString::new(source.as_os_str().as_bytes()).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            crate::i18n::text!("Путь содержит нулевой символ"),
-        )
-    })?;
-    let destination = CString::new(destination.as_os_str().as_bytes()).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            crate::i18n::text!("Путь содержит нулевой символ"),
-        )
-    })?;
+    let invalid_path = |error| io::Error::new(io::ErrorKind::InvalidInput, error);
+    let source = CString::new(source.as_os_str().as_bytes()).map_err(invalid_path)?;
+    let destination = CString::new(destination.as_os_str().as_bytes()).map_err(invalid_path)?;
     #[cfg(target_os = "macos")]
     unsafe extern "C" {
         fn renamex_np(source: *const c_char, destination: *const c_char, flags: c_uint) -> c_int;
@@ -1540,6 +1523,63 @@ pub(crate) fn rename_no_replace(_: &Path, _: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn local_copy_keeps_the_original_errno_and_nested_path_for_a_bare_io_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let child = source.join("nested/child");
+        let target = root.path().join("target");
+        fs::create_dir_all(child.parent().unwrap()).unwrap();
+        fs::write(&child, b"copy input").unwrap();
+        fs::write(&target, b"existing output").unwrap();
+        let error = copy_atomically_cancellable(
+            &source,
+            &target,
+            &mut Progress::default(),
+            |_, _| panic!("a failed copy must stop before publication"),
+            &mut |path| {
+                if path == child {
+                    Err(io::Error::from_raw_os_error(libc::EIO))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, TransferError::Failed(Failure::Access(access))
+            if access.location.local() == Some(child.as_path())
+                && access.action == AccessAction::CopyEntry
+                && matches!(&access.cause, AccessCause::Local(source) if source.raw_os_error() == Some(libc::EIO)))
+        );
+        assert!(crate::i18n::file_error(&error).contains(&*child.to_string_lossy()));
+        assert_eq!(fs::read(&child).unwrap(), b"copy input");
+        assert_eq!(fs::read(&target).unwrap(), b"existing output");
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn invalid_rename_path_keeps_the_original_null_byte_cause() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let source = Path::new("/fixture/from");
+        let target = Path::new(std::ffi::OsStr::from_bytes(b"/fixture/bad\0name"));
+        let error = rename_no_replace(source, target).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        let cause = error
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<std::ffi::NulError>()
+            .unwrap();
+        assert_eq!(cause.nul_position(), b"/fixture/bad".len());
+        let error = rename_error(source, target, error);
+        let message = crate::i18n::file_error(&error);
+        assert!(message.contains("/fixture/from"));
+        assert!(message.contains(crate::i18n::text!("Путь содержит нулевой символ")));
+    }
 
     #[test]
     fn copy_hash_mismatch_preserves_source_old_target_and_cleans_staging() {
@@ -2132,9 +2172,7 @@ mod tests {
             (libc::ENOSPC, io::ErrorKind::StorageFull),
             (libc::EDQUOT, io::ErrorKind::QuotaExceeded),
         ] {
-            let error = local_copy_error(Some(folder), io::Error::from_raw_os_error(errno), |_| {
-                panic!("a capacity error must carry its own context")
-            });
+            let error = local_copy_error(Some(folder), io::Error::from_raw_os_error(errno));
             let TransferError::Failed(Failure::Space(reason)) = error else {
                 panic!("expected a typed local write error");
             };
@@ -2149,7 +2187,7 @@ mod tests {
             AccessAction::ReadFile,
             io::Error::from_raw_os_error(libc::EDQUOT),
         );
-        let error = local_copy_error(Some(folder), error, ToString::to_string);
+        let error = local_copy_error(Some(folder), error);
         let TransferError::Failed(Failure::Access(error)) = error else {
             panic!("a source failure must keep its read context");
         };

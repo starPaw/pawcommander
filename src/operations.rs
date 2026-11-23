@@ -442,7 +442,7 @@ impl From<PublicationError> for TransferError {
 impl std::fmt::Display for TransferError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Cancelled => f.write_str(&crate::tr_format!("Operation cancelled")),
+            Self::Cancelled => f.write_str("Operation cancelled"),
             Self::Failed(error) | Self::PublicationUnconfirmed(error) => {
                 std::fmt::Display::fmt(error, f)
             }

@@ -14,9 +14,28 @@ pub enum Decision {
     Cancel,
 }
 
+#[derive(Clone, Copy)]
+pub enum EntryKind {
+    File,
+    Directory,
+    Link,
+    Special,
+}
+
+impl EntryKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::File => crate::i18n::text!("Файл"),
+            Self::Directory => crate::i18n::text!("Папка"),
+            Self::Link => crate::i18n::text!("Ссылка"),
+            Self::Special => crate::i18n::text!("Специальный объект"),
+        }
+    }
+}
+
 pub struct EntryDetails {
     pub location: Location,
-    pub kind: crate::i18n::MessageKey,
+    pub kind: EntryKind,
     pub size: Option<u64>,
     pub modified: Option<SystemTime>,
 }
@@ -164,7 +183,7 @@ fn entry(ui: &mut egui::Ui, title: &str, entry: &EntryDetails) {
     );
     ui.label(crate::tr_format!(
         "{} · Size {size} · Modified {date}",
-        crate::i18n::text(entry.kind),
+        entry.kind.label(),
         date = date,
         size = size
     ));
@@ -200,7 +219,7 @@ mod tests {
     fn dialog(can_replace: bool, index: usize) -> (ConflictDialog, mpsc::Receiver<Answer>) {
         let entry = |path: &str, size| EntryDetails {
             location: PathBuf::from(path).into(),
-            kind: crate::i18n::key!("Файл"),
+            kind: EntryKind::File,
             size: Some(size),
             modified: Some(UNIX_EPOCH),
         };
