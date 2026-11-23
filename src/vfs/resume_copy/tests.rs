@@ -1768,6 +1768,128 @@ fn interrupted_folder_reuses_verified_children_and_refuses_changed_trees() {
 }
 
 #[test]
+fn released_recovery_records_are_available_while_a_fork_child_is_alive() {
+    use std::io;
+    use std::net::Shutdown;
+    use std::os::{fd::AsRawFd, unix::net::UnixStream};
+
+    struct WaitingChild {
+        release: UnixStream,
+        pid: libc::pid_t,
+    }
+
+    impl Drop for WaitingChild {
+        fn drop(&mut self) {
+            let _ = self.release.shutdown(Shutdown::Write);
+            // SAFETY: pid is the specific disposable child returned by fork.
+            while unsafe { libc::waitpid(self.pid, std::ptr::null_mut(), 0) } < 0 {
+                if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+                    break;
+                }
+            }
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let recovery = root.join("recovery");
+    let source = root.join("tree");
+    let output = root.join("destination");
+    let target = output.join("tree");
+    fs::create_dir(&output).unwrap();
+    let tail = vec![23; 768 * 1024];
+    setup_folder(&source, &tail);
+    let checkpoint_directory = output.clone();
+    let interrupted = std::panic::catch_unwind(|| {
+        first_copy(
+            &source.clone().into(),
+            &output.clone().into(),
+            &recovery,
+            move || {
+                if tail_progress(&checkpoint_directory).is_some_and(|len| len >= 128 * 1024) {
+                    std::panic::panic_any("interrupted recovery fixture");
+                }
+                false
+            },
+        )
+    });
+    assert_eq!(
+        interrupted.unwrap_err().downcast_ref::<&str>(),
+        Some(&"interrupted recovery fixture")
+    );
+    let staged = staged_payload(&output).unwrap();
+    let saved = staged.join("z-child/large").metadata().unwrap().len() + HEAD.len() as u64;
+    let (offers, errors) = scan(&recovery);
+    assert!(errors.is_empty(), "{errors:?}");
+    let [offer] = offers.as_slice() else {
+        panic!("expected the interrupted copy receipt");
+    };
+    let receipt = Ticket::open(receipts(&recovery).join(&offer.id))
+        .unwrap()
+        .unwrap();
+    let finished =
+        crate::recovery::begin(&recovery, "released worker", "finished owning lock", 1).unwrap();
+    let active =
+        crate::recovery::begin(&recovery, "still active", "must remain locked", 2).unwrap();
+
+    let (release, hold) = UnixStream::pair().unwrap();
+    let hold_fd = hold.as_raw_fd();
+    // SAFETY: the child executes only async-signal-safe calls and never runs
+    // Rust destructors. The socket keeps the inherited handles open until
+    // the parent has scanned again, even if an assertion unwinds.
+    let pid = unsafe { libc::fork() };
+    if pid == 0 {
+        let mut byte = 0_u8;
+        unsafe {
+            libc::read(hold_fd, (&raw mut byte).cast(), 1);
+            libc::_exit(0);
+        }
+    }
+    assert!(pid > 0, "fork failed: {}", io::Error::last_os_error());
+    let child = WaitingChild { release, pid };
+    drop(hold);
+
+    let live = crate::recovery::scan(&recovery);
+    assert!(live.unfinished.is_empty() && live.errors.is_empty());
+    assert!(scan(&recovery).0.is_empty());
+    drop(receipt);
+    drop(finished);
+    // SAFETY: observing this child's status cannot affect any other process.
+    assert_eq!(
+        unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) },
+        0
+    );
+
+    let (available, errors) = scan(&recovery);
+    assert!(errors.is_empty(), "{errors:?}");
+    let markers = crate::recovery::scan(&recovery);
+    assert!(markers.errors.is_empty(), "{:?}", markers.errors);
+    assert_eq!(
+        (available.len(), markers.unfinished.len()),
+        (1, 1),
+        "exited workers must release both receipt and operation marker while the child is alive"
+    );
+    assert_eq!(available[0].id, offer.id);
+    assert_eq!(markers.unfinished[0].label, "released worker");
+    assert!(!target.exists());
+
+    let (mut progress, mut view) = Progress::tracked_transfer();
+    let result = resume(&recovery, &offer.id, &mut progress).unwrap();
+    assert_eq!(result.kind, Completion::FolderCopied(saved));
+    assert_eq!(
+        view.snapshot().total_written,
+        tail.len() as u64 + HEAD.len() as u64 - saved
+    );
+    assert_eq!(fs::read(source.join("z-child/large")).unwrap(), tail);
+    assert_eq!(fs::read(target.join("z-child/large")).unwrap(), tail);
+    assert_eq!(fs::read(source.join("a-finished")).unwrap(), HEAD);
+    assert_eq!(fs::read(target.join("a-finished")).unwrap(), HEAD);
+    assert!(!staged.parent().unwrap().exists() && scan(&recovery).0.is_empty());
+    active.complete().unwrap();
+    drop(child);
+}
+
+#[test]
 fn stopping_a_folder_copy_cleans_only_a_verified_draft() {
     let tail = vec![7; 768 * 1024];
     for foreign in [false, true] {

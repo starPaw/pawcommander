@@ -420,8 +420,30 @@ impl Recovery {
 /// Dropping this handle deliberately preserves its marker, including on panic.
 /// Only explicit completion removes the marker created by this handle.
 pub(crate) struct PendingOperation {
-    file: File,
+    file: LockedRecord,
     path: PathBuf,
+}
+
+pub(crate) struct LockedRecord(File);
+
+impl LockedRecord {
+    pub(crate) fn try_lock(file: File) -> Result<Self, TryLockError> {
+        file.try_lock()?;
+        Ok(Self(file))
+    }
+
+    pub(crate) fn as_file(&self) -> &File {
+        &self.0
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for LockedRecord {
+    fn drop(&mut self) {
+        // A forked helper can hold the open file until exec, even with
+        // close-on-exec. Closing our descriptor alone leaves the lock held.
+        let _ = self.0.unlock();
+    }
 }
 
 /// Persist before executing the operation. An error means the caller must not
@@ -467,7 +489,7 @@ pub(crate) fn store_record(
     directory: &Path,
     prefix: &str,
     parts: &[&[u8]],
-) -> Result<(File, PathBuf), RecoveryRecordError> {
+) -> Result<(LockedRecord, PathBuf), RecoveryRecordError> {
     use RecoveryRecordAction::*;
 
     let mut builder = fs::DirBuilder::new();
@@ -480,14 +502,15 @@ pub(crate) fn store_record(
     builder
         .create(directory)
         .map_err(|error| RecoveryRecordError::io(directory, CreateDirectory, error))?;
-    let mut temporary = tempfile::Builder::new()
+    let (file, temporary) = tempfile::Builder::new()
         .prefix(prefix)
         .suffix(".pending")
         .tempfile_in(directory)
-        .map_err(|error| RecoveryRecordError::io(directory, CreateFile, error))?;
-    let pending_path = temporary.path().to_owned();
-    match temporary.as_file().try_lock() {
-        Ok(()) => {}
+        .map_err(|error| RecoveryRecordError::io(directory, CreateFile, error))?
+        .into_parts();
+    let pending_path = temporary.to_path_buf();
+    let file = match LockedRecord::try_lock(file) {
+        Ok(file) => file,
         Err(TryLockError::WouldBlock) => {
             return Err(RecoveryRecordError::new(
                 &pending_path,
@@ -500,19 +523,17 @@ pub(crate) fn store_record(
                 RecoveryRecordProblem::Lock(error),
             ));
         }
-    }
+    };
     for part in parts {
-        temporary
-            .as_file_mut()
+        file.as_file()
             .write_all(part)
             .map_err(|error| RecoveryRecordError::io(&pending_path, WriteInitial, error))?;
     }
-    temporary
-        .as_file()
+    file.as_file()
         .sync_all()
         .map_err(|error| RecoveryRecordError::io(&pending_path, SyncInitial, error))?;
     let path = pending_path.with_extension("json");
-    let file = temporary
+    temporary
         .persist_noclobber(&path)
         .map_err(|error| RecoveryRecordError::io(&path, Publish, error.error))?;
     // A directory synchronization failure leaves the published evidence in place.
@@ -534,7 +555,7 @@ impl PendingOperation {
                 ACTIVE_MARKER.with(|active| *active.borrow_mut() = None);
             }
         }
-        let clone = self.file.try_clone().map_err(|error| {
+        let clone = self.file.as_file().try_clone().map_err(|error| {
             RecoveryRecordError::io(&self.path, RecoveryRecordAction::Activate, error)
         })?;
         ACTIVE_MARKER.with(|active| {
@@ -555,7 +576,7 @@ impl PendingOperation {
     /// Call after a confirmed startup refusal, or a normal return and result persistence.
     /// A caught panic or failed history save must drop the handle instead.
     pub fn complete(self) -> Result<(), RecoveryRecordError> {
-        remove_record(&self.file, &self.path)
+        remove_record(self.file.as_file(), &self.path)
     }
 }
 
@@ -750,20 +771,20 @@ fn read_record(
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err(failure(RecoveryRecordProblem::InvalidType));
     }
-    match file.try_lock() {
-        Ok(()) => {}
+    let locked = match LockedRecord::try_lock(file) {
+        Ok(file) => file,
         Err(TryLockError::WouldBlock) => return Ok(None),
         Err(TryLockError::Error(error)) => return Err(failure(RecoveryRecordProblem::Lock(error))),
-    }
+    };
+    let file = locked.as_file();
     let mut bytes = Vec::new();
-    (&file)
-        .take(MAX_BYTES as u64 + 1)
+    file.take(MAX_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(read)?;
     if bytes.len() > MAX_BYTES {
         return Err(failure(RecoveryRecordProblem::SizeLimit(MAX_BYTES as u64)));
     }
-    if !same_owned_marker(&file, path).map_err(read)? {
+    if !same_owned_marker(file, path).map_err(read)? {
         return Err(failure(RecoveryRecordProblem::IdentityChanged));
     }
 
