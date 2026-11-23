@@ -20,9 +20,22 @@ pub(crate) fn clipboard_write_error(error: &ClipboardWriteError) -> String {
 }
 
 pub(crate) fn clipboard_read_error(error: &ClipboardReadError) -> String {
-    let ClipboardReadError::Unreadable { cause, .. } = error else {
-        return text!("Системный буфер изменился. Повторите вставку.").into();
+    let error = match error {
+        ClipboardReadError::Changed => {
+            text!("Системный буфер изменился. Повторите вставку.").into()
+        }
+        ClipboardReadError::MovePending { .. } => {
+            return text!("Перенос файлов из этой подборки ещё не завершён.").into();
+        }
+        ClipboardReadError::Unreadable { cause, .. } => clipboard_read_failure(cause),
     };
+    crate::tr_format!(
+        "Could not read system file clipboard: {error}",
+        error = error
+    )
+}
+
+fn clipboard_read_failure(cause: &ClipboardReadFailure) -> String {
     let item_error = |slot, error: &str| {
         crate::tr_format!(
             "System clipboard item {item}. {error}",

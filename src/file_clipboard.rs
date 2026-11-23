@@ -13,7 +13,9 @@ pub use linux::SystemClipboard;
 #[cfg(target_os = "macos")]
 pub use macos::SystemClipboard;
 #[cfg(target_os = "macos")]
-pub(crate) use macos::{ClipboardReadError, ClipboardReadFailure, ClipboardWriteError};
+pub(crate) use macos::{
+    ClipboardReadError, ClipboardReadFailure, ClipboardWriteError, PasteboardMove,
+};
 #[cfg(target_os = "windows")]
 pub use windows::SystemClipboard;
 
@@ -25,6 +27,11 @@ pub struct FileList {
 }
 
 impl FileList {
+    #[cfg(target_os = "macos")]
+    pub(crate) fn pasteboard_revision(&self) -> Option<isize> {
+        self.revision.as_deref()?.parse().ok()
+    }
+
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     fn new(
         paths: Vec<PathBuf>,

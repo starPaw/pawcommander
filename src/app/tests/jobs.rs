@@ -1015,7 +1015,6 @@ fn queue_active_notice_stays_bounded_and_keeps_stop_visible() {
     let (_events, events) = mpsc::channel();
     app.jobs.current.as_mut().unwrap().transfer = Some(TransferInteraction {
         events,
-        cut_generation: None,
         conflict: None,
         can_pause: false,
     });
@@ -1095,7 +1094,6 @@ fn transfer_stop_button_keeps_pending_ownership_and_navigation_until_result() {
     let (events, receiver) = mpsc::channel();
     app.jobs.current.as_mut().unwrap().transfer = Some(TransferInteraction {
         events: receiver,
-        cut_generation: None,
         conflict: None,
         can_pause: false,
     });
@@ -1520,13 +1518,13 @@ fn late_stop_keeps_final_success_and_consumes_committed_cut_events() {
         true,
         ClipboardOrigin::App(None),
     );
-    let generation = clipboard.generation;
     app.clipboard = Some(clipboard);
+    let cut = app.capture_clipboard_cut().unwrap();
     let (result, receiver) = mpsc::channel();
     let (_, progress) = Progress::tracked();
     app.jobs.current = Some(Job {
         transfer: None,
-        cut: None,
+        cut: Some((cut, vec![committed.clone(), pending.clone()])),
         label: "test move".into(),
         started: Instant::now(),
         result: receiver,
@@ -1540,7 +1538,6 @@ fn late_stop_keeps_final_success_and_consumes_committed_cut_events() {
     let (events, receiver) = mpsc::channel();
     app.jobs.current.as_mut().unwrap().transfer = Some(TransferInteraction {
         events: receiver,
-        cut_generation: Some(generation),
         conflict: None,
         can_pause: false,
     });

@@ -1527,6 +1527,7 @@ catalog! {
     "AppKit отклонил запись файлов в системный буфер." => ("AppKit refused to write the files to the system clipboard.", "AppKit odmítl zapsat soubory do systémové schránky."),
     "Системный буфер изменился во время записи. Скопируйте выделенное ещё раз." => ("The system clipboard changed while writing. Copy the selection again.", "Systémová schránka se během zápisu změnila. Zkopírujte výběr znovu."),
     "Системный буфер изменился. Повторите вставку." => ("System clipboard changed. Paste again.", "Systémová schránka se změnila. Zkuste vložení znovu."),
+    "Перенос файлов из этой подборки ещё не завершён." => ("A move of these clipboard files is still pending.", "Přesun souborů z tohoto výběru ještě neskončil."),
     "AppKit не вернул список элементов системного буфера." => ("AppKit did not return the system clipboard items.", "AppKit nevrátil položky systémové schránky."),
     "AppKit не вернул объявленный файловый URL." => ("AppKit did not return the advertised file URL.", "AppKit nevrátil ohlášenou adresu URL souboru."),
     "Файловый буфер содержит недопустимый URL" => ("File clipboard contains an invalid URL", "Schránka souborů obsahuje neplatnou adresu URL"),

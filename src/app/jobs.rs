@@ -1,3 +1,4 @@
+use super::clipboard::ClipboardCut;
 use super::dialogs::Dialog;
 use super::directory::{FolderVisit, AUTO_REFRESH_INTERVAL};
 use super::file_result::FileResult;
@@ -30,8 +31,22 @@ pub(super) enum TransferEvent {
 pub(super) struct RetryJob {
     pub id: String,
     pub transfer: crate::vfs::RetryTransfer,
-    cut_generation: Option<u64>,
+    clipboard_cut: Option<ClipboardCut>,
     verify_copies: bool,
+}
+
+impl RetryJob {
+    fn weight(&self) -> usize {
+        let weight = self.transfer.weight();
+        #[cfg(target_os = "macos")]
+        let weight = weight.saturating_add(
+            self.clipboard_cut
+                .as_ref()
+                .and_then(|cut| cut.pasteboard.as_ref())
+                .map_or(0, |selection| selection.slot_count()),
+        );
+        weight
+    }
 }
 
 #[derive(Clone)]
@@ -45,14 +60,13 @@ struct TransferRequest {
     sources: Vec<Location>,
     destination: Location,
     kind: TransferKind,
-    cut_generation: Option<u64>,
+    clipboard_cut: Option<ClipboardCut>,
     verify_copies: bool,
     retry: Option<RetryJob>,
 }
 
 pub(super) struct TransferInteraction {
     pub(super) events: Receiver<TransferEvent>,
-    pub(super) cut_generation: Option<u64>,
     pub(super) conflict: Option<Box<ConflictDialog>>,
     pub(super) can_pause: bool,
 }
@@ -154,7 +168,7 @@ fn append_history_warning(
     }
 }
 
-pub(super) type CutRequest = (u64, Vec<Location>);
+pub(super) type CutRequest = (ClipboardCut, Vec<Location>);
 
 #[cfg(target_os = "macos")]
 #[derive(Clone)]
@@ -256,6 +270,19 @@ pub(super) struct JobQueue {
 impl JobQueue {
     pub(super) fn is_busy(&self) -> bool {
         self.current.is_some() || !self.pending.is_empty()
+    }
+
+    fn cut_requests(&self) -> impl Iterator<Item = &CutRequest> {
+        self.current
+            .iter()
+            .filter_map(|job| job.cut.as_ref())
+            .chain(self.pending.iter().filter_map(|job| job.cut.as_ref()))
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn reserves_pasteboard_move(&self, revision: isize) -> bool {
+        self.cut_requests()
+            .any(|(cut, _)| cut.pasteboard_revision() == Some(revision))
     }
 
     pub(super) fn transfer(&self) -> Option<&TransferInteraction> {
@@ -416,7 +443,6 @@ impl PawCommander {
                 }),
                 transfer: Some(TransferInteraction {
                     events,
-                    cut_generation: None,
                     conflict: None,
                     can_pause: false,
                 }),
@@ -447,7 +473,6 @@ impl PawCommander {
                 work: JobWork::CreateFile(Box::new(job)),
                 transfer: Some(TransferInteraction {
                     events: receive,
-                    cut_generation: None,
                     conflict: None,
                     can_pause: false,
                 }),
@@ -502,7 +527,6 @@ impl PawCommander {
                 work: JobWork::RemoteSave(Box::new(edit)),
                 transfer: Some(TransferInteraction {
                     events,
-                    cut_generation: None,
                     conflict: None,
                     can_pause: false,
                 }),
@@ -539,7 +563,6 @@ impl PawCommander {
                 })),
                 transfer: Some(TransferInteraction {
                     events: receive,
-                    cut_generation: None,
                     conflict: None,
                     can_pause: true,
                 }),
@@ -605,7 +628,6 @@ impl PawCommander {
                 }),
                 transfer: Some(TransferInteraction {
                     events,
-                    cut_generation: None,
                     conflict: None,
                     can_pause: true,
                 }),
@@ -645,7 +667,6 @@ impl PawCommander {
                 })),
                 transfer: Some(TransferInteraction {
                     events,
-                    cut_generation: None,
                     conflict: None,
                     can_pause: true,
                 }),
@@ -685,7 +706,6 @@ impl PawCommander {
                 })),
                 transfer: Some(TransferInteraction {
                     events: receive,
-                    cut_generation: None,
                     conflict: None,
                     can_pause: false,
                 }),
@@ -1071,12 +1091,8 @@ impl PawCommander {
         kind: TransferKind,
         from_cut_clipboard: bool,
     ) {
-        let cut_generation = from_cut_clipboard
-            .then(|| {
-                self.clipboard
-                    .as_ref()
-                    .map(|clipboard| clipboard.generation)
-            })
+        let clipboard_cut = from_cut_clipboard
+            .then(|| self.capture_clipboard_cut())
             .flatten();
         self.submit_transfer(
             ctx,
@@ -1085,7 +1101,7 @@ impl PawCommander {
                 sources,
                 destination,
                 kind,
-                cut_generation,
+                clipboard_cut,
                 verify_copies: kind == TransferKind::Copy && self.settings.verify_copies,
                 retry: None,
             },
@@ -1117,7 +1133,7 @@ impl PawCommander {
                 sources: job.transfer.sources(),
                 destination: job.transfer.destination.clone(),
                 kind: job.transfer.kind,
-                cut_generation: job.cut_generation,
+                clipboard_cut: job.clipboard_cut.clone(),
                 verify_copies: job.verify_copies,
                 retry: Some(job),
             },
@@ -1151,7 +1167,7 @@ impl PawCommander {
                                 send(RetryJob {
                                     id,
                                     transfer,
-                                    cut_generation: job.cut_generation,
+                                    clipboard_cut: job.clipboard_cut.clone(),
                                     verify_copies: job.verify_copies,
                                 });
                             }
@@ -1181,7 +1197,6 @@ impl PawCommander {
                 }),
                 transfer: Some(TransferInteraction {
                     events,
-                    cut_generation: None,
                     conflict: None,
                     can_pause: false,
                 }),
@@ -1200,7 +1215,7 @@ impl PawCommander {
             sources,
             destination,
             kind,
-            cut_generation,
+            clipboard_cut,
             verify_copies,
             retry,
         } = request;
@@ -1215,10 +1230,19 @@ impl PawCommander {
             self.notice = Some((crate::i18n::file_error(&error), true));
             return;
         }
-        let cut = cut_generation.map(|generation| (generation, sources.clone()));
-        if let Some((generation, paths)) = &cut {
-            let overlaps = |(other_generation, other_paths): &CutRequest| {
-                generation == other_generation
+        let cut = clipboard_cut
+            .as_ref()
+            .map(|cut| (cut.clone(), sources.clone()));
+        if let Some((origin, paths)) = &cut {
+            let overlaps = |(other, other_paths): &CutRequest| {
+                #[cfg(target_os = "macos")]
+                if origin
+                    .pasteboard_revision()
+                    .is_some_and(|revision| other.pasteboard_revision() == Some(revision))
+                {
+                    return true;
+                }
+                origin.generation == other.generation
                     && paths.iter().any(|path| {
                         other_paths.iter().any(|other| {
                             path.same_backend(other)
@@ -1227,15 +1251,7 @@ impl PawCommander {
                         })
                     })
             };
-            let active_cut = self.jobs.current.as_ref().and_then(|job| job.cut.as_ref());
-            if active_cut.is_some_and(overlaps)
-                || self
-                    .jobs
-                    .pending
-                    .iter()
-                    .filter_map(|job| job.cut.as_ref())
-                    .any(overlaps)
-            {
+            if self.jobs.cut_requests().any(overlaps) {
                 if let Some(retry) = retry {
                     self.remember_retry(retry);
                 }
@@ -1286,7 +1302,7 @@ impl PawCommander {
                 progress,
                 |conflict| ask_conflict(&events, &worker_ctx, &cancellation, conflict),
                 |location, covered| {
-                    if cut_generation.is_some() {
+                    if clipboard_cut.is_some() {
                         let _ =
                             events.send(TransferEvent::Moved(location.clone(), covered.to_vec()));
                         worker_ctx.request_repaint();
@@ -1301,7 +1317,7 @@ impl PawCommander {
                 let _ = events.send(TransferEvent::RetryReady(Box::new(RetryJob {
                     id,
                     transfer,
-                    cut_generation,
+                    clipboard_cut,
                     verify_copies,
                 })));
                 worker_ctx.request_repaint();
@@ -1319,7 +1335,6 @@ impl PawCommander {
                 work: JobWork::File(Box::new(work)),
                 transfer: Some(TransferInteraction {
                     events: rx,
-                    cut_generation,
                     conflict: None,
                     can_pause: true,
                 }),
@@ -1333,6 +1348,16 @@ impl PawCommander {
     }
 
     fn remember_retry(&mut self, job: RetryJob) {
+        #[cfg(target_os = "macos")]
+        let job = {
+            let mut job = job;
+            if let Some(cut) = &mut job.clipboard_cut
+                && let Some(snapshot) = &cut.pasteboard
+            {
+                cut.pasteboard = self.system_clipboard.retry_snapshot(snapshot);
+            }
+            job
+        };
         self.jobs.retries.retain(|saved| saved.id != job.id);
         self.jobs.retries.push_back(job);
         while self.jobs.retries.len() > 100
@@ -1340,7 +1365,7 @@ impl PawCommander {
                 .jobs
                 .retries
                 .iter()
-                .map(|job| job.transfer.weight())
+                .map(RetryJob::weight)
                 .sum::<usize>()
                 > 100_000
         {
@@ -1427,7 +1452,6 @@ impl PawCommander {
                 }),
                 transfer: Some(TransferInteraction {
                     events,
-                    cut_generation: None,
                     conflict: None,
                     can_pause: false,
                 }),
@@ -1474,8 +1498,9 @@ impl PawCommander {
                     }
                 }
                 Ok(TransferEvent::Moved(location, covered)) => {
-                    if let Some(generation) = transfer.cut_generation {
-                        self.consume_cut_source(&location, &covered, generation);
+                    if let Some((cut, _)) = &job.cut {
+                        let cut = cut.clone();
+                        self.consume_cut_source(&location, &covered, &cut);
                     }
                 }
                 Ok(TransferEvent::RetryReady(job)) => {
