@@ -6,11 +6,34 @@ use crate::{
     theme::Theme,
 };
 use serde::{Deserialize, Serialize};
-use std::{fs::File, io::Read, os::unix::fs::OpenOptionsExt, path::Path};
+use std::{
+    fs::File,
+    io::{self, Read},
+    os::unix::fs::OpenOptionsExt,
+    path::Path,
+};
 
 const FORMAT: &str = "pawcommander.settings";
 const VERSION: u32 = 1;
 const MAX_BYTES: u64 = 256 * 1024;
+
+#[derive(Debug)]
+pub(super) enum ReadError {
+    Io(io::Error),
+    NotRegular,
+    TooLarge,
+    Json(serde_json::Error),
+    WrongFormat,
+    Version(u32),
+    InvalidPreferences(InvalidPreferences),
+}
+
+#[derive(Debug)]
+pub(super) enum InvalidPreferences {
+    Layout,
+    Columns,
+    Shortcuts,
+}
 
 // Keep the transfer file independent from the persisted application profile.
 // Locations, commands and connection records can contain private data.
@@ -82,7 +105,7 @@ impl Preferences {
         }
     }
 
-    fn validate(&self) -> Result<(), String> {
+    fn validate(&self) -> Result<(), InvalidPreferences> {
         if !Settings::UI_SCALES.contains(&self.ui_scale)
             || self
                 .pane_layout
@@ -90,68 +113,63 @@ impl Preferences {
                 .iter()
                 .any(|value| !(0.0..=1.0).contains(value))
         {
-            return Err(text!("Недопустимый масштаб или размер панелей.").into());
+            return Err(InvalidPreferences::Layout);
         }
         let mut columns = self.list_columns.clone();
         columns.validate();
         if columns != self.list_columns {
-            return Err(text!("Недопустимые размеры или порядок столбцов.").into());
+            return Err(InvalidPreferences::Columns);
         }
         let mut shortcuts = self.shortcuts.clone();
         shortcuts.validate();
         if shortcuts != self.shortcuts {
-            return Err(
-                text!("Файл содержит недопустимые или конфликтующие сочетания клавиш.").into(),
-            );
+            return Err(InvalidPreferences::Shortcuts);
         }
         Ok(())
     }
 
-    fn decode(bytes: &[u8]) -> Result<Self, String> {
-        let invalid_file = || text!("Неверный формат файла настроек PawCommander.").to_owned();
-        let header: Header = serde_json::from_slice(bytes).map_err(|_| invalid_file())?;
+    fn decode(bytes: &[u8]) -> Result<Self, ReadError> {
+        let header: Header = serde_json::from_slice(bytes).map_err(ReadError::Json)?;
         if header.format != FORMAT {
-            return Err(invalid_file());
+            return Err(ReadError::WrongFormat);
         }
         if header.version != VERSION {
-            return Err(crate::tr_format!(
-                "Unsupported settings version {version}.",
-                version = header.version
-            ));
+            return Err(ReadError::Version(header.version));
         }
-        let document: Document = serde_json::from_slice(bytes).map_err(|_| invalid_file())?;
-        document.preferences.validate()?;
+        let document: Document = serde_json::from_slice(bytes).map_err(ReadError::Json)?;
+        document
+            .preferences
+            .validate()
+            .map_err(ReadError::InvalidPreferences)?;
         Ok(document.preferences)
     }
 
-    pub(super) fn load(path: &Path) -> Result<Self, String> {
-        let read_error = |error: std::io::Error| {
-            crate::tr_format!("Could not read the settings file ({error}).", error = error)
-        };
+    pub(super) fn load(path: &Path) -> Result<Self, ReadError> {
         let file = File::options()
             .read(true)
             .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
             .open(path)
-            .map_err(read_error)?;
-        let metadata = file.metadata().map_err(read_error)?;
+            .map_err(ReadError::Io)?;
+        let metadata = file.metadata().map_err(ReadError::Io)?;
         if !metadata.is_file() {
-            return Err(text!("Выберите обычный файл настроек.").into());
+            return Err(ReadError::NotRegular);
         }
         if metadata.len() > MAX_BYTES {
-            return Err(text!("Файл настроек превышает 256 КиБ.").into());
+            return Err(ReadError::TooLarge);
         }
         let mut bytes = Vec::new();
         file.take(MAX_BYTES + 1)
             .read_to_end(&mut bytes)
-            .map_err(read_error)?;
+            .map_err(ReadError::Io)?;
         if bytes.len() as u64 > MAX_BYTES {
-            return Err(text!("Файл настроек превышает 256 КиБ.").into());
+            return Err(ReadError::TooLarge);
         }
         Self::decode(&bytes)
     }
 
     pub(super) fn save(&self, path: &Path) -> Result<(), String> {
-        self.validate()?;
+        self.validate()
+            .map_err(|error| super::invalid_preferences_message(&error))?;
         let export_error = |error: std::io::Error| {
             if error.kind() == std::io::ErrorKind::AlreadyExists {
                 text!("Файл уже существует. Выберите другое имя для экспорта.").to_owned()
@@ -245,7 +263,15 @@ mod tests {
         bad_shortcut["preferences"]["shortcuts"]["overrides"]["CommandPalette"] =
             json!(KeyboardShortcut::new(Modifiers::NONE, Key::Escape));
         assert!(Preferences::decode(bad_shortcut.to_string().as_bytes()).is_err());
-        assert!(Preferences::decode(b"{").is_err());
+        assert!(matches!(Preferences::decode(b"{\n  \"format\":"),
+            Err(ReadError::Json(error)) if error.is_eof() && error.line() == 2 && error.column() > 1
+        ));
+        let mut unsupported = base;
+        unsupported["version"] = json!(99);
+        assert!(matches!(
+            Preferences::decode(unsupported.to_string().as_bytes()),
+            Err(ReadError::Version(99))
+        ));
     }
 
     #[test]
@@ -253,10 +279,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("large.json");
         File::create(&file).unwrap().set_len(MAX_BYTES + 1).unwrap();
-        assert!(Preferences::load(&file).is_err());
-        assert!(Preferences::load(dir.path()).is_err());
+        assert!(matches!(Preferences::load(&file), Err(ReadError::TooLarge)));
+        assert!(matches!(
+            Preferences::load(dir.path()),
+            Err(ReadError::NotRegular)
+        ));
         let link = dir.path().join("link.json");
         std::os::unix::fs::symlink(&file, &link).unwrap();
-        assert!(Preferences::load(&link).is_err());
+        assert!(matches!(Preferences::load(&link), Err(ReadError::Io(error))
+            if error.raw_os_error() == Some(libc::ELOOP)));
+        assert!(
+            matches!(Preferences::load(&dir.path().join("missing.json")), Err(ReadError::Io(error))
+            if error.raw_os_error() == Some(libc::ENOENT))
+        );
     }
 }
