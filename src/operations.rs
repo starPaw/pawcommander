@@ -327,6 +327,13 @@ impl From<AccessError> for TransferError {
 
 impl From<PreviewError> for TransferError {
     fn from(error: PreviewError) -> Self {
+        #[cfg(target_os = "macos")]
+        if matches!(&error, PreviewError::Media {
+            cause: crate::file_error::MediaError::Io { source, .. }, ..
+        } if Self::is_cancelled_io(source))
+        {
+            return Self::Cancelled;
+        }
         Self::Failed(Failure::Preview(Box::new(error)))
     }
 }

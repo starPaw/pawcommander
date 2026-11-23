@@ -13,10 +13,10 @@ use crate::file_error::{
 #[cfg(target_os = "macos")]
 use crate::file_error::{
     CollectionAction, CollectionError, CollectionUnavailable, CompatiblePlanError, DuplicateError,
-    DuplicateRole, FilePromiseError, FileTemplateError, LinkCreateError, LinkIoAction,
-    RemoteEditError, ResumeCheckError, ResumeCheckProblem, ResumeRecordEvent, ResumeRole,
-    ScanLimit, ScanLimitKind, SyncDifference, SyncError, SyncExclusionProblem, SyncFolderRole,
-    SyncStateAction, SyncStateKind, SyncStateProblem, SyncVerification,
+    DuplicateRole, FilePromiseError, FileTemplateError, LinkCreateError, LinkIoAction, MediaAction,
+    MediaError, RemoteEditError, ResumeCheckError, ResumeCheckProblem, ResumeRecordEvent,
+    ResumeRole, ScanLimit, ScanLimitKind, SyncDifference, SyncError, SyncExclusionProblem,
+    SyncFolderRole, SyncStateAction, SyncStateKind, SyncStateProblem, SyncVerification,
 };
 use crate::file_error::{
     RecoveryRecordAction, RecoveryRecordError, RecoveryRecordProblem, RecoveryRecordSection,
@@ -2336,9 +2336,74 @@ fn preview_error(error: &PreviewError) -> String {
                 location = location
             );
         }
+        #[cfg(target_os = "macos")]
+        PreviewError::Media { location, cause } => return media_preview_error(location, cause),
         PreviewError::WorkerUnavailable => return text!("Служба предпросмотра недоступна").into(),
     };
     format!("{message} · {location}")
+}
+
+#[cfg(target_os = "macos")]
+fn media_preview_error(location: &Location, error: &MediaError) -> String {
+    match error {
+        MediaError::UnsupportedFormat => {
+            format!(
+                "{}\n{location}",
+                text!("Формат медиафайла не поддерживается.")
+            )
+        }
+        MediaError::ControllerUnavailable => {
+            format!(
+                "{}\n{location}",
+                text!("Служба предпросмотра медиа недоступна.")
+            )
+        }
+        MediaError::LoadingTimedOut => {
+            format!("{}\n{location}", text!("Медиаплеер не ответил вовремя."))
+        }
+        MediaError::Io { action, source } => {
+            let action = media_action(*action);
+            if source.kind() == std::io::ErrorKind::TimedOut {
+                format!(
+                    "{}\n{location}\n{action} · {source}",
+                    text!("Медиаплеер не ответил вовремя.")
+                )
+            } else {
+                format!("{action}\n{location}\n{source}")
+            }
+        }
+        MediaError::InvalidResponse(action) => format!(
+            "{}\n{location}\n{}",
+            text!("Получен неверный ответ медиаплеера."),
+            media_action(*action)
+        ),
+        MediaError::Playback(errors) => {
+            let mut message = format!(
+                "{}\n{location}",
+                text!("Не удалось воспроизвести медиафайл.")
+            );
+            for error in errors {
+                message.push('\n');
+                message.push_str(&error.to_string());
+            }
+            message
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn media_action(action: MediaAction) -> &'static str {
+    match action {
+        MediaAction::StartController => text!("Не удалось запустить предпросмотр медиа."),
+        MediaAction::LaunchHelper => text!("Не удалось запустить медиаплеер."),
+        MediaAction::SendSource => text!("Не удалось передать файл медиаплееру."),
+        MediaAction::ReadOpenReply => {
+            text!("Не удалось прочитать ответ медиаплеера при открытии файла.")
+        }
+        MediaAction::SendCommand => text!("Не удалось отправить команду воспроизведения."),
+        MediaAction::ReadState => text!("Не удалось получить состояние воспроизведения."),
+        MediaAction::ReadFrame => text!("Не удалось получить видеокадр."),
+    }
 }
 
 pub(crate) fn deletion_failure(failure: &DeletionFailure) -> String {

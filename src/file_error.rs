@@ -27,6 +27,8 @@ mod file_template;
 mod host_key;
 #[cfg(target_os = "macos")]
 mod link_create;
+#[cfg(target_os = "macos")]
+mod media;
 mod metadata;
 mod move_history;
 mod recovery_record;
@@ -63,6 +65,8 @@ pub(crate) use file_template::FileTemplateError;
 pub(crate) use host_key::{HostKeyError, KnownHostEntryError, KnownHostsError, PinError};
 #[cfg(target_os = "macos")]
 pub(crate) use link_create::{LinkCreateError, LinkIoAction};
+#[cfg(target_os = "macos")]
+pub(crate) use media::{MediaAction, MediaError, MediaNativeError};
 pub(crate) use metadata::{MetadataError, MetadataField, MetadataWarning};
 pub(crate) use move_history::{DescendantProblem, MoveHistoryError};
 #[cfg(target_os = "macos")]
@@ -617,6 +621,11 @@ pub(crate) enum PreviewError {
         location: Location,
         limit: u64,
     },
+    #[cfg(target_os = "macos")]
+    Media {
+        location: Location,
+        cause: MediaError,
+    },
     WorkerUnavailable,
 }
 
@@ -634,12 +643,22 @@ impl fmt::Display for PreviewError {
             Self::MediaLimit { location, limit } => {
                 write!(f, "Media preview exceeds {limit} bytes: {location}")
             }
+            #[cfg(target_os = "macos")]
+            Self::Media { location, cause } => write!(f, "Media preview at {location}: {cause}"),
             Self::WorkerUnavailable => f.write_str("Preview worker is unavailable"),
         }
     }
 }
 
-impl Error for PreviewError {}
+impl Error for PreviewError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            #[cfg(target_os = "macos")]
+            Self::Media { cause, .. } => Some(cause),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub(crate) enum SearchError {

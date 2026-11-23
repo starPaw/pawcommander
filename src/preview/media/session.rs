@@ -1,9 +1,9 @@
 use super::{
-    frame_size, media_error, media_extension, Command, Frame, OpenSource, Reply, Snapshot,
-    MEDIA_WORKER_ARG, SFTP_LIMIT,
+    frame_size, media_extension, Command, Frame, OpenSource, Reply, Snapshot, MEDIA_WORKER_ARG,
+    SFTP_LIMIT,
 };
 use crate::{
-    file_error::{AccessAction, AccessError, PreviewError},
+    file_error::{AccessAction, AccessError, MediaAction, MediaError, PreviewError},
     operations::{Cancellation, TransferError},
     preview::{
         helper::{read_message, write_blob, write_message, Process},
@@ -33,21 +33,29 @@ pub(super) struct Session<'a> {
 
 impl<'a> Session<'a> {
     pub(super) fn open(target: &'a Target, cancel: &Cancellation) -> Result<Self, TransferError> {
+        let location = &target.location;
         let (source, cached) = prepare(target, cancel)?;
         cancel.check()?;
         target.checked(Ok(()))?;
-        let mut process = target.checked(source.launch().map_err(helper_error))?;
+        let mut process = target.checked(
+            source
+                .launch()
+                .map_err(media_io(location, MediaAction::LaunchHelper)),
+        )?;
         let (mut input, mut output) = process.pipes(TIMEOUT, cancel);
         let opened = source
             .send(&mut input)
-            .and_then(|()| read_message(&mut output));
-        match target.checked(opened.map_err(helper_error))? {
+            .map_err(media_io(location, MediaAction::SendSource))
+            .and_then(|()| {
+                read_message(&mut output).map_err(media_io(location, MediaAction::ReadOpenReply))
+            });
+        match target.checked(opened)? {
             Reply::Opened => Ok(Self {
                 target,
                 process,
                 _cached: cached,
             }),
-            reply => Err(reply_error(&target.location, reply)),
+            reply => Err(reply_error(location, MediaAction::ReadOpenReply, reply)),
         }
     }
 
@@ -67,23 +75,32 @@ impl<'a> Session<'a> {
         command: Command,
         cancel: &Cancellation,
     ) -> Result<Snapshot, TransferError> {
+        let location = &self.target.location;
         let (mut input, mut output) = self.process.pipes(TIMEOUT, cancel);
-        write_message(&mut input, &command).map_err(helper_error)?;
-        let reply = read_message(&mut output).map_err(helper_error)?;
+        write_message(&mut input, &command)
+            .map_err(media_io(location, MediaAction::SendCommand))?;
+        let reply =
+            read_message(&mut output).map_err(media_io(location, MediaAction::ReadState))?;
         let Reply::Snapshot {
             state,
             size,
             metadata,
         } = reply
         else {
-            return Err(reply_error(&self.target.location, reply));
+            return Err(reply_error(location, MediaAction::ReadState, reply));
         };
         if !state.valid() {
-            return Err(media_error().into());
+            return Err(MediaError::InvalidResponse(MediaAction::ReadState)
+                .at(location)
+                .into());
         }
         let frame = if let Some(size) = size {
-            let mut rgba = vec![0; frame_size(size).ok_or_else(media_error)?];
-            output.read_exact(&mut rgba).map_err(helper_error)?;
+            let length = frame_size(size)
+                .ok_or_else(|| MediaError::InvalidResponse(MediaAction::ReadFrame).at(location))?;
+            let mut rgba = vec![0; length];
+            output
+                .read_exact(&mut rgba)
+                .map_err(media_io(location, MediaAction::ReadFrame))?;
             Some(Frame { size, rgba })
         } else {
             None
@@ -149,7 +166,7 @@ fn prepare(
             let extension = path
                 .extension()
                 .and_then(media_extension)
-                .ok_or_else(media_error)?;
+                .ok_or_else(|| MediaError::UnsupportedFormat.at(location))?;
             let file = target.open_local(path)?;
             // Keep clear of the helper's stdin, stdout and stderr redirects.
             let fd =
@@ -176,7 +193,7 @@ fn prepare(
         .path()
         .extension()
         .and_then(|ext| ext.to_str())
-        .ok_or_else(media_error)?;
+        .ok_or_else(|| MediaError::UnsupportedFormat.at(location))?;
     let mut cached = tempfile::Builder::new()
         .prefix("pawcommander-media-")
         .suffix(&format!(".{suffix}"))
@@ -186,19 +203,87 @@ fn prepare(
     Ok((PreparedSource::Path(cached.path().to_owned()), Some(cached)))
 }
 
-fn reply_error(location: &Location, reply: Reply) -> TransferError {
+fn reply_error(location: &Location, action: MediaAction, reply: Reply) -> TransferError {
     match reply {
         Reply::ReadError(errno) => {
             AccessError::read(location, io::Error::from_raw_os_error(errno)).into()
         }
         Reply::Truncated => PreviewError::ChangedWhileReading(location.clone()).into(),
-        _ => media_error().into(),
+        Reply::Failed(errors) => MediaError::Playback(errors).at(location).into(),
+        _ => MediaError::InvalidResponse(action).at(location).into(),
     }
 }
 
-fn helper_error(error: io::Error) -> TransferError {
-    TransferError::io(error, |error| match error.kind() {
-        io::ErrorKind::TimedOut => crate::i18n::text!("Медиаплеер не ответил вовремя.").into(),
-        _ => media_error(),
-    })
+fn media_io(
+    location: &Location,
+    action: MediaAction,
+) -> impl FnOnce(io::Error) -> TransferError + '_ {
+    move |source| MediaError::Io { action, source }.at(location).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::file_error::{Failure, MediaNativeError};
+    use std::error::Error;
+
+    #[test]
+    fn media_transport_preserves_the_stage_path_and_os_error_or_cancellation() {
+        let location = Location::Local("/fixtures/video.mov".into());
+        let error =
+            media_io(&location, MediaAction::ReadFrame)(io::Error::from_raw_os_error(libc::EIO));
+        let TransferError::Failed(Failure::Preview(preview)) = &error else {
+            panic!("expected media preview failure");
+        };
+        assert!(
+            matches!(preview.as_ref(), PreviewError::Media { location: target, cause:
+            MediaError::Io { action: MediaAction::ReadFrame, .. } } if target == &location)
+        );
+        let original = preview
+            .source()
+            .unwrap()
+            .source()
+            .unwrap()
+            .downcast_ref::<io::Error>()
+            .unwrap();
+        assert_eq!(original.raw_os_error(), Some(libc::EIO));
+        let message = crate::i18n::file_error(&error);
+        assert!(message.contains(&location.display()) && message.contains(&original.to_string()));
+
+        let cancel = Cancellation::default();
+        cancel.request();
+        let error = media_io(&location, MediaAction::ReadState)(cancel.check().unwrap_err());
+        assert!(matches!(error, TransferError::Cancelled));
+    }
+
+    #[test]
+    fn media_reply_preserves_backend_codes_and_the_selected_path() {
+        let location = Location::Local("/fixtures/broken.mp4".into());
+        let errors = vec![
+            MediaNativeError {
+                domain: "AVFoundationErrorDomain".into(),
+                code: -11829,
+            },
+            MediaNativeError {
+                domain: "NSOSStatusErrorDomain".into(),
+                code: -12848,
+            },
+        ];
+        let error = reply_error(&location, MediaAction::ReadState, Reply::Failed(errors));
+        let TransferError::Failed(Failure::Preview(preview)) = &error else {
+            panic!("expected the typed playback failure");
+        };
+        assert!(
+            matches!(preview.as_ref(), PreviewError::Media { location: target, cause:
+            MediaError::Playback(errors) } if target == &location && errors.len() == 2)
+        );
+        let message = crate::i18n::file_error(&error);
+        for detail in [
+            location.display().as_str(),
+            "AVFoundationErrorDomain (-11829)",
+            "NSOSStatusErrorDomain (-12848)",
+        ] {
+            assert!(message.contains(detail), "{message}");
+        }
+    }
 }
