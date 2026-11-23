@@ -203,6 +203,7 @@ fn scan_page(
     }
     let separator = known_separator.unwrap_or_else(|| {
         records::detect(
+            location,
             &sample[..sample.len().min(SAMPLE_BYTES)],
             sample.len() <= SAMPLE_BYTES,
             preferred,
@@ -230,7 +231,7 @@ fn scan_page(
         let mut headers = Vec::new();
         if request.settings.header
             && let Some(record) = records
-                .next(&request.cancel)
+                .next(location, &request.cancel)
                 .map_err(|error| table_access_error(location, error))?
         {
             headers.extend(record.cells().map(str::to_owned));
@@ -264,8 +265,14 @@ fn scan_page(
         rows: Vec::new(),
         scanned: start.records,
     };
-    let result = collect_rows(&mut records, filter.as_ref(), &mut batch, reporter)
-        .map_err(|error| table_access_error(location, error));
+    let result = collect_rows(
+        location,
+        &mut records,
+        filter.as_ref(),
+        &mut batch,
+        reporter,
+    )
+    .map_err(|error| table_access_error(location, error));
     batch.publish(reporter);
     result
 }
@@ -285,6 +292,7 @@ impl Batch {
 }
 
 fn collect_rows<R: BufRead>(
+    location: &Location,
     records: &mut Records<R>,
     filter: Option<&regex::Regex>,
     batch: &mut Batch,
@@ -295,7 +303,7 @@ fn collect_rows<R: BufRead>(
     let mut last = Instant::now();
     while count < PAGE_ROWS {
         let before = records.position();
-        let Some(record) = records.next(&reporter.request.cancel)? else {
+        let Some(record) = records.next(location, &reporter.request.cancel)? else {
             return Ok(None);
         };
         if filter.is_none_or(|query| record.cells().any(|cell| query.is_match(cell))) {
@@ -334,6 +342,7 @@ fn table_access_error(location: &Location, error: TransferError) -> TransferErro
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_error::TextDecodeError;
     use std::{fs::File, io::Write};
 
     fn load(
@@ -509,5 +518,37 @@ mod tests {
             assert_eq!(filtered.rows[0].cells, ["Конец", "ПОЗДНИЙ[1]"]);
             assert_eq!(std::fs::read(file.path()).unwrap(), raw);
         }
+    }
+
+    #[test]
+    fn malformed_csv_utf8_keeps_the_prior_row_and_original_cause() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let bytes = b"City,Details\nPraha,ready\nBrno,\"broken\xff\"\n";
+        std::fs::write(file.path(), bytes).unwrap();
+        let location = Location::Local(file.path().to_owned());
+        let (update, result) = load(&location, "", None, None, Codec::Utf8);
+        assert_eq!(update.scanned, 2);
+        assert_eq!(update.rows.len(), 1);
+        assert_eq!(update.rows[0].number, 2);
+        assert_eq!(update.rows[0].cells, ["Praha", "ready"]);
+        let Err(TransferError::Failed(Failure::Preview(error))) = result else {
+            panic!("expected an invalid UTF-8 error for row 3");
+        };
+        let PreviewError::Text {
+            location: source,
+            encoding: "UTF-8",
+            record: Some(3),
+            cause:
+                TextDecodeError::Utf8 {
+                    source: cause,
+                    byte: None,
+                },
+        } = *error
+        else {
+            panic!("expected the original UTF-8 cause without a file offset");
+        };
+        assert_eq!(source, location);
+        assert_eq!(cause.error_len(), Some(1));
+        assert_eq!(std::fs::read(file.path()).unwrap(), bytes);
     }
 }

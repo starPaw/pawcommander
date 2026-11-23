@@ -209,6 +209,10 @@ impl<'a> Window<'a> {
         }
     }
 
+    pub(super) fn location(&self) -> &Location {
+        &self.source.target.location
+    }
+
     #[cfg(test)]
     pub(super) fn offset(&self) -> u64 {
         self.offset

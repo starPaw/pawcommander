@@ -42,6 +42,7 @@ mod space;
 mod staging;
 #[cfg(target_os = "macos")]
 mod sync;
+mod text_preview;
 mod transfer_plan;
 mod undo;
 pub(crate) use archive::{ArchiveError, ArchiveIoError, ArchiveIssue};
@@ -90,6 +91,7 @@ pub(crate) use sync::{
     SyncDifference, SyncError, SyncExclusionProblem, SyncFolderRole, SyncStateAction,
     SyncStateKind, SyncStateProblem, SyncVerification,
 };
+pub(crate) use text_preview::TextDecodeError;
 #[cfg(target_os = "macos")]
 pub(crate) use transfer_plan::SmbTransferRole;
 pub(crate) use transfer_plan::TransferPlanError;
@@ -626,6 +628,12 @@ pub(crate) enum PreviewError {
         location: Location,
         cause: ImagePreviewError,
     },
+    Text {
+        location: Location,
+        encoding: &'static str,
+        record: Option<u64>,
+        cause: TextDecodeError,
+    },
     #[cfg(target_os = "macos")]
     MediaLimit {
         location: Location,
@@ -673,6 +681,18 @@ impl fmt::Display for PreviewError {
                 write!(f, "File changed while reading: {location}")
             }
             Self::Image { location, cause } => write!(f, "Image preview at {location}: {cause}"),
+            Self::Text {
+                location,
+                encoding,
+                record,
+                cause,
+            } => {
+                write!(f, "Text preview in {encoding} at {location}")?;
+                if let Some(record) = record {
+                    write!(f, ", record {record}")?;
+                }
+                write!(f, ": {cause}")
+            }
             #[cfg(target_os = "macos")]
             Self::MediaLimit { location, limit } => {
                 write!(f, "Media preview exceeds {limit} bytes: {location}")
@@ -690,6 +710,7 @@ impl Error for PreviewError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Image { cause, .. } => Some(cause),
+            Self::Text { cause, .. } => Some(cause),
             #[cfg(target_os = "macos")]
             Self::Media { cause, .. } => Some(cause),
             #[cfg(target_os = "macos")]

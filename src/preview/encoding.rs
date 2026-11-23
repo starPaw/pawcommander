@@ -1,3 +1,4 @@
+use crate::file_error::TextDecodeError;
 use encoding_rs::{Decoder, DecoderResult, Encoding};
 use std::borrow::Cow;
 
@@ -114,15 +115,59 @@ impl Codec {
     }
 
     pub(super) fn prefix(self, bytes: &[u8], truncated: bool) -> Option<String> {
-        let bytes = &bytes[self.bom(bytes)..];
+        self.checked_prefix(bytes, truncated).ok()
+    }
+
+    pub(super) fn checked_prefix(
+        self,
+        bytes: &[u8],
+        truncated: bool,
+    ) -> Result<String, TextDecodeError> {
+        let bom = self.bom(bytes);
+        let bytes = &bytes[bom..];
         if !truncated {
-            return self.decode(bytes).map(Cow::into_owned);
+            return self.checked_decode(bytes, bom as u64).map(Cow::into_owned);
         }
+        self.decode_window(bytes, bom as u64, false)
+    }
+
+    pub(super) fn checked_decode(
+        self,
+        bytes: &[u8],
+        origin: u64,
+    ) -> Result<Cow<'_, str>, TextDecodeError> {
+        if self == Self::Utf8 {
+            return std::str::from_utf8(bytes)
+                .map(Cow::Borrowed)
+                .map_err(|source| TextDecodeError::utf8(source, Some(origin)));
+        }
+        if let Some(text) = self.decode(bytes) {
+            return Ok(text);
+        }
+        self.decode_window(bytes, origin, true).map(Cow::Owned)
+    }
+
+    fn decode_window(
+        self,
+        bytes: &[u8],
+        origin: u64,
+        last: bool,
+    ) -> Result<String, TextDecodeError> {
         let mut decoder = self.decoder();
-        let mut text =
-            String::with_capacity(decoder.max_utf8_buffer_length_without_replacement(bytes.len())?);
-        let (status, read) = decoder.decode_to_string_without_replacement(bytes, &mut text, false);
-        (status == DecoderResult::InputEmpty && read == bytes.len()).then_some(text)
+        let capacity = decoder
+            .max_utf8_buffer_length_without_replacement(bytes.len())
+            .ok_or(TextDecodeError::BufferLimit)?;
+        let mut text = String::with_capacity(capacity);
+        let (status, read) = decoder.decode_to_string_without_replacement(bytes, &mut text, last);
+        match status {
+            DecoderResult::InputEmpty if read == bytes.len() => Ok(text),
+            DecoderResult::Malformed(length, after) => Err(TextDecodeError::malformed(
+                origin.saturating_add(read as u64),
+                length,
+                after,
+            )),
+            _ => Err(TextDecodeError::BufferLimit),
+        }
     }
 
     pub(crate) fn encode(self, text: &str) -> Option<Cow<'_, [u8]>> {
@@ -139,13 +184,6 @@ impl Codec {
                 (!errors).then_some(bytes)
             }
         }
-    }
-
-    pub(super) fn error(self) -> String {
-        crate::tr_format!(
-            "Could not show text in {}. Choose an encoding.",
-            self.name()
-        )
     }
 }
 
@@ -187,5 +225,23 @@ mod tests {
         assert_eq!(Codec::Utf16Le.prefix(little, true).as_deref(), Some("A"));
         assert!(Codec::Utf16Le.prefix(little, false).is_none());
         assert_eq!(Codec::Utf16Be.prefix(big, false).as_deref(), Some("A🙂"));
+    }
+
+    #[test]
+    fn decoding_issues_include_the_source_offset_after_the_bom() {
+        assert!(matches!(
+            Codec::Utf8.checked_prefix(b"\xef\xbb\xbfa\xff", false),
+            Err(TextDecodeError::Utf8 { source, byte: Some(4) })
+                if source.valid_up_to() == 1 && source.error_len() == Some(1)
+        ));
+        let little = b"\xff\xfeA\x00\x3d\xd8Z\x00";
+        assert!(matches!(
+            Codec::Utf16Le.checked_prefix(little, false),
+            Err(TextDecodeError::Malformed {
+                byte: 4,
+                length: 2,
+                ..
+            })
+        ));
     }
 }

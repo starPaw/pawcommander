@@ -8,7 +8,7 @@ use crate::file_error::{
     MetadataError, MetadataField, MetadataWarning, MoveHistoryError, MutationError, PathError,
     PermissionError, PinError, PreviewError, ProbeAction, PublicationError, RecoveryNotice,
     ReplacementRefusal, RetryError, RetryProblem, ScanError, SearchError, SftpStateLock,
-    SpaceError, SshStage, StagingCleanupError, StagingError, StagingRecordAction,
+    SpaceError, SshStage, StagingCleanupError, StagingError, StagingRecordAction, TextDecodeError,
     TransferPlanError, UndoError,
 };
 #[cfg(target_os = "macos")]
@@ -2325,6 +2325,14 @@ fn preview_error(error: &PreviewError) -> String {
             location,
         ),
         PreviewError::Image { location, cause } => return image_preview_error(location, cause),
+        PreviewError::Text {
+            location,
+            encoding,
+            record,
+            cause,
+        } => {
+            return text_preview_error(location, encoding, *record, cause);
+        }
         #[cfg(target_os = "macos")]
         PreviewError::MediaLimit { location, limit } => {
             return crate::tr_format!(
@@ -2340,6 +2348,54 @@ fn preview_error(error: &PreviewError) -> String {
         PreviewError::WorkerUnavailable => return text!("Служба предпросмотра недоступна").into(),
     };
     format!("{message} · {location}")
+}
+
+fn text_preview_error(
+    location: &Location,
+    encoding: &str,
+    record: Option<u64>,
+    cause: &TextDecodeError,
+) -> String {
+    let summary = match record {
+        Some(number) => crate::tr_format!(
+            "Record {number} contains invalid {} text.",
+            encoding,
+            number = number
+        ),
+        None => crate::tr_format!("Could not show text in {}. Choose an encoding.", encoding),
+    };
+    let (detail, byte) = match cause {
+        TextDecodeError::Utf8 { source, byte } => (source.to_string(), *byte),
+        TextDecodeError::Malformed { byte, length, .. } => (
+            crate::tr_format!("Malformed byte sequence ({length} B).", length = length),
+            Some(*byte),
+        ),
+        TextDecodeError::IncompleteUnit { byte } => {
+            (text!("Неполная кодовая единица.").into(), Some(*byte))
+        }
+        TextDecodeError::ForbiddenCharacter(value) => (
+            crate::tr_format!(
+                "Character {code} is invalid in this preview.",
+                code = format!("U+{:04X}", u32::from(*value))
+            ),
+            None,
+        ),
+        TextDecodeError::InvalidCellBoundary => {
+            (text!("Граница столбца разделяет символ.").into(), None)
+        }
+        TextDecodeError::BufferLimit => (
+            text!("Превышен лимит буфера декодирования текста.").into(),
+            None,
+        ),
+    };
+    if let Some(byte) = byte {
+        format!(
+            "{summary}\n{location}\n{detail}\n{} · {byte}",
+            text!("Смещение в файле (байт)")
+        )
+    } else {
+        format!("{summary}\n{location}\n{detail}")
+    }
 }
 
 fn preview_limit_size(limit: u64) -> String {

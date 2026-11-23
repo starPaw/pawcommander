@@ -1,5 +1,6 @@
 use super::{Codec, Direction, Hit, Position, QUERY_CHARS};
 use crate::{
+    file_error::TextDecodeError,
     operations::{Cancellation, TransferError},
     preview::source::{Source, Window, READ_BLOCK as BLOCK},
 };
@@ -62,21 +63,25 @@ impl<'a> Reader<'a> {
         } else {
             first
         };
+        let decode_error =
+            |error: TextDecodeError| error.at(self.source.location(), self.encoding.name(), None);
         let (text, encoded) = if self.encoding == Codec::Utf8 {
             (
-                String::from_utf8(data).map_err(|_| self.encoding.error())?,
+                String::from_utf8(data).map_err(|error| {
+                    decode_error(TextDecodeError::utf8(error.utf8_error(), Some(origin)))
+                })?,
                 None,
             )
         } else {
             let text = self
                 .encoding
-                .decode(&data)
-                .ok_or_else(|| self.encoding.error())?
+                .checked_decode(&data, origin)
+                .map_err(decode_error)?
                 .into_owned();
             (text, Some((self.encoding, data)))
         };
-        if !super::super::preview_text_chars(&text) {
-            return Err(self.encoding.error().into());
+        if let Some(character) = super::super::invalid_preview_text_char(&text) {
+            return Err(decode_error(TextDecodeError::ForbiddenCharacter(character)).into());
         }
         Ok(PageText {
             index,
@@ -156,8 +161,13 @@ impl<'a> Reader<'a> {
                     }
                 }
                 let end = self.end_position(from)?;
-                if !end.byte.is_multiple_of(self.encoding.width() as u64) {
-                    return Err(self.encoding.error().into());
+                let tail = end.byte % self.encoding.width() as u64;
+                if tail != 0 {
+                    return Err(TextDecodeError::IncompleteUnit {
+                        byte: end.byte - tail,
+                    }
+                    .at(self.source.location(), self.encoding.name(), None)
+                    .into());
                 }
                 self.backward(from.byte, end, &finder)
             }
