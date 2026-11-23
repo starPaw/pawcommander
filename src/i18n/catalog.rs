@@ -325,6 +325,7 @@ catalog! {
     "Большое изменение показано одним блоком" => ("Large change shown as a single block", "Rozsáhlá změna je zobrazena jako jeden blok"),
     "Внешний инструмент сравнения" => ("External diff tool", "Externí nástroj pro porovnávání"),
     "Внешний инструмент сравнения недоступен" => ("External diff tool is unavailable", "Externí nástroj pro porovnávání není dostupný"),
+    "Для сравнения нужен исполняемый файл." => ("The configured diff tool must be an executable file.", "Nástroj pro porovnávání musí být spustitelný soubor."),
     "Пользовательские действия" => ("Custom actions", "Vlastní akce"),
     "Пользовательские действия…" => ("Custom actions…", "Vlastní akce…"),
     "Внешние редакторы" => ("External editors", "Externí editory"),

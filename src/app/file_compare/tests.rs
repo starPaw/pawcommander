@@ -129,9 +129,27 @@ fn file_comparison_dialog_shows_changes_and_passes_literal_paths_to_external_too
     assert_eq!(received, expected);
     fs::write(&tool, b"#!/bin/sh\nexit 19\n").unwrap();
     click_external(&mut app);
-    wait(&mut app, "tool failure", &|label| {
+    let failure = wait(&mut app, "tool failure", &|label| {
         label.contains("exit status: 19")
     });
+    if cfg!(target_os = "macos") {
+        assert!(failure
+            .iter()
+            .any(|(label, _)| label.contains(tool.to_str().unwrap())));
+        let held = temporary.path().join("held right input");
+        fs::rename(&files[1], &held).unwrap();
+        click_external(&mut app);
+        let labels = wait(&mut app, "right source disappeared", &|label| {
+            label.contains("os error 2")
+                && label.contains(text!("Правая панель"))
+                && label.contains(&selected[1].display())
+                && label.contains(tool.to_str().unwrap())
+        });
+        assert!(labels
+            .iter()
+            .any(|(label, _)| label.contains("+ new entry")));
+        fs::rename(held, &files[1]).unwrap();
+    }
     assert_eq!(fs::read(&files[0]).unwrap(), b"heading\nold entry\n");
     assert_eq!(fs::read(&files[1]).unwrap(), b"heading\nnew entry\n");
 }

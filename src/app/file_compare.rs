@@ -4,9 +4,10 @@ use super::{
     PawCommander,
 };
 use crate::{
-    i18n::text,
+    i18n::{launch::diff_error, text},
     shortcuts::Command,
     theme::Palette,
+    tools::DiffLaunchError,
     vfs::{
         compare_files, DiffKind, DiffRow, FileComparison, FileDifference, Location, TextDifference,
     },
@@ -25,9 +26,9 @@ pub(super) struct FileComparisonDialog {
 
 enum External {
     Ready,
-    Opening(mpsc::Receiver<Result<(), String>>),
+    Opening(mpsc::Receiver<Result<(), DiffLaunchError>>),
     HandedOff,
-    Failed(String),
+    Failed(DiffLaunchError),
 }
 
 impl FileComparisonDialog {
@@ -60,7 +61,7 @@ impl FileComparisonDialog {
             Ok(Err(error)) => External::Failed(error),
             Err(mpsc::TryRecvError::Empty) => return,
             Err(mpsc::TryRecvError::Disconnected) => {
-                External::Failed(text!("Не удалось запустить внешний инструмент сравнения").into())
+                External::Failed(DiffLaunchError::WorkerStopped)
             }
         };
     }
@@ -85,10 +86,7 @@ impl FileComparisonDialog {
                 });
             }) {
             Ok(_) => External::Opening(result),
-            Err(error) => External::Failed(crate::tr_format!(
-                "Could not launch the external tool: {error}",
-                error = error
-            )),
+            Err(error) => External::Failed(DiffLaunchError::WorkerStart(error)),
         };
     }
 
@@ -143,7 +141,15 @@ impl FileComparisonDialog {
                     ui.label(text!("Сравнение передано внешнему инструменту"));
                 }
                 External::Failed(error) => {
-                    ui.colored_label(ui.visuals().error_fg_color, error);
+                    let message = diff_error(self.tool.as_deref(), error);
+                    let height = (ctx.content_rect().height() * 0.20).clamp(48.0, 120.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt(("external-diff-error", self.run))
+                        .max_height(height)
+                        .show(ui, |ui| {
+                            let message = RichText::new(message).color(ui.visuals().error_fg_color);
+                            ui.add(egui::Label::new(message).wrap().selectable(true));
+                        });
                 }
                 External::Ready => {}
             }
