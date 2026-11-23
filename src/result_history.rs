@@ -589,6 +589,33 @@ impl Results {
         self.record(source, None, outcome, error.map(crate::i18n::file_error));
     }
 
+    /// Project typed completion warnings into the existing persisted history row.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn record_sync_completion(
+        &mut self,
+        source: &Location,
+        target: Option<String>,
+        metadata: Option<MetadataWarning>,
+        cleanup: Option<TransferError>,
+    ) {
+        let mut reason = metadata.as_ref().map(crate::i18n::metadata_warning);
+        if let Some(error) = cleanup {
+            let cleanup = crate::i18n::file_error(&error);
+            if let Some(reason) = &mut reason {
+                reason.push('\n');
+                reason.push_str(&cleanup);
+            } else {
+                reason = Some(cleanup);
+            }
+        }
+        let outcome = if reason.is_some() {
+            Outcome::CompletedWithWarning
+        } else {
+            Outcome::Completed
+        };
+        self.record(source, target, outcome, reason);
+    }
+
     pub(crate) fn record_transfer_item(
         &mut self,
         source: &Location,

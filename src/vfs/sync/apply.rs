@@ -9,7 +9,7 @@ use crate::{
         SyncFolderRole, SyncVerification,
     },
     operations::{AccessStream, Cancellation, Progress, TransferError},
-    result_history::Outcome,
+    result_history::{Outcome, Results},
     vfs::{
         compare::scan,
         copy_metadata,
@@ -136,25 +136,8 @@ impl Execution<'_> {
                 self.apply_group(row, scopes, progress, staging.as_deref_mut())
             })();
             match result {
-                Ok(GroupWarnings { metadata, cleanup }) => {
-                    let mut warning = metadata.as_ref().map(crate::i18n::metadata_warning);
-                    if let Some(cleanup) = cleanup {
-                        let cause = crate::i18n::file_error(&cleanup);
-                        warning = Some(match warning {
-                            Some(warning) => format!("{warning}\n{cause}"),
-                            None => cause,
-                        });
-                    }
-                    for row in group {
-                        let (key, target) = self.history_row(row);
-                        let warning = warning.take();
-                        let outcome = if warning.is_some() {
-                            Outcome::CompletedWithWarning
-                        } else {
-                            Outcome::Completed
-                        };
-                        progress.results.record(&key, target, outcome, warning);
-                    }
+                Ok(warnings) => {
+                    self.record_completed_group(group, warnings, &mut progress.results);
                     *completed += group.len();
                 }
                 Err(error) => {
@@ -171,6 +154,23 @@ impl Execution<'_> {
             }
         }
         Ok(())
+    }
+
+    fn record_completed_group(
+        &self,
+        group: &[SyncRow],
+        mut warnings: GroupWarnings,
+        results: &mut Results,
+    ) {
+        for row in group {
+            let (key, target) = self.history_row(row);
+            results.record_sync_completion(
+                &key,
+                target,
+                warnings.metadata.take(),
+                warnings.cleanup.take(),
+            );
+        }
     }
 
     fn apply_group(
@@ -800,6 +800,91 @@ fn check_tree(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grouped_sync_completion_keeps_both_warnings_on_the_first_history_row() {
+        use crate::file_error::{AccessCause, MetadataField};
+        use std::io;
+
+        let temp = tempfile::tempdir().unwrap();
+        let folders = ["from", "to"].map(|name| Location::Local(temp.path().join(name)));
+        fs::create_dir_all(folders[0].join("group").path()).unwrap();
+        fs::write(folders[0].join("group/child").path(), b"contents").unwrap();
+        fs::create_dir(folders[1].path()).unwrap();
+        let mut progress = Progress::default();
+        let plan = SyncPlan::build(folders, false, Exclusions::default(), &mut progress).unwrap();
+        let execution = Execution {
+            folders: &plan.folders,
+            roles: ONE_WAY_ROLES,
+            observed: &plan.observed,
+            rows: &plan.rows,
+            exclusions: &plan.exclusions,
+        };
+        let groups = groups(execution.rows);
+        let [group] = groups.as_slice() else {
+            panic!("expected a single group");
+        };
+        assert_eq!(group.len(), 2);
+        let target = execution.observed[1].root.join("group");
+        let staging = execution.observed[1].root.join("temporary-data");
+        let metadata_cause = io::Error::from_raw_os_error(libc::EIO);
+        let metadata_message = metadata_cause.to_string();
+        let metadata = MetadataWarning {
+            fields: vec![MetadataField::Permissions, MetadataField::AccessTime],
+            causes: vec![AccessCause::Local(metadata_cause)],
+        };
+        let cleanup_cause = io::Error::from_raw_os_error(libc::EACCES);
+        let cleanup_message = cleanup_cause.to_string();
+        let cleanup = StagingCleanupError::failed_cleanup(
+            None,
+            AccessError::new(
+                &staging,
+                AccessAction::RemoveStagingDirectory,
+                cleanup_cause,
+            )
+            .into(),
+            &staging,
+            &target,
+        );
+        let metadata_text = crate::i18n::metadata_warning(&metadata);
+        let cleanup_text = crate::i18n::file_error(&cleanup);
+        assert!(metadata_text.contains(&metadata_message));
+        assert!(cleanup_text.contains(&cleanup_message));
+        assert!(cleanup_text.contains(&target.display()));
+        assert!(cleanup_text.contains(&staging.display()));
+
+        execution.plan_history(&mut progress);
+        progress.results.begin(&execution.history_row(&group[0]).0);
+        execution.record_completed_group(
+            group,
+            GroupWarnings {
+                metadata: Some(metadata),
+                cleanup: Some(cleanup),
+            },
+            &mut progress.results,
+        );
+        let history = progress
+            .results
+            .finish("sync".into(), 0, &Ok("complete".into()))
+            .unwrap();
+        let bytes = serde_json::to_vec(&history).unwrap();
+        let restored: crate::result_history::Record = serde_json::from_slice(&bytes).unwrap();
+        let [root, child] = restored.items.as_slice() else {
+            panic!("expected two history rows");
+        };
+        assert_eq!(root.target.as_deref(), Some(target.display().as_str()));
+        assert_eq!(root.outcome, Outcome::CompletedWithWarning);
+        assert_eq!(
+            root.reason,
+            Some(format!("{metadata_text}\n{cleanup_text}"))
+        );
+        assert_eq!(
+            child.target.as_deref(),
+            Some(target.join("child").display().as_str())
+        );
+        assert_eq!(child.outcome, Outcome::Completed);
+        assert!(child.reason.is_none());
+    }
 
     #[test]
     fn staged_file_verification_displays_both_file_paths_verbatim() {
