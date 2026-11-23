@@ -15,12 +15,13 @@ use std::{
     fs::File,
     io::{self, Read, Seek, SeekFrom},
     ops::Range,
+    path::Path,
     time::{Duration, SystemTime},
 };
 
 pub(super) const READ_BLOCK: usize = 64 * 1024;
 
-/// One selected path, shared by its initial read and any paged readers.
+/// One selected path, shared by its initial read and any preview readers.
 #[derive(Clone)]
 pub(super) struct Target {
     pub(super) location: Location,
@@ -55,6 +56,17 @@ impl Target {
             mount.check(self.location.path())?;
         }
         Ok(mount.is_owned().then(|| mount.clone()))
+    }
+
+    pub(super) fn open_local(&self, path: &Path) -> Result<File, TransferError> {
+        #[cfg(target_os = "macos")]
+        let mount = self.capture_mount()?;
+        let file = self.checked(super::open_regular(path))?;
+        #[cfg(target_os = "macos")]
+        if let Some(mount) = mount {
+            mount.verify_file(&file, path)?;
+        }
+        Ok(file)
     }
 
     pub(super) fn checked<T>(&self, result: Result<T, TransferError>) -> Result<T, TransferError> {
@@ -94,14 +106,7 @@ enum PreviewFile {
 impl Source {
     pub(super) fn open(target: &Target) -> Result<Self, TransferError> {
         let file = if let Some(path) = target.location.local() {
-            #[cfg(target_os = "macos")]
-            let mount = target.capture_mount()?;
-            let file = target.checked(super::open_regular(path))?;
-            #[cfg(target_os = "macos")]
-            if let Some(mount) = mount {
-                mount.verify_file(&file, path)?;
-            }
-            PreviewFile::Local(file)
+            PreviewFile::Local(target.open_local(path)?)
         } else {
             PreviewFile::Sftp(vfs::open_preview_stream(&target.location)?)
         };

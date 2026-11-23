@@ -2,8 +2,7 @@ use super::{media_error, session::Session, Command, Frame, Metadata, Mode, Snaps
 use crate::{
     i18n::{file_error, text},
     operations::{Cancellation, TransferError},
-    preview::metadata,
-    vfs::Location,
+    preview::{metadata, source::Target},
 };
 use eframe::egui;
 use std::{
@@ -13,7 +12,7 @@ use std::{
 };
 
 pub(in crate::preview) struct Player {
-    location: Location,
+    target: Target,
     controller: Option<Controller>,
     state: State,
     metadata: Metadata,
@@ -27,9 +26,9 @@ pub(in crate::preview) struct Player {
 }
 
 impl Player {
-    pub(in crate::preview) fn new(location: Location) -> Self {
+    pub(in crate::preview) fn new(target: Target) -> Self {
         Self {
-            location,
+            target,
             controller: None,
             state: State::default(),
             metadata: Metadata::default(),
@@ -50,7 +49,7 @@ impl Player {
 
     pub(in crate::preview) fn show(&mut self, ui: &mut egui::Ui, cancel: &Cancellation) {
         if self.controller.is_none() && self.error.is_none() {
-            match Controller::start(self.location.clone(), cancel.clone(), ui.ctx()) {
+            match Controller::start(self.target.clone(), cancel.clone(), ui.ctx()) {
                 Ok(controller) => self.controller = Some(controller),
                 Err(error) => self.error = Some(error),
             }
@@ -291,7 +290,7 @@ struct Controller {
 
 impl Controller {
     fn start(
-        location: Location,
+        target: Target,
         cancel: Cancellation,
         ctx: &egui::Context,
     ) -> Result<Self, TransferError> {
@@ -305,13 +304,9 @@ impl Controller {
             .name("pawcommander-media".into())
             .spawn(move || {
                 let repaint = || ctx.request_repaint_of(viewport);
-                if let Err(error) = run(
-                    &location,
-                    &incoming,
-                    &worker_latest,
-                    &worker_cancel,
-                    &repaint,
-                ) && !worker_cancel.is_requested()
+                if let Err(error) =
+                    run(&target, &incoming, &worker_latest, &worker_cancel, &repaint)
+                    && !worker_cancel.is_requested()
                     && let Ok(mut update) = worker_latest.lock()
                 {
                     update.error = Some(error);
@@ -335,13 +330,13 @@ impl Drop for Controller {
 }
 
 fn run(
-    location: &Location,
+    target: &Target,
     incoming: &mpsc::Receiver<(u64, Command)>,
     latest: &Mutex<Update>,
     cancel: &Cancellation,
     repaint: &impl Fn(),
 ) -> Result<(), TransferError> {
-    let mut session = Session::open(location, cancel)?;
+    let mut session = Session::open(target, cancel)?;
     let began = Instant::now();
     let mut state = State::default();
     let mut applied = 0;
@@ -421,13 +416,14 @@ mod tests {
     use super::*;
     use crate::preview::media::{AudioMetadata, VideoMetadata};
     use crate::test_ui::ContextExt as _;
+    use crate::vfs::Location;
 
     #[test]
     fn short_media_preview_scrolls_to_channels_and_back_to_play() {
         let ctx = egui::Context::default();
         let cancel = Cancellation::default();
         let (commands, _requested) = mpsc::channel();
-        let mut player = Player::new(Location::Local("fixture.mp4".into()));
+        let mut player = Player::new(Location::Local("fixture.mp4".into()).into());
         player.controller = Some(Controller {
             commands,
             latest: Arc::new(Mutex::new(Update::default())),
@@ -524,7 +520,7 @@ mod tests {
         let cancel = Cancellation::default();
         let latest = Arc::new(Mutex::new(Update::default()));
         let (commands, requested) = mpsc::channel();
-        let mut player = Player::new(Location::Local("fixture.mp4".into()));
+        let mut player = Player::new(Location::Local("fixture.mp4".into()).into());
         player.controller = Some(Controller {
             commands,
             latest: latest.clone(),
