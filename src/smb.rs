@@ -22,7 +22,7 @@ mod error;
 mod paths;
 pub(crate) use discovery::{Discovery, DiscoveryWarnings};
 pub(crate) use error::{MountFailure, PasswordAction, PathAction, RecordProblem, SmbError};
-pub(crate) use paths::{check_location, check_transfer_mount, MutationMount};
+pub(crate) use paths::{check_location, check_transfer_mount, verify_listing_mount, MutationMount};
 
 const SERVICE: &str = "dev.pawcommander.smb.v1";
 const RECORD: &str = "connection.json";

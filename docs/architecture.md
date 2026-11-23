@@ -76,6 +76,8 @@ The main thread owns application state. `App::logic` polls worker channels and a
 
 Directory reads use bounded channels and progressive batches. Dropping a directory load cancels it and disconnects its producer. Previews coalesce pending requests and use generations to reject stale results. Search and thumbnails have their own worker lifecycles. Preserve cancellation, stale-result protection and repaint notifications when extending these paths.
 
+On macOS, listings on saved SMB shares carry the verified volume identity. The Grid thumbnail worker checks the expected mount and the opened file before reading, then verifies the mount again before returning pixels. The cache includes the volume identity, so a refreshed listing on a replacement volume gets its own thumbnails even when file metadata matches the earlier listing.
+
 NetFS mounts SMB shares on demand in a private directory for each connection. The empty directory underneath the share is write-protected so an old tab cannot send data to a local folder after the mount disappears. The file queue uses normal mounted paths for browsing and downloads. SMB uploads create regular files exclusively through an open SMB directory handle because macOS SMB volumes lack exclusive rename. A failure after creation records the result as unconfirmed and leaves the new name for inspection.
 
 The macOS PDF preview passes a bounded byte snapshot to a helper process. Its native renderer uses PDFKit for document text and selections and Core Graphics for page rasters. The preview worker owns the helper, enforces response sizes and deadlines, and ends the session when the preview changes. The UI uploads only the current page texture.

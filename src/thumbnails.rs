@@ -1,3 +1,5 @@
+#[cfg(target_os = "macos")]
+use crate::{file_error::SmbMutationAction, smb::MutationMount};
 use crate::{
     fs_ops::{open_regular_source, LocalFileIdentity},
     preview::image_path_format,
@@ -45,6 +47,8 @@ impl Version {
 struct Source {
     path: PathBuf,
     version: Version,
+    #[cfg(target_os = "macos")]
+    smb_mount: Option<[i32; 2]>,
 }
 
 impl Source {
@@ -61,6 +65,8 @@ impl Source {
                 modified: entry.modified,
                 identity,
             },
+            #[cfg(target_os = "macos")]
+            smb_mount: entry.metadata.smb_mount,
         })
     }
 }
@@ -261,7 +267,18 @@ impl Thumbnails {
 }
 
 fn load(source: &Source) -> Option<egui::ColorImage> {
+    #[cfg(target_os = "macos")]
+    let mount = {
+        let mut mount = MutationMount::new(SmbMutationAction::ReadPreview);
+        mount.check(&source.path).ok()?;
+        if mount.id() != source.smb_mount {
+            return None;
+        }
+        mount
+    };
     let mut file = open_regular_source(&source.path).ok()?;
+    #[cfg(target_os = "macos")]
+    mount.verify_file(&file, &source.path).ok()?;
     let version = source.version;
     if !version.matches(&file.metadata().ok()?) {
         return None;
@@ -276,9 +293,12 @@ fn load(source: &Source) -> Option<egui::ColorImage> {
     }
     let thumbnail = decode(&bytes)?;
     // The handle may still refer to a file that was replaced at this path.
-    version
-        .matches(&fs::symlink_metadata(&source.path).ok()?)
-        .then_some(thumbnail)
+    if !version.matches(&fs::symlink_metadata(&source.path).ok()?) {
+        return None;
+    }
+    #[cfg(target_os = "macos")]
+    mount.recheck().ok()?;
+    Some(thumbnail)
 }
 
 fn supports_format(format: ImageFormat) -> bool {
@@ -504,6 +524,78 @@ mod tests {
         );
         assert!(thumbnails.cache.is_empty());
         assert!(requests.try_recv().unwrap().source == after);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn smb_remount_separates_cached_and_in_flight_thumbnails() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("image.png");
+        write_image(&path, [255, 0, 0], [4, 2], 1_700_000_000);
+        let local = source(&path).unwrap();
+        let red = load(&local).unwrap();
+        let cached = Source {
+            smb_mount: Some([2, 3]),
+            ..local.clone()
+        };
+        let in_flight = Source {
+            path: directory.path().join("pending.png"),
+            ..cached.clone()
+        };
+        let old = [cached.clone(), in_flight.clone()];
+        let new = old.clone().map(|source| Source {
+            smb_mount: Some([5, 8]),
+            ..source
+        });
+        let ctx = egui::Context::default();
+        let (mut thumbnails, requests, responses) = Thumbnails::channel();
+        draw(&mut thumbnails, &ctx, &old);
+        responses
+            .send(Response {
+                source: requests.try_recv().unwrap().source,
+                image: Some(red.clone()),
+            })
+            .unwrap();
+        let pending = requests.try_recv().unwrap();
+        draw(&mut thumbnails, &ctx, &old);
+        let old_texture = draw(&mut thumbnails, &ctx, &old)[0].unwrap();
+
+        responses
+            .send(Response {
+                source: pending.source,
+                image: Some(red),
+            })
+            .unwrap();
+        assert_eq!(draw(&mut thumbnails, &ctx, &new), [None, None]);
+        assert!(!thumbnails.cache.contains_key(&in_flight));
+        let blue = egui::ColorImage::filled([4, 2], egui::Color32::BLUE);
+        for expected in &new {
+            let request = requests.try_recv().unwrap();
+            assert!(request.source == *expected);
+            responses
+                .send(Response {
+                    source: request.source,
+                    image: Some(blue.clone()),
+                })
+                .unwrap();
+        }
+        draw(&mut thumbnails, &ctx, &new);
+        let textures = draw(&mut thumbnails, &ctx, &new);
+        assert_ne!(textures[0].unwrap(), old_texture);
+        assert!(textures[1].is_some());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn thumbnail_for_missing_smb_mount_refuses_matching_local_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("image.png");
+        write_image(&path, [255, 0, 0], [4, 2], 1_700_000_000);
+        let mut source = source(&path).unwrap();
+        assert!(load(&source).is_some());
+
+        source.smb_mount = Some([2, 3]);
+        assert!(load(&source).is_none());
     }
 
     #[cfg(unix)]
