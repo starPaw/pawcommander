@@ -343,6 +343,7 @@ impl Viewer {
                     }
                 }
             }
+            Err(TransferError::Cancelled) => {}
             Err(error) => self.error = Some(error),
         }
     }

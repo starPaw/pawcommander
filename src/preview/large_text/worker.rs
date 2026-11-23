@@ -5,7 +5,7 @@ use super::{
 #[cfg(test)]
 use crate::vfs::Location;
 use crate::{
-    file_error::PreviewError,
+    file_error::{PreviewError, PreviewWorkerKind},
     operations::{Cancellation, TransferError},
     preview::{
         code::Code,
@@ -55,9 +55,13 @@ pub(super) fn start(
     encoding: Codec,
     ctx: &egui::Context,
 ) -> Result<Worker, TransferError> {
-    Worker::start("pawcommander-text", ctx, move |(work, version), cancel| {
-        run(&target, work, *version, encoding, cancel)
-    })
+    Worker::start(
+        "pawcommander-text",
+        target.location.clone(),
+        PreviewWorkerKind::Text,
+        ctx,
+        move |(work, version), cancel| run(&target, work, *version, encoding, cancel),
+    )
 }
 fn run(
     target: &Target,

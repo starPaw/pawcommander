@@ -34,6 +34,7 @@ mod metadata;
 mod move_history;
 #[cfg(target_os = "macos")]
 mod pdf;
+mod preview_worker;
 mod recovery_record;
 #[cfg(target_os = "macos")]
 mod resume_check;
@@ -77,6 +78,7 @@ pub(crate) use metadata::{MetadataError, MetadataField, MetadataWarning};
 pub(crate) use move_history::{DescendantProblem, MoveHistoryError};
 #[cfg(target_os = "macos")]
 pub(crate) use pdf::{PdfAction, PdfError, PdfProblem};
+pub(crate) use preview_worker::{PreviewWorkerError, PreviewWorkerKind};
 #[cfg(target_os = "macos")]
 pub(crate) use recovery_record::ResumeRecordEvent;
 pub(crate) use recovery_record::{
@@ -655,13 +657,21 @@ pub(crate) enum PreviewError {
         location: Location,
         cause: PdfError,
     },
-    WorkerUnavailable,
+    Worker {
+        location: Location,
+        kind: PreviewWorkerKind,
+        cause: PreviewWorkerError,
+    },
 }
 
 impl PreviewError {
     pub(crate) fn io_cause(&self) -> Option<&io::Error> {
         match self {
             Self::Image { cause, .. } => cause.io_cause(),
+            Self::Worker {
+                cause: PreviewWorkerError::Start(source),
+                ..
+            } => Some(source),
             #[cfg(target_os = "macos")]
             Self::Media {
                 cause: MediaError::Io { source, .. },
@@ -708,7 +718,11 @@ impl fmt::Display for PreviewError {
             Self::Media { location, cause } => write!(f, "Media preview at {location}: {cause}"),
             #[cfg(target_os = "macos")]
             Self::Pdf { location, cause } => write!(f, "PDF preview at {location}: {cause}"),
-            Self::WorkerUnavailable => f.write_str("Preview worker is unavailable"),
+            Self::Worker {
+                location,
+                kind,
+                cause,
+            } => write!(f, "{kind} at {location}: {cause}"),
         }
     }
 }
@@ -719,6 +733,7 @@ impl Error for PreviewError {
             Self::Image { cause, .. } => Some(cause),
             Self::Text { cause, .. } => Some(cause),
             Self::Table { cause, .. } => Some(cause),
+            Self::Worker { cause, .. } => Some(cause),
             #[cfg(target_os = "macos")]
             Self::Media { cause, .. } => Some(cause),
             #[cfg(target_os = "macos")]

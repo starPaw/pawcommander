@@ -3,6 +3,7 @@ use super::{
     Codec, Position, Row, Separator,
 };
 use crate::{
+    file_error::{Failure, PreviewError, PreviewWorkerError},
     i18n::{file_error, text},
     operations::TransferError,
     preview::source::Target,
@@ -219,7 +220,7 @@ impl Document {
         })();
         match result {
             Ok(scan) => self.scan = Some(scan),
-            Err(error) => self.page.error = Some(error),
+            Err(error) => self.set_error(error),
         }
     }
 
@@ -227,7 +228,7 @@ impl Document {
         let Some(scan) = &self.scan else {
             return;
         };
-        let update = scan.take_update();
+        let update = scan.take_update(&self.target.location);
         if let Some(start) = update.ready {
             self.page.columns = start.layout.headers.len();
             self.page.start = Some(start);
@@ -241,15 +242,27 @@ impl Document {
             self.scan = None;
             match result {
                 Ok(next) => self.page.next = next,
-                Err(error) => {
-                    #[cfg(target_os = "macos")]
-                    if crate::preview::source::is_smb_mount_error(&error) {
-                        self.page = Page::default();
-                    }
-                    self.page.error = Some(error);
-                }
+                Err(error) => self.set_error(error),
             }
         }
+    }
+
+    fn set_error(&mut self, error: TransferError) {
+        if matches!(error, TransferError::Cancelled) {
+            return;
+        }
+        if matches!(&error, TransferError::Failed(Failure::Preview(reason))
+        if matches!(reason.as_ref(), PreviewError::Worker {
+            cause: PreviewWorkerError::Disconnected,
+            ..
+        })) {
+            self.worker = None;
+        }
+        #[cfg(target_os = "macos")]
+        if crate::preview::source::is_smb_mount_error(&error) {
+            self.page = Page::default();
+        }
+        self.page.error = Some(error);
     }
 }
 
