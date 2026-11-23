@@ -44,7 +44,13 @@ fn main() {
             .compile("paw_volumes");
         println!("cargo:rustc-link-lib=framework=DiskArbitration");
         println!("cargo:rustc-link-lib=framework=IOKit");
-        for framework in ["AVFoundation", "CoreMedia", "CoreVideo", "QuartzCore"] {
+        for framework in [
+            "AVFoundation",
+            "CoreMedia",
+            "CoreVideo",
+            "QuartzCore",
+            "UniformTypeIdentifiers",
+        ] {
             println!("cargo:rustc-link-lib=framework={framework}");
         }
     }

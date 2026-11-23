@@ -1,12 +1,13 @@
 use super::{
-    frame_size, AudioMetadata, Command, Metadata, Mode, Reply, State, VideoMetadata, VIDEO_EDGE,
+    frame_size, media_extension, AudioMetadata, Command, Metadata, Mode, OpenSource, Reply, State,
+    VideoMetadata, VIDEO_EDGE,
 };
 use crate::preview::{
     helper::{read_message, read_size, write_message},
     metadata::positive,
 };
 use std::{
-    ffi::{c_char, c_void, CString},
+    ffi::{c_char, c_void, CString, OsStr},
     io::{self, BufReader, BufWriter, Read, Write},
     ptr::NonNull,
     sync::mpsc,
@@ -39,10 +40,13 @@ struct NativeMetadata {
 
 unsafe extern "C" {
     fn paw_media_open(path: *const c_char) -> *mut c_void;
+    fn paw_media_open_descriptor(fd: i32, extension: *const c_char, error: *mut i32)
+        -> *mut c_void;
     fn paw_media_close(player: *mut c_void);
     fn paw_media_pump();
     fn paw_media_command(player: *mut c_void, command: i32, seconds: f64) -> bool;
     fn paw_media_state(player: *mut c_void, state: *mut NativeState) -> bool;
+    fn paw_media_read_failure(player: *mut c_void) -> i32;
     fn paw_media_metadata(player: *mut c_void, metadata: *mut NativeMetadata);
     fn paw_media_frame(
         player: *mut c_void,
@@ -60,19 +64,9 @@ pub(crate) fn run() -> i32 {
 }
 
 fn serve(mut input: impl Read + Send + 'static, output: &mut impl Write) -> io::Result<()> {
-    let size = read_size(&mut input)?;
-    if !(1..=65536).contains(&size) {
-        return fail(output);
-    }
-    let mut bytes = vec![0; size];
-    input.read_exact(&mut bytes)?;
-    let Ok(path) = CString::new(bytes) else {
-        return fail(output);
-    };
-    // The path is an absolute filesystem representation passed by the
-    // parent. The bridge retains the player independently of its bytes.
-    let Some(player) = NonNull::new(unsafe { paw_media_open(path.as_ptr()) }).map(Player) else {
-        return fail(output);
+    let player = match open(&mut input)? {
+        Ok(player) => player,
+        Err(reply) => return fail(output, reply),
     };
     let (sender, commands) = mpsc::sync_channel(1);
     thread::Builder::new()
@@ -98,11 +92,15 @@ fn serve(mut input: impl Read + Send + 'static, output: &mut impl Write) -> io::
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
         };
-        let Some(state) = player.apply(command) else {
-            return fail(output);
+        let state = player.apply(command);
+        if let Some(reply) = player.read_failure() {
+            return fail(output, reply);
+        }
+        let Some(state) = state else {
+            return fail(output, Reply::Failed);
         };
         let Ok(frame) = player.frame(&mut rgba, state.mode) else {
-            return fail(output);
+            return fail(output, player.read_failure().unwrap_or(Reply::Failed));
         };
         let metadata = if !sent_metadata && state.mode != Mode::Loading {
             sent_metadata = true;
@@ -125,14 +123,58 @@ fn serve(mut input: impl Read + Send + 'static, output: &mut impl Write) -> io::
     }
 }
 
-fn fail(output: &mut impl Write) -> io::Result<()> {
-    write_message(output, &Reply::Failed)?;
+fn open(input: &mut impl Read) -> io::Result<Result<Player, Reply>> {
+    let mut error = 0;
+    let handle = match read_message(input)? {
+        OpenSource::Path => {
+            let size = read_size(input)?;
+            if !(1..=65536).contains(&size) {
+                return Ok(Err(Reply::Failed));
+            }
+            let mut bytes = vec![0; size];
+            input.read_exact(&mut bytes)?;
+            let Ok(path) = CString::new(bytes) else {
+                return Ok(Err(Reply::Failed));
+            };
+            // The bridge uses the absolute filesystem representation during this call.
+            unsafe { paw_media_open(path.as_ptr()) }
+        }
+        OpenSource::Descriptor { fd, extension } => {
+            if fd <= libc::STDERR_FILENO {
+                return Ok(Err(Reply::Failed));
+            }
+            let Some(extension) = media_extension(OsStr::new(&extension)) else {
+                return Ok(Err(Reply::Failed));
+            };
+            let extension = CString::new(extension).expect("known media extension");
+            // The inherited descriptor stays open for this dedicated process.
+            unsafe { paw_media_open_descriptor(fd, extension.as_ptr(), &mut error) }
+        }
+    };
+    let failure = if error == 0 {
+        Reply::Failed
+    } else {
+        Reply::ReadError(error)
+    };
+    Ok(NonNull::new(handle).map(Player).ok_or(failure))
+}
+
+fn fail(output: &mut impl Write, reply: Reply) -> io::Result<()> {
+    write_message(output, &reply)?;
     output.flush()
 }
 
 struct Player(NonNull<c_void>);
 
 impl Player {
+    fn read_failure(&self) -> Option<Reply> {
+        match unsafe { paw_media_read_failure(self.0.as_ptr()) } {
+            0 => None,
+            -1 => Some(Reply::Truncated),
+            errno => Some(Reply::ReadError(errno)),
+        }
+    }
+
     fn apply(&self, command: Command) -> Option<State> {
         let handle = self.0.as_ptr();
         let (opcode, seconds) = match command {

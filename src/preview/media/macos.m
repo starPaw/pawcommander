@@ -2,9 +2,95 @@
 #import <CoreGraphics/CoreGraphics.h>
 #import <CoreVideo/CoreVideo.h>
 #import <QuartzCore/QuartzCore.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+@interface PawMediaFileSource : NSObject <AVAssetResourceLoaderDelegate> {
+@public
+    int descriptor;
+    int64_t length;
+    NSURL *url;
+    NSString *contentType;
+    dispatch_queue_t queue;
+}
+// A positive value is errno, -1 is EOF before the advertised file length.
+@property(atomic) int32_t readFailure;
+- (void)respondToRequest:(AVAssetResourceLoadingRequest *)request;
+@end
+
+@implementation PawMediaFileSource
+- (BOOL)resourceLoader:(AVAssetResourceLoader *)loader
+        shouldWaitForLoadingOfRequestedResource:(AVAssetResourceLoadingRequest *)request {
+    if (![request.request.URL isEqual:url]) {
+        return NO;
+    }
+    AVAssetResourceLoadingContentInformationRequest *info = request.contentInformationRequest;
+    info.contentLength = length;
+    info.contentType = contentType;
+    info.byteRangeAccessSupported = YES;
+    [self respondToRequest:request];
+    return YES;
+}
+
+- (void)respondToRequest:(AVAssetResourceLoadingRequest *)request {
+    if (request.cancelled) {
+        return;
+    }
+    AVAssetResourceLoadingDataRequest *data = request.dataRequest;
+    if (data == nil) {
+        [request finishLoading];
+        return;
+    }
+    int64_t offset = data.currentOffset;
+    int64_t start = data.requestedOffset;
+    if (start < 0 || offset < start || data.requestedLength < 0) {
+        [request finishLoadingWithError:[NSError errorWithDomain:NSPOSIXErrorDomain code:EINVAL userInfo:nil]];
+        return;
+    }
+    int64_t end = length;
+    if (!data.requestsAllDataToEndOfResource && start < length) {
+        end = start + MIN(data.requestedLength, length - start);
+    }
+    if (offset >= end) {
+        [request finishLoading];
+        return;
+    }
+
+    uint8_t bytes[64 * 1024];
+    size_t size = (size_t)MIN((int64_t)sizeof(bytes), end - offset);
+    ssize_t count;
+    do {
+        count = pread(descriptor, bytes, size, offset);
+    } while (count < 0 && errno == EINTR && !request.cancelled);
+    int error = count < 0 ? errno : EIO;
+    if (request.cancelled) {
+        return;
+    }
+    if (count <= 0) {
+        if (self.readFailure == 0) {
+            self.readFailure = count == 0 ? -1 : error;
+        }
+        [request finishLoadingWithError:[NSError errorWithDomain:NSPOSIXErrorDomain code:error userInfo:nil]];
+        return;
+    }
+    [data respondWithData:[NSData dataWithBytes:bytes length:(NSUInteger)count]];
+    if (offset + count == end) {
+        [request finishLoading];
+    } else {
+        // Let cancellation and new seeks run between chunks of large requests.
+        __weak PawMediaFileSource *source = self;
+        dispatch_async(queue, ^{
+            [source respondToRequest:request];
+        });
+    }
+}
+@end
 
 // All player methods run on the helper's main thread. The only callback uses
 // a weak reference and publishes seek completion back on that same thread.
@@ -12,6 +98,8 @@
 @property(nonatomic, strong) AVPlayer *player;
 @property(nonatomic, strong) AVPlayerItem *item;
 @property(nonatomic, strong) AVPlayerItemVideoOutput *output;
+// AVAssetResourceLoader holds its delegate weakly.
+@property(nonatomic, strong) PawMediaFileSource *fileSource;
 @property(nonatomic) CGAffineTransform orientation;
 @property(nonatomic) bool hasOrientation;
 @property(nonatomic) NSUInteger seekSerial;
@@ -40,27 +128,73 @@ typedef struct {
     bool hasAudio;
 } PawMediaMetadata;
 
+static void *open_media(NSURL *url, PawMediaFileSource *source) {
+    AVURLAsset *asset = [[AVURLAsset alloc] initWithURL:url options:@{
+        AVURLAssetReferenceRestrictionsKey: @(AVAssetReferenceRestrictionForbidAll),
+        AVURLAssetShouldSupportAliasDataReferencesKey: @NO,
+    }];
+    PawMedia *media = [[PawMedia alloc] init];
+    if (source != nil) {
+        media.fileSource = source;
+        [asset.resourceLoader setDelegate:source queue:source->queue];
+    }
+    media.item = [AVPlayerItem playerItemWithAsset:asset];
+    media.output = [[AVPlayerItemVideoOutput alloc] initWithPixelBufferAttributes:@{
+        (__bridge NSString *)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
+    }];
+    [media.item addOutput:media.output];
+    media.player = [AVPlayer playerWithPlayerItem:media.item];
+    media.player.allowsExternalPlayback = NO;
+    return (__bridge_retained void *)media;
+}
+
 void *paw_media_open(const char *path) {
     @autoreleasepool {
         @try {
             NSURL *url = [NSURL fileURLWithFileSystemRepresentation:path isDirectory:NO relativeToURL:nil];
-            AVURLAsset *asset = [[AVURLAsset alloc] initWithURL:url options:@{
-                AVURLAssetReferenceRestrictionsKey: @(AVAssetReferenceRestrictionForbidAll),
-                AVURLAssetShouldSupportAliasDataReferencesKey: @NO,
-            }];
-            PawMedia *media = [[PawMedia alloc] init];
-            media.item = [AVPlayerItem playerItemWithAsset:asset];
-            media.output = [[AVPlayerItemVideoOutput alloc] initWithPixelBufferAttributes:@{
-                (__bridge NSString *)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
-            }];
-            [media.item addOutput:media.output];
-            media.player = [AVPlayer playerWithPlayerItem:media.item];
-            media.player.allowsExternalPlayback = NO;
-            return (__bridge_retained void *)media;
+            return open_media(url, nil);
         } @catch (NSException *exception) {
             return NULL;
         }
     }
+}
+
+void *paw_media_open_descriptor(int32_t fd, const char *extension, int32_t *error) {
+    @autoreleasepool {
+        @try {
+            struct stat st;
+            // The process owns this descriptor until exit, including any
+            // reads still completing on the delegate queue during teardown.
+            if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0 || fstat(fd, &st) < 0) {
+                *error = errno;
+                return NULL;
+            }
+            if (!S_ISREG(st.st_mode) || st.st_size < 0) {
+                return NULL;
+            }
+            NSString *suffix = [NSString stringWithUTF8String:extension];
+            NSString *identifier = [UTType typeWithFilenameExtension:suffix].identifier;
+            if (identifier == nil) {
+                return NULL;
+            }
+            PawMediaFileSource *source = [[PawMediaFileSource alloc] init];
+            source->descriptor = fd;
+            source->length = st.st_size;
+            source->url = [NSURL URLWithString:[@"paw-media://selected/media." stringByAppendingString:suffix]];
+            source->contentType = identifier;
+            source->queue = dispatch_queue_create("pawcommander.media.read",
+                dispatch_queue_attr_make_with_autorelease_frequency(DISPATCH_QUEUE_SERIAL,
+                    DISPATCH_AUTORELEASE_FREQUENCY_WORK_ITEM));
+            return open_media(source->url, source);
+        } @catch (NSException *exception) {
+            return NULL;
+        }
+    }
+}
+
+int32_t paw_media_read_failure(void *handle) {
+    PawMedia *media = (__bridge PawMedia *)handle;
+    return media.fileSource.readFailure;
 }
 
 void paw_media_close(void *handle) {

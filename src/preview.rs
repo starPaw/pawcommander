@@ -861,9 +861,7 @@ fn remote_file_preview(
     let location = &target.location;
     #[cfg(target_os = "macos")]
     if media::supported(location.path()) {
-        return Ok(Content::Media(Box::new(media::Player::new(
-            location.clone(),
-        ))));
+        return Ok(Content::Media(Box::new(media::Player::new(target.clone()))));
     }
     #[cfg(target_os = "macos")]
     if pdf::is_pdf(location.path()) {
@@ -971,9 +969,7 @@ fn load_content(
     let path = target.location.path();
     #[cfg(target_os = "macos")]
     if media::supported(path) {
-        return Ok(Content::Media(Box::new(media::Player::new(
-            Location::Local(path.into()),
-        ))));
+        return Ok(Content::Media(Box::new(media::Player::new(target.clone()))));
     }
     #[cfg(target_os = "macos")]
     if pdf::is_pdf(path) {

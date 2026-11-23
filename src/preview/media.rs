@@ -3,7 +3,7 @@ mod view;
 mod worker;
 
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::{ffi::OsStr, path::Path};
 
 pub(super) use view::Player;
 pub(crate) use worker::run as run_media_worker;
@@ -12,13 +12,21 @@ const VIDEO_EDGE: u32 = 1280;
 const SFTP_LIMIT: u64 = 128 * 1024 * 1024;
 
 pub(super) fn supported(path: &Path) -> bool {
-    path.extension().is_some_and(|extension| {
-        [
-            "aac", "aif", "aiff", "caf", "flac", "m4a", "m4b", "mp3", "wav", "m4v", "mov", "mp4",
-        ]
-        .iter()
-        .any(|name| extension.eq_ignore_ascii_case(name))
-    })
+    path.extension().and_then(media_extension).is_some()
+}
+
+fn media_extension(extension: &OsStr) -> Option<&'static str> {
+    [
+        "aac", "aif", "aiff", "caf", "flac", "m4a", "m4b", "mp3", "wav", "m4v", "mov", "mp4",
+    ]
+    .into_iter()
+    .find(|name| extension.eq_ignore_ascii_case(name))
+}
+
+#[derive(Serialize, Deserialize)]
+enum OpenSource {
+    Path,
+    Descriptor { fd: i32, extension: String },
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -89,6 +97,8 @@ enum Reply {
         metadata: Option<Metadata>,
     },
     Failed,
+    ReadError(i32),
+    Truncated,
 }
 
 struct Frame {
