@@ -18,6 +18,7 @@ mod source;
 mod table;
 
 use self::encoding::Codec;
+use self::source::Target;
 use crate::file_error::{AccessAction, AccessError, MutationError, PreviewError};
 use crate::i18n::file_error;
 use crate::operations::{Cancellation, TransferError};
@@ -54,7 +55,7 @@ const IMAGE_EDGE_LIMIT: u32 = 8192;
 
 struct Request {
     generation: u64,
-    path: Location,
+    target: Target,
     context: egui::Context,
     viewport: egui::ViewportId,
     cancel: Cancellation,
@@ -136,7 +137,7 @@ impl From<&vfs::FileEntry> for Fingerprint {
 pub struct Preview {
     requests: Sender<Request>,
     responses: Receiver<Response>,
-    path: Option<Location>,
+    target: Option<Target>,
     generation: u64,
     result: Option<Result<Loaded, TransferError>>,
     texture: Option<egui::TextureHandle>,
@@ -177,8 +178,12 @@ impl Preview {
                 if request.cancel.is_requested() {
                     continue;
                 }
-                let result =
-                    load_location(&request.path, &request.cancel, quick_look, request.encoding);
+                let result = load_location(
+                    &request.target,
+                    &request.cancel,
+                    quick_look,
+                    request.encoding,
+                );
                 if request.cancel.is_requested() {
                     continue;
                 }
@@ -197,7 +202,7 @@ impl Preview {
         Self {
             requests,
             responses,
-            path: None,
+            target: None,
             generation: 0,
             result: None,
             texture: None,
@@ -244,6 +249,7 @@ impl Preview {
                     .inner
                     .clicked()
                 {
+                    self.target = path.cloned().map(Target::from);
                     self.refresh();
                     ui.ctx().request_repaint();
                 }
@@ -276,7 +282,7 @@ impl Preview {
         path: &Location,
         fingerprint: Fingerprint,
     ) {
-        let changed_path = self.path.as_ref() != Some(path);
+        let changed_path = self.target.as_ref().map(|target| &target.location) != Some(path);
         ui.add(egui::Label::new(RichText::new(path.name()).heading()).truncate());
         if !path.is_archive() {
             let previous = self.hex_mode;
@@ -445,32 +451,33 @@ impl Preview {
         path: Option<&Location>,
         fingerprint: Option<Fingerprint>,
     ) {
-        let changed_path = self.path.as_ref() != path;
+        let changed_path = self.target.as_ref().map(|target| &target.location) != path;
         if changed_path {
             self.encoding = None;
+            self.target = path.cloned().map(Target::from);
         }
         if changed_path || self.fingerprint != fingerprint || self.dirty {
             self.cancel.request();
             self.cancel = Cancellation::default();
             self.fingerprint = fingerprint;
             self.dirty = false;
-            self.path = path.cloned();
             self.generation = self.generation.wrapping_add(1);
             self.result = None;
             self.hex = None;
             self.text.find.clear(ctx);
             self.text = TextView::default();
             self.texture = None;
-            if let Some(path) = path {
+            if let Some(target) = &self.target {
+                let path = &target.location;
                 if path.is_archive() {
                     self.result = Some(Err(MutationError::ReadOnlyArchive(path.clone()).into()));
                 } else if self.hex_mode {
-                    self.hex = Some(hex::Document::start(path.clone(), ctx).map(Box::new));
+                    self.hex = Some(hex::Document::start(target.clone(), ctx).map(Box::new));
                 } else if self
                     .requests
                     .send(Request {
                         generation: self.generation,
-                        path: path.clone(),
+                        target: target.clone(),
                         context: ctx.clone(),
                         viewport: ctx.viewport_id(),
                         cancel: self.cancel.clone(),
@@ -776,14 +783,17 @@ fn draw_icon(ui: &mut egui::Ui, is_dir: bool, name: &str) {
 }
 
 fn load_location(
-    location: &Location,
+    target: &Target,
     cancel: &Cancellation,
     quick_look: bool,
     encoding: Option<Codec>,
 ) -> Result<Loaded, TransferError> {
     cancel.check()?;
-    if let Some(path) = location.local() {
-        return load(path, cancel, quick_look, encoding);
+    let location = &target.location;
+    if location.local().is_some() {
+        #[cfg(target_os = "macos")]
+        target.capture_mount()?;
+        return target.checked(load_local(target, cancel, quick_look, encoding));
     }
     let separator = quick_look
         .then(|| table::Separator::from_path(location.path()))
@@ -808,13 +818,13 @@ fn load_location(
         Content::Directory
     } else if let Some(separator) = separator {
         Content::Table(Box::new(table::Document::new(
-            location.clone(),
+            target.clone(),
             separator,
             Codec::choose(encoding, &bytes),
         )))
     } else {
         let length = stat.size.unwrap_or(bytes.len() as u64);
-        remote_file_preview(location, bytes, length, cancel, quick_look, encoding)
+        remote_file_preview(target, bytes, length, cancel, quick_look, encoding)
             .unwrap_or_else(Content::Unavailable)
     };
     Ok(Loaded {
@@ -841,13 +851,14 @@ fn load_location(
 }
 
 fn remote_file_preview(
-    location: &Location,
+    target: &Target,
     bytes: Vec<u8>,
     length: u64,
     cancel: &Cancellation,
     quick_look: bool,
     encoding: Option<Codec>,
 ) -> Result<Content, TransferError> {
+    let location = &target.location;
     #[cfg(target_os = "macos")]
     if media::supported(location.path()) {
         return Ok(Content::Media(Box::new(media::Player::new(
@@ -859,7 +870,7 @@ fn remote_file_preview(
         return pdf_content(bytes, length, cancel);
     }
     if image_path_format(location.path()).is_none() {
-        return Ok(text_content(location, bytes, quick_look, encoding));
+        return Ok(text_content(target, bytes, quick_look, encoding));
     }
     if length > IMAGE_LIMIT {
         return Err(image_too_large().into());
@@ -867,18 +878,19 @@ fn remote_file_preview(
     image_content(&bytes, cancel)
 }
 
-fn load(
-    path: &Path,
+fn load_local(
+    target: &Target,
     cancel: &Cancellation,
     quick_look: bool,
     encoding: Option<Codec>,
 ) -> Result<Loaded, TransferError> {
-    let location = Location::Local(path.into());
+    let location = &target.location;
+    let path = location.path();
     let link_metadata = fs::symlink_metadata(path)
-        .map_err(|error| AccessError::new(&location, AccessAction::ReadMetadata, error))?;
+        .map_err(|error| AccessError::new(location, AccessAction::ReadMetadata, error))?;
     let is_link = link_metadata.file_type().is_symlink();
     let metadata = fs::metadata(path)
-        .map_err(|error| AccessError::new(&location, AccessAction::ReadMetadata, error))?;
+        .map_err(|error| AccessError::new(location, AccessAction::ReadMetadata, error))?;
     let is_dir = metadata.is_dir();
     let kind = if is_link {
         if is_dir {
@@ -906,19 +918,24 @@ fn load(
         Content::Directory
     } else if !metadata.is_file() {
         // Do not open sockets, devices or named pipes: a read may never finish.
-        Content::Unavailable(PreviewError::UnsupportedFile(location).into())
+        Content::Unavailable(PreviewError::UnsupportedFile(location.clone()).into())
     } else if quick_look && let Some(separator) = table::Separator::from_path(path) {
-        match read_bounded(path, 3, cancel) {
+        match read_bounded(target, 3, cancel) {
             Ok(prefix) => Content::Table(Box::new(table::Document::new(
-                location,
+                target.clone(),
                 separator,
                 Codec::choose(encoding, &prefix),
             ))),
             Err(error) => Content::Unavailable(error),
         }
     } else {
-        load_content(path, metadata.len(), cancel, quick_look, encoding)
+        load_content(target, metadata.len(), cancel, quick_look, encoding)
             .unwrap_or_else(Content::Unavailable)
+    };
+    #[cfg(target_os = "macos")]
+    let content = match content {
+        Content::Unavailable(error) if source::is_smb_mount_error(&error) => return Err(error),
+        content => content,
     };
     Ok(Loaded {
         kind: kind.into(),
@@ -944,13 +961,14 @@ pub(crate) fn image_path_format(path: &Path) -> Option<image::ImageFormat> {
 }
 
 fn load_content(
-    path: &Path,
+    target: &Target,
     length: u64,
     cancel: &Cancellation,
     quick_look: bool,
     encoding: Option<Codec>,
 ) -> Result<Content, TransferError> {
     cancel.check()?;
+    let path = target.location.path();
     #[cfg(target_os = "macos")]
     if media::supported(path) {
         return Ok(Content::Media(Box::new(media::Player::new(
@@ -962,19 +980,19 @@ fn load_content(
         if length > pdf::FILE_LIMIT as u64 {
             return Err(pdf_too_large().into());
         }
-        let bytes = read_bounded(path, pdf::FILE_LIMIT, cancel)?;
+        let bytes = read_bounded(target, pdf::FILE_LIMIT, cancel)?;
         return pdf_content(bytes, length, cancel);
     }
     if image_path_format(path).is_some() {
         if length > IMAGE_LIMIT {
             return Err(image_too_large().into());
         }
-        let bytes = read_bounded(path, IMAGE_LIMIT as usize, cancel)?;
+        let bytes = read_bounded(target, IMAGE_LIMIT as usize, cancel)?;
         return image_content(&bytes, cancel);
     }
     Ok(text_content(
-        &Location::Local(path.into()),
-        read_bounded(path, TEXT_LIMIT, cancel)?,
+        target,
+        read_bounded(target, TEXT_LIMIT, cancel)?,
         quick_look,
         encoding,
     ))
@@ -1013,11 +1031,12 @@ fn image_content(bytes: &[u8], cancel: &Cancellation) -> Result<Content, Transfe
 }
 
 fn text_content(
-    location: &Location,
+    target: &Target,
     mut bytes: Vec<u8>,
     quick_look: bool,
     encoding: Option<Codec>,
 ) -> Content {
+    let location = &target.location;
     let truncated = bytes.len() > TEXT_LIMIT;
     bytes.truncate(TEXT_LIMIT);
     let encoding = Codec::choose(encoding, &bytes);
@@ -1031,7 +1050,7 @@ fn text_content(
     let markup = markup::parse(location.path(), &body);
     if quick_look && truncated {
         return Content::LargeText(Box::new(large_text::Document::new(
-            location.clone(),
+            target.clone(),
             markup,
             encoding,
         )));
@@ -1090,15 +1109,12 @@ fn open_regular(path: &Path) -> Result<File, TransferError> {
 }
 
 fn read_bounded(
-    path: &Path,
+    target: &Target,
     limit: usize,
     cancel: &Cancellation,
 ) -> Result<Vec<u8>, TransferError> {
     cancel.check()?;
-    let mut file = open_regular(path)?;
-    cancel
-        .read_up_to(&mut file, limit.saturating_add(1))
-        .map_err(|error| AccessError::read(&Location::Local(path.into()), error).into())
+    source::Source::open(target)?.read_up_to(limit.saturating_add(1), cancel)
 }
 
 fn preview_text_chars(text: &str) -> bool {
@@ -1141,6 +1157,10 @@ fn format_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn load_test_file(path: &Path) -> Loaded {
+        let target = Location::Local(path.into()).into();
+        load_location(&target, &Cancellation::default(), false, None).unwrap()
+    }
 
     #[test]
     fn markup_load_uses_the_bounded_prefix_without_modifying_source() {
@@ -1148,7 +1168,7 @@ mod tests {
         let path = dir.path().join("document.MARKDOWN");
         let original = format!("# Заголовок\n\n{}", "я".repeat(TEXT_LIMIT));
         fs::write(&path, &original).unwrap();
-        let loaded = load(&path, &Cancellation::default(), false, None).unwrap();
+        let loaded = load_test_file(&path);
         assert!(matches!(
             loaded.content,
             Content::Text {
@@ -1535,7 +1555,13 @@ mod tests {
     pub(crate) fn check_sftp_image_metadata(location: &Location) {
         let fixture = photo_fixture();
         fs::write(location.path(), &fixture).unwrap();
-        let loaded = load_location(location, &Cancellation::default(), true, None).unwrap();
+        let loaded = load_location(
+            &location.clone().into(),
+            &Cancellation::default(),
+            true,
+            None,
+        )
+        .unwrap();
         assert!(matches!(
             loaded.content,
             Content::Image {
@@ -1647,7 +1673,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("large.txt");
         fs::write(&path, "я".repeat(TEXT_LIMIT)).unwrap();
-        let loaded = load(&path, &Cancellation::default(), false, None).unwrap();
+        let loaded = load_test_file(&path);
         match loaded.content {
             Content::Text {
                 body, truncated, ..
@@ -1667,14 +1693,14 @@ mod tests {
         image::RgbaImage::new(IMAGE_EDGE_LIMIT + 1, 1)
             .save(&path)
             .unwrap();
-        let loaded = load(&path, &Cancellation::default(), false, None).unwrap();
+        let loaded = load_test_file(&path);
         assert!(matches!(loaded.content, Content::Unavailable(_)));
     }
 
     #[test]
     fn directory_does_not_get_a_recursive_size_or_text_preview() {
         let directory = tempfile::tempdir().unwrap();
-        let loaded = load(directory.path(), &Cancellation::default(), false, None).unwrap();
+        let loaded = load_test_file(directory.path());
         assert!(loaded.is_dir);
         assert!(loaded.size.is_none());
         assert!(matches!(loaded.content, Content::Directory));

@@ -3,7 +3,14 @@ use crate::{
     operations::{Cancellation, TransferError},
     vfs::{self, Location},
 };
+#[cfg(target_os = "macos")]
+use crate::{
+    file_error::{Failure, MutationError, SmbMutationAction},
+    smb::MutationMount,
+};
 use memchr::memmem;
+#[cfg(target_os = "macos")]
+use std::sync::{Arc, Mutex};
 use std::{
     fs::File,
     io::{self, Read, Seek, SeekFrom},
@@ -13,6 +20,60 @@ use std::{
 
 pub(super) const READ_BLOCK: usize = 64 * 1024;
 
+/// One selected path, shared by its initial read and any paged readers.
+#[derive(Clone)]
+pub(super) struct Target {
+    pub(super) location: Location,
+    #[cfg(target_os = "macos")]
+    mount: Option<Arc<Mutex<MutationMount>>>,
+}
+
+impl From<Location> for Target {
+    fn from(location: Location) -> Self {
+        Self {
+            #[cfg(target_os = "macos")]
+            mount: location.local().map(|_| {
+                Arc::new(Mutex::new(MutationMount::new(
+                    SmbMutationAction::ReadPreview,
+                )))
+            }),
+            location,
+        }
+    }
+}
+
+impl Target {
+    #[cfg(target_os = "macos")]
+    pub(super) fn capture_mount(&self) -> Result<Option<MutationMount>, TransferError> {
+        let Some(mount) = &self.mount else {
+            return Ok(None);
+        };
+        let mut mount = mount.lock().unwrap();
+        if mount.is_owned() {
+            mount.recheck()?;
+        } else {
+            mount.check(self.location.path())?;
+        }
+        Ok(mount.is_owned().then(|| mount.clone()))
+    }
+
+    pub(super) fn checked<T>(&self, result: Result<T, TransferError>) -> Result<T, TransferError> {
+        #[cfg(target_os = "macos")]
+        if !matches!(result, Err(TransferError::Cancelled))
+            && let Some(mount) = &self.mount
+        {
+            mount.lock().unwrap().recheck()?;
+        }
+        result
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn is_smb_mount_error(error: &TransferError) -> bool {
+    matches!(error, TransferError::Failed(Failure::Mutation(reason))
+        if matches!(reason.as_ref(), MutationError::SmbMount { .. }))
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct Version {
     pub size: Option<u64>,
@@ -21,7 +82,7 @@ pub(super) struct Version {
 }
 
 pub(super) struct Source {
-    location: Location,
+    target: Target,
     file: PreviewFile,
 }
 
@@ -31,25 +92,38 @@ enum PreviewFile {
 }
 
 impl Source {
-    pub(super) fn open(location: &Location) -> Result<Self, TransferError> {
-        let file = if let Some(path) = location.local() {
-            PreviewFile::Local(super::open_regular(path)?)
+    pub(super) fn open(target: &Target) -> Result<Self, TransferError> {
+        let file = if let Some(path) = target.location.local() {
+            #[cfg(target_os = "macos")]
+            let mount = target.capture_mount()?;
+            let file = target.checked(super::open_regular(path))?;
+            #[cfg(target_os = "macos")]
+            if let Some(mount) = mount {
+                mount.verify_file(&file, path)?;
+            }
+            PreviewFile::Local(file)
         } else {
-            PreviewFile::Sftp(vfs::open_preview_stream(location)?)
+            PreviewFile::Sftp(vfs::open_preview_stream(&target.location)?)
         };
         Ok(Self {
-            location: location.clone(),
+            target: target.clone(),
             file,
         })
     }
 
     pub(super) fn version(&mut self) -> Result<Version, TransferError> {
+        let version = self.read_version();
+        self.checked(version)
+    }
+
+    fn read_version(&mut self) -> Result<Version, TransferError> {
         let action = AccessAction::ReadOpenMetadata;
+        let location = &self.target.location;
         match &mut self.file {
             PreviewFile::Local(file) => {
                 let metadata = file
                     .metadata()
-                    .map_err(|error| AccessError::new(&self.location, action, error))?;
+                    .map_err(|error| AccessError::new(location, action, error))?;
                 #[cfg(unix)]
                 let identity = {
                     use std::os::unix::fs::MetadataExt;
@@ -66,7 +140,7 @@ impl Source {
             PreviewFile::Sftp(file) => {
                 let stat = file
                     .stat()
-                    .map_err(|error| AccessError::new(&self.location, action, error))?;
+                    .map_err(|error| AccessError::new(location, action, error))?;
                 Ok(Version {
                     size: stat.size,
                     changed: stat.mtime.and_then(|time| {
@@ -78,12 +152,29 @@ impl Source {
         }
     }
 
+    pub(super) fn checked<T>(&self, result: Result<T, TransferError>) -> Result<T, TransferError> {
+        self.target.checked(result)
+    }
+
+    pub(super) fn read_up_to(
+        &mut self,
+        limit: usize,
+        cancel: &Cancellation,
+    ) -> Result<Vec<u8>, TransferError> {
+        let result = cancel
+            .read_up_to(self, limit)
+            .map_err(|error| AccessError::read(&self.target.location, error).into());
+        self.checked(result)
+    }
+
     pub(super) fn seek_to(&mut self, byte: u64) -> Result<u64, TransferError> {
-        match &mut self.file {
+        let offset = match &mut self.file {
             PreviewFile::Local(file) => file.seek(SeekFrom::Start(byte)),
             PreviewFile::Sftp(file) => file.seek(SeekFrom::Start(byte)),
-        }
-        .map_err(|error| AccessError::read(&self.location, error).into())
+        };
+        offset.or_else(|error| {
+            self.checked(Err(AccessError::read(&self.target.location, error).into()))
+        })
     }
 }
 
@@ -142,7 +233,10 @@ impl<'a> Window<'a> {
                     self.offset += count as u64;
                 }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                Err(error) => return Err(AccessError::read(&self.source.location, error).into()),
+                Err(error) => {
+                    let error = AccessError::read(&self.source.target.location, error).into();
+                    return self.source.checked(Err(error));
+                }
             }
         }
         Ok(used)
@@ -154,7 +248,10 @@ impl<'a> Window<'a> {
         buffer: &'b mut [u8],
     ) -> Result<&'b [u8], TransferError> {
         if self.read_at(byte, buffer)? != buffer.len() {
-            return Err(PreviewError::ChangedWhileReading(self.source.location.clone()).into());
+            return self.source.checked(Err(PreviewError::ChangedWhileReading(
+                self.source.target.location.clone(),
+            )
+            .into()));
         }
         Ok(buffer)
     }

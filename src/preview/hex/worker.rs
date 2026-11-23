@@ -1,12 +1,13 @@
 use super::{PAGE_BYTES, PATTERN_LIMIT};
+#[cfg(test)]
+use crate::vfs::Location;
 use crate::{
     file_error::PreviewError,
     operations::{Cancellation, TransferError},
     preview::{
         read_worker,
-        source::{Source, Version, Window, READ_BLOCK},
+        source::{Source, Target, Version, Window, READ_BLOCK},
     },
-    vfs::Location,
 };
 use eframe::egui;
 use memchr::memmem;
@@ -45,20 +46,21 @@ type Output = (Version, ResultPage);
 pub(super) type Worker = read_worker::Worker<(Work, Option<Version>), Output>;
 pub(super) type Pending = read_worker::Pending<Output>;
 
-pub(super) fn start(location: Location, ctx: &egui::Context) -> Result<Worker, TransferError> {
+pub(super) fn start(target: Target, ctx: &egui::Context) -> Result<Worker, TransferError> {
     Worker::start("pawcommander-hex", ctx, move |(work, version), cancel| {
-        run(&location, work, *version, cancel)
+        run(&target, work, *version, cancel)
     })
 }
 
 fn run(
-    location: &Location,
+    target: &Target,
     work: &Work,
     expected: Option<Version>,
     cancel: &Cancellation,
 ) -> Result<Output, TransferError> {
     cancel.check()?;
-    let mut source = Source::open(location)?;
+    let location = &target.location;
+    let mut source = Source::open(target)?;
     let version = source.version()?;
     if expected.is_some_and(|expected| version != expected) {
         return Err(PreviewError::ChangedWhileReading(location.clone()).into());
@@ -186,11 +188,12 @@ mod tests {
 
     pub(crate) fn check_sftp_hex(location: &Location, at: u64, pattern: &[u8]) {
         let cancel = Cancellation::default();
-        let (version, first) = run(location, &Work::Page(0), None, &cancel).unwrap();
+        let target = location.clone().into();
+        let (version, first) = run(&target, &Work::Page(0), None, &cancel).unwrap();
         let page = require_page(first);
         assert_eq!(page.bytes.len() as u64, PAGE_BYTES);
         let (_, found) = run(
-            location,
+            &target,
             &Work::Search {
                 pattern: pattern.to_vec(),
                 from: 0,
@@ -219,7 +222,7 @@ mod tests {
         bytes[SECOND..SECOND + pattern.len()].copy_from_slice(pattern);
         let mut file = tempfile::NamedTempFile::new().unwrap();
         file.write_all(&bytes).unwrap();
-        let mut source = Source::open(&Location::Local(file.path().into())).unwrap();
+        let mut source = Source::open(&Location::Local(file.path().into()).into()).unwrap();
         let size = bytes.len() as u64;
         let cancel = Cancellation::default();
         let mut window = Window::new(&mut source, Some(size), &cancel);
@@ -287,7 +290,7 @@ mod tests {
         assert_eq!(&hit_page.bytes[PAGE_BYTES as usize - 2..], pattern);
         assert!(hit_page.has_next);
 
-        let mut source = Source::open(&Location::Local(file.path().into())).unwrap();
+        let mut source = Source::open(&Location::Local(file.path().into()).into()).unwrap();
         let mut unknown_size = Window::new(&mut source, None, &cancel);
         assert_eq!(
             find(
@@ -324,11 +327,11 @@ mod tests {
     #[test]
     fn a_change_to_the_open_file_invalidates_the_saved_offsets() {
         let file = tempfile::NamedTempFile::new().unwrap();
-        let location = Location::Local(file.path().to_owned());
+        let target = Location::Local(file.path().to_owned()).into();
         let cancel = Cancellation::default();
-        let (version, empty) = run(&location, &Work::Page(0), None, &cancel).unwrap();
+        let (version, empty) = run(&target, &Work::Page(0), None, &cancel).unwrap();
         assert!(require_page(empty).bytes.is_empty());
         std::fs::write(file.path(), b"a different file size").unwrap();
-        assert!(run(&location, &Work::Page(0), Some(version), &cancel).is_err());
+        assert!(run(&target, &Work::Page(0), Some(version), &cancel).is_err());
     }
 }

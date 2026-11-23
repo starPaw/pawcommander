@@ -6,13 +6,16 @@ use crate::{
     i18n::{file_error, text},
     icons::{self, Icon},
     operations::TransferError,
-    preview::{code::Highlights, markup, source::Version},
-    vfs::Location,
+    preview::{
+        code::Highlights,
+        markup,
+        source::{Target, Version},
+    },
 };
 use eframe::egui;
 
 pub(in crate::preview) struct Document {
-    location: Location,
+    target: Target,
     markup: Option<markup::Document>,
     encoding: Codec,
     source: bool,
@@ -21,12 +24,12 @@ pub(in crate::preview) struct Document {
 
 impl Document {
     pub(in crate::preview) fn new(
-        location: Location,
+        target: Target,
         markup: Option<markup::Document>,
         encoding: Codec,
     ) -> Self {
         Self {
-            location,
+            target,
             source: markup.is_none(),
             markup,
             encoding,
@@ -58,7 +61,7 @@ impl Document {
         }
         let viewer = self
             .viewer
-            .get_or_insert_with(|| Viewer::new(self.location.clone(), self.encoding, ui.ctx()));
+            .get_or_insert_with(|| Viewer::new(self.target.clone(), self.encoding, ui.ctx()));
         match viewer {
             Ok(viewer) => viewer.show(ui),
             Err(error) => {
@@ -90,12 +93,8 @@ struct Viewer {
 }
 
 impl Viewer {
-    fn new(
-        location: Location,
-        encoding: Codec,
-        ctx: &egui::Context,
-    ) -> Result<Self, TransferError> {
-        let worker = worker::start(location, encoding, ctx)?;
+    fn new(target: Target, encoding: Codec, ctx: &egui::Context) -> Result<Self, TransferError> {
+        let worker = worker::start(target, encoding, ctx)?;
         let pending = worker.load((
             Work::Page {
                 index: 0,
@@ -353,6 +352,7 @@ impl Viewer {
 mod tests {
     use super::*;
     use crate::test_ui::ContextExt as _;
+    use crate::vfs::Location;
     use eframe::egui::{Event, Key, Modifiers};
     use std::{io::Write, thread, time::Duration};
 
@@ -366,8 +366,11 @@ mod tests {
             }
         }
         let ctx = egui::Context::default();
-        let mut document =
-            Document::new(Location::Local(file.path().to_owned()), None, Codec::Utf8);
+        let mut document = Document::new(
+            Location::Local(file.path().to_owned()).into(),
+            None,
+            Codec::Utf8,
+        );
         let draw = |document: &mut Document, events| {
             ctx.run_test_ui(
                 egui::RawInput {
