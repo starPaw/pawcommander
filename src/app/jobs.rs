@@ -1,5 +1,6 @@
 use super::dialogs::Dialog;
 use super::directory::{FolderVisit, AUTO_REFRESH_INTERVAL};
+use super::file_result::FileResult;
 #[cfg(target_os = "macos")]
 use super::file_templates::{creation_notice, CreationResult};
 use super::state::FolderMode;
@@ -71,9 +72,11 @@ pub(super) struct Job {
 }
 
 type TextWork = Box<dyn FnOnce(&mut Progress) -> Result<String, TransferError> + Send>;
+type FileWork = Box<dyn FnOnce(&mut Progress) -> FileResult + Send>;
 
 enum JobWork {
     Text(TextWork),
+    File(FileWork),
     #[cfg(target_os = "macos")]
     CreateFile(Box<crate::vfs::file_templates::NewFile>),
     #[cfg(target_os = "macos")]
@@ -82,6 +85,7 @@ enum JobWork {
 
 enum WorkResult {
     Text(Result<String, TransferError>),
+    File(FileResult),
     #[cfg(target_os = "macos")]
     CreateFile(Location, Arc<CreationResult>),
     #[cfg(target_os = "macos")]
@@ -101,6 +105,7 @@ impl JobWork {
     fn run(self, progress: &mut Progress) -> WorkResult {
         match self {
             Self::Text(work) => WorkResult::Text(work(progress)),
+            Self::File(work) => WorkResult::File(work(progress)),
             #[cfg(target_os = "macos")]
             Self::CreateFile(job) => {
                 let target = job.target();
@@ -117,6 +122,11 @@ impl JobWork {
 
 pub(super) enum JobCompletion {
     Text(Result<String, String>),
+    #[cfg(target_os = "macos")]
+    File {
+        result: Box<FileResult>,
+        history_warning: Option<String>,
+    },
     #[cfg(target_os = "macos")]
     CreateFile {
         target: Location,
@@ -223,6 +233,7 @@ impl PendingJob {
     pub(super) fn run_text_work(self, progress: &mut Progress) -> Result<String, TransferError> {
         match self.work.run(progress) {
             WorkResult::Text(result) => result,
+            WorkResult::File(result) => result.notice().map_err(Into::into),
             #[cfg(target_os = "macos")]
             WorkResult::RemoteSave(..) | WorkResult::CreateFile(..) => {
                 panic!("expected a text work result")
@@ -319,12 +330,24 @@ impl PawCommander {
         description: String,
         work: impl FnOnce(&mut Progress) -> Result<String, String> + Send + 'static,
     ) {
+        self.start_file_job(ctx, label, description, move |progress| {
+            FileResult::text(work(progress).map_err(Into::into))
+        });
+    }
+
+    pub(super) fn start_file_job(
+        &mut self,
+        ctx: &egui::Context,
+        label: &str,
+        description: String,
+        work: impl FnOnce(&mut Progress) -> FileResult + Send + 'static,
+    ) {
         self.submit_job(
             ctx,
             PendingJob {
                 label: label.into(),
                 description,
-                work: JobWork::text(move |progress| work(progress).map_err(TransferError::from)),
+                work: JobWork::File(Box::new(work)),
                 transfer: None,
                 cut: None,
                 retry_origin: None,
@@ -436,14 +459,14 @@ impl PawCommander {
         );
     }
 
-    pub(super) fn start_stoppable_job(
+    pub(super) fn start_stoppable_file_job(
         &mut self,
         ctx: &egui::Context,
         label: &str,
         description: String,
-        work: impl FnOnce(&mut Progress) -> Result<String, String> + Send + 'static,
+        work: impl FnOnce(&mut Progress) -> FileResult + Send + 'static,
     ) {
-        self.start_conflict_job(ctx, label, description, move |progress, _| work(progress));
+        self.start_conflict_file_job(ctx, label, description, move |progress, _| work(progress));
     }
 
     #[cfg(target_os = "macos")]
@@ -454,7 +477,9 @@ impl PawCommander {
         description: String,
         work: impl FnOnce(&mut Progress) -> Result<String, TransferError> + Send + 'static,
     ) {
-        self.start_conflict_job(ctx, label, description, move |progress, _| work(progress));
+        self.start_stoppable_file_job(ctx, label, description, move |progress| {
+            FileResult::text(work(progress))
+        });
     }
 
     #[cfg(target_os = "macos")]
@@ -497,6 +522,7 @@ impl PawCommander {
     ) {
         let label = crate::shortcuts::Command::CompatibleNames.label();
         let description = format!("{label} · {}", plan.destination().display().escape_debug());
+        let destination = plan.destination().clone();
         let verify = plan.kind() == TransferKind::Copy && self.settings.verify_copies;
         let (_events, receive) = mpsc::channel();
         self.submit_job(
@@ -504,39 +530,13 @@ impl PawCommander {
             PendingJob {
                 label: label.into(),
                 description,
-                work: JobWork::text(move |progress| {
+                work: JobWork::File(Box::new(move |progress| {
                     progress.set_copy_verification(verify);
-                    let summary = plan.apply(progress).map_err(|failure| {
-                        let error = crate::i18n::file_error(&failure.error);
-                        if failure.summary.preparing {
-                            error
-                        } else {
-                            crate::tr_format!(
-                                "Completed items: {completed}. {error}",
-                                completed = failure.summary.completed,
-                                error = error
-                            )
-                        }
-                    })?;
-                    let completed = summary.completed;
-                    let mut message = if summary.cancelled {
-                        crate::tr_format!(
-                            "Completed items: {completed}. {error}",
-                            completed = completed,
-                            error = crate::tr_format!("Operation cancelled")
-                        )
-                    } else {
-                        crate::tr_format!(
-                            "Transfer with compatible names finished. Items: {completed}",
-                            completed = completed
-                        )
-                    };
-                    if summary.metadata_warnings != 0 {
-                        message.push('\n');
-                        message.push_str(crate::i18n::text!("Даты или права доступа сохранены частично. Подробности указаны в строках журнала."));
+                    FileResult::CompatibleNames {
+                        destination,
+                        result: plan.apply(progress),
                     }
-                    Ok(message)
-                }),
+                })),
                 transfer: Some(TransferInteraction {
                     events: receive,
                     cut_generation: None,
@@ -638,17 +638,11 @@ impl PawCommander {
             PendingJob {
                 label: label.into(),
                 description,
-                work: JobWork::text(move |progress| {
-                    crate::vfs::resume_copy::resume(&directory, &offer.id, progress)
-                        .map(crate::i18n::resume_completion)
-                        .or_else(|error| {
-                            if error.is_completed_cleanup_warning() {
-                                Ok(crate::i18n::file_error(&error))
-                            } else {
-                                Err(error)
-                            }
-                        })
-                }),
+                work: JobWork::File(Box::new(move |progress| {
+                    FileResult::Resume(crate::vfs::resume_copy::resume(
+                        &directory, &offer.id, progress,
+                    ))
+                })),
                 transfer: Some(TransferInteraction {
                     events,
                     cut_generation: None,
@@ -664,7 +658,7 @@ impl PawCommander {
         );
     }
 
-    pub(super) fn start_conflict_job<E: Into<TransferError>>(
+    pub(super) fn start_conflict_file_job(
         &mut self,
         ctx: &egui::Context,
         label: &str,
@@ -672,7 +666,7 @@ impl PawCommander {
         work: impl FnOnce(
                 &mut Progress,
                 &mut dyn FnMut(Conflict) -> Result<Answer, TransferError>,
-            ) -> Result<String, E>
+            ) -> FileResult
             + Send
             + 'static,
     ) {
@@ -683,13 +677,12 @@ impl PawCommander {
             PendingJob {
                 label: label.into(),
                 description,
-                work: JobWork::text(move |progress| {
+                work: JobWork::File(Box::new(move |progress| {
                     let cancel = progress.cancellation();
                     work(progress, &mut |conflict| {
                         ask_conflict(&events, &worker_ctx, &cancel, conflict)
                     })
-                    .map_err(Into::into)
-                }),
+                })),
                 transfer: Some(TransferInteraction {
                     events: receive,
                     cut_generation: None,
@@ -895,6 +888,8 @@ impl PawCommander {
                 let mut saved_edit = None;
                 #[cfg(target_os = "macos")]
                 let mut created_file = None;
+                #[cfg(target_os = "macos")]
+                let mut file_result = None;
                 let result = match result {
                     WorkResult::Text(result) => {
                         let display = if matches!(&result, Err(TransferError::Cancelled)) {
@@ -909,8 +904,19 @@ impl PawCommander {
                                 Err(error) => completion.report_error(error),
                                 Ok(_) => completion.report_success(),
                             }
+                        } else if !remote_save {
+                            file_result = Some(FileResult::text(result));
                         }
                         display
+                    }
+                    WorkResult::File(result) => {
+                        reporter.results.cancelled |= result.cancelled();
+                        let snapshot = result.notice();
+                        #[cfg(target_os = "macos")]
+                        {
+                            file_result = Some(result);
+                        }
+                        snapshot
                     }
                     #[cfg(target_os = "macos")]
                     WorkResult::CreateFile(target, result) => {
@@ -971,6 +977,15 @@ impl PawCommander {
                     let _ = tx.send(JobCompletion::RemoteSave {
                         edit,
                         result,
+                        history_warning: warning,
+                    });
+                    worker_ctx.request_repaint();
+                    return;
+                }
+                #[cfg(target_os = "macos")]
+                if let Some(result) = file_result {
+                    let _ = tx.send(JobCompletion::File {
+                        result: Box::new(result),
                         history_warning: warning,
                     });
                     worker_ctx.request_repaint();
@@ -1291,41 +1306,17 @@ impl PawCommander {
                 })));
                 worker_ctx.request_repaint();
             }
-            #[cfg(target_os = "macos")]
-            if let Err(failure) = &result
-                && failure.completed_with_cleanup_warning()
-            {
-                return Ok(crate::i18n::transfer_failure(failure));
+            FileResult::Transfer {
+                destination,
+                result,
             }
-            let summary = result.map_err(|failure| crate::i18n::transfer_failure(&failure))?;
-            let mut message = crate::i18n::transfer_finished(
-                summary.completed,
-                summary.skipped,
-                &summary
-                    .remaining
-                    .iter()
-                    .map(Location::display)
-                    .collect::<Vec<_>>(),
-                summary.preparing,
-                summary.cancelled,
-                &destination.display(),
-            );
-            if let Some(warning) = &summary.move_history_warning {
-                message.push('\n');
-                message.push_str(&crate::i18n::file_error(warning));
-            }
-            if summary.metadata_warnings != 0 {
-                message.push('\n');
-                message.push_str(crate::i18n::text!("Даты или права доступа сохранены частично. Подробности указаны в строках журнала."));
-            }
-            Ok(message)
         };
         self.submit_job(
             ctx,
             PendingJob {
                 label,
                 description,
-                work: JobWork::text(work),
+                work: JobWork::File(Box::new(work)),
                 transfer: Some(TransferInteraction {
                     events: rx,
                     cut_generation,
@@ -1695,6 +1686,11 @@ impl PawCommander {
                         }
                         result
                     }
+                    #[cfg(target_os = "macos")]
+                    JobCompletion::File {
+                        result,
+                        history_warning,
+                    } => append_history_warning(result.notice(), history_warning),
                     #[cfg(target_os = "macos")]
                     JobCompletion::CreateFile {
                         target,

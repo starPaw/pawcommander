@@ -2,6 +2,8 @@ use super::{
     entry_widget, fs_ops, list_notice, Action, ColumnNavigation, DirectoryEntries, DropTargets,
     EntryOptions, FileEntry, FolderView, Location, PaneOptions, Tab, COMPACT_FILE_ROW_HEIGHT,
 };
+#[cfg(target_os = "macos")]
+use crate::file_error::{ListingError, ListingErrorKind};
 use crate::{i18n::text, icons, operations::TransferError, theme::paint_focus};
 use eframe::egui::{self, RichText, Vec2};
 use std::collections::BTreeMap;
@@ -23,7 +25,7 @@ pub(super) struct Columns {
     tab: Option<u64>,
     archive_index: Option<Arc<crate::archive::Index>>,
     ancestors: Vec<Location>,
-    listings: BTreeMap<Location, Result<DirectoryEntries, String>>,
+    listings: BTreeMap<Location, Result<DirectoryEntries, TransferError>>,
     worker: Option<Read>,
     retry_at: Option<Instant>,
     scroll_geometry: Option<(Location, f32)>,
@@ -108,7 +110,12 @@ impl Columns {
                 Ok(listing) => listing,
                 Err(mpsc::TryRecvError::Empty) => return,
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    Err(text!("Не удалось прочитать папку: фоновая задача завершилась").into())
+                    #[cfg(target_os = "macos")]
+                    let error =
+                        ListingError::new(read.location.clone(), ListingErrorKind::WorkerStopped);
+                    #[cfg(not(target_os = "macos"))]
+                    let error = text!("Не удалось прочитать папку: фоновая задача завершилась");
+                    Err(error.into())
                 }
             };
             if !read.cancelled.load(Ordering::Relaxed) {
@@ -122,7 +129,7 @@ impl Columns {
                         entries.replace(files);
                         Some(Ok(entries))
                     }
-                    Err(error) => Some(Err(crate::i18n::file_error(&error))),
+                    Err(error) => Some(Err(error)),
                 };
                 if let Some(listing) = listing {
                     self.listings.insert(read.location.clone(), listing);
@@ -179,7 +186,12 @@ impl Columns {
                 })
             }
             Err(error) => {
-                self.listings.insert(location, Err(error.to_string()));
+                #[cfg(target_os = "macos")]
+                let error =
+                    ListingError::new(location.clone(), ListingErrorKind::WorkerStart(error));
+                #[cfg(not(target_os = "macos"))]
+                let error = error.to_string();
+                self.listings.insert(location, Err(error.into()));
                 ctx.request_repaint();
             }
         }
@@ -294,7 +306,7 @@ fn show_ancestor(
     tab: &Tab,
     location: &Location,
     child: &Location,
-    listing: Option<&Result<DirectoryEntries, String>>,
+    listing: Option<&Result<DirectoryEntries, TransferError>>,
     options: PaneOptions<'_>,
     drop_targets: &mut DropTargets,
 ) -> Option<ColumnNavigation> {
@@ -323,7 +335,7 @@ fn show_ancestor(
     let entries = match listing {
         Ok(entries) => entries,
         Err(error) => {
-            column_notice(ui, error);
+            column_notice(ui, &crate::i18n::file_error(error));
             return navigation;
         }
     };

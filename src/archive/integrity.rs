@@ -9,7 +9,7 @@ use crate::{
     result_history::Outcome,
     vfs::Location,
 };
-use std::{cell::Cell, io, path::Path};
+use std::{cell::Cell, io, path::Path, sync::Arc};
 
 #[derive(Debug)]
 pub(crate) struct ArchiveVerification {
@@ -18,6 +18,16 @@ pub(crate) struct ArchiveVerification {
     pub(crate) damaged: usize,
     pub(crate) unverified: usize,
     pub(crate) interruption: Option<TransferError>,
+    #[cfg(target_os = "macos")]
+    pub(crate) first_issue: Option<MemberIssue>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+pub(crate) struct MemberIssue {
+    pub(crate) index: usize,
+    pub(crate) name: Option<String>,
+    pub(crate) source: Arc<io::Error>,
 }
 
 pub(crate) fn verify_archive(
@@ -45,6 +55,8 @@ pub(crate) fn verify_archive(
             damaged: 0,
             unverified: 0,
             interruption: None,
+            #[cfg(target_os = "macos")]
+            first_issue: None,
         },
     };
     let result = report.check(path, format, password);
@@ -143,7 +155,7 @@ impl Report<'_> {
                         }
                         records.push((index, record));
                     }
-                    Err(error) => self.member_result(index, Some(name), Err(&error))?,
+                    Err(error) => self.member_result(index, Some(name), Err(error))?,
                 }
                 Ok(())
             },
@@ -161,6 +173,7 @@ impl Report<'_> {
                     &cancel,
                 )
                 .err()
+                .map(Arc::new)
         } else {
             None
         };
@@ -180,7 +193,7 @@ impl Report<'_> {
                 self.member_result(
                     index,
                     name,
-                    Err(&ArchiveIssue::OverlappingZipEntries.io_error()),
+                    Err(ArchiveIssue::OverlappingZipEntries.io_error()),
                 )?;
                 continue;
             }
@@ -195,7 +208,7 @@ impl Report<'_> {
                     Err(ArchiveIssue::ZipCheckPasswordRequired.io_error())
                 }
                 Contents::Encrypted(_) if let Some(ref error) = protected_error => {
-                    self.member_failure(index, name, Outcome::Skipped, error)?;
+                    self.member_failure(index, name, Outcome::Skipped, error.clone())?;
                     continue;
                 }
                 _ => archive.check_payload(
@@ -205,7 +218,7 @@ impl Report<'_> {
                     self.progress,
                 ),
             };
-            self.member_result(index, name, result.as_ref().copied())?;
+            self.member_result(index, name, result)?;
         }
         scanned
     }
@@ -235,7 +248,7 @@ impl Report<'_> {
             let mut entry = match entry {
                 Ok(entry) => entry,
                 Err(error) => {
-                    self.member_result(index + 1, None, Err(&error))?;
+                    self.record_member_failure(index + 1, None, member_outcome(&error), &error)?;
                     return Err(error);
                 }
             };
@@ -272,11 +285,7 @@ impl Report<'_> {
                 reading_payload.set(false);
                 checked
             });
-            self.member_result(
-                index + 1,
-                Some(&String::from_utf8_lossy(&raw)),
-                result.as_ref().copied(),
-            )?;
+            self.member_result(index + 1, Some(&String::from_utf8_lossy(&raw)), result)?;
         }
         check_tar_trailer(tar.into_inner(), self.source.path(), self.progress)
     }
@@ -285,27 +294,36 @@ impl Report<'_> {
         &mut self,
         index: usize,
         name: Option<&str>,
-        result: Result<(), &io::Error>,
+        result: io::Result<()>,
     ) -> io::Result<()> {
         let Err(error) = result else {
             self.progress.check_cancelled()?;
             self.verification.passed += 1;
             return Ok(());
         };
-        let outcome = if matches!(
-            error.kind(),
-            io::ErrorKind::Unsupported
-                | io::ErrorKind::InvalidInput
-                | io::ErrorKind::PermissionDenied
-        ) {
-            Outcome::Skipped
-        } else {
-            Outcome::Failed
-        };
-        self.member_failure(index, name, outcome, error)
+        self.member_failure(index, name, member_outcome(&error), Arc::new(error))
     }
 
     fn member_failure(
+        &mut self,
+        index: usize,
+        name: Option<&str>,
+        outcome: Outcome,
+        error: Arc<io::Error>,
+    ) -> io::Result<()> {
+        self.record_member_failure(index, name, outcome, &error)?;
+        #[cfg(target_os = "macos")]
+        if self.verification.first_issue.is_none() {
+            self.verification.first_issue = Some(MemberIssue {
+                index,
+                name: name.map(str::to_owned),
+                source: error,
+            });
+        }
+        Ok(())
+    }
+
+    fn record_member_failure(
         &mut self,
         index: usize,
         name: Option<&str>,
@@ -322,6 +340,15 @@ impl Report<'_> {
             .results
             .archive_diagnostic(self.source, index, name, outcome, error);
         Ok(())
+    }
+}
+
+fn member_outcome(error: &io::Error) -> Outcome {
+    match error.kind() {
+        io::ErrorKind::Unsupported
+        | io::ErrorKind::InvalidInput
+        | io::ErrorKind::PermissionDenied => Outcome::Skipped,
+        _ => Outcome::Failed,
     }
 }
 

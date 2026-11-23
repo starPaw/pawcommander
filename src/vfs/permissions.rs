@@ -36,6 +36,8 @@ pub(crate) struct PermissionsReport {
     pub(crate) failed: usize,
     pub(crate) cancelled: bool,
     pub(crate) error: Option<TransferError>,
+    #[cfg(target_os = "macos")]
+    pub(crate) warning: Option<TransferError>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -158,7 +160,13 @@ impl PermissionsPreview {
                 .record_with_error(&row.source, outcome, reason.as_ref());
             match outcome {
                 Outcome::Completed => report.completed += 1,
-                Outcome::CompletedWithWarning => report.warned += 1,
+                Outcome::CompletedWithWarning => {
+                    report.warned += 1;
+                    #[cfg(target_os = "macos")]
+                    if report.warning.is_none() {
+                        report.warning = reason;
+                    }
+                }
                 Outcome::Skipped => report.skipped += 1,
                 Outcome::Failed => {
                     report.failed += 1;

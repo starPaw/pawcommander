@@ -228,7 +228,14 @@ fn verify_manifest(
             }
             Err(error) => {
                 report.errors += 1;
-                ChecksumOutcome::Unreadable(error)
+                progress
+                    .results
+                    .record_with_error(&source, Outcome::Failed, Some(&error));
+                #[cfg(target_os = "macos")]
+                if report.first_error.is_none() {
+                    report.first_error = Some(error);
+                }
+                continue;
             }
         };
         progress.results.record_checksum(&source, outcome);
@@ -285,13 +292,15 @@ fn prepare_verification(
     Ok((directory, scope, entries))
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default)]
 pub(crate) struct ChecksumVerification {
     pub(crate) matched: usize,
     pub(crate) changed: usize,
     pub(crate) missing: usize,
     pub(crate) errors: usize,
     pub(crate) cancelled: bool,
+    #[cfg(target_os = "macos")]
+    pub(crate) first_error: Option<TransferError>,
 }
 
 fn ensure_absent(target: &Location) -> Result<(), TransferError> {

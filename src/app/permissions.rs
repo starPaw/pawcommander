@@ -1,5 +1,5 @@
 use crate::i18n::{file_error, text};
-use crate::operations::{Cancellation, Progress, TransferError};
+use crate::operations::{Cancellation, TransferError};
 use crate::vfs::{Location, ModeRule, PermissionsPreview};
 use eframe::egui;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -165,30 +165,6 @@ impl PermissionsDialog {
             }
         }
         self.pending = None;
-    }
-}
-
-pub(super) fn apply(plan: PermissionsPreview, progress: &mut Progress) -> Result<String, String> {
-    let report = match plan.apply(progress) {
-        Ok(report) => report,
-        Err(TransferError::Cancelled) => {
-            return Ok(text!("Операция остановлена пользователем").into())
-        }
-        Err(error) => return Err(file_error(&error)),
-    };
-    let mut summary = crate::tr_format!(
-        "Changed {}. With warnings {}. Skipped {}. Failed {}.",
-        report.completed,
-        report.warned,
-        report.skipped,
-        report.failed
-    );
-    if report.cancelled {
-        summary = format!("{}. {summary}", text!("Операция остановлена пользователем"));
-    }
-    match report.error {
-        Some(error) => Err(format!("{summary} {}", file_error(&error))),
-        None => Ok(summary),
     }
 }
 

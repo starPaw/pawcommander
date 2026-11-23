@@ -34,6 +34,7 @@ mod external_editors;
 mod file_compare;
 #[cfg(target_os = "macos")]
 mod file_dialog;
+mod file_result;
 #[cfg(target_os = "macos")]
 mod file_templates;
 #[cfg(target_os = "macos")]
