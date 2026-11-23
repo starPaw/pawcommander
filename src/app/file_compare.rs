@@ -122,7 +122,8 @@ impl FileComparisonDialog {
                         .max_height(height)
                         .show(ui, |ui| {
                             let message =
-                                RichText::new(error.as_str()).color(ui.visuals().error_fg_color);
+                                RichText::new(error.message(Command::CompareFiles.label()))
+                                    .color(ui.visuals().error_fg_color);
                             ui.add(egui::Label::new(message).wrap().selectable(true));
                         });
                 }

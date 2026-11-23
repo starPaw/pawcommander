@@ -85,7 +85,10 @@ impl DirectoryComparison {
                     show_result(ui, result, &mut self.show_matches, self.run)
                 }
                 Phase::Failed(error) => {
-                    ui.colored_label(ui.visuals().error_fg_color, error);
+                    ui.colored_label(
+                        ui.visuals().error_fg_color,
+                        error.message(Command::CompareFolders.label()),
+                    );
                 }
                 Phase::Stopped => {
                     ui.label(text!("Сравнение остановлено"));

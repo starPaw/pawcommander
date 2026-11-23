@@ -433,7 +433,7 @@ impl FileTemplatesDialog {
                 }
                 Err(error) => (file_error(&error), true),
             },
-            Phase::Failed(error) => (error, true),
+            Phase::Failed(error) => (error.message(text!("Сохранение шаблона")), true),
             Phase::Stopped => (text!("Операция остановлена").into(), false),
             Phase::Ready | Phase::Running(_) => unreachable!(),
         });

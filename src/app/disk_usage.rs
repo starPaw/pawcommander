@@ -79,8 +79,8 @@ impl DiskUsage {
                     );
                 }
                 Phase::Failed(error) => {
-                    let message =
-                        egui::RichText::new(error.as_str()).color(ui.visuals().error_fg_color);
+                    let message = egui::RichText::new(error.message(Command::DiskUsage.label()))
+                        .color(ui.visuals().error_fg_color);
                     ui.add(egui::Label::new(message).wrap().selectable(true));
                 }
                 Phase::Stopped => {

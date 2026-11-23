@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{
     file_error::{CollectionAction, CollectionError},
-    i18n::{collection_error, collection_unavailable, text},
+    i18n::{collection_error, collection_unavailable, key, text, MessageKey},
     operations::{Progress, TransferError},
     shortcuts::Command,
     vfs::{
@@ -40,6 +40,7 @@ pub(super) struct CollectionsDialog {
     selected: Option<usize>,
     states: Vec<Option<Unavailable>>,
     work: Phase<ResultView>,
+    work_label: MessageKey,
     edit_name: Option<NameEdit>,
     name: String,
     remove_group: bool,
@@ -59,6 +60,7 @@ impl CollectionsDialog {
             selected: None,
             states: Vec::new(),
             work: Phase::Ready,
+            work_label: key!("Теги и коллекции"),
             edit_name: None,
             name: String::new(),
             remove_group: false,
@@ -249,14 +251,18 @@ impl CollectionsDialog {
                         Ok(tags) => {
                             let mut group = group.clone();
                             let paths = self.selection.clone();
-                            self.start(ui.ctx(), move |progress| {
-                                group.add(&paths, &tags, capacity, progress)?;
-                                update(
-                                    group,
-                                    Some(crate::i18n::key!("Объекты добавлены")),
-                                    progress,
-                                )
-                            });
+                            self.start(
+                                ui.ctx(),
+                                key!("Добавление в коллекцию"),
+                                move |progress| {
+                                    group.add(&paths, &tags, capacity, progress)?;
+                                    update(
+                                        group,
+                                        Some(crate::i18n::key!("Объекты добавлены")),
+                                        progress,
+                                    )
+                                },
+                            );
                         }
                         Err(error) => self.notice = Some((collection_error(&error), true)),
                     }
@@ -390,10 +396,14 @@ impl CollectionsDialog {
                 .clicked()
             {
                 let mut member = group.members[row].clone();
-                self.start(ui.ctx(), move |_| {
-                    let path = member.resolve().map_err(CollectionError::Unavailable)?;
-                    Ok(ResultView::Reveal(Location::Local(path)))
-                });
+                self.start(
+                    ui.ctx(),
+                    key!("Показать в панели"),
+                    move |_| {
+                        let path = member.resolve().map_err(CollectionError::Unavailable)?;
+                        Ok(ResultView::Reveal(Location::Local(path)))
+                    },
+                );
             }
             if can_relink
                 && let [path] = self.selection.as_slice()
@@ -401,13 +411,17 @@ impl CollectionsDialog {
             {
                 let path = path.clone();
                 let mut group = group.clone();
-                self.start(ui.ctx(), move |progress| {
-                    if group.members[row].resolve().is_ok() {
-                        return Err(CollectionError::AvailableAgain.into());
-                    }
-                    group.relink(row, &path)?;
-                    update(group, Some(crate::i18n::key!("Связь обновлена")), progress)
-                });
+                self.start(
+                    ui.ctx(),
+                    key!("Связать с выделенным"),
+                    move |progress| {
+                        if group.members[row].resolve().is_ok() {
+                            return Err(CollectionError::AvailableAgain.into());
+                        }
+                        group.relink(row, &path)?;
+                        update(group, Some(crate::i18n::key!("Связь обновлена")), progress)
+                    },
+                );
             }
             if ui.button(text!("Убрать из коллекции")).clicked() {
                 group.members.remove(row);
@@ -442,14 +456,18 @@ impl CollectionsDialog {
                 && let Some(source) = source
             {
                 let root = root.clone();
-                self.start(ui.ctx(), move |progress| {
-                    let group = collections::import(&root, &source, progress)?;
-                    let states = group.members.iter().map(|_| None).collect();
-                    Ok(ResultView::Imported {
-                        update: Update { group, states },
-                        source,
-                    })
-                });
+                self.start(
+                    ui.ctx(),
+                    key!("Импорт коллекции"),
+                    move |progress| {
+                        let group = collections::import(&root, &source, progress)?;
+                        let states = group.members.iter().map(|_| None).collect();
+                        Ok(ResultView::Imported {
+                            update: Update { group, states },
+                            source,
+                        })
+                    },
+                );
             }
             if let Some(index) = self.active {
                 ui.horizontal_wrapped(|ui| {
@@ -464,10 +482,14 @@ impl CollectionsDialog {
                     {
                         let mut group = catalog.collections[index].clone();
                         let name = self.export_name.clone();
-                        self.start(ui.ctx(), move |progress| {
-                            collections::export(&root, &name, &mut group, progress)
-                                .map(ResultView::Exported)
-                        });
+                        self.start(
+                            ui.ctx(),
+                            key!("Экспорт коллекции"),
+                            move |progress| {
+                                collections::export(&root, &name, &mut group, progress)
+                                    .map(ResultView::Exported)
+                            },
+                        );
                     }
                 });
             }
@@ -491,16 +513,22 @@ impl CollectionsDialog {
 
     fn refresh(&mut self, group: &Collection, ctx: &egui::Context) {
         let group = group.clone();
-        self.start(ctx, move |progress| update(group, None, progress));
+        self.start(
+            ctx,
+            key!("Обновление коллекции"),
+            move |progress| update(group, None, progress),
+        );
     }
 
     fn start(
         &mut self,
         ctx: &egui::Context,
+        label: MessageKey,
         work: impl FnOnce(&mut Progress) -> Result<ResultView, TransferError> + Send + 'static,
     ) {
         if !matches!(self.work, Phase::Running(_)) {
             self.notice = None;
+            self.work_label = label;
             self.work = Phase::start(ctx, work);
         }
     }
@@ -546,7 +574,9 @@ impl CollectionsDialog {
                 ));
             }
             Phase::Finished(ResultView::Reveal(path)) => return Some(path),
-            Phase::Failed(error) => self.notice = Some((error, true)),
+            Phase::Failed(error) => {
+                self.notice = Some((error.message(text(self.work_label)), true))
+            }
             Phase::Stopped => self.notice = Some((text!("Операция остановлена").into(), false)),
             Phase::Running(_) | Phase::Ready => unreachable!(),
         }
