@@ -1870,6 +1870,7 @@ fn access_error(error: &AccessError) -> String {
     };
     let action = match error.action {
         AccessAction::ResolvePath => text!("Не удалось определить путь к элементу"),
+        AccessAction::CopyEntry => text!("Не удалось скопировать"),
         AccessAction::ReadMetadata => {
             text!("Не удалось получить сведения об элементе")
         }
@@ -1918,6 +1919,9 @@ fn access_error(error: &AccessError) -> String {
 }
 
 pub(crate) fn access_io_message(error: &std::io::Error) -> String {
+    if TransferError::is_cancelled_io(error) {
+        return file_error(&TransferError::Cancelled);
+    }
     let Some(cause) = error.get_ref() else {
         return error.to_string();
     };
@@ -2513,7 +2517,11 @@ fn mutation_error(error: &MutationError, unconfirmed: bool) -> String {
                 "Could not move “{}” to “{}” without replacing existing items: {error}",
                 from.display(),
                 to.display(),
-                error = source
+                error = if source.get_ref().is_some_and(|error| error.is::<std::ffi::NulError>()) {
+                    text!("Путь содержит нулевой символ").into()
+                } else {
+                    source.to_string()
+                }
             )
         }
         OpenSftpRename { from, to, reason } => crate::tr_format!(

@@ -460,6 +460,7 @@ impl Error for ConnectionError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AccessAction {
     ResolvePath,
+    CopyEntry,
     ReadMetadata,
     OpenFile,
     CreateFile,

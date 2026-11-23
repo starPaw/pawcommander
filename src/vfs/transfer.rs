@@ -4,7 +4,7 @@ use super::location::{validate_name, Location};
 use super::mutations::remove_remote_tree;
 use super::sftp::remote;
 use super::{TransferFailure, TransferSummary, MAX_TREE_DEPTH};
-use crate::conflict::{Answer, Conflict, Decision, EntryDetails};
+use crate::conflict::{Answer, Conflict, Decision, EntryDetails, EntryKind};
 use crate::file_error::{
     AccessAction, AccessCause, AccessError, ConflictError, CopyVerificationError,
     DescendantProblem, Failure, MoveHistoryError, MutationError, ProbeAction, PublicationError,
@@ -201,15 +201,15 @@ impl EntryMetadata {
     }
 }
 
-pub(super) fn entry_kind(file: bool, dir: bool, symlink: bool) -> crate::i18n::MessageKey {
+pub(super) fn entry_kind(file: bool, dir: bool, symlink: bool) -> EntryKind {
     if file {
-        crate::i18n::key!("Файл")
+        EntryKind::File
     } else if dir {
-        crate::i18n::key!("Папка")
+        EntryKind::Directory
     } else if symlink {
-        crate::i18n::key!("Ссылка")
+        EntryKind::Link
     } else {
-        crate::i18n::key!("Специальный объект")
+        EntryKind::Special
     }
 }
 
@@ -1031,7 +1031,7 @@ pub(crate) fn copy_sftp_for_drop(
     kind: PromiseKind,
     progress: &mut Progress,
 ) -> Result<DropDelivery, TransferError> {
-    use crate::{file_error::FilePromiseError, i18n::text, result_history::Outcome};
+    use crate::{file_error::FilePromiseError, result_history::Outcome};
 
     let target = Location::Local(destination.to_owned());
     progress
@@ -1058,7 +1058,8 @@ pub(crate) fn copy_sftp_for_drop(
             committed = true
         })
     })();
-    let warning = committed && (result.is_err() || progress.results.active_metadata_warning());
+    let metadata_warning = committed && progress.results.active_metadata_warning();
+    let warning = committed && (result.is_err() || metadata_warning);
     let outcome = match (&result, committed) {
         (_, true) if warning => Outcome::CompletedWithWarning,
         (_, true) => Outcome::Completed,
@@ -1070,18 +1071,13 @@ pub(crate) fn copy_sftp_for_drop(
         (_, false) if progress.partial_copy_retained => Outcome::PartialCopyRetained,
         _ => Outcome::Failed,
     };
-    if warning && result.is_ok() {
-        let reason = text!(
-            "Даты или права доступа сохранены частично. Подробности указаны в строках журнала."
-        );
-        progress
-            .results
-            .record(source, None, outcome, Some(reason.into()));
-    } else {
-        progress
-            .results
-            .record_with_error(source, outcome, result.as_ref().err());
-    }
+    progress.results.record_transfer_item(
+        source,
+        outcome,
+        result.as_ref().err(),
+        None,
+        metadata_warning && result.is_ok(),
+    );
     if committed {
         Ok(if warning {
             DropDelivery::CompletedWithWarning
@@ -1895,7 +1891,6 @@ impl LocalStaging {
                     let cause = fs_ops::local_copy_error(
                         Some(parent),
                         access_io(&location, AccessAction::CreateStagingDirectory, error),
-                        ToString::to_string,
                     );
                     #[cfg(target_os = "macos")]
                     if unconfirmed {
@@ -2857,7 +2852,6 @@ pub(super) fn copy_tree_entry(
                 fs_ops::local_copy_error(
                     local_parent,
                     access_io(target, AccessAction::CreateDirectory, error),
-                    ToString::to_string,
                 )
             })?;
         } else {
@@ -2904,8 +2898,7 @@ fn copy_file_entry(
     observe: &mut impl FnMut(&Location, CopyPhase) -> Result<(), TransferError>,
 ) -> Result<(), TransferError> {
     let cancel = progress.cancellation();
-    let local_write_error =
-        |error| fs_ops::local_copy_error(local_parent, error, ToString::to_string);
+    let local_write_error = |error| fs_ops::local_copy_error(local_parent, error);
     cancel.check()?;
     let mut input = SourceReader::open(source)?;
     observe(source, CopyPhase::Opened)?;

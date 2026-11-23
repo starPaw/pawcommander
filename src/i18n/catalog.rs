@@ -62,7 +62,6 @@ catalog! {
     "Копирование символических ссылок на этой платформе не поддерживается" => ("This platform does not support copying symbolic links", "Tato platforma nepodporuje kopírování symbolických odkazů"),
     "Безопасное переименование без перезаписи на этой платформе пока не реализовано" => ("Safe non-overwriting rename is unavailable on this platform", "Bezpečné přejmenování bez přepsání není na této platformě dostupné"),
     "Язык" => ("Language", "Jazyk"),
-    "Не удалось проверить источник" => ("Could not check source", "Zdroj se nepodařilo ověřit"),
     "Не удалось скопировать" => ("Could not copy", "Kopírování se nezdařilo"),
     "Совпадение имён" => ("Name conflict", "Kolize názvů"),
     "Совпадение {} из {}" => ("Conflict {} of {}", "Kolize {} z {}"),
