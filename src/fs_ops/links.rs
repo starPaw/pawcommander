@@ -1,9 +1,10 @@
-use super::{at, directory_path, validate_name};
-use crate::file_error::{LinkCreateError, LinkIoAction, SmbMutationAction};
-use crate::i18n::text;
+use super::{directory_path, validate_name};
+use crate::file_error::{
+    AccessAction, AccessError, LinkCreateError, LinkIoAction, SmbMutationAction,
+};
 use crate::operations::{Progress, TransferError};
 use crate::smb::MutationMount;
-use crate::vfs::{with_open_file_staging, FILE_STAGING_PAYLOAD};
+use crate::vfs::{with_open_file_staging, Location, FILE_STAGING_PAYLOAD};
 use rustix::fs::{
     fstat, linkat, lstat, renameat_with, statat, symlinkat, AtFlags, FileType, RenameFlags, Stat,
 };
@@ -46,34 +47,28 @@ impl LinkStatus {
             Err(_) => Self::Unavailable,
         }
     }
-
-    pub(crate) fn problem(self) -> Option<&'static str> {
-        match self {
-            Self::Available => None,
-            Self::Missing => Some(text!("Цель ссылки отсутствует")),
-            Self::Loop => Some(text!("Цикл или слишком длинная цепочка ссылок")),
-            Self::Unavailable => Some(text!("Цель ссылки недоступна")),
-        }
-    }
 }
 
-pub(crate) fn describe_target(path: &Path) -> String {
-    match fs::read_link(path) {
-        Ok(target) => {
-            // The kernel resolves relative targets at the link and bounds chain traversal.
-            let status = LinkStatus::from_stat(&fs::metadata(path));
-            format!(
-                "{}: {}\n{}: {}",
-                text!("Цель ссылки"),
-                target.display(),
-                text!("Состояние цели ссылки"),
-                status
-                    .problem()
-                    .unwrap_or_else(|| text!("Цель ссылки доступна")),
-            )
-        }
-        Err(error) => at(text!("Не удалось прочитать цель ссылки"), path, error),
-    }
+#[derive(Debug)]
+pub(crate) struct LinkTarget {
+    pub(crate) path: PathBuf,
+    pub(crate) status: LinkStatus,
+}
+
+pub(crate) fn read_target(path: &Path) -> Result<LinkTarget, Box<AccessError>> {
+    let target = fs::read_link(path).map_err(|error| {
+        Box::new(AccessError::new(
+            &Location::Local(path.to_owned()),
+            AccessAction::ReadLink,
+            error,
+        ))
+    })?;
+    // The kernel resolves relative targets at the link and bounds chain traversal.
+    let status = LinkStatus::from_stat(&fs::metadata(path));
+    Ok(LinkTarget {
+        path: target,
+        status,
+    })
 }
 
 pub(crate) struct CreatedLink {
@@ -266,7 +261,30 @@ mod tests {
         assert_eq!(status("ok"), Some(LinkStatus::Available));
         assert_eq!(status("missing"), Some(LinkStatus::Missing));
         assert_eq!(status("loop-a"), Some(LinkStatus::Loop));
-        assert!(describe_target(&folder.join("ok")).contains("../текст"));
+        for (name, target, expected) in [
+            ("ok", "../текст", LinkStatus::Available),
+            ("missing", "never-existed", LinkStatus::Missing),
+            ("loop-a", "loop-b", LinkStatus::Loop),
+        ] {
+            let target_details = read_target(&folder.join(name)).unwrap();
+            assert_eq!(target_details.path, Path::new(target));
+            assert_eq!(target_details.status, expected);
+        }
+    }
+
+    #[test]
+    fn read_target_retains_the_link_path_and_original_errno() {
+        use crate::file_error::AccessCause;
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("missing-link");
+        let error = read_target(&path).unwrap_err();
+        assert_eq!(error.location, Location::Local(path));
+        assert_eq!(error.action, AccessAction::ReadLink);
+        assert!(matches!(
+            error.cause,
+            AccessCause::Local(error) if error.raw_os_error() == Some(libc::ENOENT)
+        ));
     }
 
     #[test]

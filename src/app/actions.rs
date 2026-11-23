@@ -760,7 +760,7 @@ impl PawCommander {
         #[cfg(target_os = "macos")]
         if let Some(problem) = entry
             .and_then(|entry| entry.metadata.link_status)
-            .and_then(crate::fs_ops::links::LinkStatus::problem)
+            .and_then(crate::i18n::link_problem)
         {
             self.notice = Some((problem.into(), true));
             return;
