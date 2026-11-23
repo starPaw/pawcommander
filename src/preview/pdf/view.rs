@@ -1,9 +1,15 @@
-use super::{protocol::Session, Answer, Command, Problem, MAX_EDGE, QUERY_LIMIT};
-use crate::{i18n::text, operations::Cancellation};
+use super::{protocol::Session, Answer, Command, MAX_EDGE, QUERY_LIMIT};
+use crate::{
+    file_error::{PdfAction, PdfError},
+    i18n::{file_error, text},
+    operations::{Cancellation, TransferError},
+    vfs::Location,
+};
 use eframe::egui;
 use std::{sync::mpsc, thread};
 
 pub(in crate::preview) struct Document {
+    location: Location,
     pages: usize,
     page: usize,
     page_field: Option<egui::Id>,
@@ -14,8 +20,8 @@ pub(in crate::preview) struct Document {
     ticket: u64,
     pending: Option<(u64, Raster)>,
     frame: Option<Page>,
-    failed_page: Option<(Raster, Problem)>,
-    stopped: Option<Problem>,
+    failed_page: Option<(Raster, TransferError)>,
+    stopped: Option<TransferError>,
 }
 
 #[derive(Default)]
@@ -25,7 +31,7 @@ struct Search {
     query: String,
     ticket: Option<u64>,
     matches: Option<Vec<usize>>,
-    error: Option<Problem>,
+    error: Option<TransferError>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -50,26 +56,42 @@ struct Request {
 
 enum Event {
     Result(u64, Answer),
-    Stopped(Problem),
+    Stopped(TransferError),
 }
 
 impl Document {
-    pub(in crate::preview) fn open(bytes: Vec<u8>, cancel: &Cancellation) -> Result<Self, String> {
-        let session =
-            Session::open(&bytes, cancel).map_err(|reason| reason.message().to_owned())?;
+    pub(in crate::preview) fn open(
+        location: &Location,
+        bytes: Vec<u8>,
+        cancel: &Cancellation,
+    ) -> Result<Self, TransferError> {
+        let session = Session::open(&bytes, cancel).map_err(|error| error.at(location))?;
         let pages = session.pages();
         let (tx, requests) = mpsc::channel();
         let (replies, rx) = mpsc::channel();
         let cancel = cancel.clone();
+        let worker_location = location.clone();
         thread::Builder::new()
             .name("pawcommander-pdf".into())
-            .spawn(move || serve(session, &requests, &replies, &cancel))
-            .map_err(|_| Problem::Service.message().to_owned())?;
-        Ok(Self::new(pages, tx, rx))
+            .spawn(move || serve(session, &worker_location, &requests, &replies, &cancel))
+            .map_err(|source| {
+                PdfError::Io {
+                    action: PdfAction::StartReader,
+                    source,
+                }
+                .at(location)
+            })?;
+        Ok(Self::new(location.clone(), pages, tx, rx))
     }
 
-    fn new(pages: usize, requests: mpsc::Sender<Request>, replies: mpsc::Receiver<Event>) -> Self {
+    fn new(
+        location: Location,
+        pages: usize,
+        requests: mpsc::Sender<Request>,
+        replies: mpsc::Receiver<Event>,
+    ) -> Self {
         Self {
+            location,
             pages,
             page: 0,
             page_field: None,
@@ -222,8 +244,8 @@ impl Document {
         });
         if self.search.ticket.is_some() {
             ui.label(text!("Поиск по PDF…"));
-        } else if let Some(reason) = self.search.error {
-            ui.colored_label(ui.visuals().error_fg_color, reason.message());
+        } else if let Some(error) = &self.search.error {
+            show_error(ui, error);
         } else if let Some(pages) = &self.search.matches {
             if pages.is_empty() {
                 ui.label(text!("Совпадений нет"));
@@ -250,8 +272,8 @@ impl Document {
     }
 
     fn draw_page(&mut self, ui: &mut egui::Ui, available: egui::Vec2, thumbnail: bool) {
-        if let Some(reason) = self.stopped {
-            ui.colored_label(ui.visuals().error_fg_color, reason.message());
+        if let Some(error) = &self.stopped {
+            show_error(ui, error);
             return;
         }
         let frame = self
@@ -286,10 +308,10 @@ impl Document {
                 String::new()
             },
         };
-        if let Some((failed, reason)) = &self.failed_page
+        if let Some((failed, error)) = &self.failed_page
             && *failed == key
         {
-            ui.colored_label(ui.visuals().error_fg_color, reason.message());
+            show_error(ui, error);
             return;
         }
         let shown = frame.is_some_and(|frame| frame.raster == key);
@@ -307,8 +329,8 @@ impl Document {
             };
             self.pending = self.send(command, ui.ctx()).map(|ticket| (ticket, key));
         }
-        if let Some(reason) = self.stopped {
-            ui.colored_label(ui.visuals().error_fg_color, reason.message());
+        if let Some(error) = &self.stopped {
+            show_error(ui, error);
         } else if let Some((frame, size)) = self
             .frame
             .as_ref()
@@ -345,7 +367,9 @@ impl Document {
             viewport: ctx.viewport_id(),
         };
         if self.requests.send(request).is_err() {
-            self.stopped = Some(Problem::Service);
+            self.update(ctx);
+            self.stopped
+                .get_or_insert_with(|| PdfError::WorkerUnavailable.at(&self.location).into());
             self.search.ticket = None;
             return None;
         }
@@ -370,8 +394,16 @@ impl Document {
                             }
                             self.search.matches = Some(matches);
                         }
-                        Answer::Error(reason) => self.search.error = Some(reason),
-                        Answer::Page(_) => self.search.error = Some(Problem::Service),
+                        Answer::Error(error) => {
+                            self.search.error = Some(error.at(&self.location).into())
+                        }
+                        Answer::Page(_) => {
+                            self.search.error = Some(
+                                PdfError::InvalidResponse(PdfAction::Search)
+                                    .at(&self.location)
+                                    .into(),
+                            );
+                        }
                     }
                 }
                 Event::Result(ticket, answer)
@@ -393,14 +425,26 @@ impl Document {
                             });
                             self.failed_page = None;
                         }
-                        Answer::Error(reason) => self.failed_page = Some((raster, reason)),
-                        Answer::Matches(_) => self.failed_page = Some((raster, Problem::Service)),
+                        Answer::Error(error) => {
+                            self.failed_page = Some((raster, error.at(&self.location).into()))
+                        }
+                        Answer::Matches(_) => {
+                            let error =
+                                PdfError::InvalidResponse(PdfAction::RenderPage(raster.page))
+                                    .at(&self.location)
+                                    .into();
+                            self.failed_page = Some((raster, error));
+                        }
                     }
                 }
                 _ => {}
             }
         }
     }
+}
+
+fn show_error(ui: &mut egui::Ui, error: &TransferError) {
+    ui.colored_label(ui.visuals().error_fg_color, file_error(error));
 }
 
 fn page_extent(points: egui::Vec2, available: egui::Vec2, zoom: Option<u16>) -> egui::Vec2 {
@@ -423,6 +467,7 @@ fn matching_page(pages: &[usize], page: usize, previous: bool) -> usize {
 
 fn serve(
     mut session: Session,
+    location: &Location,
     requests: &mpsc::Receiver<Request>,
     replies: &mpsc::Sender<Event>,
     cancel: &Cancellation,
@@ -440,9 +485,16 @@ fn serve(
             if cancel.is_requested() {
                 return;
             }
-            let event = match session.run(&request.command, cancel) {
+            let result = session.run(&request.command, cancel);
+            if cancel.is_requested() {
+                return;
+            }
+            let event = match result {
                 Ok(answer) => Event::Result(request.ticket, answer),
-                Err(reason) => Event::Stopped(reason),
+                Err(error) => match TransferError::from(error.at(location)) {
+                    TransferError::Cancelled => return,
+                    error => Event::Stopped(error),
+                },
             };
             let terminal = matches!(event, Event::Stopped(_));
             if replies.send(event).is_err() {
@@ -463,11 +515,64 @@ mod tests {
     use egui::{Event as Input, Key, Modifiers};
 
     #[test]
+    fn pdf_disconnected_reader_keeps_the_raster_action_and_original_cause() {
+        use crate::file_error::{Failure, PreviewError};
+        use std::{error::Error, io};
+
+        let location = Location::Local("/fixtures/selected.pdf".into());
+        let (requests, requested) = mpsc::channel();
+        let (replies, received) = mpsc::channel();
+        let mut view = Document::new(location.clone(), 3, requests, received);
+        let source = io::Error::from_raw_os_error(libc::EIO);
+        replies
+            .send(Event::Stopped(
+                PdfError::Io {
+                    action: PdfAction::ReadRaster(1),
+                    source,
+                }
+                .at(&location)
+                .into(),
+            ))
+            .unwrap();
+        drop(requested);
+        drop(replies);
+
+        let ctx = egui::Context::default();
+        assert!(view
+            .send(
+                Command::Search {
+                    query: "fixture text".into()
+                },
+                &ctx
+            )
+            .is_none());
+        let error = view.stopped.as_ref().unwrap();
+        let TransferError::Failed(Failure::Preview(preview)) = error else {
+            panic!("expected the original PDF failure");
+        };
+        assert!(matches!(preview.as_ref(), PreviewError::Pdf {
+            location: origin,
+            cause: PdfError::Io { action: PdfAction::ReadRaster(1), .. },
+        } if origin == &location));
+        let source = preview
+            .source()
+            .unwrap()
+            .source()
+            .unwrap()
+            .downcast_ref::<io::Error>()
+            .unwrap();
+        assert_eq!(source.raw_os_error(), Some(libc::EIO));
+        let message = file_error(error);
+        assert!(message.contains(&location.display()) && message.contains(&source.to_string()));
+        assert!(!message.contains("fixture text"));
+    }
+
+    #[test]
     fn pdf_view_turns_pages_and_applies_the_current_search_and_scale() {
         let ctx = egui::Context::default();
         let (requests, requested) = mpsc::channel();
         let (replies, received) = mpsc::channel();
-        let mut view = Document::new(3, requests, received);
+        let mut view = Document::new(Location::Local("fixture.pdf".into()), 3, requests, received);
         let draw = |view: &mut Document, events| {
             ctx.run_test_ui(
                 egui::RawInput {

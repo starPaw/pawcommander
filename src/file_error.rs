@@ -31,6 +31,8 @@ mod link_create;
 mod media;
 mod metadata;
 mod move_history;
+#[cfg(target_os = "macos")]
+mod pdf;
 mod recovery_record;
 #[cfg(target_os = "macos")]
 mod resume_check;
@@ -69,6 +71,8 @@ pub(crate) use link_create::{LinkCreateError, LinkIoAction};
 pub(crate) use media::{MediaAction, MediaError, MediaNativeError};
 pub(crate) use metadata::{MetadataError, MetadataField, MetadataWarning};
 pub(crate) use move_history::{DescendantProblem, MoveHistoryError};
+#[cfg(target_os = "macos")]
+pub(crate) use pdf::{PdfAction, PdfError, PdfProblem};
 #[cfg(target_os = "macos")]
 pub(crate) use recovery_record::ResumeRecordEvent;
 pub(crate) use recovery_record::{
@@ -626,7 +630,29 @@ pub(crate) enum PreviewError {
         location: Location,
         cause: MediaError,
     },
+    #[cfg(target_os = "macos")]
+    Pdf {
+        location: Location,
+        cause: PdfError,
+    },
     WorkerUnavailable,
+}
+
+#[cfg(target_os = "macos")]
+impl PreviewError {
+    pub(crate) fn io_cause(&self) -> Option<&io::Error> {
+        match self {
+            Self::Media {
+                cause: MediaError::Io { source, .. },
+                ..
+            }
+            | Self::Pdf {
+                cause: PdfError::Io { source, .. },
+                ..
+            } => Some(source),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for PreviewError {
@@ -645,6 +671,8 @@ impl fmt::Display for PreviewError {
             }
             #[cfg(target_os = "macos")]
             Self::Media { location, cause } => write!(f, "Media preview at {location}: {cause}"),
+            #[cfg(target_os = "macos")]
+            Self::Pdf { location, cause } => write!(f, "PDF preview at {location}: {cause}"),
             Self::WorkerUnavailable => f.write_str("Preview worker is unavailable"),
         }
     }
@@ -655,6 +683,8 @@ impl Error for PreviewError {
         match self {
             #[cfg(target_os = "macos")]
             Self::Media { cause, .. } => Some(cause),
+            #[cfg(target_os = "macos")]
+            Self::Pdf { cause, .. } => Some(cause),
             _ => None,
         }
     }
