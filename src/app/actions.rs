@@ -15,6 +15,7 @@ use std::sync::mpsc;
 type ApplicationReporter<T> = Box<dyn FnOnce(T) + Send>;
 
 pub(super) enum ApplicationJob {
+    #[cfg(not(target_os = "macos"))]
     External(mpsc::Receiver<Result<String, String>>),
     #[cfg(target_os = "macos")]
     Terminal {
@@ -26,45 +27,52 @@ pub(super) enum ApplicationJob {
         path: Location,
         result: mpsc::Receiver<Result<crate::zed::OpenRequest, crate::zed::OpenError>>,
     },
+    #[cfg(target_os = "macos")]
+    Configured {
+        details: crate::tools::launch::CommandDetails,
+        result: mpsc::Receiver<Result<(), crate::tools::launch::InvocationError>>,
+    },
+}
+
+fn application_result<T, E>(
+    receive: &mpsc::Receiver<Result<T, E>>,
+    stopped: impl FnOnce() -> E,
+) -> Option<Result<T, E>> {
+    match receive.try_recv() {
+        Ok(result) => Some(result),
+        Err(mpsc::TryRecvError::Empty) => None,
+        Err(mpsc::TryRecvError::Disconnected) => Some(Err(stopped())),
+    }
 }
 
 impl ApplicationJob {
     pub(super) fn poll_notice(&self) -> Option<(String, bool)> {
         let result = match self {
-            Self::External(result) => match result.try_recv() {
-                Ok(result) => result,
-                Err(mpsc::TryRecvError::Empty) => return None,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    Err(crate::i18n::text!("Запуск приложения прервался.").into())
-                }
-            },
+            #[cfg(not(target_os = "macos"))]
+            Self::External(result) => application_result(result, || {
+                crate::i18n::text!("Запуск приложения прервался.").into()
+            })?,
             #[cfg(target_os = "macos")]
             Self::Terminal { folder, result } => {
                 use crate::i18n::terminal;
-                let result = match result.try_recv() {
-                    Ok(result) => result,
-                    Err(mpsc::TryRecvError::Empty) => return None,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        Err(crate::terminal::OpenError::WorkerStopped)
-                    }
-                };
-                result
+                application_result(result, || crate::terminal::OpenError::WorkerStopped)?
                     .map(|request| terminal::open_request(request).into())
                     .map_err(|error| terminal::open_error(folder, &error))
             }
             #[cfg(target_os = "macos")]
             Self::Zed { path, result } => {
                 use crate::i18n::zed;
-                let result = match result.try_recv() {
-                    Ok(result) => result,
-                    Err(mpsc::TryRecvError::Empty) => return None,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        Err(crate::zed::OpenError::WorkerStopped)
-                    }
-                };
-                result
+                application_result(result, || crate::zed::OpenError::WorkerStopped)?
                     .map(|request| zed::open_request(request).into())
                     .map_err(|error| zed::open_error(path, &error))
+            }
+            #[cfg(target_os = "macos")]
+            Self::Configured { details, result } => {
+                use crate::i18n::launch;
+                use crate::tools::launch::InvocationError;
+                application_result(result, || InvocationError::WorkerStopped)?
+                    .map(|()| launch::started(details))
+                    .map_err(|error| launch::invocation_error(details, &error))
             }
         };
         Some(match result {
@@ -297,6 +305,7 @@ impl PawCommander {
         });
     }
 
+    #[cfg(not(target_os = "macos"))]
     pub(super) fn launch_application(
         &mut self,
         ctx: &egui::Context,
@@ -321,16 +330,30 @@ impl PawCommander {
     }
 
     #[cfg(target_os = "macos")]
-    pub(super) fn launch_custom_action(
+    pub(super) fn launch_configured(
         &mut self,
-        invocation: crate::tools::custom_action::Invocation,
         ctx: &egui::Context,
+        status: &str,
+        invocation: crate::tools::launch::Invocation,
     ) {
-        self.launch_application(
-            ctx,
-            crate::i18n::text!("Запуск пользовательского действия…"),
-            move |report| invocation.launch(report),
-        );
+        use crate::i18n::launch::invocation_error;
+        use crate::tools::launch::InvocationError;
+        if self.application_job.is_some() {
+            return;
+        }
+        let details = invocation.details.clone();
+        match spawn_application(ctx, move |report| invocation.launch(report)) {
+            Ok(result) => {
+                self.application_job = Some(ApplicationJob::Configured { details, result });
+                self.notice = Some((status.into(), false));
+            }
+            Err(error) => {
+                self.notice = Some((
+                    invocation_error(&details, &InvocationError::WorkerStart(error)),
+                    true,
+                ));
+            }
+        }
     }
 
     pub(super) fn action(&mut self, action: Action, ctx: &egui::Context) {

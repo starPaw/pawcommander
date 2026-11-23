@@ -6,6 +6,7 @@ mod catalog;
 pub(crate) mod display;
 mod file_errors;
 mod formats;
+pub(crate) mod launch;
 #[cfg(target_os = "macos")]
 mod smb;
 #[cfg(target_os = "macos")]

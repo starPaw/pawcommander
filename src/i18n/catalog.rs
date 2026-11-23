@@ -330,6 +330,7 @@ catalog! {
     "Внешние редакторы" => ("External editors", "Externí editory"),
     "Внешние редакторы…" => ("External editors…", "Externí editory…"),
     "Внешний редактор" => ("External editor", "Externí editor"),
+    "Для редактора нужен обычный файл." => ("The editor requires a regular file.", "Editor vyžaduje běžný soubor."),
     "Открыть во внешнем редакторе" => ("Open in external editor", "Otevřít v externím editoru"),
     "Открытие внешнего редактора…" => ("Opening external editor…", "Otevírání externího editoru…"),
     "Файл для редактирования недоступен." => ("The file to edit is unavailable.", "Soubor určený k úpravám není dostupný."),
