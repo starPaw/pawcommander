@@ -7,6 +7,7 @@ use crate::vfs::Location;
 use crate::{file_error::ScanError, operations::TransferError};
 use chrono::{DateTime, Local};
 use eframe::egui;
+use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::HashSet;
 #[cfg(any(not(any(windows, target_os = "macos")), test))]
@@ -34,6 +35,29 @@ use unix::scan_root;
 #[cfg(windows)]
 mod windows;
 
+#[derive(Clone, Debug)]
+enum ItemDetails {
+    #[cfg(not(target_os = "macos"))]
+    Text(String),
+    #[cfg(target_os = "macos")]
+    Local(Arc<macos::LocalDetails>),
+    #[cfg(target_os = "macos")]
+    Sftp(ssh2::FileStat),
+}
+
+impl ItemDetails {
+    fn render(&self) -> Cow<'_, str> {
+        match self {
+            #[cfg(not(target_os = "macos"))]
+            Self::Text(text) => Cow::Borrowed(text),
+            #[cfg(target_os = "macos")]
+            Self::Local(details) => Cow::Owned(details.render()),
+            #[cfg(target_os = "macos")]
+            Self::Sftp(stat) => Cow::Owned(sftp::details(stat)),
+        }
+    }
+}
+
 #[derive(Default, Clone, Debug)]
 struct Summary {
     files: u64,
@@ -43,7 +67,7 @@ struct Summary {
     bytes: u64,
     errors: u64,
     error_examples: Vec<Arc<TransferError>>,
-    details: Vec<(Location, String)>,
+    details: Vec<(Location, ItemDetails)>,
     done: bool,
     cancelled: bool,
 }
@@ -202,7 +226,7 @@ impl Properties {
                     for (path, details) in &summary.details {
                         ui.separator();
                         ui.label(path.display());
-                        ui.label(details);
+                        ui.label(details.render());
                     }
                     #[cfg(not(target_os = "macos"))]
                     show_read_errors(ui, &summary);
@@ -334,8 +358,8 @@ fn scan(paths: &[PathBuf], cancel: &AtomicBool, mut progress: impl FnMut(&Summar
         };
         #[cfg(target_os = "macos")]
         let (metadata, item_details, mount) = match mount.and_then(|mount| {
-            let (metadata, description) = macos::read_item(&path, cancel, &mount)?;
-            Ok((metadata, description, mount))
+            let (metadata, details) = macos::read_item(&path, cancel, &mount)?;
+            Ok((metadata, ItemDetails::Local(Arc::new(details)), mount))
         }) {
             Ok(item) => item,
             Err(error) => {
@@ -345,7 +369,7 @@ fn scan(paths: &[PathBuf], cancel: &AtomicBool, mut progress: impl FnMut(&Summar
             }
         };
         #[cfg(not(target_os = "macos"))]
-        let item_details = details(&metadata);
+        let item_details = ItemDetails::Text(details(&metadata));
         summary.details.push((path.clone().into(), item_details));
         if metadata.is_dir() {
             accepted.insert(path.clone());
@@ -562,8 +586,9 @@ mod tests {
         );
         assert_eq!(result.errors, 0);
         let result = scan(&[root.join("file")], &AtomicBool::new(false), |_| {});
-        assert!(result.details[0].1.contains("0640"));
-        assert!(result.details[0].1.contains("Modified:"));
+        let details = result.details[0].1.render();
+        assert!(details.contains("0640"));
+        assert!(details.contains("Modified:"));
     }
 
     #[cfg(unix)]
@@ -786,6 +811,41 @@ mod tests {
             ..Default::default()
         };
         let _ = ctx.run_test_ui(input, |ui| assert!(!properties.show(ui.ctx())));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn window_renders_the_original_symbolic_link_snapshot() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let folder = temp.path().join("folder");
+        fs::create_dir(&folder).unwrap();
+        let link = folder.join("link");
+        let target = "../прежняя цель {name}";
+        symlink(target, &link).unwrap();
+        let ctx = egui::Context::default();
+        let properties = Properties::start(vec![link.clone().into()], &ctx);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !properties.state.lock().unwrap().done {
+            assert!(Instant::now() < deadline, "worker did not complete");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        fs::remove_file(&link).unwrap();
+        symlink("new target", &link).unwrap();
+
+        let mut drawn = false;
+        for _ in 0..3 {
+            let output = ctx.run_test_ui(egui::RawInput::default(), |ui| {
+                assert!(properties.show(ui.ctx()));
+            });
+            drawn |= output.shapes.iter().any(|shape| {
+                matches!(&shape.shape, egui::Shape::Text(text)
+                    if text.galley.text().contains(target)
+                        && text.galley.text().contains(crate::i18n::text!("Цель ссылки отсутствует")))
+            });
+        }
+        assert!(drawn);
     }
 
     #[test]

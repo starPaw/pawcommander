@@ -227,6 +227,18 @@ macro_rules! translate_literal {
 pub(crate) use translate_literal as text;
 
 #[cfg(target_os = "macos")]
+pub(crate) fn link_problem(status: crate::fs_ops::links::LinkStatus) -> Option<&'static str> {
+    use crate::fs_ops::links::LinkStatus;
+
+    match status {
+        LinkStatus::Available => None,
+        LinkStatus::Missing => Some(text!("Цель ссылки отсутствует")),
+        LinkStatus::Loop => Some(text!("Цикл или слишком длинная цепочка ссылок")),
+        LinkStatus::Unavailable => Some(text!("Цель ссылки недоступна")),
+    }
+}
+
+#[cfg(target_os = "macos")]
 pub(crate) fn cli_help() -> &'static str {
     match language() {
         Language::English => include_str!("i18n/help/en.txt"),

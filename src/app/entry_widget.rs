@@ -161,7 +161,7 @@ pub(super) fn entry_widget(
     let link_problem = entry
         .metadata
         .link_status
-        .and_then(crate::fs_ops::links::LinkStatus::problem);
+        .and_then(crate::i18n::link_problem);
     if entry.is_symlink {
         ui.painter().text(
             icon_rect.right_bottom(),

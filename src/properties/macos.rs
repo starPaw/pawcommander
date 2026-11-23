@@ -1,5 +1,6 @@
 use crate::{
     file_error::{AccessAction, AccessError, Failure, MutationError, ScanError, SmbMutationAction},
+    fs_ops::links::{read_target, LinkTarget},
     i18n::text,
     operations::TransferError,
     smb::MutationMount,
@@ -10,6 +11,7 @@ use objc2_foundation::{
     NSArray, NSData, NSPropertyListReadOptions, NSPropertyListSerialization, NSString,
 };
 use rustix::fs::{fstat, statat, AtFlags};
+use std::borrow::Cow;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::fs::{self, Metadata, OpenOptions};
 use std::io;
@@ -32,6 +34,95 @@ unsafe extern "C" {
     fn acl_free(value: *mut c_void) -> c_int;
 }
 
+#[derive(Debug)]
+pub(super) struct LocalDetails {
+    metadata: Metadata,
+    extended: Option<Result<ExtendedDetails, ItemChanged>>,
+}
+
+impl LocalDetails {
+    pub(super) fn render(&self) -> String {
+        let mut description = super::details(&self.metadata);
+        if let Some(extended) = &self.extended {
+            description.push('\n');
+            match extended {
+                Ok(extended) => extended.render(&mut description),
+                Err(ItemChanged) => {
+                    description.push_str(text!("Объект изменился во время чтения метаданных."));
+                }
+            }
+        }
+        description
+    }
+}
+
+#[derive(Debug)]
+struct ItemChanged;
+
+#[derive(Debug)]
+enum HardLinkCount {
+    Count(u64),
+    Unsupported,
+    NotApplicable,
+}
+
+#[derive(Debug)]
+struct ExtendedDetails {
+    filesystem: Option<String>,
+    links: HardLinkCount,
+    tags: TextAttribute,
+    attributes: TextAttribute,
+    acl: TextAttribute,
+    link: Option<Result<LinkTarget, Box<AccessError>>>,
+}
+
+impl ExtendedDetails {
+    fn render(&self, description: &mut String) {
+        let links = match self.links {
+            HardLinkCount::Count(count) => count.to_string(),
+            HardLinkCount::Unsupported => text!("Не поддерживается на этом томе").into(),
+            HardLinkCount::NotApplicable => text!("Не применяется").into(),
+        };
+        description.push_str(&format!(
+            "{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}",
+            text!("Файловая система"),
+            self.filesystem
+                .as_deref()
+                .unwrap_or_else(|| text!("Недоступно")),
+            text!("Жёсткие ссылки"),
+            links,
+            text!("Теги Finder"),
+            display_attribute(&self.tags),
+            text!("Расширенные атрибуты"),
+            display_attribute(&self.attributes),
+            "ACL",
+            display_attribute(&self.acl),
+        ));
+        if let Some(link) = &self.link {
+            description.push('\n');
+            description.push_str(&render_link_target(link));
+        }
+    }
+}
+
+fn render_link_target(link: &Result<LinkTarget, Box<AccessError>>) -> String {
+    match link {
+        Ok(link) => format!(
+            "{}: {}\n{}: {}",
+            text!("Цель ссылки"),
+            link.path.display(),
+            text!("Состояние цели ссылки"),
+            crate::i18n::link_problem(link.status).unwrap_or_else(|| text!("Цель ссылки доступна")),
+        ),
+        Err(error) => format!(
+            "{} «{}»: {}",
+            text!("Не удалось прочитать цель ссылки"),
+            error.location,
+            error.cause,
+        ),
+    }
+}
+
 pub(super) fn capture_mount(path: &Path) -> Result<MutationMount, TransferError> {
     let mut mount = MutationMount::new(SmbMutationAction::ReadProperties);
     mount.check(path)?;
@@ -47,7 +138,7 @@ pub(super) fn read_item(
     path: &Path,
     cancel: &AtomicBool,
     mount: &MutationMount,
-) -> Result<(Metadata, String), TransferError> {
+) -> Result<(Metadata, LocalDetails), TransferError> {
     let location = Location::Local(path.to_owned());
     let read = || -> Result<Metadata, TransferError> {
         fs::symlink_metadata(path)
@@ -59,17 +150,17 @@ pub(super) fn read_item(
         if mount.is_owned() {
             verify_selected_entry(&location, &metadata, mount)?;
         }
-        let mut details = super::details(&metadata);
-        if let Some(extended) = describe(path, &metadata, cancel) {
-            details.push('\n');
-            details.push_str(&extended);
-        }
+        let extended = read_extended(path, &metadata, cancel);
         if mount.is_owned() {
             mount.recheck()?;
             if !same_item(&metadata, &read()?) {
                 return Err(ScanError::PropertiesItemChanged(location.clone()).into());
             }
         }
+        let details = LocalDetails {
+            metadata: metadata.clone(),
+            extended,
+        };
         Ok((metadata, details))
     })();
     mount.recheck().and(result)
@@ -129,7 +220,11 @@ fn verify_selected_entry(
     Ok(())
 }
 
-fn describe(path: &Path, metadata: &Metadata, cancel: &AtomicBool) -> Option<String> {
+fn read_extended(
+    path: &Path,
+    metadata: &Metadata,
+    cancel: &AtomicBool,
+) -> Option<Result<ExtendedDetails, ItemChanged>> {
     let active = || !cancel.load(Ordering::Relaxed);
     if !active() {
         return None;
@@ -147,8 +242,8 @@ fn describe(path: &Path, metadata: &Metadata, cancel: &AtomicBool) -> Option<Str
         return None;
     }
     let acl = match volume.acl {
-        Some(false) => Err(io::ErrorKind::Unsupported.into()),
-        _ => acl_text(&path_bytes),
+        Some(false) => Err(AttributeError::Io(io::ErrorKind::Unsupported.into())),
+        _ => acl_text(&path_bytes).map_err(AttributeError::Io),
     };
     if !active() {
         return None;
@@ -158,46 +253,31 @@ fn describe(path: &Path, metadata: &Metadata, cancel: &AtomicBool) -> Option<Str
         return None;
     }
     let tags = finder_tags(&path_bytes);
-    let link = metadata
-        .is_symlink()
-        .then(|| crate::fs_ops::links::describe_target(path));
+    let link = metadata.is_symlink().then(|| read_target(path));
     if !active() {
         return None;
     }
     // If a root changed while these calls ran, discard the whole extended
     // snapshot. This also disambiguates ENOENT for a missing ACL and a vanished file.
     if !fs::symlink_metadata(path).is_ok_and(|current| same_item(metadata, &current)) {
-        return Some(text!("Объект изменился во время чтения метаданных.").into());
+        return Some(Err(ItemChanged));
     }
 
     let links = if !metadata.is_file() {
-        Ok(Some(text!("Не применяется").into()))
+        HardLinkCount::NotApplicable
     } else if volume.hard_links == Some(false) {
-        Err(io::ErrorKind::Unsupported.into())
+        HardLinkCount::Unsupported
     } else {
-        Ok(Some(metadata.nlink().to_string()))
+        HardLinkCount::Count(metadata.nlink())
     };
-    let mut description = format!(
-        "{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}",
-        text!("Файловая система"),
-        volume
-            .filesystem
-            .as_deref()
-            .unwrap_or_else(|| text!("Недоступно")),
-        text!("Жёсткие ссылки"),
-        display(links),
-        text!("Теги Finder"),
-        display(tags),
-        text!("Расширенные атрибуты"),
-        display(attributes),
-        "ACL",
-        display(acl),
-    );
-    if let Some(link) = link {
-        description.push('\n');
-        description.push_str(&link);
-    }
-    Some(description)
+    Some(Ok(ExtendedDetails {
+        filesystem: volume.filesystem,
+        links,
+        tags,
+        attributes,
+        acl,
+        link,
+    }))
 }
 
 fn same_item(before: &Metadata, after: &Metadata) -> bool {
@@ -209,18 +289,37 @@ fn same_item(before: &Metadata, after: &Metadata) -> bool {
     ) == (after.dev(), after.ino(), after.ctime(), after.ctime_nsec())
 }
 
-fn display(value: io::Result<Option<String>>) -> String {
-    match value {
-        Ok(Some(value)) => value,
-        Ok(None) => text!("Отсутствуют").into(),
-        Err(error)
+#[derive(Debug)]
+enum AttributeError {
+    Io(io::Error),
+    PreviewLimit(Option<io::Error>),
+    FinderTagFormat,
+}
+
+type TextAttribute = Result<Option<String>, AttributeError>;
+
+fn display_attribute(value: &TextAttribute) -> Cow<'_, str> {
+    let cause = match value {
+        Ok(Some(value)) => return Cow::Borrowed(value),
+        Ok(None) => return text!("Отсутствуют").into(),
+        Err(AttributeError::Io(error))
             if error.kind() == io::ErrorKind::Unsupported
                 || matches!(error.raw_os_error(), Some(libc::ENOTSUP | libc::EOPNOTSUPP)) =>
         {
-            text!("Не поддерживается на этом томе").into()
+            return text!("Не поддерживается на этом томе").into();
         }
-        Err(error) => crate::tr_format!("Unavailable ({error})", error = error),
-    }
+        Err(AttributeError::Io(error)) => Cow::Owned(error.to_string()),
+        Err(AttributeError::PreviewLimit(source)) => {
+            let limit = text!("Превышен лимит предпросмотра атрибутов");
+            source.as_ref().map_or(Cow::Borrowed(limit), |error| {
+                Cow::Owned(format!("{limit} · {error}"))
+            })
+        }
+        Err(AttributeError::FinderTagFormat) => {
+            Cow::Borrowed(text!("Не удалось прочитать формат тегов Finder"))
+        }
+    };
+    crate::tr_format!("Unavailable ({error})", error = cause).into()
 }
 
 #[derive(Default)]
@@ -326,29 +425,27 @@ fn acl_text(path: &CStr) -> io::Result<Option<String>> {
     Ok((!entries.is_empty()).then_some(entries))
 }
 
-fn bounded_attribute(read: impl FnOnce(&mut [u8]) -> libc::ssize_t) -> io::Result<Vec<u8>> {
+fn bounded_attribute(
+    read: impl FnOnce(&mut [u8]) -> libc::ssize_t,
+) -> Result<Vec<u8>, AttributeError> {
     let mut bytes = vec![0; MAX_ATTRIBUTE_BYTES];
     let count = read(&mut bytes);
     if count < 0 {
         let error = io::Error::last_os_error();
         return if error.raw_os_error() == Some(libc::ERANGE) {
-            Err(attribute_limit())
+            Err(AttributeError::PreviewLimit(Some(error)))
         } else {
-            Err(error)
+            Err(AttributeError::Io(error))
         };
     }
     if count as usize > bytes.len() {
-        return Err(attribute_limit());
+        return Err(AttributeError::PreviewLimit(None));
     }
     bytes.truncate(count as usize);
     Ok(bytes)
 }
 
-fn attribute_limit() -> io::Error {
-    io::Error::other(text!("Превышен лимит предпросмотра атрибутов"))
-}
-
-fn attribute_names(path: &CStr) -> io::Result<Option<String>> {
+fn attribute_names(path: &CStr) -> TextAttribute {
     let bytes = bounded_attribute(|buffer| {
         // SAFETY: path is NUL-terminated and buffer is writable for its full length.
         unsafe {
@@ -374,7 +471,7 @@ fn attribute_names(path: &CStr) -> io::Result<Option<String>> {
     }))
 }
 
-fn finder_tags(path: &CStr) -> io::Result<Option<String>> {
+fn finder_tags(path: &CStr) -> TextAttribute {
     let bytes = bounded_attribute(|buffer| {
         // SAFETY: both input C strings are NUL-terminated. The output fits in buffer.
         unsafe {
@@ -390,18 +487,12 @@ fn finder_tags(path: &CStr) -> io::Result<Option<String>> {
     });
     match bytes {
         Ok(bytes) => decode_tags(&bytes),
-        Err(error) if error.raw_os_error() == Some(libc::ENOATTR) => Ok(None),
+        Err(AttributeError::Io(error)) if error.raw_os_error() == Some(libc::ENOATTR) => Ok(None),
         Err(error) => Err(error),
     }
 }
 
-fn decode_tags(bytes: &[u8]) -> io::Result<Option<String>> {
-    let malformed = || {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            text!("Не удалось прочитать формат тегов Finder"),
-        )
-    };
+fn decode_tags(bytes: &[u8]) -> TextAttribute {
     autoreleasepool(|_| {
         let data = NSData::with_bytes(bytes);
         // SAFETY: a null format out-parameter is permitted by Foundation.
@@ -412,15 +503,15 @@ fn decode_tags(bytes: &[u8]) -> io::Result<Option<String>> {
                 ptr::null_mut(),
             )
         }
-        .map_err(|_| malformed())?;
+        .map_err(|_| AttributeError::FinderTagFormat)?;
         let tags = plist
             .downcast::<NSArray<AnyObject>>()
-            .map_err(|_| malformed())?;
+            .map_err(|_| AttributeError::FinderTagFormat)?;
         let mut names = String::new();
         for value in tags.iter() {
             let tag = value
                 .downcast::<NSString>()
-                .map_err(|_| malformed())?
+                .map_err(|_| AttributeError::FinderTagFormat)?
                 .to_string();
             // Finder uses a final newline and a single color digit after the name.
             let name = match tag.rsplit_once('\n') {
@@ -428,7 +519,7 @@ fn decode_tags(bytes: &[u8]) -> io::Result<Option<String>> {
                 _ => &tag,
             };
             if names.len() + name.len() + 2 > MAX_ATTRIBUTE_BYTES {
-                return Err(attribute_limit());
+                return Err(AttributeError::PreviewLimit(None));
             }
             if !names.is_empty() {
                 names.push_str(", ");
@@ -509,20 +600,17 @@ mod tests {
 
         fs::remove_file(&hard).unwrap();
         fs::write(&hard, b"replacement").unwrap();
-        let changed = describe(&hard, &snapshot, &AtomicBool::new(false));
-        assert_eq!(
-            changed.as_deref(),
-            Some(text!("Объект изменился во время чтения метаданных."))
-        );
+        let changed = read_extended(&hard, &snapshot, &AtomicBool::new(false));
+        assert!(matches!(changed, Some(Err(ItemChanged))));
         assert_eq!(fs::read(&file).unwrap(), b"unchanged");
     }
 
     #[test]
     fn malformed_finder_tags_are_a_read_error() {
         let invalid = br#"<?xml version="1.0"?><plist version="1.0"><array><string>tag</string><integer>7</integer></array></plist>"#;
-        assert_eq!(
-            decode_tags(invalid).unwrap_err().kind(),
-            io::ErrorKind::InvalidData
-        );
+        assert!(matches!(
+            decode_tags(invalid),
+            Err(AttributeError::FinderTagFormat)
+        ));
     }
 }

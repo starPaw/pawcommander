@@ -1,4 +1,4 @@
-use super::{date, Summary};
+use super::{date, ItemDetails, Summary};
 use crate::{
     file_error::ScanError,
     i18n::text,
@@ -40,7 +40,9 @@ pub(super) fn scan(
                     _ => summary.other += 1,
                 }
                 if selected {
-                    summary.details.push((location.clone(), details(stat)));
+                    summary
+                        .details
+                        .push((location.clone(), ItemDetails::Sftp(stat.clone())));
                 }
             }
             PropertyEvent::Error(error) => summary.read_error(error),
@@ -52,7 +54,7 @@ pub(super) fn scan(
     summary
 }
 
-fn details(stat: &FileStat) -> String {
+pub(super) fn details(stat: &FileStat) -> String {
     let unavailable = || text!("недоступно").to_owned();
     let mode = stat
         .perm
@@ -134,16 +136,22 @@ pub(crate) fn check_sftp_properties(remote: &Location) {
         .iter()
         .find(|(path, _)| *path == peer)
         .unwrap();
+    let rendered = details.render();
     use std::os::unix::fs::MetadataExt;
     let metadata = fs::metadata(peer.path()).unwrap();
-    assert!(details.contains(&format!(
-        "0640 · UID {} · GID {}",
-        metadata.uid(),
-        metadata.gid()
-    )));
-    assert!(details.contains(&date(Some(modified))));
-    assert!(details.contains(&date(Some(accessed))));
-    assert!(details.contains(text!("недоступно")));
+    let ownership = format!("0640 · UID {} · GID {}", metadata.uid(), metadata.gid());
+    assert!(rendered.contains(&ownership));
+    assert!(rendered.contains(&date(Some(modified))));
+    assert!(rendered.contains(&date(Some(accessed))));
+    assert!(rendered.contains(text!("недоступно")));
+
+    // This disposable integration test runs in its own process.
+    let language = crate::i18n::language();
+    crate::i18n::set_language(crate::i18n::Language::Russian);
+    let russian = details.render();
+    crate::i18n::set_language(language);
+    assert!(russian.contains(&format!("Права: {ownership}")));
+    assert!(russian.contains("Создан: недоступно"));
 
     let denied = tree.join("denied");
     let missing = root.join("missing");

@@ -1407,10 +1407,6 @@ fn remove_staging(staging: &StagingDirectory) -> Result<(), TransferError> {
     fs::remove_dir_all(&staging.path).map_err(|error| cleanup(error).into())
 }
 
-fn at(action: &str, path: &Path, error: impl std::fmt::Display) -> String {
-    format!("{action} «{}»: {error}", path.display())
-}
-
 pub(crate) fn rename_error(from: &Path, to: &Path, source: io::Error) -> TransferError {
     MutationError::RenameLocal {
         from: from.to_owned(),
