@@ -4,7 +4,9 @@ use crate::file_error::{
     RecoveryRecordAction as Action, RecoveryRecordError, RecoveryRecordProblem,
     RecoveryRecordSection, ResumeRecordEvent,
 };
-use crate::recovery::{check_record_identity, remove_record, same_owned_marker, store_record};
+use crate::recovery::{
+    check_record_identity, remove_record, same_owned_marker, store_record, LockedRecord,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cell::Cell;
@@ -27,7 +29,7 @@ const MAX_ACCESS_TIMES_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_ENTRIES: usize = 1024;
 
 pub(super) struct Ticket {
-    file: File,
+    file: LockedRecord,
     path: PathBuf,
     pub(super) receipt: Receipt,
     publication: Cell<Option<RenamedIdentity>>,
@@ -128,14 +130,14 @@ impl Ticket {
         {
             return Err(failure(RecoveryRecordProblem::IdentityChanged));
         }
-        match file.try_lock() {
-            Ok(()) => {}
+        let file = match LockedRecord::try_lock(file) {
+            Ok(file) => file,
             Err(TryLockError::WouldBlock) => return Ok(None),
             Err(TryLockError::Error(error)) => {
                 return Err(failure(RecoveryRecordProblem::Lock(error)))
             }
-        }
-        let mut reader = BufReader::new(&file);
+        };
+        let mut reader = BufReader::new(file.as_file());
         let mut header = Vec::new();
         (&mut reader)
             .take(MAX_BYTES + 1)
@@ -172,7 +174,7 @@ impl Ticket {
             let offset = header.len() as u64;
             if !has_separator
                 || !valid_access_times(&receipt, section)
-                || offset + section.bytes > file.metadata().map_err(read)?.len()
+                || offset + section.bytes > file.as_file().metadata().map_err(read)?.len()
             {
                 return Err(failure(RecoveryRecordProblem::InvalidAccessTimes));
             }
@@ -193,7 +195,7 @@ impl Ticket {
         if tail.len() as u64 > event_limit {
             return Err(failure(RecoveryRecordProblem::SizeLimit(MAX_BYTES)));
         }
-        if !same_owned_marker(&file, &path).map_err(read)? {
+        if !same_owned_marker(file.as_file(), &path).map_err(read)? {
             return Err(failure(RecoveryRecordProblem::IdentityChanged));
         }
         let events = if access_times_offset.is_some() {
@@ -269,7 +271,7 @@ impl Ticket {
             .as_ref()
             .ok_or_else(|| failure(RecoveryRecordProblem::InvalidAccessTimes))?;
         let mut bytes = vec![0; section.bytes as usize];
-        let mut file = &self.file;
+        let mut file = self.file.as_file();
         file.seek(SeekFrom::Start(offset)).map_err(read)?;
         file.read_exact(&mut bytes).map_err(read)?;
         let digest: [u8; 32] = Sha256::digest(&bytes).into();
@@ -314,7 +316,7 @@ impl Ticket {
         if self.receipt.intent != Intent::Move {
             return Err(self.error(RecoveryRecordProblem::InvalidProof));
         }
-        check_record_identity(&self.file, &self.path)?;
+        check_record_identity(self.file.as_file(), &self.path)?;
         let kind = event.kind();
         let mut bytes = vec![b'\n'];
         serde_json::to_writer(&mut bytes, event).map_err(|source| {
@@ -323,7 +325,7 @@ impl Ticket {
                 source,
             })
         })?;
-        let mut file = &self.file;
+        let mut file = self.file.as_file();
         let access_times_bytes = self
             .receipt
             .folder_access_times
@@ -356,7 +358,7 @@ impl Ticket {
     }
 
     pub(super) fn finish(&self) -> Result<(), RecoveryRecordError> {
-        remove_record(&self.file, &self.path)
+        remove_record(self.file.as_file(), &self.path)
     }
 }
 
