@@ -419,6 +419,8 @@ formats! {
     "Undo stopped. Restored: {restored}. Remaining: {remaining}." => ("Отмена изменений остановлена. Возвращено: {restored}. Осталось: {remaining}.", "Vracení bylo zastaveno. Obnoveno: {restored}. Zbývá: {remaining}."),
     "Restored: {restored}. Available for another attempt: {remaining}.\n{error}" => ("Восстановлено: {restored}. Доступно для следующей попытки: {remaining}.\n{error}", "Obnoveno: {restored}. Dostupné pro další pokus: {remaining}.\n{error}"),
     "Could not start comparison: {error}" => ("Не удалось запустить сравнение: {error}", "Porovnávání se nepodařilo spustit: {error}"),
+    "Could not start “{operation}”. {error}" => ("Не удалось запустить «{operation}». {error}", "Úlohu „{operation}“ se nepodařilo spustit. {error}"),
+    "“{operation}” ended unexpectedly." => ("Операция «{operation}» неожиданно завершилась.", "Úloha „{operation}“ byla neočekávaně ukončena."),
     "Arguments ({})" => ("Аргументы ({})", "Argumenty ({})"),
     "Selected file · {name}" => ("Выделенный файл · {name}", "Vybraný soubor · {name}"),
     "Remove collection “{name}”?" => ("Удалить коллекцию «{name}»?", "Odstranit kolekci „{name}“?"),

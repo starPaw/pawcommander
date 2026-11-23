@@ -1,6 +1,7 @@
 use super::{
     comparison::{
-        show_pair, show_progress, ComparisonBody, ComparisonDialog, ComparisonResponse, Phase,
+        show_pair, show_progress_with_stop, ComparisonBody, ComparisonDialog, ComparisonResponse,
+        Phase,
     },
     sync_profiles::{Direction, Options, ProfilePicker, SyncProfile},
     PawCommander,
@@ -150,7 +151,12 @@ impl FolderSyncDialog {
             ui.separator();
             match &mut self.phase {
                 Phase::Ready => {}
-                Phase::Running(worker) => show_progress(ui, worker, crate::i18n::key!("Проверяем папки для плана…")),
+                Phase::Running(worker) => show_progress_with_stop(
+                    ui,
+                    worker,
+                    crate::i18n::key!("Проверяем папки для плана…"),
+                    crate::i18n::key!("Остановка…"),
+                ),
                 Phase::Finished(preview) => review = show_preview(ui, preview, self.run),
                 Phase::Failed(error) => {
                     let height = (ctx.content_rect().height() * 0.30).clamp(90.0, 240.0);
@@ -158,7 +164,8 @@ impl FolderSyncDialog {
                         .id_salt(("sync-plan-error", self.run))
                         .max_height(height)
                         .show(ui, |ui| {
-                            let message = egui::RichText::new(error.as_str()).color(ui.visuals().error_fg_color);
+                            let message = egui::RichText::new(error.message(Command::SyncFolders.label()))
+                                .color(ui.visuals().error_fg_color);
                             ui.add(egui::Label::new(message).selectable(true).wrap());
                         });
                 }

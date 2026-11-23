@@ -7,7 +7,7 @@ use crate::{
     vfs::Location,
 };
 use eframe::egui::{self, RichText};
-use std::{sync::mpsc, thread, time::Duration};
+use std::{io, sync::mpsc, thread, time::Duration};
 
 pub(super) struct ComparisonDialog {
     pub(super) body: ComparisonBody,
@@ -235,8 +235,45 @@ pub(super) enum Phase<T> {
     Ready,
     Running(Worker<T>),
     Finished(T),
-    Failed(String),
+    Failed(PhaseFailure),
     Stopped,
+}
+
+pub(super) enum PhaseFailure {
+    Operation(TransferError),
+    WorkerStart(io::Error),
+    WorkerStopped,
+}
+
+impl PhaseFailure {
+    pub(super) fn message(&self, operation: &str) -> String {
+        #[cfg(not(target_os = "macos"))]
+        let _ = operation;
+
+        match self {
+            Self::Operation(error) => crate::i18n::file_error(error),
+            Self::WorkerStart(error) => {
+                #[cfg(target_os = "macos")]
+                let message = crate::tr_format!(
+                    "Could not start “{operation}”. {error}",
+                    operation = operation,
+                    error = error
+                );
+                #[cfg(not(target_os = "macos"))]
+                let message =
+                    crate::tr_format!("Could not start comparison: {error}", error = error);
+                message
+            }
+            Self::WorkerStopped => {
+                #[cfg(target_os = "macos")]
+                let message =
+                    crate::tr_format!("“{operation}” ended unexpectedly.", operation = operation);
+                #[cfg(not(target_os = "macos"))]
+                let message = text!("Сравнение неожиданно завершилось").into();
+                message
+            }
+        }
+    }
 }
 
 pub(super) struct Worker<T> {
@@ -266,10 +303,7 @@ impl<T: Send + 'static> Phase<T> {
             });
         match started {
             Ok(_) => Self::Running(Worker { result, progress }),
-            Err(error) => Self::Failed(crate::tr_format!(
-                "Could not start comparison: {error}",
-                error = error
-            )),
+            Err(error) => Self::Failed(PhaseFailure::WorkerStart(error)),
         }
     }
 
@@ -280,11 +314,9 @@ impl<T: Send + 'static> Phase<T> {
         *self = match worker.result.try_recv() {
             Ok(Ok(result)) => Self::Finished(result),
             Ok(Err(TransferError::Cancelled)) => Self::Stopped,
-            Ok(Err(error)) => Self::Failed(crate::i18n::file_error(&error)),
+            Ok(Err(error)) => Self::Failed(PhaseFailure::Operation(error)),
             Err(mpsc::TryRecvError::Empty) => return,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                Self::Failed(text!("Сравнение неожиданно завершилось").into())
-            }
+            Err(mpsc::TryRecvError::Disconnected) => Self::Failed(PhaseFailure::WorkerStopped),
         };
     }
 }
@@ -333,4 +365,74 @@ pub(super) fn show_progress_with_stop<T>(
     });
     super::footer::operation_details(ui, worker.progress.snapshot(), false);
     ui.ctx().request_repaint_after(Duration::from_millis(100));
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+    use crate::{
+        file_error::{AccessCause, AccessError, Failure},
+        shortcuts::Command,
+    };
+
+    fn waiting_phase() -> (mpsc::Sender<Result<(), TransferError>>, Phase<()>) {
+        let (send, result) = mpsc::channel();
+        let (_, progress) = Progress::tracked();
+        (send, Phase::Running(Worker { result, progress }))
+    }
+
+    #[test]
+    fn phase_retains_the_requested_path_and_errno_after_a_stop_request() {
+        let target = Location::Local("/fixture/missing template.txt".into());
+        let (send, mut phase) = waiting_phase();
+        let Phase::Running(worker) = &phase else {
+            panic!("expected a running worker");
+        };
+        worker.progress.cancel.request();
+        let error = AccessError::read(&target, io::Error::from_raw_os_error(libc::ENOENT));
+        send.send(Err(error.into())).unwrap();
+
+        phase.poll();
+
+        let Phase::Failed(
+            failure @ PhaseFailure::Operation(TransferError::Failed(Failure::Access(error))),
+        ) = &phase
+        else {
+            panic!("expected the original access failure");
+        };
+        assert_eq!(error.location, target);
+        assert!(
+            matches!(&error.cause, AccessCause::Local(source) if source.raw_os_error() == Some(libc::ENOENT))
+        );
+        let message = failure.message(text!("Сохранение шаблона"));
+        assert!(
+            message.contains(&target.display()) && message.contains("os error 2"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn phase_distinguishes_cancelled_and_lost_workers_and_names_the_operation() {
+        let (send, mut cancelled) = waiting_phase();
+        send.send(Err(TransferError::Cancelled)).unwrap();
+        cancelled.poll();
+        assert!(matches!(cancelled, Phase::Stopped));
+
+        let (send, mut disconnected) = waiting_phase();
+        drop(send);
+        disconnected.poll();
+        let Phase::Failed(failure @ PhaseFailure::WorkerStopped) = &disconnected else {
+            panic!("expected a lost-worker failure");
+        };
+        let title = Command::DiskUsage.label();
+        let message = failure.message(title);
+        assert!(message.contains(title), "{message}");
+
+        let start = PhaseFailure::WorkerStart(io::Error::from_raw_os_error(libc::EAGAIN));
+        let message = start.message(title);
+        assert!(
+            message.contains(title) && message.contains("os error 35"),
+            "{message}"
+        );
+    }
 }

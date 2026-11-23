@@ -94,7 +94,8 @@ impl DuplicateSearch {
                 }
                 Phase::Failed(error) => {
                     let message =
-                        egui::RichText::new(error.as_str()).color(ui.visuals().error_fg_color);
+                        egui::RichText::new(error.message(Command::FindDuplicates.label()))
+                            .color(ui.visuals().error_fg_color);
                     ui.add(egui::Label::new(message).wrap().selectable(true));
                 }
             }

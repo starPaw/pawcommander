@@ -61,7 +61,10 @@ impl CompatibleNamesDialog {
             match &mut self.preview {
                 Phase::Ready => {}
                 Phase::Failed(error) => {
-                    ui.colored_label(ui.visuals().error_fg_color, error);
+                    ui.colored_label(
+                        ui.visuals().error_fg_color,
+                        error.message(Command::CompatibleNames.label()),
+                    );
                 }
                 Phase::Stopped => {
                     ui.label(text!("Предпросмотр остановлен"));
