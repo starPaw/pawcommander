@@ -3,7 +3,7 @@ use super::{
     Codec, Position, Row, Separator,
 };
 use crate::{
-    file_error::{AccessError, Failure, PreviewError},
+    file_error::{AccessError, Failure, PreviewError, TablePreviewError},
     operations::{Cancellation, TransferError},
     preview::source::{Source, Target, Version},
     vfs::Location,
@@ -258,7 +258,7 @@ fn scan_page(
             regex::RegexBuilder::new(&regex::escape(&request.settings.query))
                 .case_insensitive(true)
                 .build()
-                .map_err(|error| error.to_string())?,
+                .map_err(|source| TablePreviewError::Filter(source).at(location))?,
         )
     };
     let mut batch = Batch {

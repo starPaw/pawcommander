@@ -42,6 +42,7 @@ mod space;
 mod staging;
 #[cfg(target_os = "macos")]
 mod sync;
+mod table_preview;
 mod text_preview;
 mod transfer_plan;
 mod undo;
@@ -91,6 +92,7 @@ pub(crate) use sync::{
     SyncDifference, SyncError, SyncExclusionProblem, SyncFolderRole, SyncStateAction,
     SyncStateKind, SyncStateProblem, SyncVerification,
 };
+pub(crate) use table_preview::TablePreviewError;
 pub(crate) use text_preview::TextDecodeError;
 #[cfg(target_os = "macos")]
 pub(crate) use transfer_plan::SmbTransferRole;
@@ -634,6 +636,10 @@ pub(crate) enum PreviewError {
         record: Option<u64>,
         cause: TextDecodeError,
     },
+    Table {
+        location: Location,
+        cause: TablePreviewError,
+    },
     #[cfg(target_os = "macos")]
     MediaLimit {
         location: Location,
@@ -693,6 +699,7 @@ impl fmt::Display for PreviewError {
                 }
                 write!(f, ": {cause}")
             }
+            Self::Table { location, cause } => write!(f, "Table preview at {location}: {cause}"),
             #[cfg(target_os = "macos")]
             Self::MediaLimit { location, limit } => {
                 write!(f, "Media preview exceeds {limit} bytes: {location}")
@@ -711,6 +718,7 @@ impl Error for PreviewError {
         match self {
             Self::Image { cause, .. } => Some(cause),
             Self::Text { cause, .. } => Some(cause),
+            Self::Table { cause, .. } => Some(cause),
             #[cfg(target_os = "macos")]
             Self::Media { cause, .. } => Some(cause),
             #[cfg(target_os = "macos")]
