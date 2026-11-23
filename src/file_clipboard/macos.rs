@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::ffi::{CStr, CString, OsStr};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Default)]
 pub struct SystemClipboard {
@@ -21,6 +22,17 @@ struct Selection {
     consumed: HashSet<usize>,
 }
 
+pub(crate) struct PasteboardMove {
+    pub(crate) revision: isize,
+    paths: Vec<(usize, PathBuf)>,
+}
+
+impl PasteboardMove {
+    pub(crate) fn slot_count(&self) -> usize {
+        self.paths.len()
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ClipboardWriteError {
     PathContainsNul(PathBuf),
@@ -31,10 +43,22 @@ pub(crate) enum ClipboardWriteError {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ClipboardReadError {
     Changed,
+    MovePending {
+        revision: isize,
+    },
     Unreadable {
         revision: isize,
         cause: ClipboardReadFailure,
     },
+}
+
+impl ClipboardReadError {
+    pub(crate) fn revision(&self) -> Option<isize> {
+        match self {
+            Self::Changed => None,
+            Self::MovePending { revision } | Self::Unreadable { revision, .. } => Some(*revision),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -108,10 +132,23 @@ impl SystemClipboard {
         })
     }
 
-    pub(crate) fn read(&mut self) -> Result<Option<FileList>, ClipboardReadError> {
+    pub(crate) fn read(
+        &mut self,
+        move_pending: impl FnOnce(isize) -> bool,
+    ) -> Result<Option<FileList>, ClipboardReadError> {
         autoreleasepool(|_| {
             let pasteboard = NSPasteboard::generalPasteboard();
             let revision = pasteboard.changeCount();
+            // A Finder reference can already resolve to the destination of an
+            // active move. Wait for its slot to be consumed before reading it.
+            if move_pending(revision) {
+                let error = if pasteboard.changeCount() == revision {
+                    ClipboardReadError::MovePending { revision }
+                } else {
+                    ClipboardReadError::Changed
+                };
+                return Err(error);
+            }
             let items = pasteboard.pasteboardItems();
             self.read_items(
                 revision,
@@ -173,25 +210,58 @@ impl SystemClipboard {
         Ok(files)
     }
 
-    pub fn consume_moved(&mut self, files: &FileList, sources: &HashSet<&Path>) {
-        let revision = files
-            .revision
-            .as_deref()
-            .and_then(|value| value.parse().ok());
-        if revision.is_none() || self.selection.revision != revision {
+    pub(crate) fn move_snapshot(&self, files: &FileList) -> Option<Arc<PasteboardMove>> {
+        let revision = files.pasteboard_revision()?;
+        (self.selection.revision == Some(revision)).then(|| {
+            Arc::new(PasteboardMove {
+                revision,
+                paths: self.selection.paths.clone(),
+            })
+        })
+    }
+
+    pub(crate) fn retry_snapshot(
+        &self,
+        snapshot: &Arc<PasteboardMove>,
+    ) -> Option<Arc<PasteboardMove>> {
+        if self.selection.revision != Some(snapshot.revision) {
+            return None;
+        }
+        let consumed = &self.selection.consumed;
+        if snapshot
+            .paths
+            .iter()
+            .all(|(slot, _)| !consumed.contains(slot))
+        {
+            return Some(Arc::clone(snapshot));
+        }
+        let paths: Vec<_> = snapshot
+            .paths
+            .iter()
+            .filter(|(slot, _)| !consumed.contains(slot))
+            .cloned()
+            .collect();
+        (!paths.is_empty()).then(|| {
+            Arc::new(PasteboardMove {
+                revision: snapshot.revision,
+                paths,
+            })
+        })
+    }
+
+    pub(crate) fn consume_moved(&mut self, snapshot: &PasteboardMove, sources: &HashSet<&Path>) {
+        if self.selection.revision != Some(snapshot.revision) {
             return;
         }
         let Selection {
             paths, consumed, ..
         } = &mut self.selection;
-        paths.retain(|(slot, path)| {
+        for (slot, path) in &snapshot.paths {
             if sources.contains(path.as_path()) {
                 consumed.insert(*slot);
-                false
-            } else {
-                true
             }
-        });
+        }
+        paths.retain(|(slot, _)| !consumed.contains(slot));
     }
 }
 
@@ -264,10 +334,19 @@ mod tests {
                 before.paths,
                 [&folder, &child, &pending].map(PathBuf::as_path)
             );
+            let snapshot = clipboard.move_snapshot(&before).unwrap();
 
             let moved = root.path().join("moved");
             std::fs::rename(&folder, &moved).unwrap();
-            clipboard.consume_moved(&before, &HashSet::from([folder.as_path(), child.as_path()]));
+            let observed = read(&mut clipboard, 1, &urls).unwrap();
+            assert_eq!(observed.paths[0], moved);
+            assert_eq!(observed.revision, before.revision);
+            clipboard.consume_moved(
+                &snapshot,
+                &HashSet::from([folder.as_path(), child.as_path()]),
+            );
+            let retry_snapshot = clipboard.retry_snapshot(&snapshot).unwrap();
+            assert_eq!(retry_snapshot.paths, [(3, pending.clone())]);
             let renamed = root.path().join("renamed.txt");
             std::fs::rename(&pending, &renamed).unwrap();
             let retry = read(&mut clipboard, 1, &urls).unwrap();
@@ -281,7 +360,8 @@ mod tests {
             let after = read(&mut clipboard, 2, &new_urls).unwrap();
             assert_ne!(after.revision, before.revision);
             assert_eq!(after.paths, [renamed.as_path()]);
-            clipboard.consume_moved(&before, &HashSet::from([renamed.as_path()]));
+            clipboard.consume_moved(&snapshot, &HashSet::from([renamed.as_path()]));
+            assert!(clipboard.retry_snapshot(&snapshot).is_none());
             assert_eq!(read(&mut clipboard, 2, &new_urls), Some(after));
         });
     }
@@ -324,6 +404,7 @@ mod tests {
             let before = read(&mut clipboard);
             let move_files = |clipboard: &mut SystemClipboard, files: &FileList, target: &Path| {
                 let sources: Vec<Location> = files.paths.iter().cloned().map(Into::into).collect();
+                let snapshot = clipboard.move_snapshot(files).unwrap();
                 vfs::transfer_with_conflicts(
                     &sources,
                     &target.to_path_buf().into(),
@@ -339,7 +420,7 @@ mod tests {
                         let moved = std::iter::once(source.local().unwrap())
                             .chain(covered.iter().map(PathBuf::as_path))
                             .collect();
-                        clipboard.consume_moved(files, &moved);
+                        clipboard.consume_moved(&snapshot, &moved);
                     },
                 )
                 .unwrap()

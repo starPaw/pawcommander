@@ -2,13 +2,20 @@ use super::actions::Action;
 use super::PawCommander;
 use crate::file_clipboard::FileList;
 #[cfg(target_os = "macos")]
-use crate::file_clipboard::{ClipboardReadError, ClipboardWriteError};
+use crate::file_clipboard::{ClipboardReadError, ClipboardWriteError, PasteboardMove};
 use crate::fs_ops::TransferKind;
 use crate::vfs::Location;
 use eframe::egui;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(target_os = "macos")]
+use std::sync::Arc;
+
+#[cfg(target_os = "macos")]
+type FileClipboardReadError = ClipboardReadError;
+#[cfg(not(target_os = "macos"))]
+type FileClipboardReadError = String;
 
 pub(super) struct Clipboard {
     pub(super) paths: Vec<Location>,
@@ -22,18 +29,28 @@ pub(super) enum ClipboardOrigin {
     // takes precedence, while an unrelated or empty text clipboard leaves SFTP copies usable.
     App(Option<FileList>),
     #[cfg(target_os = "macos")]
-    AppWithUnreadablePasteboard(isize),
+    AppWithPasteboardRevision(isize),
     System(FileList),
 }
 
 #[cfg(target_os = "macos")]
 impl ClipboardOrigin {
-    fn accepts_unreadable(&self, error: &ClipboardReadError) -> bool {
-        matches!(
-            (self, error),
-            (Self::AppWithUnreadablePasteboard(previous), ClipboardReadError::Unreadable { revision, .. })
-                if previous == revision
-        )
+    fn accepts_read_error(&self, error: &ClipboardReadError) -> bool {
+        matches!(self, Self::AppWithPasteboardRevision(previous) if Some(*previous) == error.revision())
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct ClipboardCut {
+    pub(super) generation: u64,
+    #[cfg(target_os = "macos")]
+    pub(super) pasteboard: Option<Arc<PasteboardMove>>,
+}
+
+#[cfg(target_os = "macos")]
+impl ClipboardCut {
+    pub(super) fn pasteboard_revision(&self) -> Option<isize> {
+        self.pasteboard.as_ref().map(|selection| selection.revision)
     }
 }
 
@@ -52,7 +69,9 @@ impl Clipboard {
         match &self.origin {
             ClipboardOrigin::App(previous) => observed.is_none() || previous.as_ref() == observed,
             #[cfg(target_os = "macos")]
-            ClipboardOrigin::AppWithUnreadablePasteboard(_) => observed.is_none(),
+            ClipboardOrigin::AppWithPasteboardRevision(revision) => {
+                observed.is_none_or(|files| files.pasteboard_revision() == Some(*revision))
+            }
             ClipboardOrigin::System(previous) => Some(previous) == observed,
         }
     }
@@ -128,6 +147,31 @@ pub(super) fn translate_macos_clipboard_events(
 }
 
 impl PawCommander {
+    fn read_file_clipboard(&mut self) -> Result<Option<FileList>, FileClipboardReadError> {
+        #[cfg(target_os = "macos")]
+        {
+            let jobs = &self.jobs;
+            self.system_clipboard
+                .read(|revision| jobs.reserves_pasteboard_move(revision))
+        }
+        #[cfg(not(target_os = "macos"))]
+        self.system_clipboard.read()
+    }
+
+    pub(super) fn capture_clipboard_cut(&self) -> Option<ClipboardCut> {
+        let clipboard = self.clipboard.as_ref()?;
+        #[cfg(target_os = "macos")]
+        let pasteboard = match &clipboard.origin {
+            ClipboardOrigin::System(files) => self.system_clipboard.move_snapshot(files),
+            _ => None,
+        };
+        Some(ClipboardCut {
+            generation: clipboard.generation,
+            #[cfg(target_os = "macos")]
+            pasteboard,
+        })
+    }
+
     pub(super) fn copy_files(&mut self, cut: bool) {
         let paths = self.selected();
         if paths.is_empty() {
@@ -158,13 +202,15 @@ impl PawCommander {
         } else {
             None
         };
-        let origin = match self.system_clipboard.read() {
-            #[cfg(target_os = "macos")]
-            Err(ClipboardReadError::Unreadable { revision, .. }) => {
-                ClipboardOrigin::AppWithUnreadablePasteboard(revision)
-            }
-            observed => ClipboardOrigin::App(observed.ok().flatten()),
+        let observed = self.read_file_clipboard();
+        #[cfg(target_os = "macos")]
+        let revision = match &observed {
+            Ok(files) => files.as_ref().and_then(FileList::pasteboard_revision),
+            Err(error) => error.revision(),
         };
+        let origin = ClipboardOrigin::App(observed.ok().flatten());
+        #[cfg(target_os = "macos")]
+        let origin = revision.map_or(origin, ClipboardOrigin::AppWithPasteboardRevision);
         self.clipboard = Some(Clipboard::new(paths, cut, origin));
         #[cfg(target_os = "macos")]
         let write_error = write_error.as_ref().map(crate::i18n::clipboard_write_error);
@@ -184,14 +230,14 @@ impl PawCommander {
     }
 
     pub(super) fn paste_files(&mut self, move_here: bool, ctx: &egui::Context) {
-        let observed = match self.system_clipboard.read() {
+        let observed = match self.read_file_clipboard() {
             Ok(files) => files,
             #[cfg(target_os = "macos")]
             Err(error)
                 if self
                     .clipboard
                     .as_ref()
-                    .is_some_and(|clipboard| clipboard.origin.accepts_unreadable(&error)) =>
+                    .is_some_and(|clipboard| clipboard.origin.accepts_read_error(&error)) =>
             {
                 None
             }
@@ -205,14 +251,13 @@ impl PawCommander {
             }
             Err(error) => {
                 #[cfg(target_os = "macos")]
-                let error = crate::i18n::clipboard_read_error(&error);
-                self.notice = Some((
-                    crate::tr_format!(
-                        "Could not read system file clipboard: {error}",
-                        error = error
-                    ),
-                    true,
-                ));
+                let notice = crate::i18n::clipboard_read_error(&error);
+                #[cfg(not(target_os = "macos"))]
+                let notice = crate::tr_format!(
+                    "Could not read system file clipboard: {error}",
+                    error = error
+                );
+                self.notice = Some((notice, true));
                 return;
             }
         };
@@ -262,29 +307,29 @@ impl PawCommander {
         &mut self,
         source: &Location,
         covered: &[PathBuf],
-        generation: u64,
+        cut: &ClipboardCut,
     ) {
-        if let Some(clipboard) = self
+        let clipboard = self
             .clipboard
             .as_mut()
-            .filter(|clipboard| clipboard.generation == generation)
-        {
-            if let Some(source) = source.local() {
-                let moved: HashSet<_> = std::iter::once(source)
-                    .chain(covered.iter().map(PathBuf::as_path))
-                    .collect();
-                #[cfg(target_os = "macos")]
-                if let ClipboardOrigin::System(files) = &clipboard.origin {
-                    self.system_clipboard.consume_moved(files, &moved);
-                }
+            .filter(|clipboard| clipboard.generation == cut.generation);
+        if let Some(source) = source.local() {
+            let moved: HashSet<_> = std::iter::once(source)
+                .chain(covered.iter().map(PathBuf::as_path))
+                .collect();
+            #[cfg(target_os = "macos")]
+            if let Some(pasteboard) = &cut.pasteboard {
+                self.system_clipboard.consume_moved(pasteboard, &moved);
+            }
+            if let Some(clipboard) = clipboard {
                 clipboard
                     .paths
                     .retain(|path| path.local().is_none_or(|path| !moved.contains(path)));
-            } else {
-                clipboard.paths.retain(|path| {
-                    !path.same_backend(source) || !path.path().starts_with(source.path())
-                });
             }
+        } else if let Some(clipboard) = clipboard {
+            clipboard.paths.retain(|path| {
+                !path.same_backend(source) || !path.path().starts_with(source.path())
+            });
         }
     }
 }
@@ -295,16 +340,18 @@ mod tests {
     use crate::file_clipboard::ClipboardReadFailure;
 
     #[test]
-    fn app_cut_fallback_requires_the_same_unreadable_pasteboard_revision() {
-        let origin = ClipboardOrigin::AppWithUnreadablePasteboard(12);
+    fn app_cut_fallback_requires_the_same_pasteboard_revision() {
+        let origin = ClipboardOrigin::AppWithPasteboardRevision(12);
         let unreadable = |revision| ClipboardReadError::Unreadable {
             revision,
             cause: ClipboardReadFailure::ItemsUnavailable,
         };
 
-        assert!(origin.accepts_unreadable(&unreadable(12)));
-        assert!(!origin.accepts_unreadable(&unreadable(13)));
-        assert!(!origin.accepts_unreadable(&ClipboardReadError::Changed));
-        assert!(!ClipboardOrigin::App(None).accepts_unreadable(&unreadable(12)));
+        assert!(origin.accepts_read_error(&unreadable(12)));
+        assert!(!origin.accepts_read_error(&unreadable(13)));
+        assert!(origin.accepts_read_error(&ClipboardReadError::MovePending { revision: 12 }));
+        assert!(!origin.accepts_read_error(&ClipboardReadError::MovePending { revision: 13 }));
+        assert!(!origin.accepts_read_error(&ClipboardReadError::Changed));
+        assert!(!ClipboardOrigin::App(None).accepts_read_error(&unreadable(12)));
     }
 }
