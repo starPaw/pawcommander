@@ -39,4 +39,24 @@ The ZIP contains the app, this guide, release notes, the MIT license, third-part
 
 Quit PawCommander before replacing it with a newer copy in Applications. Automatic app updates are not included. Check the [Releases page](https://github.com/starPaw/pawcommander/releases) for updates.
 
+With a version that provides `update-macos` in `--help`, use the installed command to verify and replace the app. Keep the ZIP, `SHA256SUMS.txt` and `SHA256SUMS.txt.sig` together. Use the public key you verified in the previous section. For example, with PawCommander installed in Applications, run this in Terminal after quitting the app.
+
+```sh
+app=/Applications/PawCommander.app
+"$app/Contents/MacOS/pawcommander" update-macos "$app" \
+  /path/to/PawCommander-VERSION-macOS-arm64.zip /path/to/trusted-release-key.pub
+```
+
+The command accepts a newer version for your architecture and checks its macOS requirement. It prepares the signed app and a copy of the previous installation in private folders before swapping the app bundles. Use a writable local volume that supports atomic swaps, such as APFS. Use the signed ZIP and manual installation above when your installed version predates the update command.
+
+Save the printed backup path. If the command is interrupted, check the installed version in Finder using **Get Info**. The installation path contains a complete app before and after the swap. After quitting the app, restore from the saved path. Run the command from the backup so recovery also works when the new app cannot launch. If the backup predates the command, use a separate trusted copy with `restore-macos` in `--help`.
+
+```sh
+app=/Applications/PawCommander.app
+backup=/Applications/.pawcommander-previous-EXAMPLE/PawCommander.app
+"$backup/Contents/MacOS/pawcommander" restore-macos "$app" "$backup"
+```
+
+Keep the backup beside the existing app until you have checked that the updated app opens. Restore leaves that copy available for another attempt. A forcibly stopped command may leave a private `.pawcommander-update-*` working folder beside the app. After confirming the installed version and backup, you can remove that folder.
+
 Version 0.2.0 keeps the application and credential-store identifiers used by the public 0.1.0 preview. Replacing the app preserves that preview’s settings and saved connections. Settings and saved keys from older development builds with different identifiers are not migrated.
