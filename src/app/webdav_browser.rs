@@ -190,7 +190,7 @@ impl Browser {
                                     if entry.is_dir {
                                         let button = ui.add_enabled_ui(idle, |ui| {
                                             ui.add_sized([name_width, row_height],
-                                                egui::Button::new(format!("▸ {}", entry.name)).truncate())
+                                                egui::Button::new(&entry.name).truncate())
                                         }).inner;
                                         if button.on_hover_text(&entry.name).clicked() {
                                             match endpoint.child(entry) {
