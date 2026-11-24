@@ -69,7 +69,7 @@ impl fmt::Display for Error {
 type Result<T> = std::result::Result<T, Error>;
 
 pub(crate) fn install(installed: &Path, archive: &Path, key: &Path) -> Result<()> {
-    let target = Target::open(installed)?;
+    let target = Target::open(installed, Operation::Update)?;
     let installed_version = bundle_property(&target.path, "CFBundleShortVersionString")?;
     let current = parse_version(&installed_version).ok_or_else(|| invalid_bundle(&target.path))?;
     let (release, candidate) = release_version(archive)?;
@@ -115,7 +115,7 @@ pub(crate) fn install(installed: &Path, archive: &Path, key: &Path) -> Result<()
 }
 
 pub(crate) fn restore(installed: &Path, backup: &Path) -> Result<()> {
-    let target = Target::open(installed)?;
+    let target = Target::open(installed, Operation::Restore)?;
     let backup = absolute(backup)?;
     let Some(directory) = backup.parent().filter(|directory| {
         directory.file_name().is_some_and(|name| {
@@ -153,14 +153,19 @@ pub(crate) fn restore(installed: &Path, backup: &Path) -> Result<()> {
     Ok(())
 }
 
+enum Operation {
+    Update,
+    Restore,
+}
+
 struct Target {
     path: PathBuf,
-    installed: Metadata,
+    installed: Option<Metadata>,
     parent_lock: LockedRecord,
 }
 
 impl Target {
-    fn open(path: &Path) -> Result<Self> {
+    fn open(path: &Path, operation: Operation) -> Result<Self> {
         let path = absolute(path)?;
         let Some(name) = path
             .file_name()
@@ -182,9 +187,20 @@ impl Target {
             }
             Err(TryLockError::Error(error)) => return at(&parent, Err(error)),
         };
-        let installed = at(&path, fs::symlink_metadata(&path))?;
-        check_bundle(&path, &installed)?;
-        require_closed(&path)?;
+        let installed = match fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                check_bundle(&path, &metadata)?;
+                require_closed(&path)?;
+                Some(metadata)
+            }
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    && matches!(operation, Operation::Restore) =>
+            {
+                None
+            }
+            Err(error) => return at(&path, Err(error)),
+        };
         Ok(Self {
             path,
             installed,
@@ -201,30 +217,38 @@ impl Target {
         let locked_parent = self.parent_lock.as_file();
         let original_parent = at(parent, locked_parent.metadata())?;
         let current_parent = at(parent, fs::symlink_metadata(parent))?;
-        let current_app = at(&self.path, fs::symlink_metadata(&self.path))?;
-        if !same_file(&original_parent, &current_parent)
-            || !same_file(&self.installed, &current_app)
-        {
-            return Err(Error::Refused(crate::tr_format!(
+        let changed = || {
+            Error::Refused(crate::tr_format!(
                 "The installation at {path:?} changed during the operation.",
                 path = self.path
-            )));
+            ))
+        };
+        if !same_file(&original_parent, &current_parent) {
+            return Err(changed());
         }
-        require_closed(&self.path)?;
+        let flags = if let Some(installed) = &self.installed {
+            let current = at(&self.path, fs::symlink_metadata(&self.path))?;
+            if !same_file(installed, &current) {
+                return Err(changed());
+            }
+            require_closed(&self.path)?;
+            libc::RENAME_SWAP
+        } else {
+            libc::RENAME_EXCL
+        };
 
         let stage_parent = staged.parent().expect("staged application has a parent");
         let stage_parent = at(stage_parent, File::open(stage_parent))?;
         let name = self.path.file_name().expect("application path has a name");
         let name = CString::new(name.as_bytes()).expect("an existing path cannot contain a NUL");
-        // SAFETY: Both directory handles and C strings are valid for this call. RENAME_SWAP
-        // atomically exchanges the two names on supported filesystems.
+        // SAFETY: Both directory handles and C strings remain valid for the rename.
         let result = unsafe {
             libc::renameatx_np(
                 stage_parent.as_raw_fd(),
                 c"PawCommander.app".as_ptr(),
                 locked_parent.as_raw_fd(),
                 name.as_ptr(),
-                libc::RENAME_SWAP,
+                flags,
             )
         };
         if result == 0 {
@@ -486,6 +510,22 @@ fn run(command: &mut Command) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restoring_a_missing_app_preserves_a_late_arrival() {
+        let parent = tempfile::tempdir().unwrap();
+        let path = parent.path().join(APP_NAME);
+        assert!(Target::open(&path, Operation::Update).is_err());
+        let target = Target::open(&path, Operation::Restore).unwrap();
+        let staging = tempfile::tempdir_in(parent.path()).unwrap();
+        let restored = staging.path().join(APP_NAME);
+        fs::create_dir(&restored).unwrap();
+        fs::write(&path, b"another item").unwrap();
+
+        assert!(target.replace_with(&restored).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"another item");
+        assert!(restored.is_dir());
+    }
 
     #[test]
     fn staging_and_backup_are_private_from_creation() {
