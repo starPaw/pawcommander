@@ -57,6 +57,6 @@ backup=/Applications/.pawcommander-previous-EXAMPLE/PawCommander.app
 "$backup/Contents/MacOS/pawcommander" restore-macos "$app" "$backup"
 ```
 
-Keep the backup beside the existing app until you have checked that the updated app opens. Restore leaves that copy available for another attempt. A forcibly stopped command may leave a private `.pawcommander-update-*` working folder beside the app. After confirming the installed version and backup, you can remove that folder.
+Keep the backup in the original installation folder until you have checked that the updated app opens. The same restore command also works if the installed app has been removed. If another item appears at the missing app's path during recovery, restore stops and preserves that item. The backup remains available for another attempt. A forcibly stopped command may leave a private `.pawcommander-update-*` working folder beside the app. After confirming the installed version and backup, you can remove that folder.
 
 Version 0.2.0 keeps the application and credential-store identifiers used by the public 0.1.0 preview. Replacing the app preserves that preview’s settings and saved connections. Settings and saved keys from older development builds with different identifiers are not migrated.
