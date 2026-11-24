@@ -3,7 +3,7 @@ use super::dialogs::Dialog;
 use super::directory::{FolderVisit, AUTO_REFRESH_INTERVAL};
 use super::file_result::FileResult;
 #[cfg(target_os = "macos")]
-use super::file_templates::{creation_notice, CreationResult};
+use super::file_templates::CreationResult;
 use super::state::FolderMode;
 use super::PawCommander;
 use crate::conflict::{Answer, Conflict, ConflictDialog, Decision};
@@ -21,6 +21,13 @@ use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
+
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+use macos::NativeCompletion;
+#[cfg(target_os = "macos")]
+pub(super) use macos::{JobCompletion, JobOutcome};
 
 pub(super) enum TransferEvent {
     Conflict(Box<ConflictDialog>),
@@ -140,40 +147,15 @@ impl JobWork {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 pub(super) enum JobCompletion {
-    Text {
-        result: Result<String, String>,
-        #[cfg(target_os = "macos")]
-        history_warning: Option<HistoryWarning>,
-    },
-    #[cfg(target_os = "macos")]
-    StartFailed(TransferError),
-    #[cfg(target_os = "macos")]
-    File {
-        result: Box<FileResult>,
-        history_warning: Option<HistoryWarning>,
-    },
-    #[cfg(target_os = "macos")]
-    CreateFile {
-        target: Location,
-        result: Arc<CreationResult>,
-        history_warning: Option<HistoryWarning>,
-    },
-    #[cfg(target_os = "macos")]
-    RemoteSave {
-        edit: Box<crate::vfs::RemoteEdit>,
-        result: super::external_editors::SaveResult,
-        history_warning: Option<HistoryWarning>,
-    },
+    Text { result: Result<String, String> },
 }
 
+#[cfg(not(target_os = "macos"))]
 impl JobCompletion {
     pub(super) fn text(result: Result<String, String>) -> Self {
-        Self::Text {
-            result,
-            #[cfg(target_os = "macos")]
-            history_warning: None,
-        }
+        Self::Text { result }
     }
 }
 
@@ -219,68 +201,6 @@ fn append_history_warning(
 }
 
 pub(super) type CutRequest = (ClipboardCut, Vec<Location>);
-
-#[cfg(target_os = "macos")]
-#[derive(Clone)]
-enum NativeCompletion {
-    FilePromise(mpsc::Sender<Result<(), TransferError>>),
-    CreateFile(mpsc::Sender<Arc<CreationResult>>),
-    Export {
-        target: ExportTarget,
-        reply: Option<mpsc::Sender<Result<(), TransferError>>>,
-    },
-}
-
-#[cfg(target_os = "macos")]
-impl NativeCompletion {
-    fn export_target(&self) -> Option<&ExportTarget> {
-        match self {
-            Self::Export { target, .. } => Some(target),
-            _ => None,
-        }
-    }
-
-    fn start_error(&self, error: TransferError) -> TransferError {
-        match self.export_target() {
-            Some(target) => target.operation_error(error),
-            None => error,
-        }
-    }
-
-    fn report_start_error(&self, error: TransferError) -> String {
-        let error = self.start_error(error);
-        let notice = crate::i18n::file_error(&error);
-        self.report_error(error);
-        notice
-    }
-
-    fn report_error(&self, error: TransferError) {
-        match self {
-            Self::FilePromise(completion)
-            | Self::Export {
-                reply: Some(completion),
-                ..
-            } => {
-                let _ = completion.send(Err(error));
-            }
-            Self::CreateFile(completion) => {
-                let _ = completion.send(Arc::new(Err(error)));
-            }
-            Self::Export { reply: None, .. } => {}
-        }
-    }
-
-    fn report_success(&self) {
-        if let Self::FilePromise(completion)
-        | Self::Export {
-            reply: Some(completion),
-            ..
-        } = self
-        {
-            let _ = completion.send(Ok(()));
-        }
-    }
-}
 
 // One global worker serializes all mutations, including aliased and nested paths.
 // Pending closures own their inputs; no filesystem work is done until dispatch.
@@ -864,20 +784,7 @@ impl PawCommander {
             let worker = move || {
                 let fail_to_start = |cause: RecoveryStartError| {
                     #[cfg(target_os = "macos")]
-                    let result = {
-                        let cause = Arc::new(cause);
-                        let error = TransferError::Failed(Failure::RecoveryStart(cause.clone()));
-                        let error = match &worker_completion {
-                            Some(completion) => {
-                                completion.report_error(completion.start_error(
-                                    TransferError::Failed(Failure::RecoveryStart(cause)),
-                                ));
-                                completion.start_error(error)
-                            }
-                            None => error,
-                        };
-                        JobCompletion::StartFailed(error)
-                    };
+                    let result = JobCompletion::start_failed(cause, worker_completion.as_ref());
                     #[cfg(not(target_os = "macos"))]
                     let result =
                         JobCompletion::text(Err(crate::i18n::recovery_start_error(&cause)));
@@ -937,81 +844,39 @@ impl PawCommander {
                             "Фоновая операция неожиданно завершилась. Проверьте файлы в обеих папках.",
                         );
                         #[cfg(target_os = "macos")]
-                        let stopped = if let Some(target) = creation_target {
-                            let error = TransferError::from(message).with_unconfirmed_publication();
-                            reporter.results.record_with_error(
-                                &target,
-                                crate::result_history::Outcome::PublicationUnconfirmed,
-                                Some(&error),
-                            );
-                            WorkResult::CreateFile(target, Arc::new(Err(error)))
-                        } else if let Some(target) = worker_completion
-                            .as_ref()
-                            .and_then(NativeCompletion::export_target)
-                        {
-                            WorkResult::Text(Err(target.worker_stopped()))
-                        } else {
-                            WorkResult::Text(Err(message.into()))
-                        };
+                        let stopped = WorkResult::after_panic(
+                            message,
+                            creation_target,
+                            worker_completion.as_ref(),
+                            &mut reporter.results,
+                        );
                         #[cfg(not(target_os = "macos"))]
                         let stopped = WorkResult::Text(Err(message.into()));
                         stopped
                     }
                 };
-                // The native file promise acknowledges the file operation. History
-                // persistence and recovery record cleanup remain worker follow-up.
                 #[cfg(target_os = "macos")]
-                let mut saved_edit = None;
+                let outcome = JobOutcome::acknowledge(
+                    result,
+                    worker_completion.as_ref(),
+                    remote_save,
+                    &mut reporter.results,
+                );
                 #[cfg(target_os = "macos")]
-                let mut created_file = None;
-                #[cfg(target_os = "macos")]
-                let mut file_result = None;
+                let result = outcome.notice();
+                #[cfg(not(target_os = "macos"))]
                 let result = match result {
                     WorkResult::Text(result) => {
-                        let display = if matches!(&result, Err(TransferError::Cancelled)) {
+                        if matches!(&result, Err(TransferError::Cancelled)) {
                             reporter.results.cancelled = true;
                             Ok(crate::tr_format!("Operation cancelled"))
                         } else {
                             result.as_ref().cloned().map_err(crate::i18n::file_error)
-                        };
-                        #[cfg(target_os = "macos")]
-                        if let Some(completion) = &worker_completion {
-                            match result {
-                                Err(error) => completion.report_error(error),
-                                Ok(_) => completion.report_success(),
-                            }
-                        } else if !remote_save {
-                            file_result = Some(FileResult::text(result));
                         }
-                        display
                     }
                     WorkResult::File(result) => {
                         reporter.results.cancelled |= result.cancelled();
-                        let snapshot = result.notice();
-                        #[cfg(target_os = "macos")]
-                        {
-                            file_result = Some(result);
-                        }
-                        snapshot
-                    }
-                    #[cfg(target_os = "macos")]
-                    WorkResult::CreateFile(target, result) => {
-                        if let Some(NativeCompletion::CreateFile(completion)) = &worker_completion {
-                            let _ = completion.send(result.clone());
-                        }
-                        let snapshot = creation_notice(&target, &result);
-                        created_file = Some((target, result));
-                        snapshot
-                    }
-                    #[cfg(target_os = "macos")]
-                    WorkResult::RemoteSave(edit, result) => {
-                        let snapshot = super::external_editors::save_notice(
-                            edit.target(),
-                            edit.copy(),
-                            &result,
-                        );
-                        saved_edit = Some((edit, result));
-                        snapshot
+                        result.notice()
                     }
                 };
                 let undo_id = undo_id.unwrap_or_else(|| reporter.results.id.clone());
@@ -1036,42 +901,14 @@ impl PawCommander {
                     });
                 }
                 #[cfg(target_os = "macos")]
-                if let Some((target, result)) = created_file {
-                    let _ = tx.send(JobCompletion::CreateFile {
-                        target,
-                        result,
-                        history_warning: warning,
-                    });
-                    worker_ctx.request_repaint();
-                    return;
-                }
-                #[cfg(target_os = "macos")]
-                if let Some((edit, result)) = saved_edit {
-                    let _ = tx.send(JobCompletion::RemoteSave {
-                        edit,
-                        result,
-                        history_warning: warning,
-                    });
-                    worker_ctx.request_repaint();
-                    return;
-                }
-                #[cfg(target_os = "macos")]
-                if let Some(result) = file_result {
-                    let _ = tx.send(JobCompletion::File {
-                        result: Box::new(result),
-                        history_warning: warning,
-                    });
-                    worker_ctx.request_repaint();
-                    return;
-                }
-                let _ = tx.send(JobCompletion::Text {
-                    #[cfg(not(target_os = "macos"))]
-                    result: append_history_warning(result, warning.as_ref()),
-                    #[cfg(target_os = "macos")]
-                    result,
-                    #[cfg(target_os = "macos")]
+                let completion = JobCompletion::Finished {
+                    outcome,
                     history_warning: warning,
-                });
+                };
+                #[cfg(not(target_os = "macos"))]
+                let completion =
+                    JobCompletion::text(append_history_warning(result, warning.as_ref()));
+                let _ = tx.send(completion);
                 worker_ctx.request_repaint();
             };
             let builder = std::thread::Builder::new().name("pawcommander-file-operation".into());
@@ -1767,78 +1604,10 @@ impl PawCommander {
                 if let Some(undo) = undo {
                     self.remember_undo(undo);
                 }
-                let result = match result {
-                    JobCompletion::Text {
-                        result,
-                        #[cfg(target_os = "macos")]
-                        history_warning,
-                    } => {
-                        #[cfg(target_os = "macos")]
-                        let result = match result {
-                            Err(error) if remote_save => {
-                                let notice = append_history_warning(
-                                    Err(error.clone()),
-                                    history_warning.as_ref(),
-                                );
-                                self.remote_editor.finish_save(
-                                    None,
-                                    Err(error.into()),
-                                    history_warning,
-                                );
-                                notice
-                            }
-                            result => append_history_warning(result, history_warning.as_ref()),
-                        };
-                        result
-                    }
-                    #[cfg(target_os = "macos")]
-                    JobCompletion::StartFailed(error) => {
-                        let job = self.jobs.current.as_mut().unwrap();
-                        let retry = job.retry_origin.take();
-                        let undo = job.undo_origin.take();
-                        if let Some(retry) = retry {
-                            self.remember_retry(retry);
-                        }
-                        if let Some(undo) = undo {
-                            self.remember_undo(undo);
-                        }
-                        let notice = crate::i18n::file_error(&error);
-                        if remote_save {
-                            self.remote_editor.finish_save(None, Err(error), None);
-                        }
-                        Err(notice)
-                    }
-                    #[cfg(target_os = "macos")]
-                    JobCompletion::File {
-                        result,
-                        history_warning,
-                    } => append_history_warning(result.notice(), history_warning.as_ref()),
-                    #[cfg(target_os = "macos")]
-                    JobCompletion::CreateFile {
-                        target,
-                        result,
-                        history_warning,
-                    } => append_history_warning(
-                        creation_notice(&target, &result),
-                        history_warning.as_ref(),
-                    ),
-                    #[cfg(target_os = "macos")]
-                    JobCompletion::RemoteSave {
-                        edit,
-                        result,
-                        history_warning,
-                    } => {
-                        let notice = super::external_editors::save_notice(
-                            edit.target(),
-                            edit.copy(),
-                            &result,
-                        );
-                        let notice = append_history_warning(notice, history_warning.as_ref());
-                        self.remote_editor
-                            .finish_save(Some(*edit), result, history_warning);
-                        notice
-                    }
-                };
+                #[cfg(target_os = "macos")]
+                let result = result.apply(self, remote_save);
+                #[cfg(not(target_os = "macos"))]
+                let JobCompletion::Text { result } = result;
                 #[cfg(target_os = "macos")]
                 let result = if remote_save && let Some(error) = application_error {
                     Err(format!(

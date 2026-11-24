@@ -14,6 +14,7 @@ PawCommander ships as one executable using eframe/egui. The launcher forwards it
 | Selection, rows, drag targets | [`app/selection.rs`](../src/app/selection.rs), [`app/entry_widget.rs`](../src/app/entry_widget.rs) | `drag_drop.rs`, `tab_drag.rs`, `app/tab_strip.rs` |
 | Settings, workspaces, bookmarks | [`app/state.rs`](../src/app/state.rs), [`app/persistence.rs`](../src/app/persistence.rs) | `app/bookmarks.rs`, `app/sidebar.rs` |
 | Mutation queue, progress, conflict UI | [`app/jobs.rs`](../src/app/jobs.rs), [`operations.rs`](../src/operations.rs) | `conflict.rs`, `app/footer.rs`, `app/dialogs.rs` |
+| File operation completion on macOS | [`app/jobs/macos.rs`](../src/app/jobs/macos.rs) | Native callers receive the file result before the queue writes history. The UI receives the outcome together with any history or recovery warning. |
 | Local/SFTP transfer policy | [`vfs/transfer.rs`](../src/vfs/transfer.rs) | [`fs_ops.rs`](../src/fs_ops.rs) for local I/O primitives; `vfs/mutations.rs` for mkdir, rename and deletion |
 | Moves across local volumes or connections | [`vfs/cross_move.rs`](../src/vfs/cross_move.rs) | Mandatory copy verification, guarded source removal and partial results; published copies are excluded from Retry and rename-only Undo |
 | Retry unfinished transfers | [`vfs/retry.rs`](../src/vfs/retry.rs) | `app/jobs.rs` owns session retry requests; `result_history.rs` presents actions without replaying stored display paths |

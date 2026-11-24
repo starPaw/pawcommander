@@ -4,6 +4,7 @@ use super::*;
 #[test]
 fn file_job_delivers_the_original_io_error_to_the_ui() {
     use crate::app::file_result::FileResult;
+    use crate::app::jobs::JobOutcome;
     use crate::file_error::{Failure, LocalPathAction, MutationError};
     use crate::operations::TransferError;
 
@@ -30,8 +31,8 @@ fn file_job_delivers_the_original_io_error_to_the_ui() {
         .result
         .recv_timeout(Duration::from_secs(3))
         .unwrap();
-    let JobCompletion::File {
-        result,
+    let JobCompletion::Finished {
+        outcome: JobOutcome::File(result),
         history_warning: None,
     } = completion
     else {
@@ -51,6 +52,80 @@ fn file_job_delivers_the_original_io_error_to_the_ui() {
         MutationError::LocalIo { path, action: LocalPathAction::CreateDirectory, source }
             if path == target.path() && source.raw_os_error() == Some(libc::EEXIST)
     ));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn file_creation_acknowledges_success_even_when_history_cannot_be_saved() {
+    use crate::app::jobs::{HistoryWarning, JobOutcome};
+    use crate::result_history::{HistoryError, HistorySaveProblem};
+    use crate::vfs::file_templates::{NewFile, Source};
+    use std::{fs, sync::Arc};
+
+    let root = tempfile::tempdir().unwrap();
+    let folder = Location::Local(root.path().canonicalize().unwrap());
+    let history = root.path().join("history.json");
+    let recovery = root.path().join("recovery");
+    let original_history = br#"{"version":1,"records":[]}"#;
+    fs::write(&history, original_history).unwrap();
+    let ctx = egui::Context::default();
+    let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+    let mut app = PawCommander::new(&cc, Some(folder.path().to_owned()));
+    app.history = History::for_test(history.clone(), &ctx);
+    app.recovery = crate::recovery::Recovery::for_test(recovery.clone(), &ctx);
+    poll_queue_until(&mut app, &ctx, |app| app.history.diagnostics_loaded());
+    assert!(app.history.error.is_none());
+    let lock = history.with_extension("lock");
+    fs::rename(&lock, root.path().join("original.lock")).unwrap();
+    fs::write(&lock, b"replacement").unwrap();
+
+    let file = NewFile {
+        directory: folder,
+        name: "created.txt".into(),
+        source: Source::Text {
+            value: "created".into(),
+            encoding: Default::default(),
+        },
+    };
+    let target = file.target();
+    let (send, reply) = mpsc::channel();
+    app.enqueue_new_file(file, send, &ctx);
+    let acknowledged = reply.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(acknowledged.as_ref().as_ref().unwrap().target, target);
+    assert_eq!(fs::read(target.path()).unwrap(), b"created");
+
+    let completion = app
+        .jobs
+        .current
+        .as_ref()
+        .unwrap()
+        .result
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap();
+    let JobCompletion::Finished {
+        outcome:
+            JobOutcome::CreateFile {
+                target: reported,
+                result,
+            },
+        history_warning:
+            Some(HistoryWarning::Save {
+                cause,
+                recovery_path,
+            }),
+    } = completion
+    else {
+        panic!("expected the file result and a separate history warning");
+    };
+    assert_eq!(reported, target);
+    assert!(Arc::ptr_eq(&result, &acknowledged));
+    assert!(matches!(cause.as_ref(), HistoryError::Save {
+        path, problem: HistorySaveProblem::LockChanged,
+    } if *path == lock));
+    assert_eq!(recovery_path.parent(), Some(recovery.as_path()));
+    assert!(recovery_path.is_file());
+    assert_eq!(fs::read(history).unwrap(), original_history);
+    assert_eq!(fs::read(lock).unwrap(), b"replacement");
 }
 
 #[cfg(target_os = "macos")]
