@@ -36,10 +36,37 @@ fn clear_input_state(ctx: &egui::Context) {
     }
 }
 
+enum Navigation {
+    Open(Endpoint),
+    Parent,
+    Refresh,
+}
+
+impl Navigation {
+    fn endpoint<'a>(&'a self, history: &'a [Endpoint]) -> Option<&'a Endpoint> {
+        match self {
+            Self::Open(endpoint) => Some(endpoint),
+            Self::Parent => history.iter().rev().nth(1),
+            Self::Refresh => history.last(),
+        }
+    }
+
+    fn apply(self, history: &mut Vec<Endpoint>) {
+        match self {
+            Self::Open(endpoint) => history.push(endpoint),
+            Self::Parent => {
+                history.pop();
+            }
+            Self::Refresh => (),
+        }
+    }
+}
+
+type BrowseResult = Result<(Navigation, Vec<Entry>), WebDavError>;
+
 struct Worker {
-    reply: Receiver<Result<Vec<Entry>, WebDavError>>,
+    reply: Receiver<BrowseResult>,
     cancelled: Arc<AtomicBool>,
-    history: Vec<Endpoint>,
 }
 
 impl Drop for Worker {
@@ -63,11 +90,11 @@ impl Browser {
         }
     }
 
-    fn start(&mut self, ctx: &egui::Context, history: Vec<Endpoint>) {
+    fn start(&mut self, ctx: &egui::Context, navigation: Navigation) {
         if self.worker.is_some() {
             return;
         }
-        let Some(endpoint) = history.last().cloned() else {
+        let Some(endpoint) = navigation.endpoint(&self.history).cloned() else {
             return;
         };
         let password = self.password.clone();
@@ -82,23 +109,17 @@ impl Browser {
                 let result = webdav::browse(&endpoint, &password, &|| {
                     cancel_worker.load(Ordering::Relaxed)
                 });
-                let _ = send.send(result);
+                let _ = send.send(result.map(|entries| (navigation, entries)));
                 ctx.request_repaint();
             }) {
-            Ok(_) => {
-                self.worker = Some(Worker {
-                    reply,
-                    cancelled,
-                    history,
-                })
-            }
+            Ok(_) => self.worker = Some(Worker { reply, cancelled }),
             Err(_) => self.error = Some(WebDavError::StartFailed),
         }
     }
 
     fn connect(&mut self, ctx: &egui::Context) {
         match Endpoint::parse(&self.address, &self.user) {
-            Ok(endpoint) => self.start(ctx, vec![endpoint]),
+            Ok(endpoint) => self.start(ctx, Navigation::Open(endpoint)),
             Err(error) => self.error = Some(error),
         }
     }
@@ -112,10 +133,10 @@ impl Browser {
             Err(TryRecvError::Empty) => return,
             Err(TryRecvError::Disconnected) => Err(WebDavError::Io),
         };
-        let worker = self.worker.take().expect("completed WebDAV worker");
+        self.worker = None;
         match result {
-            Ok(entries) => {
-                self.history.clone_from(&worker.history);
+            Ok((navigation, entries)) => {
+                navigation.apply(&mut self.history);
                 self.entries = entries;
             }
             Err(error) => self.error = Some(error),
@@ -166,10 +187,10 @@ impl Browser {
                 ui.horizontal(|ui| {
                     if ui.add_enabled(idle && self.history.len() > 1,
                         egui::Button::new(text!("Родительская папка"))).clicked() {
-                        requested = Some(self.history[..self.history.len() - 1].to_vec());
+                        requested = Some(Navigation::Parent);
                     }
                     if ui.add_enabled(idle, egui::Button::new(text!("Обновить"))).clicked() {
-                        requested = Some(self.history.clone());
+                        requested = Some(Navigation::Refresh);
                     }
                 });
                 ui.separator();
@@ -194,11 +215,7 @@ impl Browser {
                                         }).inner;
                                         if button.on_hover_text(&entry.name).clicked() {
                                             match endpoint.child(entry) {
-                                                Ok(child) => {
-                                                    let mut history = self.history.clone();
-                                                    history.push(child);
-                                                    requested = Some(history);
-                                                }
+                                                Ok(child) => requested = Some(Navigation::Open(child)),
                                                 Err(error) => self.error = Some(error),
                                             }
                                         }
@@ -236,8 +253,8 @@ impl Browser {
         }
         if connect {
             self.connect(ctx);
-        } else if let Some(history) = requested {
-            self.start(ctx, history);
+        } else if let Some(navigation) = requested {
+            self.start(ctx, navigation);
         }
         false
     }
@@ -275,22 +292,31 @@ mod tests {
         Endpoint::parse(&format!("https://cloud.example/{path}/"), "sample").unwrap()
     }
 
-    fn pending(history: Vec<Endpoint>) -> (Worker, mpsc::Sender<Result<Vec<Entry>, WebDavError>>) {
+    fn pending() -> (Worker, mpsc::Sender<BrowseResult>) {
         let (send, reply) = mpsc::channel();
         (
             Worker {
                 reply,
-                history,
                 cancelled: Arc::new(AtomicBool::new(false)),
             },
             send,
         )
     }
 
+    fn file(folder: &Endpoint) -> Entry {
+        Entry {
+            name: "hello.txt".into(),
+            address: format!("{}hello.txt", folder.address()),
+            is_dir: false,
+            size: Some(42),
+            etag: None,
+        }
+    }
+
     #[test]
     fn closing_browser_cancels_inflight_listing() {
         let mut browser = Browser::new(None);
-        let (worker, _send) = pending(vec![endpoint("root")]);
+        let (worker, _send) = pending();
         let cancellation = worker.cancelled.clone();
         browser.password = Zeroizing::new("disposable-app-password".into());
         browser.worker = Some(worker);
@@ -301,31 +327,47 @@ mod tests {
     #[test]
     fn failed_navigation_preserves_current_folder_and_history() {
         let mut browser = Browser::new(None);
-        browser.history = vec![endpoint("root")];
-        let (worker, send) = pending(vec![endpoint("root"), endpoint("root/denied")]);
+        let root = endpoint("root");
+        let current_file = file(&root);
+        browser.history.push(root);
+        browser.entries.push(current_file.clone());
+        let (worker, send) = pending();
         browser.worker = Some(worker);
         send.send(Err(WebDavError::HttpStatus(403))).unwrap();
         browser.poll();
         assert!(browser.worker.is_none());
         assert_eq!(browser.history.len(), 1);
         assert_eq!(browser.history[0].address(), "https://cloud.example/root/");
+        assert_eq!(browser.entries, vec![current_file]);
         assert!(matches!(browser.error, Some(WebDavError::HttpStatus(403))));
     }
 
     #[test]
-    fn successful_navigation_publishes_only_the_requested_history() {
+    fn successful_open_refresh_and_parent_publish_the_requested_folder() {
         let mut browser = Browser::new(None);
-        browser.history = vec![endpoint("root")];
-        let (worker, send) = pending(vec![endpoint("root"), endpoint("root/child")]);
-        browser.worker = Some(worker);
-        send.send(Ok(Vec::new())).unwrap();
-        browser.poll();
-        assert!(browser.worker.is_none());
-        assert_eq!(browser.history.len(), 2);
-        assert_eq!(
-            browser.history[1].address(),
-            "https://cloud.example/root/child/"
-        );
+        assert!(Navigation::Refresh.endpoint(&browser.history).is_none());
+        for (navigation, expected, depth) in [
+            (Navigation::Open(endpoint("root")), "root", 1),
+            (Navigation::Open(endpoint("root/child")), "root/child", 2),
+            (Navigation::Refresh, "root/child", 2),
+            (Navigation::Parent, "root", 1),
+        ] {
+            let target = navigation.endpoint(&browser.history).unwrap();
+            assert_eq!(target.address(), endpoint(expected).address());
+            let entry = file(target);
+            let (worker, send) = pending();
+            browser.worker = Some(worker);
+            send.send(Ok((navigation, vec![entry.clone()]))).unwrap();
+            browser.poll();
+            assert!(browser.worker.is_none());
+            assert_eq!(browser.history.len(), depth);
+            assert_eq!(
+                browser.history.last().unwrap().address(),
+                endpoint(expected).address()
+            );
+            assert_eq!(browser.entries, vec![entry]);
+        }
+        assert!(Navigation::Parent.endpoint(&browser.history).is_none());
     }
 
     #[test]

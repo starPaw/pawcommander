@@ -20,14 +20,20 @@ impl Node {
     }
 }
 
-fn parse_xml(body: &[u8], cancelled: &impl Fn() -> bool) -> Result<Node, WebDavError> {
+/// Visit each direct DAV:response as it closes, retaining at most one response tree.
+fn read_responses(
+    body: &[u8],
+    cancelled: &impl Fn() -> bool,
+    mut visit: impl FnMut(&Node) -> Result<(), WebDavError>,
+) -> Result<(), WebDavError> {
     if body.len() > MAX_BODY {
         return Err(WebDavError::ResponseTooLarge);
     }
     let mut reader = NsReader::from_reader(body);
     reader.config_mut().expand_empty_elements = true;
     let mut stack: Vec<Node> = Vec::new();
-    let mut root = None;
+    let mut root_closed = false;
+    let mut result = Ok(());
     let mut nodes = 0;
     loop {
         if cancelled() {
@@ -50,6 +56,9 @@ fn parse_xml(body: &[u8], cancelled: &impl Fn() -> bool) -> Result<Node, WebDavE
                     ResolveResult::Unknown(_) => return Err(WebDavError::InvalidResponse),
                     _ => None,
                 };
+                if stack.is_empty() && (root_closed || name.as_deref() != Some("multistatus")) {
+                    return Err(WebDavError::InvalidResponse);
+                }
                 stack.push(Node {
                     name,
                     ..Node::default()
@@ -57,10 +66,12 @@ fn parse_xml(body: &[u8], cancelled: &impl Fn() -> bool) -> Result<Node, WebDavE
             }
             Event::End(_) => {
                 let node = stack.pop().ok_or(WebDavError::InvalidResponse)?;
-                if let Some(parent) = stack.last_mut() {
-                    parent.children.push(node);
-                } else if root.replace(node).is_some() {
-                    return Err(WebDavError::InvalidResponse);
+                let in_response = stack.get(1).is_some_and(|child| child.named("response"));
+                match stack.as_mut_slice() {
+                    [] => root_closed = true,
+                    [_] if node.named("response") && result.is_ok() => result = visit(&node),
+                    [.., parent] if in_response && result.is_ok() => parent.children.push(node),
+                    _ => (),
                 }
             }
             Event::Text(text) => {
@@ -98,11 +109,11 @@ fn parse_xml(body: &[u8], cancelled: &impl Fn() -> bool) -> Result<Node, WebDavE
             _ => (),
         }
     }
-    if !stack.is_empty() {
+    if !root_closed || !stack.is_empty() {
         return Err(WebDavError::InvalidResponse);
     }
-    root.filter(|node| node.named("multistatus"))
-        .ok_or(WebDavError::InvalidResponse)
+    // Invalid XML anywhere in the document takes precedence over a per-resource error.
+    result
 }
 
 fn successful(status: &str) -> bool {
@@ -116,87 +127,87 @@ fn successful(status: &str) -> bool {
             .is_some_and(|status| (200..300).contains(&status))
 }
 
-pub(super) fn parse_listing(
-    endpoint: &Endpoint,
-    body: &[u8],
-    cancelled: &impl Fn() -> bool,
-) -> Result<Vec<Entry>, WebDavError> {
-    let root = parse_xml(body, cancelled)?;
-    let mut entries = Vec::new();
-    let mut seen = HashSet::new();
-    let mut self_collection = false;
-    for response in root.children.iter().filter(|node| node.named("response")) {
-        if cancelled() {
-            return Err(WebDavError::Cancelled);
-        }
-        let href = response
-            .value("href")
-            .filter(|href| !href.is_empty())
-            .ok_or(WebDavError::InvalidResponse)?;
-        let (url, name) = endpoint.resolve_href(href)?;
-        if response
-            .value("status")
-            .is_some_and(|status| !successful(status))
-        {
-            return Err(WebDavError::InvalidResponse);
-        }
-        let mut resource_type = None;
-        let mut size = None;
-        let mut etag = None;
-        for propstat in response
-            .children
-            .iter()
-            .filter(|node| node.named("propstat"))
-        {
-            if !propstat.value("status").is_some_and(successful) {
-                continue;
-            }
-            let props = propstat.child("prop").ok_or(WebDavError::InvalidResponse)?;
-            if let Some(kind) = props.child("resourcetype") {
-                resource_type = Some(kind.child("collection").is_some());
-            }
-            if let Some(value) = props.value("getcontentlength") {
-                size = Some(
-                    value
-                        .parse::<u64>()
-                        .map_err(|_| WebDavError::InvalidResponse)?,
-                );
-            }
-            if let Some(value) = props.value("getetag").filter(|value| !value.is_empty()) {
-                etag = Some(value.into());
-            }
-        }
-        let is_dir = resource_type.ok_or(WebDavError::InvalidResponse)?;
-        let Some(name) = name else {
-            if !is_dir {
-                return Err(WebDavError::NotCollection);
-            }
-            self_collection = true;
+// The collection's own response establishes its type and contributes no child entry.
+fn parse_response(endpoint: &Endpoint, response: &Node) -> Result<Option<Entry>, WebDavError> {
+    let href = response
+        .value("href")
+        .filter(|href| !href.is_empty())
+        .ok_or(WebDavError::InvalidResponse)?;
+    let (url, name) = endpoint.resolve_href(href)?;
+    if response
+        .value("status")
+        .is_some_and(|status| !successful(status))
+    {
+        return Err(WebDavError::InvalidResponse);
+    }
+    let mut resource_type = None;
+    let mut size = None;
+    let mut etag = None;
+    for propstat in response
+        .children
+        .iter()
+        .filter(|node| node.named("propstat"))
+    {
+        if !propstat.value("status").is_some_and(successful) {
             continue;
-        };
-        if !seen.insert(name.clone()) {
-            return Err(WebDavError::InvalidResponse);
         }
-        if entries.len() >= MAX_ENTRIES {
-            return Err(WebDavError::TooManyEntries);
+        let props = propstat.child("prop").ok_or(WebDavError::InvalidResponse)?;
+        if let Some(kind) = props.child("resourcetype") {
+            resource_type = Some(kind.child("collection").is_some());
         }
-        entries.push(Entry {
+        if let Some(value) = props.value("getcontentlength") {
+            size = Some(
+                value
+                    .parse::<u64>()
+                    .map_err(|_| WebDavError::InvalidResponse)?,
+            );
+        }
+        if let Some(value) = props.value("getetag").filter(|value| !value.is_empty()) {
+            etag = Some(value.into());
+        }
+    }
+    let is_dir = resource_type.ok_or(WebDavError::InvalidResponse)?;
+    match name {
+        Some(name) => Ok(Some(Entry {
             name,
             address: url.into(),
             is_dir,
             size,
             etag,
-        });
+        })),
+        None if is_dir => Ok(None),
+        None => Err(WebDavError::NotCollection),
     }
+}
+
+pub(super) fn parse_listing(
+    endpoint: &Endpoint,
+    body: &[u8],
+    cancelled: &impl Fn() -> bool,
+) -> Result<Vec<Entry>, WebDavError> {
+    let mut entries = Vec::new();
+    let mut seen = HashSet::new();
+    let mut self_collection = false;
+    read_responses(body, cancelled, |response| {
+        if let Some(entry) = parse_response(endpoint, response)? {
+            if !seen.insert(entry.name.clone()) {
+                return Err(WebDavError::InvalidResponse);
+            }
+            if entries.len() >= MAX_ENTRIES {
+                return Err(WebDavError::TooManyEntries);
+            }
+            entries.push(entry);
+        } else {
+            self_collection = true;
+        }
+        Ok(())
+    })?;
     if !self_collection {
         return Err(WebDavError::NotCollection);
     }
-    entries.sort_by(|a, b| {
-        b.is_dir
-            .cmp(&a.is_dir)
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-            .then_with(|| a.name.cmp(&b.name))
-    });
+    drop(seen);
+    entries
+        .sort_by_cached_key(|entry| (!entry.is_dir, entry.name.to_lowercase(), entry.name.clone()));
     Ok(entries)
 }
 
@@ -242,6 +253,55 @@ mod tests {
         assert!(!entries[0].is_dir);
         assert_eq!(entries[0].size, None);
         assert_eq!(entries[0].etag, None);
+    }
+
+    #[test]
+    fn only_direct_responses_contribute_entries_and_the_collection_may_come_last() {
+        let file = child("/dav/hello", "<resourcetype/>");
+        let body = format!(
+            "<multistatus xmlns='DAV:'><extension>{file}</extension>{file}{}</multistatus>",
+            self_node()
+        );
+        let entries = parse_listing(&endpoint(), body.as_bytes(), &|| false).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "hello");
+    }
+
+    #[test]
+    fn folders_sort_first_then_unicode_names_with_original_case_breaking_ties() {
+        let mut children = String::new();
+        for name in ["žena", "árka", "Árka", "folder", "A"] {
+            let kind = if name == "folder" {
+                "<resourcetype><collection/></resourcetype>"
+            } else {
+                "<resourcetype/>"
+            };
+            children.push_str(&child(&format!("/dav/{name}"), kind));
+        }
+        let entries = parse_listing(&endpoint(), &document(&children), &|| false).unwrap();
+        let names: Vec<_> = entries.iter().map(|entry| entry.name.as_str()).collect();
+        assert_eq!(names, ["folder", "A", "Árka", "árka", "žena"]);
+    }
+
+    #[test]
+    fn invalid_document_tail_rejects_even_previously_parsed_responses() {
+        let mut body = document(&child("/dav/hello", "<resourcetype/>"));
+        body.extend_from_slice(b"<multistatus xmlns='DAV:'/>");
+        assert_eq!(
+            parse_listing(&endpoint(), &body, &|| false),
+            Err(WebDavError::InvalidResponse)
+        );
+
+        let mut body = document(&child("/another/file", "<resourcetype/>"));
+        assert_eq!(
+            parse_listing(&endpoint(), &body, &|| false),
+            Err(WebDavError::UnsafeHref)
+        );
+        body.extend_from_slice(b"unclosed document tail");
+        assert_eq!(
+            parse_listing(&endpoint(), &body, &|| false),
+            Err(WebDavError::InvalidResponse)
+        );
     }
 
     #[test]
