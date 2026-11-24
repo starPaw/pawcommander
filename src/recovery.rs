@@ -771,7 +771,13 @@ fn read_record(
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err(failure(RecoveryRecordProblem::InvalidType));
     }
-    let locked = match LockedRecord::try_lock(file) {
+    // Independent recovery scans can read the same marker while a live writer
+    // still excludes every reader through its exclusive lock.
+    #[cfg(target_os = "macos")]
+    let lock = file.try_lock_shared().map(|()| LockedRecord(file));
+    #[cfg(not(target_os = "macos"))]
+    let lock = LockedRecord::try_lock(file);
+    let locked = match lock {
         Ok(file) => file,
         Err(TryLockError::WouldBlock) => return Ok(None),
         Err(TryLockError::Error(error)) => return Err(failure(RecoveryRecordProblem::Lock(error))),
@@ -858,6 +864,22 @@ pub(crate) fn sync_directory(directory: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn retained_marker_is_visible_while_another_reader_inspects_it() {
+        let root = tempfile::tempdir().unwrap();
+        let worker = begin(root.path(), "copy", "source to target", 42).unwrap();
+        let reader = File::open(worker.path()).unwrap();
+        assert!(scan(root.path()).unfinished.is_empty());
+        drop(worker);
+
+        reader.try_lock_shared().unwrap();
+        let report = scan(root.path());
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.unfinished.len(), 1);
+        assert_eq!(report.unfinished[0].label, "copy");
+    }
 
     #[cfg(windows)]
     #[test]
