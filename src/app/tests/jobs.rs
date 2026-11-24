@@ -356,8 +356,28 @@ fn history_retry_owns_one_queued_attempt_and_keeps_completed_files_untouched() {
     );
     app.retry_transfer(&ctx, &id);
     assert_eq!(app.jobs.pending.len(), 1);
+    #[cfg(target_os = "macos")]
+    let (blocker, previous_history) = {
+        let blocker = root.path().join("blocked-recovery");
+        std::fs::write(&blocker, b"foreign file").unwrap();
+        app.recovery = crate::recovery::Recovery::for_test(blocker.clone(), &ctx);
+        (blocker, std::fs::read(&history_path).unwrap())
+    };
     held.send(JobCompletion::text(Ok("release".into())))
         .unwrap();
+    #[cfg(target_os = "macos")]
+    {
+        poll_queue_until(&mut app, &ctx, |app| !app.jobs.is_busy());
+        assert_eq!(std::fs::read(&history_path).unwrap(), previous_history);
+        assert_eq!(std::fs::read(target.join("a")).unwrap(), b"existing target");
+        assert_eq!(std::fs::read(&blocker).unwrap(), b"foreign file");
+        assert!(
+            app.history.retryable.contains(&id),
+            "startup refusal must restore Retry"
+        );
+        std::fs::remove_file(blocker).unwrap();
+        app.retry_transfer(&ctx, &id);
+    }
     poll_queue_until(&mut app, &ctx, PawCommander::conflict_open);
     answer_queue_conflict(&mut app, &ctx, crate::i18n::text!("Сохранить обе версии"));
     poll_queue_until(&mut app, &ctx, |app| app.jobs.current.is_none());
@@ -1079,6 +1099,10 @@ fn transfer_stop_button_keeps_pending_ownership_and_navigation_until_result() {
         undo: None,
         progress,
         #[cfg(target_os = "macos")]
+        retry_origin: None,
+        #[cfg(target_os = "macos")]
+        undo_origin: None,
+        #[cfg(target_os = "macos")]
         remote_save: false,
         #[cfg(target_os = "macos")]
         export_target: None,
@@ -1530,6 +1554,10 @@ fn late_stop_keeps_final_success_and_consumes_committed_cut_events() {
         result: receiver,
         undo: None,
         progress,
+        #[cfg(target_os = "macos")]
+        retry_origin: None,
+        #[cfg(target_os = "macos")]
+        undo_origin: None,
         #[cfg(target_os = "macos")]
         remote_save: false,
         #[cfg(target_os = "macos")]

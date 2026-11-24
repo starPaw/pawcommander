@@ -80,6 +80,11 @@ pub(super) struct Job {
     pub(super) result: Receiver<JobCompletion>,
     pub(super) progress: ProgressView,
     pub(super) undo: Option<Receiver<UndoJob>>,
+    // Keep history actions until the result proves the operation could start.
+    #[cfg(target_os = "macos")]
+    pub(super) retry_origin: Option<RetryJob>,
+    #[cfg(target_os = "macos")]
+    pub(super) undo_origin: Option<UndoJob>,
     #[cfg(target_os = "macos")]
     pub(super) remote_save: bool,
     #[cfg(target_os = "macos")]
@@ -1112,6 +1117,10 @@ impl PawCommander {
                 progress,
                 undo: Some(undo_receive),
                 #[cfg(target_os = "macos")]
+                retry_origin,
+                #[cfg(target_os = "macos")]
+                undo_origin,
+                #[cfg(target_os = "macos")]
                 remote_save,
                 #[cfg(target_os = "macos")]
                 export_target,
@@ -1783,6 +1792,15 @@ impl PawCommander {
                     }
                     #[cfg(target_os = "macos")]
                     JobCompletion::StartFailed(error) => {
+                        let job = self.jobs.current.as_mut().unwrap();
+                        let retry = job.retry_origin.take();
+                        let undo = job.undo_origin.take();
+                        if let Some(retry) = retry {
+                            self.remember_retry(retry);
+                        }
+                        if let Some(undo) = undo {
+                            self.remember_undo(undo);
+                        }
                         let notice = crate::i18n::file_error(&error);
                         if remote_save {
                             self.remote_editor.finish_save(None, Err(error), None);
