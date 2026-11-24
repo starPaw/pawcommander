@@ -217,6 +217,8 @@ pub(super) enum Action {
     CopyPath,
     ConnectSftp,
     #[cfg(target_os = "macos")]
+    BrowseWebDav,
+    #[cfg(target_os = "macos")]
     ConnectSmb,
     #[cfg(target_os = "macos")]
     OpenSmb(usize),
@@ -532,6 +534,8 @@ impl PawCommander {
             Action::OpenSmb(index) => self.open_smb(index, ctx),
             #[cfg(target_os = "macos")]
             Action::DisconnectSmb(index) => self.disconnect_smb(index, ctx),
+            #[cfg(target_os = "macos")]
+            Action::BrowseWebDav => self.open_webdav(ctx),
             Action::ConnectSftp => {
                 let mut form = SftpForm::default();
                 if let Location::Sftp { endpoint, path } = &self.tab().path {

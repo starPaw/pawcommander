@@ -29,6 +29,8 @@ The UI supports English, Russian, and Czech on macOS. Add static messages to [th
 
 ## Optional integration checks
 
+On macOS, `cargo test --locked disposable_https_browse -- --ignored` exercises the WebDAV browser transport against a disposable HTTPS server with Basic authentication. Set `PAWCOMMANDER_TEST_WEBDAV_URL`, `PAWCOMMANDER_TEST_WEBDAV_USER` and `PAWCOMMANDER_TEST_WEBDAV_PASSWORD` for the test process. The collection should contain `hello.txt`, `space name.txt` and `subfolder/nested.txt`. For a private fixture CA, point `CURL_CA_BUNDLE` at its PEM certificate for this run.
+
 On macOS/Linux with OpenSSH server tools and Python 3:
 
 ```sh

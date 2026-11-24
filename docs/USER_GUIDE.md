@@ -223,6 +223,12 @@ Select files or folders in an SFTP pane and choose **Change permissions** from t
 
 The change applies to the selected regular files and folders. A selected folder's children keep their current modes. An unavailable item or a symbolic link is marked in the preview. If an item changes after the preview or the server denies access, the result history shows the reason for that item. Check any unconfirmed change before trying again after a disconnect.
 
+## Browse WebDAV on macOS
+
+Choose **Connections → WebDAV · Browse** and enter the HTTPS address of your WebDAV folder. In Nextcloud, copy the WebDAV URL from **Files settings**. Enter your username and an app password, then choose **Connect**. [Nextcloud WebDAV guide](https://docs.nextcloud.com/server/latest/user_manual/en/files/access_webdav.html)
+
+Click a folder to see its contents. Use **Parent folder** to go back one level or **Refresh** to fetch the latest listing. This browser provides read-only access. Closing it ends the session.
+
 ## SMB connections on macOS
 
 In the sidebar, choose **Connections → SMB · Connect** and enter a share address such as `smb://nas/Photos`. Enter the user name and password in their own fields, or select **Guest access**. If macOS requests access to network volumes, allow it to open the share in PawCommander.

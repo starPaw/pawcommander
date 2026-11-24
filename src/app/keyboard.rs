@@ -202,6 +202,7 @@ impl PawCommander {
             || self.comparison.is_some()
             || self.conflict_open()
             || self.sftp_form.is_some()
+            || self.webdav_open()
             || self.show_help
             || self.show_history
             || self.recovery.is_open()

@@ -1136,6 +1136,7 @@ impl PawCommander {
             && self.properties.is_none()
             && self.comparison.is_none()
             && self.sftp_form.is_none()
+            && !self.webdav_open()
             && !self.show_help
             && !self.show_history
             && !self.recovery.is_open()
