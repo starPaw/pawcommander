@@ -39,8 +39,33 @@ fn history_undo_owns_one_queued_request_survives_remove_and_spawn_failure() {
     assert!(!source.path().exists());
     app.jobs.fail_spawn = false;
     app.jobs.start_failed = false;
+    #[cfg(target_os = "macos")]
+    let (blocker, previous_history) = {
+        let blocker = root.path().join("blocked-recovery");
+        std::fs::write(&blocker, b"foreign file").unwrap();
+        app.recovery = crate::recovery::Recovery::for_test(blocker.clone(), &ctx);
+        (blocker, std::fs::read(&history_path).unwrap())
+    };
     app.start_next_job(&ctx);
     poll_queue_until(&mut app, &ctx, |app| app.jobs.current.is_none());
+    #[cfg(target_os = "macos")]
+    {
+        assert_eq!(std::fs::read(&history_path).unwrap(), previous_history);
+        assert!(!source.path().exists());
+        assert_eq!(
+            std::fs::read(root.path().join("renamed")).unwrap(),
+            b"original bytes"
+        );
+        assert_eq!(std::fs::read(&blocker).unwrap(), b"foreign file");
+        assert_eq!(
+            app.history.undoable.get(&id),
+            Some(&1),
+            "startup refusal must restore Undo"
+        );
+        std::fs::remove_file(blocker).unwrap();
+        app.undo_operation(&ctx, &id);
+        poll_queue_until(&mut app, &ctx, |app| app.jobs.current.is_none());
+    }
     assert_eq!(std::fs::read(source.path()).unwrap(), b"original bytes");
     assert!(!root.path().join("renamed").exists());
     assert!(app.jobs.undo.is_empty());
