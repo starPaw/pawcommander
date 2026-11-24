@@ -1,16 +1,11 @@
-use crate::i18n::text;
+use crate::{i18n::text, macos_file_url};
 use eframe::egui;
 use objc2::{rc::Retained, MainThreadMarker};
 use objc2_app_kit::{
     NSModalResponse, NSModalResponseCancel, NSModalResponseOK, NSOpenPanel, NSSavePanel,
 };
 use objc2_foundation::NSString;
-use std::{
-    ffi::{CStr, OsStr},
-    os::unix::ffi::OsStrExt,
-    path::PathBuf,
-    sync::mpsc,
-};
+use std::{path::PathBuf, sync::mpsc};
 
 #[derive(Clone, Copy)]
 pub(super) enum Mode {
@@ -60,11 +55,10 @@ impl Picker {
     pub(super) fn poll(&self) -> Option<Result<Option<PathBuf>, String>> {
         match self.result.try_recv() {
             Ok(response) if response == NSModalResponseOK => {
-                let path = self.panel.URL().filter(|url| url.isFileURL()).map(|url| {
-                    // SAFETY: NSURL supplies a NUL-terminated buffer valid while the URL is alive.
-                    let bytes = unsafe { CStr::from_ptr(url.fileSystemRepresentation().as_ptr()) };
-                    PathBuf::from(OsStr::from_bytes(bytes.to_bytes()))
-                });
+                let path = self
+                    .panel
+                    .URL()
+                    .and_then(|url| macos_file_url::to_path(&url));
                 Some(
                     path.map(Some)
                         .ok_or_else(|| text!("Путь к выбранному файлу недоступен.").into()),

@@ -24,6 +24,8 @@ mod list_columns;
 #[cfg(target_os = "macos")]
 mod macos_about;
 #[cfg(target_os = "macos")]
+mod macos_file_url;
+#[cfg(target_os = "macos")]
 mod macos_update;
 mod name_match;
 mod native_drag;

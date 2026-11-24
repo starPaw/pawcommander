@@ -1,11 +1,10 @@
 use super::{decode_local_file_url, FileList, LocalFileUrlError};
+use crate::macos_file_url;
 use objc2::rc::{autoreleasepool, Retained};
 use objc2::runtime::ProtocolObject;
 use objc2_app_kit::{NSPasteboard, NSPasteboardTypeFileURL, NSPasteboardTypeString};
 use objc2_foundation::{NSArray, NSString, NSURL};
 use std::collections::HashSet;
-use std::ffi::{CStr, CString, OsStr};
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -99,17 +98,16 @@ impl SystemClipboard {
             let urls = paths
                 .iter()
                 .map(|path| {
-                    let bytes = CString::new(path.as_os_str().as_bytes())
-                        .map_err(|_| ClipboardWriteError::PathContainsNul(path.clone()))?;
                     let is_dir = path.symlink_metadata().is_ok_and(|meta| meta.is_dir());
-                    // The file-system representation preserves symlinks and non-UTF-8 path bytes.
-                    let url = unsafe {
-                        NSURL::fileURLWithFileSystemRepresentation_isDirectory_relativeToURL(
-                            std::ptr::NonNull::from(bytes.as_c_str()).cast(),
-                            is_dir,
-                            None,
-                        )
-                    };
+                    let url =
+                        macos_file_url::from_path(path, is_dir).map_err(|error| match error {
+                            macos_file_url::PathError::ContainsNul(_) => {
+                                ClipboardWriteError::PathContainsNul(path.clone())
+                            }
+                            macos_file_url::PathError::Unrepresentable => {
+                                ClipboardWriteError::Rejected
+                            }
+                        })?;
                     Ok(ProtocolObject::from_retained(url))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -277,13 +275,9 @@ fn clipboard_path(value: &NSString, slot: usize) -> Result<PathBuf, ClipboardRea
         // Ordinary paths must retain symlinks and need not currently exist.
         return Ok(path);
     }
-    let resolved = url
-        .filePathURL()
-        .ok_or(ClipboardReadFailure::UnresolvedReference { slot, path })?;
-    // SAFETY: the filesystem representation belongs to the live resolved NSURL;
-    // copy its bytes before releasing the URL, preserving non-UTF-8 filenames.
-    let bytes = unsafe { CStr::from_ptr(resolved.fileSystemRepresentation().as_ptr()) }.to_bytes();
-    Ok(PathBuf::from(OsStr::from_bytes(bytes)))
+    url.filePathURL()
+        .and_then(|resolved| macos_file_url::to_path(&resolved))
+        .ok_or(ClipboardReadFailure::UnresolvedReference { slot, path })
 }
 
 #[cfg(test)]
@@ -293,7 +287,10 @@ mod tests {
     use crate::fs_ops::TransferKind;
     use crate::operations::Progress;
     use crate::vfs::{self, Location};
-    use std::os::unix::fs::symlink;
+    use std::{
+        ffi::OsStr,
+        os::unix::{ffi::OsStrExt, fs::symlink},
+    };
 
     fn native_url(path: &Path) -> Retained<NSURL> {
         let value = url::Url::from_file_path(path).unwrap();
