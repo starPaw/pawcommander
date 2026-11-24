@@ -82,6 +82,8 @@ Install [cargo-about 0.9.3](https://github.com/EmbarkStudios/cargo-about/release
 bash scripts/package-macos.sh
 ```
 
-This builds for the current Mac's architecture and writes a ZIP plus `SHA256SUMS.txt` to `dist/release`. The archive includes license notices and corresponding source for MPL-licensed components. `CARGO_ABOUT_BIN` can select a cargo-about executable; `SOURCE_COMMIT` identifies the commit when building from an exported source tree.
+This builds for the current Mac's architecture and writes a ZIP plus `SHA256SUMS.txt` to `dist/release`. The archive includes license notices and corresponding source for MPL-licensed components. `CARGO_ABOUT_BIN` selects a cargo-about executable. `SOURCE_COMMIT` identifies the commit when building from an exported source tree. Set `PAWCOMMANDER_RELEASE_DIR` to collect assets in a separate directory.
+
+To sign the release checksum, set `PAWCOMMANDER_RELEASE_SIGNING_KEY` to a dedicated Ed25519 key file or its public key with the private half loaded in your SSH agent. This adds `SHA256SUMS.txt.sig`. Publish the ZIP and both checksum files together. Before uploading, use `bash scripts/verify-macos-release.sh <trusted-release-key.pub> <release.zip>` with the public key already communicated to users through a trusted channel. The key fingerprint is displayed by `ssh-keygen -E sha256 -lf <trusted-release-key.pub>`.
 
 For public releases, build from a clean, reviewed source snapshot, verify the source commit in `BUILD_INFO.txt`, inspect the archive for private paths or files, and test the extracted app. The package is ad-hoc signed and not notarized. Publish it as an asset on a versioned GitHub Release; update the README's versioned download link when releasing a new version.

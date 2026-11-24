@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a native macOS ZIP with licenses, source attribution, and a checksum.
+# Build a native macOS ZIP with licenses, source attribution, and optional release signing.
 set -euo pipefail
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$project_dir"
@@ -9,15 +9,26 @@ command -v "$about_bin" >/dev/null || {
   exit 1
 }
 command -v python3 >/dev/null
+signing_key="${PAWCOMMANDER_RELEASE_SIGNING_KEY:-}"
+if [[ -n "$signing_key" ]]; then
+  fingerprint="$(/usr/bin/ssh-keygen -lf "$signing_key")"
+  if [[ "$fingerprint" != *' (ED25519)' ]]; then
+    echo 'Use an Ed25519 release signing key.' >&2
+    exit 1
+  fi
+fi
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
 bash scripts/build-macos.sh
 version="$(sed -n '/^\[package\]/,/^\[/s/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml)"
 architecture="$(uname -m)"
 target="$(rustc -vV | sed -n 's/^host: //p')"
-release_dir="$project_dir/dist/release"
-mkdir -p "$release_dir"
-staging="$(mktemp -d "$project_dir/dist/package.XXXXXX")"
-trap 'rm -rf "$staging"' EXIT
+release_dir="${PAWCOMMANDER_RELEASE_DIR:-$project_dir/dist/release}"
+mkdir -p -- "$release_dir"
+release_dir="$(cd -- "$release_dir" && pwd -P)"
+work_dir="$(mktemp -d "$release_dir/.package.XXXXXX")"
+trap 'rm -rf "$work_dir"' EXIT
+staging="$work_dir/payload"
+mkdir "$staging"
 ditto dist/PawCommander.app "$staging/PawCommander.app"
 "$about_bin" generate --locked --target "$target" --fail scripts/licenses.hbs \
   -o "$staging/THIRD_PARTY_NOTICES.txt"
@@ -36,6 +47,18 @@ printf 'PawCommander %s\nArchitecture: %s\nSource commit: %s\nBuild macOS: %s\nM
 codesign --force --sign - "$staging/PawCommander.app"
 codesign --verify --strict "$staging/PawCommander.app"
 archive="PawCommander-${version}-macOS-${architecture}.zip"
-ditto -c -k --sequesterRsrc "$staging" "$release_dir/$archive"
-(cd "$release_dir" && shasum -a 256 "$archive" > SHA256SUMS.txt)
+ditto -c -k --sequesterRsrc "$staging" "$work_dir/$archive"
+(cd "$work_dir" && /usr/bin/shasum -a 256 "$archive" > SHA256SUMS.txt)
+if [[ -n "$signing_key" ]]; then
+  /usr/bin/ssh-keygen -Y sign -f "$signing_key" -n macos-release@pawcommander.capture402.xyz \
+    < "$work_dir/SHA256SUMS.txt" > "$work_dir/SHA256SUMS.txt.sig"
+fi
+
+# Withdraw the previous signature before changing the files it authenticates.
+rm -f "$release_dir/SHA256SUMS.txt.sig"
+mv -f "$work_dir/$archive" "$release_dir/$archive"
+mv -f "$work_dir/SHA256SUMS.txt" "$release_dir/SHA256SUMS.txt"
+if [[ -n "$signing_key" ]]; then
+  mv -f "$work_dir/SHA256SUMS.txt.sig" "$release_dir/SHA256SUMS.txt.sig"
+fi
 printf 'Release archive: %s\n' "$release_dir/$archive"
