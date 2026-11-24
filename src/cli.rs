@@ -13,7 +13,19 @@ enum Request {
     LegacyFolder(PathBuf),
     Open(PathBuf),
     Workspace(String),
-    Search { query: String, folder: PathBuf },
+    Search {
+        query: String,
+        folder: PathBuf,
+    },
+    UpdateMacos {
+        installed: PathBuf,
+        archive: PathBuf,
+        key: PathBuf,
+    },
+    RestoreMacos {
+        installed: PathBuf,
+        backup: PathBuf,
+    },
 }
 
 #[derive(Debug)]
@@ -76,7 +88,9 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Request, Error
             _ => Err(bad_arguments()),
         };
     }
-    let Some(command @ ("open" | "workspace" | "search")) = first.to_str() else {
+    let Some(command @ ("open" | "workspace" | "search" | "update-macos" | "restore-macos")) =
+        first.to_str()
+    else {
         return if is_option(&first) || arguments.next().is_some() {
             Err(bad_arguments())
         } else {
@@ -117,6 +131,15 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Request, Error
                 folder,
             })
         }
+        ("update-macos", [installed, archive, key]) => Ok(Request::UpdateMacos {
+            installed: installed.into(),
+            archive: archive.into(),
+            key: key.into(),
+        }),
+        ("restore-macos", [installed, backup]) => Ok(Request::RestoreMacos {
+            installed: installed.into(),
+            backup: backup.into(),
+        }),
         _ => Err(bad_arguments()),
     }
 }
@@ -153,6 +176,18 @@ fn execute(request: Request) -> Result<(), Error> {
             let folders = find_saved_workspace(profile.as_deref(), &name)
                 .map_err(|error| workspace_error(error, &name))?;
             return launch_isolated(Startup::Workspace(folders), profile.as_deref());
+        }
+        Request::UpdateMacos {
+            installed,
+            archive,
+            key,
+        } => {
+            return crate::macos_update::install(&installed, &archive, &key)
+                .map_err(|error| Error::Target(error.to_string()));
+        }
+        Request::RestoreMacos { installed, backup } => {
+            return crate::macos_update::restore(&installed, &backup)
+                .map_err(|error| Error::Target(error.to_string()));
         }
     };
     let profile = read_profile(saved_profile_path().as_deref())?;
@@ -301,6 +336,8 @@ mod tests {
             &["--help", "extra"],
             &["workspace", "  "],
             &["--unsupported"],
+            &["update-macos", "application.app", "package.zip"],
+            &["restore-macos", "application.app"],
         ] {
             assert!(matches!(args(values), Err(Error::Usage(_))), "{values:?}");
         }
@@ -309,6 +346,36 @@ mod tests {
             args(&["search", &over_limit]),
             Err(Error::Usage(_))
         ));
+    }
+
+    #[test]
+    fn accepts_macos_update_and_restore_paths() {
+        assert_eq!(
+            args(&[
+                "update-macos",
+                "PawCommander.app",
+                "package.zip",
+                "release.pub"
+            ])
+            .unwrap(),
+            Request::UpdateMacos {
+                installed: "PawCommander.app".into(),
+                archive: "package.zip".into(),
+                key: "release.pub".into(),
+            }
+        );
+        assert_eq!(
+            args(&[
+                "restore-macos",
+                "PawCommander.app",
+                "My backup/PawCommander.app"
+            ])
+            .unwrap(),
+            Request::RestoreMacos {
+                installed: "PawCommander.app".into(),
+                backup: "My backup/PawCommander.app".into(),
+            }
+        );
     }
 
     #[test]

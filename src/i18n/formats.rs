@@ -645,6 +645,22 @@ formats! {
     "Workspace {name:?} contains incompatible paths" => ("Пути рабочего пространства {name:?} несовместимы с системой", "Pracovní plocha {name:?} obsahuje nekompatibilní cesty"),
     "Could not prepare settings for the window ({error})" => ("Не удалось подготовить настройки для окна ({error})", "Nastavení okna se nepodařilo připravit ({error})"),
     "Could not start PawCommander ({error})" => ("Не удалось запустить PawCommander ({error})", "PawCommander se nepodařilo spustit ({error})"),
+    "Operation failed at {path:?} ({error})" => ("Ошибка операции с {path:?} ({error})", "Operace u {path:?} selhala ({error})"),
+    "Command {program:?} failed ({error})" => ("Ошибка команды {program:?} ({error})", "Příkaz {program:?} selhal ({error})"),
+    "Release {release} must be newer than installed version {installed}." => ("Версия выпуска {release} должна быть новее установленной версии {installed}.", "Vydání {release} musí být novější než nainstalovaná verze {installed}."),
+    "Previous installation saved at {path:?}." => ("Копия предыдущей установки сохранена в {path:?}.", "Předchozí instalace byla uložena do {path:?}."),
+    "Installed PawCommander {version} at {path:?}." => ("PawCommander {version} установлен в {path:?}.", "PawCommander {version} byl nainstalován do {path:?}."),
+    "Restored {path:?} from {backup:?}." => ("Установка {path:?} восстановлена из {backup:?}.", "Instalace {path:?} byla obnovena ze zálohy {backup:?}."),
+    "Another update or restore is using {path:?}." => ("Другое обновление или восстановление использует {path:?}.", "Jiná aktualizace nebo obnova používá {path:?}."),
+    "The installation at {path:?} changed during the operation." => ("Установка в {path:?} изменилась во время операции.", "Instalace v {path:?} se během operace změnila."),
+    "Expected a regular file at {path:?}." => ("Ожидался обычный файл в {path:?}.", "V {path:?} se očekával běžný soubor."),
+    "The application in the archive must have release version {version}." => ("Версия приложения в архиве должна совпадать с версией выпуска {version}.", "Aplikace v archivu musí mít verzi vydání {version}."),
+    "This release requires macOS {version} or later." => ("Для этого выпуска требуется macOS {version} или новее.", "Toto vydání vyžaduje macOS {version} nebo novější."),
+    "Use the original PawCommander macOS ZIP filename for {arch}." => ("Используйте исходное имя ZIP-архива PawCommander для macOS на {arch}.", "Použijte původní název ZIP archivu PawCommander pro macOS na {arch}."),
+    "This update requires a bundle for {arch}." => ("Для обновления нужен пакет приложения для {arch}.", "Aktualizace vyžaduje balíček aplikace pro {arch}."),
+    "Quit PawCommander at {path:?} before continuing." => ("Закройте PawCommander из {path:?}, чтобы продолжить.", "Před pokračováním ukončete PawCommander v {path:?}."),
+    "Expected a PawCommander app bundle at {path:?}." => ("Ожидалось приложение PawCommander в {path:?}.", "V {path:?} se očekávala aplikace PawCommander."),
+    "Use the saved backup path at {path:?}." => ("Укажите путь к сохранённой копии. Получен путь {path:?}.", "Použijte cestu k uložené záloze. Zadána byla {path:?}."),
 }
 
 #[cfg(target_os = "macos")]

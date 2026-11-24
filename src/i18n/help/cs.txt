@@ -5,16 +5,19 @@ Použití
   pawcommander open SLOŽKA
   pawcommander workspace NÁZEV
   pawcommander search DOTAZ [SLOŽKA]
+  pawcommander update-macos NAINSTALOVANÁ_APLIKACE ZIP_VYDÁNÍ DŮVĚRYHODNÝ_KLÍČ
+  pawcommander restore-macos NAINSTALOVANÁ_APLIKACE ULOŽENÁ_ZÁLOHA
   pawcommander --help
 
 Spuštění bez argumentů obnoví uloženou relaci.
 Otevřete složku nebo uloženou pracovní plochu, případně hledejte soubory podle názvu či masky.
 Při hledání bez parametru SLOŽKA se použije aktuální složka.
 Příkazy open, workspace a search otevírají samostatná okna s dočasným nastavením.
+Před aktualizací nebo obnovou ukončete nainstalovanou aplikaci.
 Před argumenty začínající pomlčkou použijte --.
 
 Návratové kódy
-  0  Nápověda zobrazena nebo okno zavřeno běžným způsobem
+  0  Příkaz byl úspěšně dokončen
   1  Chyba nastavení nebo spuštění aplikace
   2  Neplatné argumenty
-  3  Složka nebo pracovní plocha není dostupná
+  3  Cíl není dostupný nebo aktualizace či obnova selhala
