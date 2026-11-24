@@ -18,10 +18,8 @@ use objc2_foundation::{
     NSObjectProtocol, NSOperationQueue, NSString, NSUserCancelledError, NSURL,
 };
 use std::{
-    ffi::{CStr, OsStr},
-    os::unix::ffi::OsStrExt,
     path::PathBuf,
-    ptr::{self, NonNull},
+    ptr,
     sync::{
         atomic::{AtomicU8, Ordering},
         mpsc::{self, Receiver, Sender},
@@ -180,15 +178,9 @@ fn destination_path(url: &NSURL) -> Result<PathBuf, FilePromiseError> {
     if !url.isFileURL() {
         return Err(FilePromiseError::InvalidReceiverUrl);
     }
-    let mut bytes = [0u8; libc::PATH_MAX as usize];
-    let buffer = NonNull::from(&mut bytes[0]).cast();
-    // SAFETY: the buffer is writable for the supplied length during the call.
-    if !unsafe { url.getFileSystemRepresentation_maxLength(buffer, bytes.len()) } {
-        return Err(FilePromiseError::InvalidReceiverUrl);
-    }
-    let encoded =
-        CStr::from_bytes_until_nul(&bytes).map_err(|_| FilePromiseError::InvalidReceiverUrl)?;
-    let path = PathBuf::from(OsStr::from_bytes(encoded.to_bytes()));
+    let path = url
+        .to_file_path()
+        .ok_or(FilePromiseError::InvalidReceiverUrl)?;
     if !path.is_absolute() || path.file_name().is_none() {
         return Err(FilePromiseError::InvalidDestination(path));
     }
@@ -236,6 +228,15 @@ mod tests {
             NSURL::URLWithString(&NSString::from_str("https://example.invalid/file")).unwrap();
         assert!(matches!(
             destination_path(&web),
+            Err(FilePromiseError::InvalidReceiverUrl)
+        ));
+
+        let long_path = Path::new("/private/tmp")
+            .join("component/".repeat(120))
+            .join("file");
+        let long_url = NSURL::from_file_path(&long_path).unwrap();
+        assert!(matches!(
+            destination_path(&long_url),
             Err(FilePromiseError::InvalidReceiverUrl)
         ));
     }

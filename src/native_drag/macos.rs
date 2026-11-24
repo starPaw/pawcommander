@@ -2,7 +2,7 @@ use super::file_promises::{FilePromises, PromiseRequest};
 use super::PromiseKind;
 #[cfg(test)]
 use crate::test_ui::ContextExt as _;
-use crate::{drag_drop::DragFiles, vfs::Location};
+use crate::{drag_drop::DragFiles, macos_file_url, vfs::Location};
 use eframe::egui;
 use objc2::{
     define_class, msg_send,
@@ -21,8 +21,6 @@ use objc2_foundation::{
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{
     cell::RefCell,
-    ffi::CString,
-    os::unix::ffi::OsStrExt,
     path::PathBuf,
     ptr::NonNull,
     rc::Rc,
@@ -500,25 +498,19 @@ fn local_paths(sources: &[Location]) -> Result<Vec<PathBuf>, String> {
 }
 
 fn file_url(path: &std::path::Path) -> Result<Retained<NSURL>, String> {
-    let bytes = CString::new(path.as_os_str().as_bytes())
-        .map_err(|_| crate::i18n::text!("Недопустимый путь файла"))?;
     let metadata = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
-    // SAFETY: the NUL-terminated filesystem byte string remains live for the
-    // call. NSURL copies it. lstat preserves directory symlinks as symlinks.
-    Ok(unsafe {
-        NSURL::fileURLWithFileSystemRepresentation_isDirectory_relativeToURL(
-            NonNull::new(bytes.as_ptr().cast_mut()).unwrap(),
-            metadata.is_dir(),
-            None,
-        )
-    })
+    macos_file_url::from_path(path, metadata.is_dir())
+        .map_err(|_| crate::i18n::text!("Недопустимый путь файла").into())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use objc2_app_kit::NSPasteboardWriting;
-    use std::{ffi::CStr, os::unix::fs::symlink};
+    use std::{
+        ffi::CStr,
+        os::unix::{ffi::OsStrExt, fs::symlink},
+    };
 
     #[test]
     fn native_completion_preserves_latest_modifiers() {

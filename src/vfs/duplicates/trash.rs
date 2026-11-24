@@ -6,6 +6,7 @@ use crate::{
         AccessAction, AccessError, DuplicateError, DuplicateRole, Failure, MacTrashError,
         MutationError, SmbMutationAction,
     },
+    macos_file_url,
     operations::{Cancellation, Progress, TransferError},
     result_history::Outcome,
     smb::MutationMount,
@@ -20,8 +21,8 @@ use crate::{
     },
 };
 use objc2::rc::autoreleasepool;
-use objc2_foundation::{NSFileManager, NSURL};
-use std::{ffi::CString, fs::File, io, os::unix::ffi::OsStrExt, path::Path, ptr::NonNull};
+use objc2_foundation::NSFileManager;
+use std::{fs::File, path::Path};
 
 pub(crate) struct TrashPlan {
     pub(super) root: Parent,
@@ -153,23 +154,14 @@ impl TrashPlan {
 }
 
 fn system_trash(original: &Path, held: &Path) -> Result<(), TransferError> {
-    let path = CString::new(held.as_os_str().as_bytes()).map_err(|source| {
-        AccessError::new(
-            &Location::Local(held.to_owned()),
-            AccessAction::ResolvePath,
-            io::Error::new(io::ErrorKind::InvalidInput, source),
-        )
-    })?;
     autoreleasepool(|_| {
-        // SAFETY: The NUL-terminated filesystem representation outlives the call.
-        // NSURL copies it. The selected payload was verified as a regular file.
-        let url = unsafe {
-            NSURL::fileURLWithFileSystemRepresentation_isDirectory_relativeToURL(
-                NonNull::from(path.as_c_str()).cast(),
-                false,
-                None,
+        let url = macos_file_url::from_path(held, false).map_err(|source| {
+            AccessError::new(
+                &Location::Local(held.to_owned()),
+                AccessAction::ResolvePath,
+                std::io::Error::from(source),
             )
-        };
+        })?;
         NSFileManager::defaultManager()
             .trashItemAtURL_resultingItemURL_error(&url, None)
             .map_err(|error| {

@@ -1,6 +1,6 @@
-use crate::recovery::LockedRecord;
 use crate::APP_ID;
-use objc2_foundation::{NSBundle, NSURL};
+use crate::{macos_file_url, recovery::LockedRecord};
+use objc2_foundation::NSBundle;
 use std::ffi::{CString, OsString};
 use std::fmt;
 use std::fs::{self, File, Metadata, TryLockError};
@@ -12,7 +12,6 @@ use std::os::unix::{
 };
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
-use std::ptr::NonNull;
 use tempfile::{Builder, TempDir};
 
 const APP_NAME: &str = "PawCommander.app";
@@ -343,16 +342,10 @@ fn parse_version(value: &str) -> Option<[u32; 3]> {
 
 fn require_architecture(path: &Path) -> Result<()> {
     let (arch, cpu) = RELEASE_ARCH;
-    let c_path =
-        CString::new(path.as_os_str().as_bytes()).expect("existing bundle path has no NUL");
-    // SAFETY: c_path remains live and NUL-terminated through this call.
-    let url = unsafe {
-        NSURL::fileURLWithFileSystemRepresentation_isDirectory_relativeToURL(
-            NonNull::new(c_path.as_ptr().cast_mut()).expect("CString has a non-null pointer"),
-            true,
-            None,
-        )
-    };
+    let url = at(
+        path,
+        macos_file_url::from_path(path, true).map_err(io::Error::from),
+    )?;
     let matches = NSBundle::bundleWithURL(&url)
         .and_then(|bundle| bundle.executableArchitectures())
         .is_some_and(|architectures| {
