@@ -48,6 +48,10 @@ jobs:
       - name: Run repository checks
         run: python scripts/check.py --report target/check-report.json
 
+      - name: Verify macOS release signatures
+        if: runner.os == 'macOS'
+        run: bash scripts/test-macos-release.sh
+
       - name: Save Rust build cache
         if: ${{ !cancelled() && steps.rust-cache.outputs.cache-primary-key != '' && steps.rust-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

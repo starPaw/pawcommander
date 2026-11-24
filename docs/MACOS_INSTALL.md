@@ -16,7 +16,16 @@ If you trust the official download, first attempt to open the app, then choose *
 
 ## Verify the download
 
-Download `SHA256SUMS.txt` from the same release and put it beside the ZIP. In that folder, run:
+For a release with `SHA256SUMS.txt.sig`, put both checksum files beside the original ZIP. Use a previously trusted copy of the verifier and release public key. Compare the key fingerprint with the one you obtained through your trusted channel before verifying the ZIP:
+
+```sh
+ssh-keygen -E sha256 -lf /path/to/trusted-release-key.pub
+bash scripts/verify-macos-release.sh /path/to/trusted-release-key.pub /path/to/PawCommander-VERSION-macOS-arm64.zip
+```
+
+Proceed after `Verified release archive` appears. This authenticates the package with the PawCommander release key. macOS evaluates the app's code signature and notarization separately on launch.
+
+The 0.2.0 preview provides an unsigned checksum. Put `SHA256SUMS.txt` from that release beside the ZIP and run this in the download folder to check its bytes:
 
 ```sh
 shasum -a 256 -c SHA256SUMS.txt

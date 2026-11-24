@@ -10,3 +10,6 @@ accepted = [
     "CC0-1.0",
     "BSD-2-Clause",
 ]
+
+[encoding_rs]
+accepted = ["BSD-3-Clause"]
