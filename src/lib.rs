@@ -47,6 +47,8 @@ mod tools;
 mod vfs;
 #[cfg(target_os = "macos")]
 mod volumes;
+#[cfg(target_os = "macos")]
+mod webdav;
 #[cfg(windows)]
 mod windows_file_id;
 mod zed;

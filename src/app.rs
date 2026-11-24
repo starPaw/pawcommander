@@ -69,6 +69,8 @@ mod toolbar;
 mod transfer_limits;
 #[cfg(target_os = "macos")]
 mod volumes;
+#[cfg(target_os = "macos")]
+mod webdav_browser;
 
 use crate::command_palette::CommandPalette;
 use crate::directory_tree::DirectoryTree;
@@ -158,6 +160,8 @@ pub struct PawCommander {
     show_list_columns: bool,
     list_columns_focus: bool,
     sftp_form: Option<SftpForm>,
+    #[cfg(target_os = "macos")]
+    webdav: Option<webdav_browser::Browser>,
     connection: Option<ConnectionJob>,
     native_drag: crate::native_drag::NativeDrag,
     application_job: Option<actions::ApplicationJob>,
@@ -178,6 +182,17 @@ pub struct PawCommander {
 }
 
 impl PawCommander {
+    fn webdav_open(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            self.webdav.is_some()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            false
+        }
+    }
+
     fn tab(&self) -> &Tab {
         self.panes[self.active].tab()
     }
@@ -536,6 +551,7 @@ impl eframe::App for PawCommander {
             && self.comparison.is_none()
             && !self.conflict_open()
             && self.sftp_form.is_none()
+            && !self.webdav_open()
             && !self.show_help
             && !self.show_history
             && !self.recovery.is_open()
@@ -641,6 +657,8 @@ impl eframe::App for PawCommander {
             self.properties = None;
         }
         self.sftp_dialog(ctx);
+        #[cfg(target_os = "macos")]
+        self.show_webdav(ctx);
         if self
             .shortcut_editor
             .as_mut()

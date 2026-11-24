@@ -256,6 +256,8 @@ impl PawCommander {
             show_list_columns: false,
             list_columns_focus: false,
             sftp_form: None,
+            #[cfg(target_os = "macos")]
+            webdav: None,
             connection: None,
             native_drag: Default::default(),
             application_job: None,

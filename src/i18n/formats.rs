@@ -16,6 +16,7 @@ macro_rules! formats {
 }
 
 formats! {
+    "WebDAV server returned HTTP {status}." => ("Сервер WebDAV вернул HTTP {status}.", "Server WebDAV vrátil HTTP {status}."),
     "If only one pane is visible, choose “{split}” in the Command Palette. Open a folder in each pane and click the pane you want to work in." => ("Если видна одна панель, выберите «{split}» в палитре команд. Откройте нужную папку в каждой панели и щёлкните по той, в которой хотите работать.", "Pokud vidíte jen jeden panel, vyberte v paletě příkazů „{split}“. V každém panelu otevřete složku a klikněte na panel, ve kterém chcete pracovat."),
     "Select files in the active pane. In the Command Palette, choose “{copy}” or “{move_files}”." => ("Выделите файлы в активной панели. В палитре команд выберите «{copy}» или «{move_files}».", "Vyberte soubory v aktivním panelu. V paletě příkazů vyberte „{copy}“ nebo „{move_files}“."),
     "Could not save the diagnostic report to “{path}”.\n{reason}" => ("Не удалось сохранить диагностический отчёт в «{path}».\n{reason}", "Diagnostickou zprávu se nepodařilo uložit do „{path}“.\n{reason}"),

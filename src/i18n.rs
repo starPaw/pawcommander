@@ -13,6 +13,8 @@ pub(crate) mod launch;
 mod smb;
 #[cfg(target_os = "macos")]
 pub(crate) mod terminal;
+#[cfg(target_os = "macos")]
+mod webdav;
 pub(crate) mod zed;
 pub(crate) use catalog::key;
 #[cfg(target_os = "macos")]
@@ -34,6 +36,8 @@ pub(crate) use formats::czech_format;
 pub(crate) use formats::russian_format;
 #[cfg(target_os = "macos")]
 pub(crate) use smb::smb_error;
+#[cfg(target_os = "macos")]
+pub(crate) use webdav::webdav_error;
 
 pub(crate) fn archive_read_only() -> &'static str {
     text!("Эта операция недоступна внутри архива")

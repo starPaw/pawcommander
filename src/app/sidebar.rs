@@ -211,6 +211,11 @@ impl PawCommander {
                                 }
                                 #[cfg(target_os = "macos")]
                                 self.smb_sidebar(ui, &current, actions);
+                                #[cfg(target_os = "macos")]
+                                if place_button(ui, crate::i18n::text!("WebDAV · Просмотр"), false)
+                                {
+                                    actions.push(Action::BrowseWebDav);
+                                }
                             });
                         ui.add_space(6.0);
                         egui::CollapsingHeader::new(crate::i18n::text!("Избранное"))
