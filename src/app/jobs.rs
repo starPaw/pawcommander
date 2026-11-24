@@ -803,7 +803,7 @@ impl PawCommander {
                     fail_to_start(RecoveryStartError::Unavailable);
                     return;
                 }
-                let pending = match recovery_directory
+                let mut pending = match recovery_directory
                     .as_deref()
                     .map(|directory| {
                         crate::recovery::begin(
@@ -890,10 +890,14 @@ impl PawCommander {
                         recovery_path: pending.path().to_owned(),
                     }),
                     Ok(()) if !panicked => pending
+                        .take()
                         .and_then(|pending| pending.complete().err())
                         .map(HistoryWarning::RecoveryCleanup),
                     Ok(()) => None,
                 };
+                // A receiver may scan immediately, even while the worker is repainting.
+                #[cfg(target_os = "macos")]
+                drop(pending);
                 if !panicked && history_saved && reporter.undo.len() != 0 {
                     let _ = undo_send.send(UndoJob {
                         id: undo_id,

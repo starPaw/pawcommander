@@ -85,6 +85,47 @@ fn recovery_worker_preserves_marker_after_caught_panic() {
     assert!(app.notice.as_ref().unwrap().1);
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn retained_marker_is_readable_on_receipt_of_the_worker_result() {
+    for panics in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("recovery");
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = PawCommander::new(&cc, Some(root.path().into()));
+        app.recovery = crate::recovery::Recovery::for_test(directory.clone(), &ctx);
+        let (release, wait) = mpsc::channel();
+        app.start_progress_job(&ctx, "retained operation", move |progress| {
+            wait.recv_timeout(Duration::from_secs(5)).unwrap();
+            if panics {
+                panic!("injected worker panic");
+            }
+            // The default test history cannot persist this row.
+            progress
+                .results
+                .plan([(Location::Local("source".into()), None)]);
+            Ok("finished".into())
+        });
+
+        // Hold the UI lock so the worker cannot exit through its final repaint.
+        let report = ctx.memory_mut(|_| {
+            release.send(()).unwrap();
+            app.jobs
+                .current
+                .as_ref()
+                .unwrap()
+                .result
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+            crate::recovery::scan(&directory)
+        });
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.unfinished.len(), 1, "panics = {panics}");
+        assert_eq!(report.unfinished[0].label, "retained operation");
+    }
+}
+
 #[test]
 fn recovery_worker_refuses_to_start_without_persisted_marker() {
     let root = tempfile::tempdir().unwrap();
