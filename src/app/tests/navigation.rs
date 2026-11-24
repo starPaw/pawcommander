@@ -22,7 +22,7 @@ fn system_open_and_reveal_report_the_original_selection_after_focus_changes() {
     app.active = 1 - app.active;
     let completed = hold_queue(&mut app);
     completed
-        .send(JobCompletion::Text(Ok("file operation finished".into())))
+        .send(JobCompletion::text(Ok("file operation finished".into())))
         .unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(5);

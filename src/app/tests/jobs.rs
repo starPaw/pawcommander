@@ -120,7 +120,7 @@ fn editor_launch_error_and_remote_save_result_remain_visible_in_the_same_poll() 
         ))))
         .unwrap();
     report_save
-        .send(JobCompletion::Text(Err("save preparation refused".into())))
+        .send(JobCompletion::text(Err("save preparation refused".into())))
         .unwrap();
 
     app.poll(&ctx);
@@ -178,7 +178,7 @@ fn file_promise_completion_preserves_worker_failure_and_queue_cancellation() {
         queued.try_recv(),
         Ok(Err(TransferError::Cancelled))
     ));
-    held.send(JobCompletion::Text(Ok("release".into())))
+    held.send(JobCompletion::text(Ok("release".into())))
         .unwrap();
     poll_queue_until(&mut app, &ctx, |app| !app.jobs.is_busy());
 
@@ -356,7 +356,7 @@ fn history_retry_owns_one_queued_attempt_and_keeps_completed_files_untouched() {
     );
     app.retry_transfer(&ctx, &id);
     assert_eq!(app.jobs.pending.len(), 1);
-    held.send(JobCompletion::Text(Ok("release".into())))
+    held.send(JobCompletion::text(Ok("release".into())))
         .unwrap();
     poll_queue_until(&mut app, &ctx, PawCommander::conflict_open);
     answer_queue_conflict(&mut app, &ctx, crate::i18n::text!("Сохранить обе версии"));
@@ -528,7 +528,7 @@ fn queue_is_bounded_and_removing_pending_work_has_no_side_effects() {
     assert!(app.notice.as_ref().unwrap().0.contains("100"));
     assert!(app.notice.as_ref().unwrap().1);
     app.jobs.pending.clear();
-    held.send(JobCompletion::Text(Ok("done".into()))).unwrap();
+    held.send(JobCompletion::text(Ok("done".into()))).unwrap();
     app.poll(&ctx);
     assert!(app.jobs.current.is_none());
     assert!(observed.try_recv().is_err());
@@ -553,7 +553,7 @@ fn queue_spawn_failure_preserves_work_and_order_until_explicit_retry() {
         });
     }
     app.jobs.fail_spawn = true;
-    held.send(JobCompletion::Text(Ok("released".into())))
+    held.send(JobCompletion::text(Ok("released".into())))
         .unwrap();
     app.poll(&ctx);
     assert!(app.jobs.current.is_none());
@@ -646,7 +646,7 @@ fn queued_same_target_copies_revalidate_conflicts_capture_destination_and_save_o
         );
         assert!(!target.join("same.txt").exists());
         app.action(Action::Navigate(0, other.clone().into()), &ctx);
-        held.send(JobCompletion::Text(Ok("released".into())))
+        held.send(JobCompletion::text(Ok("released".into())))
             .unwrap();
         poll_queue_until(&mut app, &ctx, PawCommander::conflict_open);
         assert_eq!(app.jobs.current.as_ref().unwrap().label, "second");
@@ -728,7 +728,7 @@ fn queued_transfer_failure_and_conflict_stop_release_only_the_active_job() {
             false,
         );
     }
-    held.send(JobCompletion::Text(Ok("released".into())))
+    held.send(JobCompletion::text(Ok("released".into())))
         .unwrap();
     poll_queue_until(&mut app, &ctx, PawCommander::conflict_open);
     assert_eq!(app.jobs.current.as_ref().unwrap().label, "conflict.txt");
@@ -789,7 +789,7 @@ fn queued_copy_waits_for_destination_creation_and_source_rename() {
         !target.exists(),
         "queued operations must not mutate the destination"
     );
-    held.send(JobCompletion::Text(Ok("released".into())))
+    held.send(JobCompletion::text(Ok("released".into())))
         .unwrap();
     poll_queue_until(&mut app, &ctx, |app| !app.jobs.is_busy());
     assert_eq!(
@@ -842,7 +842,7 @@ fn queued_cut_moves_reserve_sources_and_do_not_consume_replaced_clipboard() {
         true,
         ClipboardOrigin::App(None),
     ));
-    held.send(JobCompletion::Text(Ok("released".into())))
+    held.send(JobCompletion::text(Ok("released".into())))
         .unwrap();
     poll_queue_until(&mut app, &ctx, |app| !app.jobs.is_busy());
     assert!(!source.exists());
@@ -1149,7 +1149,7 @@ fn transfer_stop_button_keeps_pending_ownership_and_navigation_until_result() {
 
     // Errors after Stop preserve recovery guidance rather than becoming success.
     result
-        .send(JobCompletion::Text(Err(
+        .send(JobCompletion::text(Err(
             "cleanup failed: /retained/private-staging".into(),
         )))
         .unwrap();
@@ -1559,7 +1559,7 @@ fn late_stop_keeps_final_success_and_consumes_committed_cut_events() {
         .send(TransferEvent::Moved(committed, vec![]))
         .unwrap();
     result
-        .send(JobCompletion::Text(Ok(success.clone())))
+        .send(JobCompletion::text(Ok(success.clone())))
         .unwrap();
     // A token request never rewrites the worker's already finalized outcome.
     app.request_transfer_stop(&ctx);

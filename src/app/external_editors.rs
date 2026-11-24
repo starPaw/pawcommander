@@ -1,4 +1,4 @@
-use super::{dialogs::Dialog, PawCommander};
+use super::{dialogs::Dialog, jobs::HistoryWarning, PawCommander};
 use crate::i18n::{key, launch::editor_preparation_error, text, MessageKey};
 use crate::operations::TransferError;
 use crate::tools::launch::{CommandDetails, Invocation, Target};
@@ -116,7 +116,7 @@ pub(super) type SaveResult = Result<RemoteEditSaveOutcome, TransferError>;
 
 struct SaveFeedback {
     result: SaveResult,
-    history_warning: Option<String>,
+    history_warning: Option<HistoryWarning>,
 }
 
 impl Session {
@@ -132,7 +132,7 @@ impl Session {
         &mut self,
         edit: Option<RemoteEdit>,
         result: SaveResult,
-        history_warning: Option<String>,
+        history_warning: Option<HistoryWarning>,
     ) {
         if let Some(edit) = edit {
             self.edit = Some(edit);
@@ -283,7 +283,7 @@ impl PawCommander {
                     ui.add(egui::Label::new(message).wrap().selectable(true));
                     if let Some(warning) = &feedback.history_warning {
                         let warning =
-                            egui::RichText::new(warning).color(ui.visuals().warn_fg_color);
+                            egui::RichText::new(warning.notice()).color(ui.visuals().warn_fg_color);
                         ui.add(egui::Label::new(warning).wrap().selectable(true));
                     }
                 }
@@ -410,16 +410,26 @@ mod tests {
 
     #[test]
     fn editor_session_keeps_history_warning_when_the_window_reopens() {
+        use crate::result_history::{HistoryError, HistorySaveProblem};
+        use std::{io, sync::Arc};
+
         let mut session = Session {
             saving: true,
             ..Session::default()
         };
+        let cause = Arc::new(HistoryError::Save {
+            path: "/fixture/history.json".into(),
+            problem: HistorySaveProblem::Replace(io::Error::from_raw_os_error(libc::EIO)),
+        });
         session.finish_save(
             None,
             Ok(RemoteEditSaveOutcome::Saved {
                 cleanup_warning: None,
             }),
-            Some("recovery record kept at /fixture/recovery".into()),
+            Some(HistoryWarning::Save {
+                cause: cause.clone(),
+                recovery_path: "/fixture/recovery".into(),
+            }),
         );
         session.reveal();
         let feedback = session.feedback.unwrap();
@@ -430,9 +440,10 @@ mod tests {
                 cleanup_warning: None
             })
         ));
-        assert_eq!(
-            feedback.history_warning.as_deref(),
-            Some("recovery record kept at /fixture/recovery")
-        );
+        assert!(matches!(
+            feedback.history_warning,
+            Some(HistoryWarning::Save { cause: received, recovery_path })
+                if Arc::ptr_eq(&received, &cause) && recovery_path == Path::new("/fixture/recovery")
+        ));
     }
 }

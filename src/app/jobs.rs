@@ -9,9 +9,10 @@ use super::PawCommander;
 use crate::conflict::{Answer, Conflict, ConflictDialog, Decision};
 #[cfg(target_os = "macos")]
 use crate::file_error::{ExportKind, ExportTarget, FilePromiseError};
-use crate::file_error::{Failure, MutationError};
+use crate::file_error::{Failure, MutationError, RecoveryRecordError, RecoveryStartError};
 use crate::fs_ops::TransferKind;
 use crate::operations::{Cancellation, Progress, ProgressView, TransferError};
+use crate::result_history::HistoryError;
 use crate::vfs as fs_ops;
 use crate::vfs::Location;
 use eframe::egui;
@@ -135,34 +136,78 @@ impl JobWork {
 }
 
 pub(super) enum JobCompletion {
-    Text(Result<String, String>),
+    Text {
+        result: Result<String, String>,
+        #[cfg(target_os = "macos")]
+        history_warning: Option<HistoryWarning>,
+    },
+    #[cfg(target_os = "macos")]
+    StartFailed(TransferError),
     #[cfg(target_os = "macos")]
     File {
         result: Box<FileResult>,
-        history_warning: Option<String>,
+        history_warning: Option<HistoryWarning>,
     },
     #[cfg(target_os = "macos")]
     CreateFile {
         target: Location,
         result: Arc<CreationResult>,
-        history_warning: Option<String>,
+        history_warning: Option<HistoryWarning>,
     },
     #[cfg(target_os = "macos")]
     RemoteSave {
         edit: Box<crate::vfs::RemoteEdit>,
         result: super::external_editors::SaveResult,
-        history_warning: Option<String>,
+        history_warning: Option<HistoryWarning>,
     },
+}
+
+impl JobCompletion {
+    pub(super) fn text(result: Result<String, String>) -> Self {
+        Self::Text {
+            result,
+            #[cfg(target_os = "macos")]
+            history_warning: None,
+        }
+    }
+}
+
+pub(super) enum HistoryWarning {
+    Save {
+        cause: Arc<HistoryError>,
+        recovery_path: PathBuf,
+    },
+    RecoveryCleanup(RecoveryRecordError),
+}
+
+impl HistoryWarning {
+    pub(super) fn notice(&self) -> String {
+        match self {
+            Self::Save {
+                cause,
+                recovery_path,
+            } => {
+                let reason = crate::i18n::history_error(cause);
+                let retained = crate::tr_format!(
+                    "Recovery record kept at {path}.",
+                    path = recovery_path.display()
+                );
+                format!("{reason}\n{retained}")
+            }
+            Self::RecoveryCleanup(error) => crate::i18n::recovery_record_error(error),
+        }
+    }
 }
 
 fn append_history_warning(
     result: Result<String, String>,
-    warning: Option<String>,
+    warning: Option<&HistoryWarning>,
 ) -> Result<String, String> {
     match warning {
         Some(warning) => Err(format!(
-            "{}\n{warning}",
-            result.unwrap_or_else(|error| error)
+            "{}\n{}",
+            result.unwrap_or_else(|error| error),
+            warning.notice()
         )),
         None => result,
     }
@@ -190,11 +235,15 @@ impl NativeCompletion {
         }
     }
 
-    fn report_start_error(&self, error: TransferError) -> String {
-        let error = match self.export_target() {
+    fn start_error(&self, error: TransferError) -> TransferError {
+        match self.export_target() {
             Some(target) => target.operation_error(error),
             None => error,
-        };
+        }
+    }
+
+    fn report_start_error(&self, error: TransferError) -> String {
+        let error = self.start_error(error);
         let notice = crate::i18n::file_error(&error);
         self.report_error(error);
         notice
@@ -808,13 +857,26 @@ impl PawCommander {
                 .and_then(NativeCompletion::export_target)
                 .cloned();
             let worker = move || {
-                let fail_to_start = |error: String| {
+                let fail_to_start = |cause: RecoveryStartError| {
                     #[cfg(target_os = "macos")]
-                    let error = match &worker_completion {
-                        Some(completion) => completion.report_start_error(error.into()),
-                        None => error,
+                    let result = {
+                        let cause = Arc::new(cause);
+                        let error = TransferError::Failed(Failure::RecoveryStart(cause.clone()));
+                        let error = match &worker_completion {
+                            Some(completion) => {
+                                completion.report_error(completion.start_error(
+                                    TransferError::Failed(Failure::RecoveryStart(cause)),
+                                ));
+                                completion.start_error(error)
+                            }
+                            None => error,
+                        };
+                        JobCompletion::StartFailed(error)
                     };
-                    let _ = tx.send(JobCompletion::Text(Err(error)));
+                    #[cfg(not(target_os = "macos"))]
+                    let result =
+                        JobCompletion::text(Err(crate::i18n::recovery_start_error(&cause)));
+                    let _ = tx.send(result);
                     worker_ctx.request_repaint();
                 };
                 let work = worker_work.lock().unwrap().take().unwrap();
@@ -826,9 +888,7 @@ impl PawCommander {
                 reporter.results.id = crate::result_history::operation_id();
                 let history_started = crate::result_history::now();
                 if recovery_directory.is_none() && !cfg!(test) {
-                    fail_to_start(crate::tr_format!(
-                        "Operation not started: application data directory for recovery is unavailable."
-                    ));
+                    fail_to_start(RecoveryStartError::Unavailable);
                     return;
                 }
                 let pending = match recovery_directory
@@ -844,11 +904,11 @@ impl PawCommander {
                     .transpose()
                 {
                     Ok(pending) => pending,
-                    Err(error) => {
-                        fail_to_start(crate::tr_format!(
-                            "Operation did not start. {error}",
-                            error = crate::i18n::recovery_record_error(&error)
-                        ));
+                    Err(cause) => {
+                        fail_to_start(RecoveryStartError::Record {
+                            cause,
+                            cleanup: None,
+                        });
                         return;
                     }
                 };
@@ -862,18 +922,9 @@ impl PawCommander {
                 let panicked = outcome.is_err();
                 let result = match outcome {
                     Ok(Ok(result)) => result,
-                    Ok(Err(error)) => {
-                        let mut message = crate::tr_format!(
-                            "Operation did not start. {error}",
-                            error = crate::i18n::recovery_record_error(&error)
-                        );
-                        if let Some(pending) = pending
-                            && let Err(cleanup) = pending.complete()
-                        {
-                            message.push('\n');
-                            message.push_str(&crate::i18n::recovery_record_error(&cleanup));
-                        }
-                        fail_to_start(message);
+                    Ok(Err(cause)) => {
+                        let cleanup = pending.and_then(|pending| pending.complete().err());
+                        fail_to_start(RecoveryStartError::Record { cause, cleanup });
                         return;
                     }
                     Err(_) => {
@@ -962,21 +1013,18 @@ impl PawCommander {
                 let persisted = std::mem::take(&mut reporter.results)
                     .finish(history_label, history_started, &result)
                     .map_or(Ok(()), |record| history.append(record));
-                let warning = match &persisted {
-                    Err(error) => pending.as_ref().map(|pending| {
-                        let reason = crate::i18n::history_error(error);
-                        let retained = crate::tr_format!(
-                            "Recovery record kept at {path}.",
-                            path = pending.path().display()
-                        );
-                        format!("{reason}\n{retained}")
+                let history_saved = persisted.is_ok();
+                let warning = match persisted {
+                    Err(cause) => pending.as_ref().map(|pending| HistoryWarning::Save {
+                        cause,
+                        recovery_path: pending.path().to_owned(),
                     }),
                     Ok(()) if !panicked => pending
                         .and_then(|pending| pending.complete().err())
-                        .map(|error| crate::i18n::recovery_record_error(&error)),
+                        .map(HistoryWarning::RecoveryCleanup),
                     Ok(()) => None,
                 };
-                if !panicked && persisted.is_ok() && reporter.undo.len() != 0 {
+                if !panicked && history_saved && reporter.undo.len() != 0 {
                     let _ = undo_send.send(UndoJob {
                         id: undo_id,
                         batch: reporter.undo,
@@ -1011,7 +1059,14 @@ impl PawCommander {
                     worker_ctx.request_repaint();
                     return;
                 }
-                let _ = tx.send(JobCompletion::Text(append_history_warning(result, warning)));
+                let _ = tx.send(JobCompletion::Text {
+                    #[cfg(not(target_os = "macos"))]
+                    result: append_history_warning(result, warning.as_ref()),
+                    #[cfg(target_os = "macos")]
+                    result,
+                    #[cfg(target_os = "macos")]
+                    history_warning: warning,
+                });
                 worker_ctx.request_repaint();
             };
             let builder = std::thread::Builder::new().name("pawcommander-file-operation".into());
@@ -1683,7 +1738,7 @@ impl PawCommander {
                         .map(|target| crate::i18n::file_error(&target.worker_stopped()));
                     #[cfg(not(target_os = "macos"))]
                     let export_notice: Option<String> = None;
-                    Some(JobCompletion::Text(Err(export_notice.unwrap_or_else(|| {
+                    Some(JobCompletion::text(Err(export_notice.unwrap_or_else(|| {
                         crate::i18n::text!(
                             "Фоновая операция неожиданно завершилась. Проверьте файлы в обеих папках.",
                         )
@@ -1703,25 +1758,51 @@ impl PawCommander {
                     self.remember_undo(undo);
                 }
                 let result = match result {
-                    JobCompletion::Text(result) => {
+                    JobCompletion::Text {
+                        result,
                         #[cfg(target_os = "macos")]
-                        if remote_save && let Err(error) = &result {
-                            self.remote_editor
-                                .finish_save(None, Err(error.clone().into()), None);
-                        }
+                        history_warning,
+                    } => {
+                        #[cfg(target_os = "macos")]
+                        let result = match result {
+                            Err(error) if remote_save => {
+                                let notice = append_history_warning(
+                                    Err(error.clone()),
+                                    history_warning.as_ref(),
+                                );
+                                self.remote_editor.finish_save(
+                                    None,
+                                    Err(error.into()),
+                                    history_warning,
+                                );
+                                notice
+                            }
+                            result => append_history_warning(result, history_warning.as_ref()),
+                        };
                         result
+                    }
+                    #[cfg(target_os = "macos")]
+                    JobCompletion::StartFailed(error) => {
+                        let notice = crate::i18n::file_error(&error);
+                        if remote_save {
+                            self.remote_editor.finish_save(None, Err(error), None);
+                        }
+                        Err(notice)
                     }
                     #[cfg(target_os = "macos")]
                     JobCompletion::File {
                         result,
                         history_warning,
-                    } => append_history_warning(result.notice(), history_warning),
+                    } => append_history_warning(result.notice(), history_warning.as_ref()),
                     #[cfg(target_os = "macos")]
                     JobCompletion::CreateFile {
                         target,
                         result,
                         history_warning,
-                    } => append_history_warning(creation_notice(&target, &result), history_warning),
+                    } => append_history_warning(
+                        creation_notice(&target, &result),
+                        history_warning.as_ref(),
+                    ),
                     #[cfg(target_os = "macos")]
                     JobCompletion::RemoteSave {
                         edit,
@@ -1733,7 +1814,7 @@ impl PawCommander {
                             edit.copy(),
                             &result,
                         );
-                        let notice = append_history_warning(notice, history_warning.clone());
+                        let notice = append_history_warning(notice, history_warning.as_ref());
                         self.remote_editor
                             .finish_save(Some(*edit), result, history_warning);
                         notice

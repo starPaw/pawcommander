@@ -110,6 +110,64 @@ fn recovery_worker_refuses_to_start_without_persisted_marker() {
     );
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn export_start_refusal_keeps_the_recovery_cause_in_the_reply_and_notice() {
+    use crate::file_error::{
+        ExportKind, ExportProblem, ExportTarget, Failure, RecoveryRecordAction,
+        RecoveryRecordProblem, RecoveryStartError,
+    };
+    use crate::operations::TransferError;
+
+    let root = tempfile::tempdir().unwrap();
+    let recovery = root.path().join("blocked-recovery");
+    let export = root.path().join("report.txt");
+    std::fs::write(&recovery, b"foreign file").unwrap();
+    let ctx = egui::Context::default();
+    let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+    let mut app = PawCommander::new(&cc, Some(root.path().into()));
+    app.recovery = crate::recovery::Recovery::for_test(recovery.clone(), &ctx);
+    let (send, reply) = mpsc::channel();
+    app.start_export(
+        &ctx,
+        ExportTarget {
+            kind: ExportKind::DiagnosticReport,
+            path: export.clone(),
+        },
+        Some(send),
+        |_| panic!("export ran without a recovery record"),
+    );
+
+    let error = reply
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap_err();
+    let TransferError::Failed(Failure::Export(error)) = error else {
+        panic!("expected a failed export, got {error:?}");
+    };
+    assert_eq!(error.target.path, export);
+    let ExportProblem::Operation(operation) = error.problem else {
+        panic!("expected the export's operation failure");
+    };
+    let TransferError::Failed(Failure::RecoveryStart(refusal)) = *operation else {
+        panic!("expected the original recovery refusal");
+    };
+    assert!(
+        matches!(refusal.as_ref(), RecoveryStartError::Record { cause, cleanup: None }
+        if cause.path == recovery && matches!(
+            &cause.problem, RecoveryRecordProblem::Write {
+                action: RecoveryRecordAction::CreateDirectory, source
+            } if source.raw_os_error() == Some(libc::EEXIST)
+        ))
+    );
+
+    poll_queue_until(&mut app, &ctx, |app| app.jobs.current.is_none());
+    let (notice, failed) = app.notice.as_ref().unwrap();
+    assert!(*failed && notice.contains("report.txt") && notice.contains("blocked-recovery"));
+    assert_eq!(std::fs::read(recovery).unwrap(), b"foreign file");
+    assert!(!export.exists());
+}
+
 #[test]
 fn recovery_worker_retains_marker_when_history_cannot_be_saved() {
     let root = tempfile::tempdir().unwrap();

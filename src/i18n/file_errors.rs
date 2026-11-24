@@ -23,6 +23,7 @@ use crate::file_error::{
 };
 use crate::file_error::{
     RecoveryRecordAction, RecoveryRecordError, RecoveryRecordProblem, RecoveryRecordSection,
+    RecoveryStartError,
 };
 use crate::operations::TransferError;
 use crate::result_history::{HistoryError, HistoryOpenProblem, HistorySaveProblem};
@@ -91,6 +92,8 @@ fn file_failure(reason: &Failure, unconfirmed: bool) -> String {
         Failure::Retry(error) => retry_error(error),
         Failure::TransferPlan(error) => transfer_plan_error(error),
         Failure::RecoveryRecord(error) => recovery_record_error(error),
+        #[cfg(target_os = "macos")]
+        Failure::RecoveryStart(error) => recovery_start_error(error),
         Failure::StagingCleanup(error) => staging_cleanup_error(error),
         _ => reason.to_string(),
     }
@@ -1136,6 +1139,25 @@ fn recovery_record_action(action: RecoveryRecordAction) -> String {
         }
     }
     .into()
+}
+
+pub(crate) fn recovery_start_error(error: &RecoveryStartError) -> String {
+    match error {
+        RecoveryStartError::Unavailable => crate::tr_format!(
+            "Operation not started: application data directory for recovery is unavailable."
+        ),
+        RecoveryStartError::Record { cause, cleanup } => {
+            let mut notice = crate::tr_format!(
+                "Operation did not start. {error}",
+                error = recovery_record_error(cause)
+            );
+            if let Some(cleanup) = cleanup {
+                notice.push('\n');
+                notice.push_str(&recovery_record_error(cleanup));
+            }
+            notice
+        }
+    }
 }
 
 pub(crate) fn history_error(error: &HistoryError) -> String {

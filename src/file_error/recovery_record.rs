@@ -100,6 +100,41 @@ pub(crate) struct RecoveryRecordError {
     pub(crate) problem: RecoveryRecordProblem,
 }
 
+#[derive(Debug)]
+pub(crate) enum RecoveryStartError {
+    Unavailable,
+    Record {
+        cause: RecoveryRecordError,
+        cleanup: Option<RecoveryRecordError>,
+    },
+}
+
+impl fmt::Display for RecoveryStartError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unavailable => {
+                f.write_str("Operation did not start: the recovery directory is unavailable")
+            }
+            Self::Record { cause, cleanup } => {
+                write!(f, "Operation did not start. {cause}")?;
+                if let Some(cleanup) = cleanup {
+                    write!(f, "\n{cleanup}")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl Error for RecoveryStartError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Unavailable => None,
+            Self::Record { cause, .. } => Some(cause),
+        }
+    }
+}
+
 impl RecoveryRecordError {
     pub(crate) fn new(path: &Path, problem: RecoveryRecordProblem) -> Self {
         Self {

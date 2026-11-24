@@ -89,6 +89,7 @@ pub(crate) use preview_worker::{PreviewWorkerError, PreviewWorkerKind};
 pub(crate) use recovery_record::ResumeRecordEvent;
 pub(crate) use recovery_record::{
     RecoveryRecordAction, RecoveryRecordError, RecoveryRecordProblem, RecoveryRecordSection,
+    RecoveryStartError,
 };
 #[cfg(target_os = "macos")]
 pub(crate) use resume_check::{ResumeCheckError, ResumeCheckProblem, ResumeRole};
@@ -163,6 +164,8 @@ pub(crate) enum Failure {
     Retry(Box<RetryError>),
     TransferPlan(Box<TransferPlanError>),
     RecoveryRecord(Box<RecoveryRecordError>),
+    #[cfg(target_os = "macos")]
+    RecoveryStart(std::sync::Arc<RecoveryStartError>),
     StagingCleanup(Box<StagingCleanupError>),
 }
 
@@ -234,6 +237,8 @@ impl Error for Failure {
             Self::Retry(error) => Some(error.as_ref()),
             Self::TransferPlan(error) => Some(error.as_ref()),
             Self::RecoveryRecord(error) => Some(error.as_ref()),
+            #[cfg(target_os = "macos")]
+            Self::RecoveryStart(error) => Some(error.as_ref()),
             Self::StagingCleanup(error) => Some(error.as_ref()),
         }
     }
@@ -292,6 +297,8 @@ impl fmt::Display for Failure {
             Self::Retry(error) => fmt::Display::fmt(error, f),
             Self::TransferPlan(error) => fmt::Display::fmt(error, f),
             Self::RecoveryRecord(error) => fmt::Display::fmt(error, f),
+            #[cfg(target_os = "macos")]
+            Self::RecoveryStart(error) => fmt::Display::fmt(error, f),
             Self::StagingCleanup(error) => fmt::Display::fmt(error, f),
         }
     }
