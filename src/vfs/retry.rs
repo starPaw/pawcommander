@@ -294,63 +294,59 @@ impl RetryTransfer {
     }
 
     pub fn unfinished(mut self, results: &Results) -> Option<Self> {
-        let outcomes: HashMap<_, _> = results.root_outcomes().into_iter().collect();
-        let blocked: BTreeSet<_> = outcomes
-            .iter()
-            .filter(|(_, outcome)| {
-                matches!(
-                    outcome,
-                    Outcome::Completed
-                        | Outcome::CompletedWithWarning
-                        | Outcome::CopiedSourceRemaining
-                        | Outcome::PublicationUnconfirmed
-                        | Outcome::PartialCopyRetained
-                )
+        let blocked: BTreeSet<&Location> = results
+            .iter_root_outcomes()
+            .filter_map(|(path, outcome)| match outcome {
+                Outcome::Completed
+                | Outcome::CompletedWithWarning
+                | Outcome::CopiedSourceRemaining
+                | Outcome::PublicationUnconfirmed
+                | Outcome::PartialCopyRetained => Some(path),
+                Outcome::Failed
+                | Outcome::Cancelled
+                | Outcome::NotStarted
+                | Outcome::Skipped
+                | Outcome::RetryReady => None,
             })
-            .map(|(path, _)| path.clone())
             .collect();
+
         self.sources.retain_mut(|source| {
-            let observed = outcomes.get(&source.original).copied();
-            let needs_review = source.attempt.is_some()
-                && matches!(
-                    observed,
-                    Some(Outcome::PublicationUnconfirmed | Outcome::CopiedSourceRemaining)
-                );
-            let eligible = outcomes.get(&source.original).is_some_and(|outcome| {
-                matches!(
-                    outcome,
-                    Outcome::Failed | Outcome::Cancelled | Outcome::NotStarted | Outcome::Skipped
-                )
+            let outcome = results.root_outcome(&source.original);
+            source.review = outcome.filter(|outcome| {
+                source.attempt.is_some()
+                    && matches!(
+                        outcome,
+                        Outcome::PublicationUnconfirmed | Outcome::CopiedSourceRemaining
+                    )
             });
-            let has_blocked_descendant = blocked
-                .range((
-                    std::ops::Bound::Excluded(source.original.clone()),
-                    std::ops::Bound::Unbounded,
-                ))
-                .next()
-                .is_some_and(|path| {
-                    path.same_backend(&source.original)
-                        && path.path().starts_with(source.original.path())
-                });
-            let mut ancestor = source.original.parent();
-            let mut has_blocked_ancestor = false;
-            while let Some(path) = ancestor {
-                if blocked.contains(&path) {
-                    has_blocked_ancestor = true;
-                    break;
-                }
-                ancestor = path.parent().filter(|parent| parent != &path);
+            let unfinished = matches!(
+                outcome,
+                Some(Outcome::Failed | Outcome::Cancelled | Outcome::NotStarted | Outcome::Skipped)
+            );
+            if !unfinished && source.review.is_none() {
+                return false;
             }
-            source.replay_allowed = !has_blocked_descendant && !has_blocked_ancestor;
-            source.review = observed.filter(|_| needs_review);
-            needs_review
-                || (eligible && !blocked.contains(&source.original) && source.replay_allowed)
+            source.replay_allowed = !overlaps_other_root(&source.original, &blocked);
+            source.review.is_some() || source.replay_allowed
         });
         self.reindex();
         self.checking = true;
         (!self.sources.is_empty() && (self.target.is_some() || self.needs_inspection()))
             .then_some(self)
     }
+}
+
+// The root itself can require inspection. Only other roots constrain that inspection.
+fn overlaps_other_root(source: &Location, blocked: &BTreeSet<&Location>) -> bool {
+    use std::ops::Bound::{Excluded, Unbounded};
+    // Location orders by backend and then path components, keeping descendants adjacent.
+    let descendant = blocked
+        .range::<Location, _>((Excluded(source), Unbounded))
+        .next()
+        .is_some_and(|path| path.same_backend(source) && path.path().starts_with(source.path()));
+    descendant
+        || std::iter::successors(source.parent(), Location::parent)
+            .any(|parent| blocked.contains(&parent))
 }
 
 impl Source {
