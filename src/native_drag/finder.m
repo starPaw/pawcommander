@@ -16,25 +16,28 @@ typedef NS_ENUM(NSUInteger, PawDragTarget) {
 // and invalidates this receipt. It contains no filenames or file contents.
 static NSString *const PawFinderReceipt = @"dev.pawcommander.finder-drag-receipt";
 
-static NSInteger previousFinderSequence(void) {
+static NSArray<NSNumber *> *previousFinderSequences(void) {
     NSPasteboard *receipt = [NSPasteboard pasteboardWithName:PawFinderReceipt];
     NSDictionary *value = [receipt propertyListForType:PawFinderReceipt];
-    if (![value isKindOfClass:NSDictionary.class] ||
-        ![value[@"sequence"] isKindOfClass:NSNumber.class]) return 0;
+    if (![value isKindOfClass:NSDictionary.class]) return nil;
+    NSArray *sequences = value[@"sequences"];
+    if (![sequences isKindOfClass:NSArray.class] || sequences.count > 4) return nil;
+    for (NSNumber *number in sequences)
+        if (![number isKindOfClass:NSNumber.class] || number.integerValue <= 0) return nil;
     NSPasteboard *board = [NSPasteboard pasteboardWithName:NSPasteboardNameDrag];
     NSRunningApplication *finder = [NSRunningApplication runningApplicationsWithBundleIdentifier:@"com.apple.finder"].firstObject;
     if (!finder || ![value[@"pid"] isEqual:@(finder.processIdentifier)] ||
-        ![value[@"change"] isEqual:@(board.changeCount)]) return 0;
-    return MAX(0, [value[@"sequence"] integerValue]);
+        ![value[@"change"] isEqual:@(board.changeCount)]) return nil;
+    return sequences;
 }
 
-static void rememberFinderSequence(NSDraggingSession *session) {
+static void rememberFinderSequences(NSDraggingSession *session, NSInteger revision, NSArray *sequences) {
     NSPasteboard *board = session.draggingPasteboard;
     NSRunningApplication *finder = [NSRunningApplication runningApplicationsWithBundleIdentifier:@"com.apple.finder"].firstObject;
-    if (!finder || ![board.name isEqualToString:NSPasteboardNameDrag]) return;
+    if (!finder || sequences.count > 4 || board.changeCount != revision ||
+        ![board.name isEqualToString:NSPasteboardNameDrag]) return;
     NSDictionary *value = @{
-        @"change": @(board.changeCount), @"pid": @(finder.processIdentifier),
-        @"sequence": @(session.draggingSequenceNumber),
+        @"change": @(revision), @"pid": @(finder.processIdentifier), @"sequences": sequences,
     };
     NSPasteboard *receipt = [NSPasteboard pasteboardWithName:PawFinderReceipt];
     [receipt clearContents];
@@ -75,8 +78,10 @@ static void rememberFinderSequence(NSDraggingSession *session) {
 @property BOOL offeredToFinder;
 @property BOOL requested;
 @property BOOL forFinder;
+@property BOOL expired;
 @property NSUInteger updates;
-@property NSInteger precedingSequence;
+@property NSInteger revision;
+@property(copy) NSArray<NSNumber *> *precedingSequences;
 - (void)beginPreparing:(BOOL)preparing;
 @end
 
@@ -101,6 +106,7 @@ static void rememberFinderSequence(NSDraggingSession *session) {
     self.beganOverFinder = self.target == PawDragFinder;
     self.offeredToFinder = NO;
     self.requested = NO;
+    self.expired = NO;
     self.updates = 0;
     NSArray *items = self.items;
     self.urls = nil;
@@ -122,11 +128,7 @@ static void rememberFinderSequence(NSDraggingSession *session) {
     if (preparing) self.session.animatesToStartingPositionsOnCancelOrFail = NO;
 }
 
-- (void)requestHandoffForFinder:(BOOL)forFinder {
-    if (self.requested || !(NSEvent.pressedMouseButtons & 1)) return;
-    self.requested = YES;
-    self.forFinder = forFinder;
-    self.session.animatesToStartingPositionsOnCancelOrFail = NO;
+- (void)cancelTracking {
     NSApplication *app = NSApp;
     NSEvent *cancel = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint
         modifierFlags:0 timestamp:NSProcessInfo.processInfo.systemUptime
@@ -135,8 +137,16 @@ static void rememberFinderSequence(NSDraggingSession *session) {
     [app postEvent:cancel atStart:YES];
 }
 
+- (void)requestHandoffForFinder:(BOOL)forFinder {
+    if (self.requested || !(NSEvent.pressedMouseButtons & 1)) return;
+    self.requested = YES;
+    self.forFinder = forFinder;
+    self.session.animatesToStartingPositionsOnCancelOrFail = NO;
+    [self cancelTracking];
+}
+
 - (NSDragOperation)draggingSession:(NSDraggingSession *)session sourceOperationMaskForDraggingContext:(NSDraggingContext)context {
-    if (self.precedingSequence && session.draggingSequenceNumber == self.precedingSequence)
+    if (self.expired || [self.precedingSequences containsObject:@(session.draggingSequenceNumber)])
         return NSDragOperationNone;
     if (self.finderReady) return NSDragOperationCopy;
     if (context == NSDraggingContextOutsideApplication && self.target == PawDragFinder) {
@@ -159,9 +169,18 @@ static void rememberFinderSequence(NSDraggingSession *session) {
 }
 
 - (void)draggingSession:(NSDraggingSession *)session willBeginAtPoint:(NSPoint)point {
+    self.revision = session.draggingPasteboard.changeCount;
+    // AppKit enters tracking on a later run-loop turn. A release already
+    // consumed before entry cannot wake that tracking loop a second time.
+    if (!(NSEvent.pressedMouseButtons & 1)) {
+        self.expired = YES;
+        session.animatesToStartingPositionsOnCancelOrFail = NO;
+        [self cancelTracking];
+        return;
+    }
     if (self.preparing) session.animatesToStartingPositionsOnCancelOrFail = NO;
-    if (self.precedingSequence) {
-        if (session.draggingSequenceNumber == self.precedingSequence) {
+    if (self.precedingSequences.count) {
+        if ([self.precedingSequences containsObject:@(session.draggingSequenceNumber)]) {
             session.animatesToStartingPositionsOnCancelOrFail = NO;
             [self requestHandoffForFinder:YES];
             return;
@@ -190,6 +209,20 @@ static void rememberFinderSequence(NSDraggingSession *session) {
     }
 }
 
+- (void)finish:(NSDraggingSession *)session at:(NSPoint)point operation:(NSDragOperation)result {
+    NSNumber *current = @(session.draggingSequenceNumber);
+    if (result == NSDragOperationCopy && self.target == PawDragFinder) {
+        rememberFinderSequences(session, self.revision, @[current]);
+    } else if (self.precedingSequences.count) {
+        // Escape or dropping elsewhere may leave Finder on either
+        // selection. A subsequent drag must avoid both identifiers.
+        NSMutableOrderedSet *possible = [NSMutableOrderedSet orderedSetWithArray:self.precedingSequences];
+        [possible addObject:current];
+        rememberFinderSequences(session, self.revision, possible.array);
+    }
+    [self.source draggingSession:session endedAtPoint:point operation:result];
+}
+
 - (void)draggingSession:(NSDraggingSession *)session endedAtPoint:(NSPoint)point operation:(NSDragOperation)operation {
     BOOL requested = self.requested;
     self.session = nil;
@@ -198,16 +231,14 @@ static void rememberFinderSequence(NSDraggingSession *session) {
             if (self.view.window && (NSEvent.pressedMouseButtons & 1) && !paw_drag_escape_was_pressed(self.escape)) {
                 PawDragTarget target = self.target;
                 self.finderReady = self.forFinder && target == PawDragFinder;
-                [self beginPreparing:!self.precedingSequence && !self.finderReady && target != PawDragOther];
+                [self beginPreparing:!self.precedingSequences.count && !self.finderReady && target != PawDragOther];
             } else {
-                [self.source draggingSession:session endedAtPoint:point operation:NSDragOperationNone];
+                [self finish:session at:point operation:NSDragOperationNone];
             }
         });
     } else {
-        NSDragOperation result = self.preparing || self.offeredToFinder ? NSDragOperationNone : operation;
-        if (result == NSDragOperationCopy && self.target == PawDragFinder)
-            rememberFinderSequence(session);
-        [self.source draggingSession:session endedAtPoint:point operation:result];
+        NSDragOperation result = self.expired || self.preparing || self.offeredToFinder ? NSDragOperationNone : operation;
+        [self finish:session at:point operation:result];
     }
 }
 @end
@@ -222,8 +253,8 @@ void *paw_begin_file_drag(NSView *view, NSArray<NSDraggingItem *> *items, NSEven
         drag.source = source;
         drag.escape = escape;
         drag.lastWindow = -1;
-        drag.precedingSequence = previousFinderSequence();
-        [drag beginPreparing:!drag.precedingSequence && drag.target != PawDragOther];
+        drag.precedingSequences = previousFinderSequences();
+        [drag beginPreparing:!drag.precedingSequences.count && drag.target != PawDragOther];
         return (__bridge_retained void *)drag;
     }
     return (__bridge_retained void *)[view beginDraggingSessionWithItems:items event:press source:source];
