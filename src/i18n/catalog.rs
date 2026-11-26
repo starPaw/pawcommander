@@ -1375,6 +1375,8 @@ catalog! {
     "Удаление файлов" => ("Deleting files", "Mazání souborů"),
     "Обработано объектов: {n}" => ("Items processed: {n}", "Zpracované položky: {n}"),
     "Файлы переданы принимающему приложению" => ("Files handed to the receiving application", "Soubory byly předány přijímající aplikaci"),
+    "Не удалось подтвердить новый сеанс перетаскивания. Перетащите выбранные файлы ещё раз." => ("Could not verify a new drag session. Drag the selected files again.", "Novou relaci přetažení se nepodařilo ověřit. Přetáhněte vybrané soubory znovu."),
+    "Результат перетаскивания неизвестен. Проверьте файлы в папке назначения." => ("The result of the drop is unknown. Check the files in the destination folder.", "Výsledek přetažení není znám. Zkontrolujte soubory v cílové složce."),
     "Файл передан. Подробности о предупреждениях в журнале результатов." => ("File delivered. See result history for warnings.", "Soubor byl doručen. Upozornění najdete v historii výsledků."),
     "Передача принимающему приложению отменена." => ("Delivery to the receiving application was cancelled.", "Doručení přijímající aplikaci bylo zrušeno."),
     "Принимающее приложение не указало путь к файлу." => ("The receiving application did not provide a file path.", "Přijímající aplikace neposkytla cestu k souboru."),

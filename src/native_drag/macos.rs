@@ -34,6 +34,7 @@ unsafe extern "C" {
     fn paw_drag_escape_listen() -> i32;
     fn paw_drag_escape_start(window: isize) -> *mut NSObject;
     fn paw_drag_escape_stop(guard: &NSObject);
+    fn paw_file_drag_recovery(token: &NSObject) -> i32;
     fn paw_begin_file_drag(
         view: &NSView,
         items: &NSArray<NSDraggingItem>,
@@ -190,6 +191,7 @@ impl Drop for MousePressMonitor {
 #[derive(Default)]
 pub struct NativeDrag {
     active: Option<ActiveDrag>,
+    delivery_notice: Option<&'static str>,
     mouse_monitor: Option<MousePressMonitor>,
     deferred_input: Vec<egui::Event>,
     promises: FilePromises,
@@ -234,6 +236,18 @@ impl NativeDrag {
         }
         let bounds = active.bounds;
         let promised = active.promised;
+        if result == DRAG_CANCELLED && !promised {
+            // SAFETY: ActiveDrag retains the token returned by the native bridge.
+            self.delivery_notice = match unsafe { paw_file_drag_recovery(&active._session) } {
+                1 => Some(crate::i18n::text!(
+                    "Не удалось подтвердить новый сеанс перетаскивания. Перетащите выбранные файлы ещё раз."
+                )),
+                2 => Some(crate::i18n::text!(
+                    "Результат перетаскивания неизвестен. Проверьте файлы в папке назначения."
+                )),
+                _ => None,
+            };
+        }
         let modifiers = active._source.ivars().ctx.input(|input| input.modifiers);
         self.active = None;
         release_pointer(input, position, bounds, modifiers);
@@ -250,6 +264,9 @@ impl NativeDrag {
         frame: &eframe::Frame,
         enabled: bool,
     ) -> Option<Result<(), String>> {
+        if let Some(notice) = self.delivery_notice.take() {
+            return Some(Err(notice.into()));
+        }
         if !enabled
             || self.active()
             || !ctx.input(|i| {
