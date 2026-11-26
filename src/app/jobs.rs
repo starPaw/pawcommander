@@ -246,6 +246,12 @@ impl JobQueue {
         self.current.is_some() || !self.pending.is_empty()
     }
 
+    fn capacity_error(&self) -> Option<crate::i18n::MessageKey> {
+        (self.pending.len() >= MAX_PENDING_JOBS).then_some(crate::i18n::key!(
+            "Очередь заполнена (100 заданий). Дождитесь завершения или удалите ожидающее задание."
+        ))
+    }
+
     fn cut_requests(&self) -> impl Iterator<Item = &CutRequest> {
         self.current
             .iter()
@@ -570,7 +576,7 @@ impl PawCommander {
             target,
             completion,
         } = request;
-        if self.jobs.start_failed || self.jobs.pending.len() >= MAX_PENDING_JOBS {
+        if self.jobs.start_failed || self.jobs.capacity_error().is_some() {
             let error = FilePromiseError::QueueUnavailable.into();
             self.notice = Some((crate::i18n::file_error(&error), true));
             let _ = completion.send(Err(error));
@@ -693,10 +699,7 @@ impl PawCommander {
     }
 
     pub(super) fn submit_job(&mut self, ctx: &egui::Context, job: PendingJob) {
-        let rejection =
-            (self.jobs.pending.len() >= MAX_PENDING_JOBS).then_some(crate::i18n::text!(
-            "Очередь заполнена (100 заданий). Дождитесь завершения или удалите ожидающее задание."
-        ));
+        let rejection = self.jobs.capacity_error().map(crate::i18n::text);
         #[cfg(target_os = "macos")]
         let rejection = if self.volumes.ejecting() {
             Some(super::volumes::wait_for_eject())
@@ -1015,8 +1018,8 @@ impl PawCommander {
     }
 
     pub(super) fn retry_transfer(&mut self, ctx: &egui::Context, id: &str) {
-        if self.jobs.pending.len() >= MAX_PENDING_JOBS {
-            self.notice = Some((crate::i18n::text!("Очередь заполнена (100 заданий). Дождитесь завершения или удалите ожидающее задание.").into(), true));
+        if let Some(error) = self.jobs.capacity_error() {
+            self.notice = Some((crate::i18n::text(error).into(), true));
             return;
         }
         let Some(index) = self.jobs.retries.iter().position(|job| job.id == id) else {
@@ -1318,8 +1321,8 @@ impl PawCommander {
     pub(super) fn undo_operation(&mut self, ctx: &egui::Context, id: &str) {
         use crate::vfs::UndoOutcome;
 
-        if self.jobs.pending.len() >= MAX_PENDING_JOBS {
-            self.notice = Some((crate::i18n::text!("Очередь заполнена (100 заданий). Дождитесь завершения или удалите ожидающее задание.").into(), true));
+        if let Some(error) = self.jobs.capacity_error() {
+            self.notice = Some((crate::i18n::text(error).into(), true));
             return;
         }
         let Some(index) = self.jobs.undo.iter().position(|job| job.id == id) else {

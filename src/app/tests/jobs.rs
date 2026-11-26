@@ -411,6 +411,17 @@ fn history_retry_owns_one_queued_attempt_and_keeps_completed_files_untouched() {
     std::fs::write(source.join("b"), "new source content").unwrap();
     app.settings.verify_copies = false;
     let held = hold_queue(&mut app);
+    for _ in 0..MAX_PENDING_JOBS {
+        app.start_job(&ctx, "pending", || panic!("held queue must not start"));
+    }
+    app.show_history = true;
+    app.retry_transfer(&ctx, &id);
+    assert!(app.show_history);
+    assert!(app.history.retryable.contains(&id));
+    assert_eq!(app.jobs.retries[0].id, id);
+    assert_eq!(app.jobs.pending.len(), MAX_PENDING_JOBS);
+    app.jobs.pending.clear();
+
     app.retry_transfer(&ctx, &id);
     app.retry_transfer(&ctx, &id);
     assert_eq!(
