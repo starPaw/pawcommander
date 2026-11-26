@@ -685,7 +685,7 @@ pub(crate) fn scan(directory: &Path) -> Report {
                 continue;
             }
         };
-        if !is_marker_name(&entry.file_name()) {
+        if !record_name_matches(&entry.file_name(), PREFIX) {
             continue;
         }
         match read_record(&entry.path()) {
@@ -732,9 +732,9 @@ pub(crate) fn scan(directory: &Path) -> Report {
     report
 }
 
-fn is_marker_name(name: &std::ffi::OsStr) -> bool {
+pub(crate) fn record_name_matches(name: &std::ffi::OsStr, prefix: &str) -> bool {
     name.to_str()
-        .and_then(|name| name.strip_prefix(PREFIX))
+        .and_then(|name| name.strip_prefix(prefix))
         .and_then(|name| name.strip_suffix(SUFFIX))
         .is_some_and(|random| {
             !random.is_empty() && random.bytes().all(|byte| byte.is_ascii_alphanumeric())
@@ -1332,7 +1332,14 @@ mod tests {
     #[test]
     fn non_markers_are_ignored_and_oversize_marker_is_preserved() {
         let root = tempfile::tempdir().unwrap();
-        fs::write(root.path().join("notes.json"), b"unrelated").unwrap();
+        for name in [
+            "notes.json",
+            "copy-valid.json",
+            "operation-.json",
+            "operation-a.pending",
+        ] {
+            fs::write(root.path().join(name), b"unrelated").unwrap();
+        }
         let oversized = root.path().join("operation-large.json");
         fs::write(&oversized, vec![b' '; MAX_BYTES + 1]).unwrap();
         let report = scan(root.path());

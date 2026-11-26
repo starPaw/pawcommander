@@ -119,6 +119,8 @@ fn unreadable_recovery_records_report_their_path_and_cause() {
     let recovery = temp.path();
     let directory = receipts(recovery);
     fs::create_dir(&directory).unwrap();
+    fs::write(directory.join("operation-valid.json"), b"other record kind").unwrap();
+    fs::write(directory.join("copy-temp.pending"), b"unpublished").unwrap();
     let malformed = directory.join("copy-malformed.json");
     let future = directory.join("copy-future.json");
     let symlink = directory.join("copy-link.json");

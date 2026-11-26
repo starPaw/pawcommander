@@ -5,7 +5,8 @@ use crate::file_error::{
     RecoveryRecordSection, ResumeRecordEvent,
 };
 use crate::recovery::{
-    check_record_identity, remove_record, same_owned_marker, store_record, LockedRecord,
+    check_record_identity, record_name_matches, remove_record, same_owned_marker, store_record,
+    LockedRecord,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -18,7 +19,6 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 const PREFIX: &str = "copy-";
-const SUFFIX: &str = ".json";
 const VERSION: u32 = 1;
 const MOVE_VERSION: u32 = 2;
 const MOVE_ACCESS_TIMES_VERSION: u32 = 3;
@@ -377,10 +377,7 @@ fn valid_access_times(receipt: &Receipt, section: &AccessTimesSection) -> bool {
 }
 
 pub(super) fn valid_name(name: &OsStr) -> bool {
-    name.to_str()
-        .and_then(|text| text.strip_prefix(PREFIX))
-        .and_then(|text| text.strip_suffix(SUFFIX))
-        .is_some_and(|token| !token.is_empty() && token.bytes().all(|b| b.is_ascii_alphanumeric()))
+    record_name_matches(name, PREFIX)
 }
 
 pub(super) fn visit_available(
