@@ -92,6 +92,33 @@ fn undo_refuses_replaced_objects_even_when_size_and_mtime_match() {
     assert_eq!(fs::read(moved_elsewhere).unwrap(), b"same bytes");
 }
 
+#[cfg(unix)]
+#[test]
+fn undo_refuses_changed_permissions_until_restored() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let original: Location = root.path().join("original").into();
+    fs::write(original.path(), b"unchanged").unwrap();
+    fs::set_permissions(original.path(), fs::Permissions::from_mode(0o600)).unwrap();
+    let mut progress = Progress::default();
+    let current = rename_with_undo(&original, "current", &mut progress).unwrap();
+    fs::set_permissions(current.path(), fs::Permissions::from_mode(0o644)).unwrap();
+
+    let error = progress.undo.restore(&mut Progress::default()).unwrap_err();
+    let UndoError::Incomplete { cause, .. } = undo_error(&error) else {
+        panic!("Expected a changed item error, got {error:?}");
+    };
+    assert!(matches!(undo_error(cause), UndoError::ItemChanged(_)));
+    assert!(!original.path().exists());
+    assert_eq!(fs::read(current.path()).unwrap(), b"unchanged");
+
+    fs::set_permissions(current.path(), fs::Permissions::from_mode(0o600)).unwrap();
+    progress.undo.restore(&mut Progress::default()).unwrap();
+    assert_eq!(fs::read(original.path()).unwrap(), b"unchanged");
+    assert!(!current.path().exists());
+}
+
 #[test]
 fn undo_move_keep_both_restores_original_name_and_keeps_existing_destination() {
     let root = tempfile::tempdir().unwrap();

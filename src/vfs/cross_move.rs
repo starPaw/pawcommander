@@ -135,15 +135,7 @@ fn verify_entry(
 ) -> Result<(), TransferError> {
     cancel.check()?;
     let actual = metadata(path)?;
-    let matches = expected.matches_moved_target(&actual)
-        && match (&expected.metadata, &actual) {
-            (EntryMetadata::Local(before), EntryMetadata::Local(after)) => {
-                before.permissions() == after.permissions()
-                    && before.created().ok() == after.created().ok()
-            }
-            _ => true,
-        };
-    if !matches {
+    if !expected.matches_after_rename(&actual) {
         return Err(changed(path).into());
     }
     Ok(())
