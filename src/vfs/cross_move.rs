@@ -402,6 +402,59 @@ pub(super) enum PublishedDestination {
     },
 }
 
+impl PublishedDestination {
+    fn verify(
+        self,
+        target: &Location,
+        cancel: &Cancellation,
+    ) -> Result<VerifiedDestination, TransferError> {
+        let from_snapshot = !matches!(self, Self::Capture);
+        let (manifest, paths, keep_stage) = match self {
+            Self::Capture => (
+                TransferSourceManifest::capture_move_observed(target, cancel, &mut |_, _| {})?,
+                None,
+                false,
+            ),
+            #[cfg(target_os = "macos")]
+            Self::Resumable(manifest) => (manifest, None, true),
+            #[cfg(target_os = "macos")]
+            Self::Compatible { manifest, paths } => (manifest, Some(paths), false),
+        };
+        if from_snapshot {
+            manifest.verify(cancel, |_, _| {})?;
+        }
+        Ok(VerifiedDestination {
+            manifest,
+            paths,
+            finish_local_attributes: from_snapshot,
+            keep_stage,
+        })
+    }
+}
+
+struct VerifiedDestination {
+    manifest: TransferSourceManifest,
+    paths: Option<BTreeMap<Location, Location>>,
+    finish_local_attributes: bool,
+    keep_stage: bool,
+}
+
+impl VerifiedDestination {
+    fn path_for(
+        &self,
+        original: &Location,
+        item: &TransferItem,
+    ) -> Result<Location, TransferError> {
+        match &self.paths {
+            Some(paths) => paths
+                .get(original)
+                .cloned()
+                .ok_or_else(|| changed(original).into()),
+            None => Ok(mapped(original, &item.source, &item.target)),
+        }
+    }
+}
+
 pub(super) fn remove_verified(
     item: &TransferItem,
     source_plan: MoveSource,
@@ -410,47 +463,16 @@ pub(super) fn remove_verified(
     removed: impl FnOnce(),
     observe: &mut impl FnMut(&Location, Phase) -> Result<(), TransferError>,
 ) -> Result<(), TransferError> {
-    let (verified_target, target_paths, keep_stage): (_, Option<BTreeMap<Location, Location>>, _) =
-        match destination {
-            PublishedDestination::Capture => (None, None, false),
-            #[cfg(target_os = "macos")]
-            PublishedDestination::Resumable(manifest) => (Some(manifest), None, true),
-            #[cfg(target_os = "macos")]
-            PublishedDestination::Compatible { manifest, paths } => {
-                (Some(manifest), Some(paths), false)
-            }
-        };
     let manifest = &source_plan.manifest;
     let links = &source_plan.links;
     let cancel = progress.cancellation();
-    let target_path = |original: &Location| -> Result<Location, TransferError> {
-        if let Some(paths) = &target_paths {
-            paths
-                .get(original)
-                .cloned()
-                .ok_or_else(|| changed(original).into())
-        } else {
-            Ok(mapped(original, &item.source, &item.target))
-        }
-    };
     progress.results.copied_source_remaining();
     let mut fully_removed = false;
     let result = (|| {
         observe(&item.source, Phase::Copied)?;
         progress.checkpoint()?;
         manifest.verify(&cancel, |_, _| {})?;
-        let finish_local_attributes = verified_target.is_some();
-        let target_manifest = match verified_target {
-            Some(manifest) => {
-                manifest.verify(&cancel, |_, _| {})?;
-                manifest
-            }
-            None => TransferSourceManifest::capture_move_observed(
-                &item.target,
-                &cancel,
-                &mut |_, _| {},
-            )?,
-        };
+        let destination = destination.verify(&item.target, &cancel)?;
         with_preserved_staging(&item.source, &cancel, |staging, preserve| {
             let staging_meta = metadata(staging)?;
             let held = staging.join("source");
@@ -461,7 +483,7 @@ pub(super) fn remove_verified(
             if let Err(error) = observe(&held, Phase::QuarantinePlanned)
                 .and_then(|()| cancel.check().map_err(Into::into))
             {
-                if keep_stage {
+                if destination.keep_stage {
                     let preparation = CrossMoveError::Prepare {
                         original: item.source.clone(),
                         cause: error,
@@ -494,12 +516,13 @@ pub(super) fn remove_verified(
                     {
                         return Err(changed(&source).into());
                     }
-                    let target = target_path(original)?;
-                    let copied = target_manifest
+                    let target = destination.path_for(original, item)?;
+                    let copied = destination
+                        .manifest
                         .entries
                         .get(&target)
                         .ok_or_else(|| changed(&target))?;
-                    let same_children = if target_paths.is_some() {
+                    let same_children = if destination.paths.is_some() {
                         // The compatible copier already verified the exact
                         // output tree and the one-to-one mapping of every row.
                         entry.children.is_some() == copied.children.is_some()
@@ -514,8 +537,8 @@ pub(super) fn remove_verified(
                 // Never remove an unenumerated entry or recursively delete.
                 for (index, (original, entry)) in manifest.entries.iter().enumerate().rev() {
                     let source = mapped(original, &item.source, &held);
-                    let target = target_path(original)?;
-                    let copied = &target_manifest.entries[&target];
+                    let target = destination.path_for(original, item)?;
+                    let copied = &destination.manifest.entries[&target];
                     progress.item(original.path());
                     observe(&source, Phase::BeforeRemove)?;
                     cancel.check()?;
@@ -525,13 +548,13 @@ pub(super) fn remove_verified(
                     verify_ancestors(original, manifest, &item.source, &held, &cancel)?;
                     verify_ancestors(
                         &target,
-                        &target_manifest,
+                        &destination.manifest,
                         &item.target,
                         &item.target,
                         &cancel,
                     )?;
                     let finish_attributes =
-                        finish_local_attributes || original.remote() || target.remote();
+                        destination.finish_local_attributes || original.remote() || target.remote();
                     let attributes =
                         finish_attributes.then(|| source_plan.attributes(&entry.metadata, index));
                     let directory = entry.children.is_some();
@@ -582,14 +605,14 @@ pub(super) fn remove_verified(
             if fully_removed {
                 // The resumable path checks the recorded ownership marker
                 // before cleaning this directory after source removal.
-                *preserve = keep_stage;
+                *preserve = destination.keep_stage;
                 return deletion;
             }
             // Restore the untouched or partially removed source tree without
             // replacing a new object that appeared at its original name.
             match rename_for_publication(&held, &item.source) {
                 #[cfg(target_os = "macos")]
-                Ok(()) if keep_stage => {
+                Ok(()) if destination.keep_stage => {
                     let cause = deletion.err().unwrap_or_else(|| changed(&held).into());
                     let restored = CrossMoveError::Restored {
                         original: item.source.clone(),
