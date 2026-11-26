@@ -112,10 +112,22 @@ pub(crate) struct Results {
 }
 
 impl Results {
-    pub(crate) fn root_outcomes(&self) -> Vec<(Location, Outcome)> {
+    pub(crate) fn root_outcome(&self, source: &Location) -> Option<Outcome> {
+        self.index
+            .get(source)
+            .map(|&index| self.items[index].outcome)
+    }
+
+    pub(crate) fn iter_root_outcomes(&self) -> impl Iterator<Item = (&Location, Outcome)> {
         self.index
             .iter()
-            .map(|(path, &index)| (path.clone(), self.items[index].outcome))
+            .map(|(source, &index)| (source, self.items[index].outcome))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn root_outcomes(&self) -> Vec<(Location, Outcome)> {
+        self.iter_root_outcomes()
+            .map(|(path, outcome)| (path.clone(), outcome))
             .collect()
     }
     pub fn plan(&mut self, items: impl IntoIterator<Item = (Location, Option<String>)>) {

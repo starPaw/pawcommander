@@ -259,6 +259,39 @@ fn retry_unconfirmed_and_completed_with_warning_are_never_candidates() {
 }
 
 #[test]
+fn retry_excludes_both_sides_of_an_overlap_but_keeps_similar_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let root: Location = dir.path().to_owned().into();
+    let destination = root.join("destination");
+    fs::create_dir(destination.path()).unwrap();
+    let tree = root.join("tree");
+    let child = tree.join("child");
+    let sibling = root.join("tree-old");
+    fs::create_dir(tree.path()).unwrap();
+    fs::write(child.path(), b"child").unwrap();
+    fs::write(sibling.path(), b"sibling").unwrap();
+    let roots = [tree, child, sibling];
+    let plan = roots.clone().map(|source| {
+        let target = destination.join(source.path().file_name().unwrap());
+        TransferItem::new(source.clone(), source, target)
+    });
+    let mut retry = RetryTransfer::new(TransferKind::Copy, destination);
+    retry.prepare(&plan, &Cancellation::default()).unwrap();
+    for published in &roots[..2] {
+        let mut results = crate::result_history::Results::default();
+        results.plan(roots.iter().cloned().map(|root| (root, None)));
+        results.record(
+            published,
+            None,
+            crate::result_history::Outcome::Completed,
+            None,
+        );
+        let unfinished = retry.clone().unfinished(&results).unwrap();
+        assert_eq!(unfinished.sources(), roots[2..]);
+    }
+}
+
+#[test]
 fn retry_cancelled_directory_rebuilds_private_copy_and_preserves_empty_folders() {
     let root = tempfile::tempdir().unwrap();
     let source: Location = root.path().join("tree").into();
