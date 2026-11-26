@@ -45,6 +45,7 @@ int paw_drag_escape_listen(void) {
 @interface PawDragEscape : NSObject
 @property(strong) NSFileHandle *lifetime;
 @property BOOL active;
+@property BOOL cancelled;
 @end
 @implementation PawDragEscape
 @end
@@ -71,6 +72,7 @@ void *paw_drag_escape_start(NSInteger windowNumber) {
                 if (byte != 'E') continue;
                 @synchronized (guard) {
                     if (!guard.active) break;
+                    guard.cancelled = YES;
                     NSEvent *escape = [NSEvent keyEventWithType:NSEventTypeKeyDown
                         location:NSZeroPoint modifierFlags:0 timestamp:NSProcessInfo.processInfo.systemUptime
                         windowNumber:windowNumber context:nil characters:@"\x1b" charactersIgnoringModifiers:@"\x1b"
@@ -83,6 +85,10 @@ void *paw_drag_escape_start(NSInteger windowNumber) {
         }
     });
     return (__bridge_retained void *)guard;
+}
+
+BOOL paw_drag_escape_was_pressed(PawDragEscape *guard) {
+    @synchronized (guard) { return guard.cancelled; }
 }
 
 void paw_drag_escape_stop(PawDragEscape *guard) {

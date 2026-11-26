@@ -34,6 +34,14 @@ unsafe extern "C" {
     fn paw_drag_escape_listen() -> i32;
     fn paw_drag_escape_start(window: isize) -> *mut NSObject;
     fn paw_drag_escape_stop(guard: &NSObject);
+    fn paw_begin_file_drag(
+        view: &NSView,
+        items: &NSArray<NSDraggingItem>,
+        event: &NSEvent,
+        source: &ProtocolObject<dyn NSDraggingSource>,
+        escape: &NSObject,
+        local_files: i32,
+    ) -> *mut NSObject;
 }
 
 pub fn listen_for_escape() -> i32 {
@@ -133,7 +141,7 @@ define_class!(
 
 struct ActiveDrag {
     _source: Retained<DragSource>,
-    _session: Retained<NSDraggingSession>,
+    _session: Retained<NSObject>,
     result: Arc<AtomicU8>,
     position: Arc<Mutex<Option<egui::Pos2>>>,
     bounds: egui::Rect,
@@ -367,11 +375,17 @@ impl NativeDrag {
                 );
                 items.push(item);
             }
-            let session = view.beginDraggingSessionWithItems_event_source(
+            let session = paw_begin_file_drag(
+                view,
                 &NSArray::from_retained_slice(&items),
                 &event,
                 ProtocolObject::from_ref(&*source),
+                &source.ivars().escape.0,
+                i32::from(!promised),
             );
+            let session = Retained::from_raw(session).ok_or(crate::i18n::text!(
+                "Не удалось получить событие перетаскивания",
+            ))?;
             self.active = Some(ActiveDrag {
                 _source: source,
                 _session: session,
