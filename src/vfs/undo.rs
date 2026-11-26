@@ -271,17 +271,7 @@ impl UndoEntry {
             cancel.check()?;
             let actual =
                 entry_metadata(path)?.ok_or_else(|| UndoError::ItemMissing(path.clone()))?;
-            // Ignore rename-only ctime changes, so two renames can be undone
-            // in reverse order. Identity, contents metadata and children must match.
-            let unchanged = expected.matches_moved_target(&actual)
-                && match (&expected.metadata, &actual) {
-                    (EntryMetadata::Local(before), EntryMetadata::Local(after)) => {
-                        before.permissions() == after.permissions()
-                            && before.created().ok() == after.created().ok()
-                    }
-                    _ => true,
-                };
-            if !unchanged {
+            if !expected.matches_after_rename(&actual) {
                 return Err(UndoError::ItemChanged(path.clone()).into());
             }
             if let Some(names) = &expected.children

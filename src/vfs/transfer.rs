@@ -2380,12 +2380,11 @@ pub(super) struct TransferSourceEntry {
 impl TransferSourceEntry {
     pub(super) fn matches_moved_target(&self, actual: &EntryMetadata) -> bool {
         match (&self.metadata, actual) {
-            (EntryMetadata::Local(expected), EntryMetadata::Local(actual)) => {
-                self.metadata
-                    .same_object(&EntryMetadata::Local(actual.clone()))
-                    && expected.file_type() == actual.file_type()
-                    && expected.len() == actual.len()
-                    && expected.modified().ok() == actual.modified().ok()
+            (EntryMetadata::Local(expected), EntryMetadata::Local(current)) => {
+                self.metadata.same_object(actual)
+                    && expected.file_type() == current.file_type()
+                    && expected.len() == current.len()
+                    && expected.modified().ok() == current.modified().ok()
             }
             (EntryMetadata::Remote(expected), EntryMetadata::Remote(actual)) => {
                 remote_source_matches(expected, actual)
@@ -2393,6 +2392,20 @@ impl TransferSourceEntry {
             _ => false,
         }
     }
+
+    /// Renaming can change ctime. Require the same moved object and its local
+    /// permissions and birth time before undoing a rename or removing a source.
+    pub(super) fn matches_after_rename(&self, actual: &EntryMetadata) -> bool {
+        self.matches_moved_target(actual)
+            && match (&self.metadata, actual) {
+                (EntryMetadata::Local(before), EntryMetadata::Local(after)) => {
+                    before.permissions() == after.permissions()
+                        && before.created().ok() == after.created().ok()
+                }
+                _ => true,
+            }
+    }
+
     pub(super) fn verify_metadata(
         &self,
         source: &Location,
