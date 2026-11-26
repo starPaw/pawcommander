@@ -5,18 +5,35 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#303446">
   <meta name="color-scheme" content="dark">
-  <title>PawCommander — A cozy home for your files</title>
-  <meta name="description" content="A fast, open-source file manager with dual panes, SFTP, keyboard shortcuts, and cozy Catppuccin themes. Download the free Apple Silicon preview and help shape what comes next.">
+  <title>PawCommander — Free Dual-Pane File Manager for macOS</title>
+  <meta name="description" content="PawCommander is a free, open-source dual-pane file manager for macOS with SFTP, tabs, keyboard shortcuts, and Catppuccin themes. Download the Apple Silicon preview.">
   <link rel="canonical" href="https://pawcommander.capture402.xyz/">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="assets/icon.png">
   <meta property="og:type" content="website">
-  <meta property="og:title" content="PawCommander — Your files. A happier place.">
-  <meta property="og:description" content="Two panes, SFTP, and a little feline energy. Meet the free, open-source file manager for your Mac.">
+  <meta property="og:site_name" content="PawCommander">
+  <meta property="og:locale" content="en_US">
+  <meta property="og:title" content="PawCommander — Free Dual-Pane File Manager for macOS">
+  <meta property="og:description" content="PawCommander is a free, open-source dual-pane file manager for macOS with SFTP, tabs, keyboard shortcuts, and Catppuccin themes. Download the Apple Silicon preview.">
   <meta property="og:url" content="https://pawcommander.capture402.xyz/">
   <meta property="og:image" content="https://pawcommander.capture402.xyz/assets/workspace.png">
   <meta property="og:image:alt" content="PawCommander dual-pane file manager with a Catppuccin theme">
+  <meta property="og:image:width" content="3024">
+  <meta property="og:image:height" content="1900">
   <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="PawCommander — Free Dual-Pane File Manager for macOS">
+  <meta name="twitter:description" content="PawCommander is a free, open-source dual-pane file manager for macOS with SFTP, tabs, keyboard shortcuts, and Catppuccin themes. Download the Apple Silicon preview.">
+  <meta name="twitter:image" content="https://pawcommander.capture402.xyz/assets/workspace.png">
+  <meta name="twitter:image:alt" content="PawCommander dual-pane file manager with a Catppuccin theme">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "WebSite",
+    "name": "PawCommander",
+    "url": "https://pawcommander.capture402.xyz/",
+    "inLanguage": "en"
+  }
+  </script>
   <link rel="preload" href="assets/fonts/outfit-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="assets/fonts/manrope-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="styles.css">
@@ -41,9 +58,9 @@
   <header class="header shell">
     <a class="wordmark" href="#" aria-label="PawCommander home"><img src="assets/logo.svg" alt="" width="38" height="38"><span>PawCommander<span class="wordmark-dot">.</span></span></a>
     <nav aria-label="Main navigation">
-      <a href="#features">The little details</a>
+      <a href="#features">Features</a>
       <a href="#roadmap">Roadmap</a>
-      <a href="#community">Say hello</a>
+      <a href="#community">Community</a>
     </nav>
     <a class="button button-small button-outline nav-download" href="#download">Get the app <svg class="icon"><use href="#i-download"/></svg></a>
   </header>
@@ -53,12 +70,12 @@
       <div class="hero-kicker"><span class="status-dot"></span> A small app with big plans <span class="kicker-divider">/</span> v0.2.0</div>
       <div class="hero-heading">
         <div class="hero-brand"><img src="assets/logo.svg" alt="PawCommander cat logo" width="88" height="88"></div>
-        <h1 id="hero-title">Your files.<br><span>A happier place.</span></h1>
+        <h1 id="hero-title">PawCommander<br><span>File manager for Mac</span></h1>
       </div>
-      <p class="hero-description">A fast, friendly file manager with two panes, SFTP,<br class="desktop-break"> and just the right amount of cat energy.</p>
+      <p class="hero-description">A free, open-source dual-pane file manager for macOS.<br class="desktop-break"> Browse local files and SFTP servers with tabs, previews, and keyboard shortcuts.</p>
       <div class="hero-actions">
-        <a class="button button-primary" href="https://github.com/starPaw/pawcommander/releases/download/v0.2.0/PawCommander-0.2.0-macOS-arm64.zip"><svg class="icon"><use href="#i-download"/></svg> Download for Mac <svg class="icon arrow"><use href="#i-arrow"/></svg></a>
-        <a class="button button-quiet" href="https://github.com/starPaw/pawcommander"><svg class="icon"><use href="#i-github"/></svg> Explore the source</a>
+        <a class="button button-primary" href="/go/github/hero-download"><svg class="icon"><use href="#i-download"/></svg> Download for Mac <svg class="icon arrow"><use href="#i-arrow"/></svg></a>
+        <a class="button button-quiet" href="/go/github/hero-source"><svg class="icon"><use href="#i-github"/></svg> Explore the source</a>
       </div>
       <p class="hero-note">Free & open source <span>·</span> Apple Silicon <span>·</span> <a href="#download">Early preview</a></p>
       <button class="pet-invite" id="pet-invite" type="button" hidden><svg class="icon"><use href="#i-paw"/></svg> Psst… meet your desk buddy <span aria-hidden="true">↘</span></button>
@@ -70,18 +87,18 @@
     </section>
 
     <section class="features section shell" id="features" aria-labelledby="features-title">
-      <div class="section-heading"><div><p class="eyebrow">A good little work companion</p><h2 id="features-title">Less friction.<br><em>More flow.</em></h2></div><p>Your projects here. Your server there.<br>Everything you need, comfortably within reach.</p></div>
+      <div class="section-heading"><div><p class="eyebrow">A good little work companion</p><h2 id="features-title">Two panes.<br><em>More possibilities.</em></h2></div><p>Your projects here. Your server there.<br>Everything you need, comfortably within reach.</p></div>
       <div class="feature-grid">
-        <article class="feature"><div class="feature-icon mint"><svg class="icon"><use href="#i-panes"/></svg></div><h3>Two panes. One happy brain.</h3><p>Keep source and destination side by side. Tabs, breadcrumbs, and list or grid views help you stay in your flow.</p><div class="mini-panes" aria-hidden="true"><div><span>Projects</span><i></i><i></i><i></i></div><svg class="icon"><use href="#i-arrow"/></svg><div><span>Assets</span><i></i><i></i><i></i></div></div></article>
-        <article class="feature"><div class="feature-icon lilac"><svg class="icon"><use href="#i-server"/></svg></div><h3>Your server feels closer.</h3><p>Browse and transfer files over SFTP in either pane. Host-key verification and OS credential storage keep connections explicit.</p><div class="connection-line" aria-hidden="true"><span><svg class="icon"><use href="#i-folder"/></svg> local</span><span class="connection-dots">··········</span><span><svg class="icon"><use href="#i-server"/></svg> sftp</span></div></article>
-        <article class="feature"><div class="feature-icon peach"><svg class="icon"><use href="#i-keyboard"/></svg></div><h3>Keep your paws on the keys.</h3><p>Jump to a path, open a tab, filter files, or send them to Zed. Familiar shortcuts keep little tasks feeling little.</p><div class="shortcut-art" aria-hidden="true"><kbd>⌘</kbd><span>+</span><kbd>T</kbd><span class="shortcut-caption">a fresh little tab</span></div></article>
+        <article class="feature"><div class="feature-icon mint"><svg class="icon"><use href="#i-panes"/></svg></div><h3>Dual panes, tabs & file previews</h3><p>Keep source and destination side by side. Tabs, breadcrumbs, and list or grid views help you stay in your flow.</p><div class="mini-panes" aria-hidden="true"><div><span>Projects</span><i></i><i></i><i></i></div><svg class="icon"><use href="#i-arrow"/></svg><div><span>Assets</span><i></i><i></i><i></i></div></div></article>
+        <article class="feature"><div class="feature-icon lilac"><svg class="icon"><use href="#i-server"/></svg></div><h3>SFTP file browsing & transfers</h3><p>Browse and transfer files over SFTP in either pane. Host-key verification and OS credential storage keep connections explicit.</p><div class="connection-line" aria-hidden="true"><span><svg class="icon"><use href="#i-folder"/></svg> local</span><span class="connection-dots">··········</span><span><svg class="icon"><use href="#i-server"/></svg> sftp</span></div></article>
+        <article class="feature"><div class="feature-icon peach"><svg class="icon"><use href="#i-keyboard"/></svg></div><h3>Keyboard shortcuts & Zed</h3><p>Jump to a path, open a tab, filter files, or send them to Zed. Familiar shortcuts keep little tasks feeling little.</p><div class="shortcut-art" aria-hidden="true"><kbd>⌘</kbd><span>+</span><kbd>T</kbd><span class="shortcut-caption">a fresh little tab</span></div></article>
       </div>
       <div class="small-goodies"><span><svg class="icon"><use href="#i-sparkle"/></svg> Four Catppuccin palettes</span><span>Text & image previews</span><span>English & Russian</span><span>MIT licensed</span></div>
     </section>
 
     <section class="roadmap section" id="roadmap" aria-labelledby="roadmap-title">
       <div class="shell roadmap-layout">
-        <div class="roadmap-intro"><p class="eyebrow">Growing, one paw at a time</p><h2 id="roadmap-title">A little today.<br><em>A lot ahead.</em></h2><p>PawCommander is young and actively evolving. Here’s where we want to take it—with your help.</p><a class="text-link" href="https://github.com/starPaw/pawcommander/issues/new/choose">Help choose what comes next <svg class="icon"><use href="#i-arrow"/></svg></a><div class="roadmap-note"><svg class="icon"><use href="#i-paw"/></svg><p>Our development roadmap, summarized from Linear.<br><time datetime="2026-11-17">Updated November 17, 2026.</time><br>Plans, not promises. Priorities may change; no release dates are committed.</p></div></div>
+        <div class="roadmap-intro"><p class="eyebrow">Growing, one paw at a time</p><h2 id="roadmap-title">The PawCommander<br><em>roadmap.</em></h2><p>PawCommander is young and actively evolving. Here’s where we want to take it—with your help.</p><a class="text-link" href="/go/github/roadmap-feedback">Help choose what comes next <svg class="icon"><use href="#i-arrow"/></svg></a><div class="roadmap-note"><svg class="icon"><use href="#i-paw"/></svg><p>Our development roadmap, summarized from Linear.<br><time datetime="2026-11-17">Updated November 17, 2026.</time><br>Plans, not promises. Priorities may change; no release dates are committed.</p></div></div>
         <div class="milestones">
           <details class="milestone" open><summary><span class="step">01</span><span class="milestone-title">A foundation you can trust<span class="phase active">In development</span></span><span class="expand" aria-hidden="true">+</span></summary><div class="milestone-content"><p>Making everyday file operations more resilient, transparent, and comfortable.</p><ul><li>A unified operations center, clearer conflicts, and results history</li><li>Safer cancellation, recovery, and handling of partial failures</li><li>Better clipboard behavior, folder refresh, and accessibility</li></ul><p class="phase-note">Some pieces are in progress or review. The full milestone is not yet released.</p></div></details>
           <details class="milestone"><summary><span class="step">02</span><span class="milestone-title">Everyday ease & smarter search<span class="phase">Planned</span></span><span class="expand" aria-hidden="true">+</span></summary><div class="milestone-content"><p>Less hunting, more finding. A workspace that remembers how you like to work.</p><ul><li>Command palette, path completion, and saved workspaces</li><li>Recursive search without an external index and content search</li><li>Batch renaming, flexible panels, and richer folder views</li></ul></div></details>
@@ -94,12 +111,12 @@
     </section>
 
     <section class="community section shell" id="community" aria-labelledby="community-title">
-      <div class="community-card"><div class="community-art" aria-hidden="true"><svg viewBox="0 0 230 180"><path d="M45 149c-18 0-28-9-28-24s15-21 23-13" fill="none" stroke="#79708c" stroke-width="15" stroke-linecap="round"/><path d="M45 154V99l-5-47 35 21c20-7 37-5 53 0l33-21-3 47v55Z" fill="#f8f4eb" stroke="#79708c" stroke-width="2.5" stroke-linejoin="round"/><path d="M64 105q7-8 14 0m40 0q7-8 14 0m-39 8 5 4 5-4m-5 4v7m-10 0q5 6 10 0 5 6 10 0" fill="none" stroke="#79708c" stroke-width="3" stroke-linecap="round"/><ellipse cx="66" cy="117" rx="10" ry="5" fill="#e8b9c6"/><ellipse cx="129" cy="117" rx="10" ry="5" fill="#e8b9c6"/><path d="M61 139h78l-9 31H71Z" fill="#d9edbc" stroke="#79708c" stroke-width="2"/><path d="m86 148 7 7 12-13" fill="none" stroke="#79708c" stroke-width="3" stroke-linecap="round"/><path d="M175 45c-12-18-32-1-19 12l19 17 19-17c13-13-7-30-19-12Z" fill="#d8c4ea"/><path d="m199 99 3 8 8 3-8 3-3 8-3-8-8-3 8-3Z" fill="#c2d795"/></svg></div><div><p class="eyebrow">Built in the open, better together</p><h2 id="community-title">Your ideas are<br><em>very welcome here.</em></h2><p>Found a rough edge? Missing your favorite shortcut? Have a tiny idea or a big one? Tell us. Bug reports, feature requests, code, docs, and translations all help this little project grow.</p><div class="community-actions"><a class="button button-dark" href="https://github.com/starPaw/pawcommander/issues/new/choose">Share your feedback <svg class="icon"><use href="#i-arrow"/></svg></a><a class="text-link" href="https://github.com/starPaw/pawcommander/blob/main/CONTRIBUTING.md">Make a contribution <span aria-hidden="true">↗</span></a></div></div></div>
+      <div class="community-card"><div class="community-art" aria-hidden="true"><svg viewBox="0 0 230 180"><path d="M45 149c-18 0-28-9-28-24s15-21 23-13" fill="none" stroke="#79708c" stroke-width="15" stroke-linecap="round"/><path d="M45 154V99l-5-47 35 21c20-7 37-5 53 0l33-21-3 47v55Z" fill="#f8f4eb" stroke="#79708c" stroke-width="2.5" stroke-linejoin="round"/><path d="M64 105q7-8 14 0m40 0q7-8 14 0m-39 8 5 4 5-4m-5 4v7m-10 0q5 6 10 0 5 6 10 0" fill="none" stroke="#79708c" stroke-width="3" stroke-linecap="round"/><ellipse cx="66" cy="117" rx="10" ry="5" fill="#e8b9c6"/><ellipse cx="129" cy="117" rx="10" ry="5" fill="#e8b9c6"/><path d="M61 139h78l-9 31H71Z" fill="#d9edbc" stroke="#79708c" stroke-width="2"/><path d="m86 148 7 7 12-13" fill="none" stroke="#79708c" stroke-width="3" stroke-linecap="round"/><path d="M175 45c-12-18-32-1-19 12l19 17 19-17c13-13-7-30-19-12Z" fill="#d8c4ea"/><path d="m199 99 3 8 8 3-8 3-3 8-3-8-8-3 8-3Z" fill="#c2d795"/></svg></div><div><p class="eyebrow">Built in the open, better together</p><h2 id="community-title">Your ideas are<br><em>very welcome here.</em></h2><p>Found a rough edge? Missing your favorite shortcut? Have a tiny idea or a big one? Tell us. Bug reports, feature requests, code, docs, and translations all help this little project grow.</p><div class="community-actions"><a class="button button-dark" href="/go/github/community-feedback">Share your feedback <svg class="icon"><use href="#i-arrow"/></svg></a><a class="text-link" href="/go/github/community-contribute">Make a contribution <span aria-hidden="true">↗</span></a></div></div></div>
     </section>
 
     <section class="download section shell" id="download" aria-labelledby="download-title">
-      <div class="download-heading"><img src="assets/logo.svg" alt="" width="80" height="80"><p class="eyebrow">Ready to make yourself at home?</p><h2 id="download-title">A new friend<br><em>for your files.</em></h2><p>Free to download. Free to explore. Yours to make better.</p></div>
-      <div class="download-panel"><div class="download-version"><span class="status-dot"></span> PawCommander 0.2.0 <span class="phase">Public preview</span></div><a class="button button-primary" href="https://github.com/starPaw/pawcommander/releases/download/v0.2.0/PawCommander-0.2.0-macOS-arm64.zip"><svg class="icon"><use href="#i-download"/></svg> Download for Apple Silicon <svg class="icon arrow"><use href="#i-arrow"/></svg></a><p class="download-spec">macOS 11+ · M-series Macs · ZIP download</p><p class="install-note">Unzip, drag into Applications, and open.<br>This preview is not Apple-notarized. macOS may ask for an extra first-launch step.</p><a class="text-link" href="https://github.com/starPaw/pawcommander/blob/main/docs/MACOS_INSTALL.md">First-launch instructions <svg class="icon"><use href="#i-arrow"/></svg></a><div class="download-links"><a href="https://github.com/starPaw/pawcommander/releases/tag/v0.2.0">Release notes & checksums</a><span>·</span><a href="https://github.com/starPaw/pawcommander#build-from-source">Build from source</a></div><p class="compatibility-note">Tested on macOS 27.0.1. Older macOS versions are not manually verified. Intel, Windows, and Linux currently require a source build.</p></div>
+      <div class="download-heading"><img src="assets/logo.svg" alt="" width="80" height="80"><p class="eyebrow">Ready to make yourself at home?</p><h2 id="download-title">Download<br><em>PawCommander for Mac.</em></h2><p>Free to download. Free to explore. Yours to make better.</p></div>
+      <div class="download-panel"><div class="download-version"><span class="status-dot"></span> PawCommander 0.2.0 <span class="phase">Public preview</span></div><a class="button button-primary" href="/go/github/download-macos"><svg class="icon"><use href="#i-download"/></svg> Download for Apple Silicon <svg class="icon arrow"><use href="#i-arrow"/></svg></a><p class="download-spec">macOS 11+ · M-series Macs · ZIP download</p><p class="install-note">Unzip, drag into Applications, and open.<br>This preview is not Apple-notarized. macOS may ask for an extra first-launch step.</p><a class="text-link" href="/go/github/install-guide">First-launch instructions <svg class="icon"><use href="#i-arrow"/></svg></a><div class="download-links"><a href="/go/github/release-notes">Release notes & checksums</a><span>·</span><a href="/go/github/build-source">Build from source</a></div><p class="compatibility-note">Tested on macOS 27.0.1. Older macOS versions are not manually verified. Intel, Windows, and Linux currently require a source build.</p></div>
     </section>
 
     <section class="support section shell" id="support" aria-labelledby="support-title">
@@ -113,7 +130,7 @@
     </section>
   </main>
 
-  <footer class="footer shell"><div class="footer-top"><a class="wordmark" href="#"><img src="assets/logo.svg" alt="" width="34" height="34"><span>PawCommander<span class="wordmark-dot">.</span></span></a><p>Good tools. Cozy corners. Happy files.</p><div class="footer-links"><a href="https://github.com/starPaw/pawcommander">GitHub ↗</a><a href="https://github.com/starPaw/pawcommander/blob/main/docs/USER_GUIDE.md">User guide ↗</a><a href="#support">Support ♡</a></div></div><div class="footer-bottom"><span>© 2026 PawCommander contributors · <a href="https://github.com/starPaw/pawcommander/blob/main/LICENSE">MIT license</a></span><span>Made with Rust. Sprinkled with paws.</span></div></footer>
+  <footer class="footer shell"><div class="footer-top"><a class="wordmark" href="#"><img src="assets/logo.svg" alt="" width="34" height="34"><span>PawCommander<span class="wordmark-dot">.</span></span></a><p>Good tools. Cozy corners. Happy files.</p><div class="footer-links"><a href="/go/github/footer-source">GitHub ↗</a><a href="/go/github/footer-guide">User guide ↗</a><a href="#support">Support ♡</a></div></div><div class="footer-bottom"><span>© 2026 PawCommander contributors · <a href="/go/github/footer-license">MIT license</a></span><span>Made with Rust. Sprinkled with paws.</span></div></footer>
 
   <aside class="cat-companion" id="cat-companion" aria-label="Your desk buddy" hidden>
     <div id="cat-expanded" class="cat-expanded">

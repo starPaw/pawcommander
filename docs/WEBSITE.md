@@ -18,6 +18,14 @@ Keep release links, version, archive size, platform requirements, and first-laun
 
 Donation addresses are literal text in the page. Copy buttons copy that visible text. Update both the address and its network label together, then check the copied value. The page does not initiate transactions.
 
+## Search and link previews
+
+The homepage has one descriptive H1, a page title and description, a self-referencing HTTPS canonical URL, Open Graph and Twitter card metadata, and `WebSite` structured data naming PawCommander. Keep these aligned with the visible product and currently available download. Content and links are present in the HTML without JavaScript. Structured data does not guarantee a particular search appearance.
+
+`robots.txt` permits crawling and points to `sitemap.xml`. The site currently has one canonical page, so the sitemap needs only the homepage. Do not add section fragments, static assets, outbound redirects, or GitHub pages. Update its `lastmod` when publishing significant homepage content, link, or structured-data changes; use the actual change date, not every deployment date. Add other URLs only when publishing distinct indexable pages. Google ignores sitemap `priority` and `changefreq` values.
+
+After verifying site ownership in Google Search Console, submit `https://pawcommander.capture402.xyz/sitemap.xml` and inspect the homepage URL. Request indexing after significant updates and monitor the reported status; publishing or submitting a sitemap does not establish that Google has indexed the page. See Google's [sitemap guidance](https://developers.google.com/search/docs/crawling-indexing/sitemaps/build-sitemap) and [site-name guidance](https://developers.google.com/search/docs/appearance/site-names).
+
 ## Server setup
 
 The production site uses nginx with an independent virtual host. `deploy/pawcommander.nginx.conf` is the HTTPS configuration template. It expects:
@@ -27,8 +35,11 @@ The production site uses nginx with an independent virtual host. `deploy/pawcomm
 - HTTP-01 validation files served from `/var/www/pawcommander/acme`.
 - nginx's existing Certbot TLS options and DH parameter files.
 - Certificate auto-renewal with an nginx reload after successful renewal.
+- The fixed outbound destination map from `deploy/pawcommander-outbound.conf`, installed in `/etc/nginx/conf.d/pawcommander-outbound.conf` inside nginx's `http` context. The `/go/github/` links preserve server-side click counts without client-side analytics or arbitrary redirect destinations.
 
 For a new server, first serve the ACME location over HTTP, obtain the certificate using the existing Certbot account, then install the HTTPS configuration. Run `nginx -t` before reloading. Do not replace unrelated virtual hosts.
+
+When changing the downloadable release, update both the page and the fixed destination map. Back up the installed map, install the checked version, run `nginx -t`, and reload nginx before publishing the page. Verify each outbound route's `Location`, including both download buttons and release notes. If publication fails, restore the previous map and reload nginx. The normal static deployment script does not install nginx configuration files.
 
 ## Publish an update
 

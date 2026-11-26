@@ -96,7 +96,7 @@ p { color: var(--muted); }
 .status-dot { display: inline-block; width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px #a6d18912; }
 .kicker-divider { color: var(--surface-2); padding-inline: 3px; }
 .hero-heading { position: relative; width: max-content; max-width: 100%; margin: 30px auto 23px; }
-h1 { font-size: clamp(62px, 7.7vw, 100px); line-height: 1.04; }
+h1 { font-size: clamp(48px, 6vw, 78px); line-height: 1.08; }
 h1 span { color: var(--lavender); font-weight: 400; }
 .hero-brand { position: absolute; left: calc(100% + 40px); top: 41%; width: 98px; padding: 10px; background: var(--lavender); border-radius: 25px; transform: rotate(9deg); box-shadow: 0 12px 32px #23263460; }
 .hero-brand img { width: 100%; height: auto; }
@@ -162,10 +162,10 @@ h1 span { color: var(--lavender); font-weight: 400; }
 .milestone summary { list-style: none; display: flex; align-items: center; gap: 20px; cursor: pointer; padding: 23px 0; }
 .milestone summary::-webkit-details-marker { display: none; }
 .step { font: 400 22px var(--display-font); color: var(--mauve); align-self: flex-start; padding-top: 2px; }
-.milestone-title { flex: 1; font: 400 18px/1.4 var(--display-font); letter-spacing: -.2px; }
+.milestone-title { flex: 1; min-width: 0; font: 400 18px/1.4 var(--display-font); letter-spacing: -.2px; }
 .phase { font: 500 10px/1.5 var(--body-font); color: var(--muted); letter-spacing: .01em; display: table; margin-top: 5px; }
 .phase.active { color: var(--green); background: #a6d18912; padding: 2px 7px; border-radius: 5px; }
-.expand { font-size: 22px; font-weight: 400; color: var(--lavender); transition: transform .2s; }
+.expand { flex: 0 0 24px; height: 24px; line-height: 24px; text-align: center; font-size: 22px; font-weight: 400; color: var(--lavender); transition: transform .2s; }
 .milestone[open] .expand { transform: rotate(45deg); }
 .milestone-content { padding: 0 0 24px 43px; font-size: 12px; color: var(--muted); }
 .milestone-content p { line-height: 1.8; }
@@ -276,7 +276,7 @@ h1 span { color: var(--lavender); font-weight: 400; }
 @media (max-width: 900px) {
   .hero-brand { position: static; margin: 0 auto 22px; width: 69px; }
   .hero-heading { margin-top: 24px; }
-  h1 { font-size: 80px; }
+  h1 { font-size: clamp(48px, 7vw, 64px); }
   .feature h3 { font-size: 19px; }
   .mini-panes { gap: 7px; padding: 12px; }
   .connection-line { gap: 2px; }
@@ -297,7 +297,7 @@ h1 span { color: var(--lavender); font-weight: 400; }
   .hero { padding-top: 28px; }
   .hero-kicker { font-size: 9px; padding: 6px 10px; gap: 7px; }
   .hero-brand { width: 60px; padding: 6px; border-radius: 16px; margin-bottom: 20px; }
-  h1 { font-size: clamp(44px, 10vw, 72px); letter-spacing: -.045em; }
+  h1 { font-size: clamp(31px, 7.6vw, 55px); letter-spacing: -.045em; }
   .hero-heading { margin-bottom: 21px; }
   .hero-description { font-size: 13px; max-width: 350px; margin-inline: auto; }
   .desktop-break { display: none; }
@@ -321,7 +321,7 @@ h1 span { color: var(--lavender); font-weight: 400; }
   .feature p { grid-column: 2; max-width: 100%; font-size: 12px; }
   .mini-panes, .connection-line, .shortcut-art { grid-column: 2; height: 96px; margin-top: 17px; max-width: 350px; }
   .small-goodies { display: grid; grid-template-columns: 1fr 1fr; gap: 15px 12px; font-size: 9px; margin-top: 30px; padding-top: 23px; }
-  .roadmap-layout { grid-template-columns: 1fr; gap: 28px; }
+  .roadmap-layout { grid-template-columns: minmax(0, 1fr); gap: 28px; }
   .roadmap-intro>p:not(.eyebrow) { max-width: 420px; font-size: 12px; }
   .roadmap-note { margin-top: 25px; max-width: 100%; }
   .roadmap-note p { font-size: 9px; }
@@ -361,6 +361,7 @@ h1 span { color: var(--lavender); font-weight: 400; }
 }
 @media (max-width: 390px) {
   .shell { width: calc(100% - 32px); }
+  .roadmap-intro h2, .download-heading h2 { font-size: 36px; }
   .header .wordmark { font-size: 18px; gap: 6px; }
   .wordmark img { width: 29px; height: 29px; }
   .nav-download .icon { display: none; }
