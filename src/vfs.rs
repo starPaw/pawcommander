@@ -13,6 +13,7 @@ pub(crate) mod collections;
 mod compare;
 #[cfg(target_os = "macos")]
 pub(crate) mod compatible_names;
+mod conflict_batch;
 mod copy_metadata;
 mod cross_move;
 #[cfg(target_os = "macos")]

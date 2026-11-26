@@ -1,3 +1,4 @@
+use super::conflict_batch::ConflictBatch;
 use super::{
     sftp::remote,
     staged_file::StagedFile,
@@ -122,8 +123,7 @@ fn extract(
     }
     #[cfg(target_os = "macos")]
     let smb_destination = smb_destination || mount.is_owned();
-    let mut index = 0;
-    let mut group = None;
+    let mut conflicts = ConflictBatch::new(count);
     for (tree, mut target) in trees.into_iter().zip(targets) {
         cancel.check()?;
         progress.item(tree.source.path());
@@ -134,7 +134,6 @@ fn extract(
         archive.verify_source()?;
         let mut replace = None;
         if let Some(existing) = entry_metadata(&target)? {
-            index += 1;
             let first = &tree.entries[0];
             let replacement_refusal = if first.is_dir() {
                 Some(ReplacementRefusal::SourceNotRegular)
@@ -155,31 +154,25 @@ fn extract(
             } else {
                 replacement_refusal
             };
-            let decision = if let Some(saved) =
-                group.filter(|&saved| saved != Decision::Replace || replacement_refusal.is_none())
-            {
-                saved
-            } else {
-                progress.waiting_for_conflict(tree.source.path());
-                let answer = decide(Conflict {
-                    source: EntryDetails {
-                        location: tree.source.clone(),
-                        kind: entry_kind(!first.is_dir(), first.is_dir(), false),
-                        size: (!first.is_dir()).then_some(first.size),
-                        modified: first.modified,
-                    },
-                    target: existing.details(&target),
-                    replacement_refusal,
-                    index,
-                    count: count.max(index),
-                })?;
-                cancel.check()?;
-                progress.item(tree.source.path());
-                if answer.apply_to_group {
-                    group = Some(answer.decision);
-                }
-                answer.decision
-            };
+            let decision = conflicts.resolve(
+                progress,
+                tree.source.path(),
+                replacement_refusal.is_none(),
+                |index, count| {
+                    decide(Conflict {
+                        source: EntryDetails {
+                            location: tree.source.clone(),
+                            kind: entry_kind(!first.is_dir(), first.is_dir(), false),
+                            size: (!first.is_dir()).then_some(first.size),
+                            modified: first.modified,
+                        },
+                        target: existing.details(&target),
+                        replacement_refusal,
+                        index,
+                        count,
+                    })
+                },
+            )?;
             match decision {
                 Decision::Skip => {
                     progress.results.record(

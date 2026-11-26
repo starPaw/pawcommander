@@ -353,6 +353,50 @@ fn conflicting_files_can_be_replaced_or_kept_with_reserved_names() {
 }
 
 #[test]
+fn grouped_extraction_rechecks_new_conflicts_and_keeps_the_saved_answer() {
+    let temp = tempfile::tempdir().unwrap();
+    let directory = Location::Local(temp.path().into());
+    let archive = directory.join("source.tar");
+    let names = ["a", "b", "c", "d"];
+    let mut writer = tar::Builder::new(fs::File::create(archive.path()).unwrap());
+    for name in names {
+        tar_file(&mut writer, name, name.as_bytes());
+    }
+    writer.finish().unwrap();
+    let root = archive.browse_archive().unwrap();
+    let selection = names.map(|name| root.join(name));
+
+    fs::write(directory.join("a").path(), b"old").unwrap();
+    fs::write(directory.join("c").path(), b"old").unwrap();
+    let mut prompts = Vec::new();
+    let mut progress = Progress::default();
+    let summary = extract_archive(&selection, &directory, None, &mut progress, |conflict| {
+        prompts.push((conflict.index, conflict.count, conflict.can_replace()));
+        if conflict.index == 1 {
+            // The remaining collisions appear after the initial count.
+            fs::create_dir(directory.join("b").path()).unwrap();
+            fs::create_dir(directory.join("d").path()).unwrap();
+            Ok(Answer {
+                decision: Decision::Replace,
+                apply_to_group: true,
+            })
+        } else {
+            Ok(Answer {
+                decision: Decision::Skip,
+                apply_to_group: false,
+            })
+        }
+    })
+    .unwrap();
+    assert_eq!(prompts, [(1, 2, true), (2, 2, false), (4, 4, false)]);
+    assert_eq!((summary.completed, summary.skipped), (2, 2));
+    assert_eq!(fs::read(directory.join("a").path()).unwrap(), b"a");
+    assert!(directory.join("b").path().is_dir());
+    assert_eq!(fs::read(directory.join("c").path()).unwrap(), b"c");
+    no_staging(&directory);
+}
+
+#[test]
 fn staged_output_is_withheld_for_crc_or_length_mismatch_and_volume_limit() {
     let temp = tempfile::tempdir().unwrap();
     let directory = Location::Local(temp.path().canonicalize().unwrap());

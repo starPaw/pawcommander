@@ -1,3 +1,4 @@
+use super::conflict_batch::ConflictBatch;
 use super::copy_metadata::{self, Mode as MetadataMode};
 use super::listing::{checked_sftp_child_name, next_sftp_entry};
 use super::location::{validate_name, Location};
@@ -599,8 +600,7 @@ pub(super) fn transfer_run(
         })
         .collect::<Result<Vec<_>, TransferError>>()?;
     let count = targets.iter().flatten().count();
-    let mut index = 0;
-    let mut group = None;
+    let mut conflicts = ConflictBatch::new(count);
     let mut ready = Vec::with_capacity(plan.len());
     for (mut item, target_meta) in plan.into_iter().zip(targets) {
         progress.checkpoint()?;
@@ -609,34 +609,24 @@ pub(super) fn transfer_run(
             progress.item(item.original.path());
             #[cfg(target_os = "macos")]
             checked_smb_mount(&item.source, SmbTransferRole::Source)?;
-            index += 1;
             let source_meta = read_entry_metadata(&item.source).map_err(|cause| {
                 AccessError::new(&item.source, AccessAction::ReadMetadata, cause)
             })?;
             let replacement_refusal = replacement_refusal(&item, &source_meta, &target_meta)?;
-            let decision = match group {
-                Some(Decision::Replace) if replacement_refusal.is_some() => None,
-                saved => saved,
-            };
-            let decision = if let Some(decision) = decision {
-                decision
-            } else {
-                progress.waiting_for_conflict(item.source.path());
-                let answer = decide(Conflict {
-                    source: source_meta.details(&item.original),
-                    target: target_meta.details(&item.target),
-                    replacement_refusal,
-                    index,
-                    count,
-                })?;
-                // A simultaneous Replace must not override a Stop request.
-                cancel.check()?;
-                progress.item(item.source.path());
-                if answer.apply_to_group {
-                    group = Some(answer.decision);
-                }
-                answer.decision
-            };
+            let decision = conflicts.resolve(
+                progress,
+                item.source.path(),
+                replacement_refusal.is_none(),
+                |index, count| {
+                    decide(Conflict {
+                        source: source_meta.details(&item.original),
+                        target: target_meta.details(&item.target),
+                        replacement_refusal,
+                        index,
+                        count,
+                    })
+                },
+            )?;
             match decision {
                 Decision::Cancel => return Err(TransferError::Cancelled),
                 Decision::Skip => {
