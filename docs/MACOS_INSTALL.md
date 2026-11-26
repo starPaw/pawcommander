@@ -1,8 +1,8 @@
 # Install PawCommander on macOS
 
-The 0.2.0 preview is for Apple Silicon (M-series Macs). It is built for macOS 11 or later and tested on macOS 27.0.1. Older macOS versions have not been manually verified. There is no Intel binary in this release.
+The 0.3.0 preview is for Apple Silicon (M-series Macs). It targets macOS 11 or later and has been tested on macOS 27.0.1.
 
-1. Download `PawCommander-0.2.0-macOS-arm64.zip` from the [official release](https://github.com/starPaw/pawcommander/releases/tag/v0.2.0).
+1. Download `PawCommander-0.3.0-macOS-arm64.zip`, `SHA256SUMS.txt` and `SHA256SUMS.txt.sig` into the same folder. Verify the download as described below. [Official release](https://github.com/starPaw/pawcommander/releases/tag/v0.3.0)
 2. Double-click the ZIP to extract it.
 3. Drag **PawCommander.app** into **Applications** and open it.
 
@@ -16,22 +16,18 @@ If you trust the official download, first attempt to open the app, then choose *
 
 ## Verify the download
 
-For a release with `SHA256SUMS.txt.sig`, put both checksum files beside the original ZIP. Use a previously trusted copy of the verifier and release public key. Compare the key fingerprint with the one you obtained through your trusted channel before verifying the ZIP:
+PawCommander signs the checksum with an Ed25519 release key. Its SHA-256 fingerprint is `SHA256:YT6I9NljjE+IWKMBYtYyN9eNC9mtUDjgJyqSPeFSONc`. Authenticate the key using a previously trusted fingerprint or the project's Git signing identity. For example, if you already trust the Git signer of `v0.2.0`, run `git verify-tag v0.3.0` in a project checkout and confirm the same signer. The signed tag contains both the release key and the verification script.
+
+From that trusted checkout, verify the original ZIP beside its two checksum files. Adjust the download path to match your Mac.
 
 ```sh
-ssh-keygen -E sha256 -lf /path/to/trusted-release-key.pub
-bash scripts/verify-macos-release.sh /path/to/trusted-release-key.pub /path/to/PawCommander-VERSION-macOS-arm64.zip
+git show v0.3.0:docs/keys/macos-release-ed25519.pub > macos-release-ed25519.pub
+git show v0.3.0:scripts/verify-macos-release.sh > verify-release.sh
+ssh-keygen -E sha256 -lf macos-release-ed25519.pub
+bash verify-release.sh macos-release-ed25519.pub ~/Downloads/PawCommander-0.3.0-macOS-arm64.zip
 ```
 
 Proceed after `Verified release archive` appears. This authenticates the package with the PawCommander release key. macOS evaluates the app's code signature and notarization separately on launch.
-
-The 0.2.0 preview provides an unsigned checksum. Put `SHA256SUMS.txt` from that release beside the ZIP and run this in the download folder to check its bytes:
-
-```sh
-shasum -a 256 -c SHA256SUMS.txt
-```
-
-The result should be `OK`. A checksum verifies the downloaded bytes against the published file; it is not Apple notarization.
 
 The ZIP contains the app, this guide, release notes, the MIT license, third-party license notices, corresponding source for MPL-licensed components, and a build manifest identifying the source commit.
 
@@ -59,4 +55,4 @@ backup=/Applications/.pawcommander-previous-EXAMPLE/PawCommander.app
 
 Keep the backup in the original installation folder until you have checked that the updated app opens. The same restore command also works if the installed app has been removed. If another item appears at the missing app's path during recovery, restore stops and preserves that item. The backup remains available for another attempt. A forcibly stopped command may leave a private `.pawcommander-update-*` working folder beside the app. After confirming the installed version and backup, you can remove that folder.
 
-Version 0.2.0 keeps the application and credential-store identifiers used by the public 0.1.0 preview. Replacing the app preserves that preview’s settings and saved connections. Settings and saved keys from older development builds with different identifiers are not migrated.
+Version 0.3.0 keeps the application and credential-store identifiers from the 0.1.0 and 0.2.0 public previews. Replacing the app preserves settings and saved connections from those releases.
